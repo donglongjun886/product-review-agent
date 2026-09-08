@@ -436,6 +436,13 @@ async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
     assert all(e.type == "RULE_HIT" and e.source == "ScreeningRuleEngine"
                for e in evs2)
 
+    # 品牌词命中（Q-1 拍板 B）：R-102 单命中 → COMPLEX 进 Agent 且转发 R-102 evidence
+    await ps.process_review(_LV_REAL_BRAND_TERM, run_id="RUN_CMPLX_LV")
+    assert seen["run_id"] == "RUN_CMPLX_LV"
+    evs3 = seen["extra_evidence"]
+    assert [e.extra["rule_id"] for e in evs3] == ["R-102"]
+    assert evs3[0].value.startswith("R-102")
+
 
 @pytest.mark.parametrize(
     ("case", "expect_verdict"),

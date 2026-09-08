@@ -96,7 +96,8 @@ def _term_hits(hay: str, term_list: frozenset[str]) -> list[str]:
 
     - **纯拉丁词/短语**（如 LV / LOUIS VUITTON）：按 **词边界** 匹配 —— 两侧要求
       非 ASCII 词字符（``(?<![a-z0-9_]) … (?![a-z0-9_])``）。短词 "LV" 不再命中
-      silver/valve/solve 等英文词**内部子串**（误杀直判 REJECT 且无复议路径）；
+      silver/valve/solve 等英文词**内部子串** —— 避免把普通商品误判为品牌词命中
+      （REJECT 直判误杀 / 无谓 COMPLEX 交 Agent 皆不可接受）；
       中文不属 ASCII 词字符、不构成边界，故 "新款LV手袋" 这类真实品牌仍命中。
     - **含中文/数字/符号的词**（如 复刻 / 1:1）：中文无空格分词，词边界语义失真，
       维持整段子串匹配（v1 行为不变）。
