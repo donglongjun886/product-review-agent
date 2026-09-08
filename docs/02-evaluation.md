@@ -365,6 +365,16 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | **Phase 2** | 300+ 正式集（§2.1 五类分布）；Evidence 侧指标评测（Evidence Sufficiency / Marginal Evidence Gain，§4.2）；**Ablation**（2a/2b/2c + 组件级，§3.3/§6）；**abstention 评测**（AUTO_DECIDABLE / SHOULD_ABSTAIN，§4.4）；**Threshold Sweep**（Evidence 单参数、CONFIDENCE 固定 0.7，§5）；**Regression** | sweep 曲线与 operating point（validation 集）并回写《00》§7.6 / 03 §5（§5.3）；abstention 五指标在正式集出数；修正集合入后重跑 Rule 基线并纳入回归（§7.1） |
 | **Phase 3** | **Real LLM Evaluation**；LLM-as-a-Judge（如必要）；Regression Report | real 模式复核 scripted 结论（§3.4/§7.2）；完整报告逐行对照《00》§12.4 预期结论、明确回答 Q1–Q4（§1.2），附全部结论边界标注 |
 
+> **Phase 3 实现状态（2026-09-08 已落地首次复核）**：`LiteLLMBackend`（`pra/agent/litellm_backend.py`，
+> 四节点完整 prompt 见 `pra/agent/llm_prompts.py`）经 `AgentScheme(llm=..., budget_limits=...)`
+> 接入评测；`scripts/run_evaluation_real.py` 跑 real vs scripted 对照（需 API key；real 臂评测侧
+> 放宽 max_latency_ms 墙钟护栏 —— 生产 30s 对真实 LLM 过紧，见脚本 docstring 与 README「评测与
+> 结论」）。**v1 35 案首次 real 单次抽样已出**（deepseek 网关）：HRR 0.771 / acc 0.200，27/35 转人工
+> 全部由确定性 Gate 归因（R3_BUDGET_EXHAUSTED×19 收敛效率、R3_HYPOTHESES_INDISTINGUISHABLE×7）；
+> 实证 scripted 高分含「标注-审查员同口径」耦合，real 显著更保守且暴露 1 例无视觉证据的幻觉性
+> SUPPORTED 误杀（EC_0007）。**该抽样只验证链路与暴露迭代方向，不代表模型固定水平**；剩余为
+> prompt/约束迭代（禁重复假设、外观类假设须引用 IMAGE_SIMILARITY），LLM-as-a-Judge 按需。
+
 > **最终主线**：**Rule Baseline → Single-call LLM → Multi-step Agent → Ablation → Abstention → Threshold Sweep → Regression**。
 > Smoke 集（≤10 条 demo case）先行验证 loader/harness/EvalRecord 链路，不混入正式统计（§2.3）。
 > Phase 1 是"能跑且可比"的门槛，Phase 2/3 才回答 Q1–Q4；Phase 1 与 Phase 2 数据构造可并行推进。
