@@ -144,7 +144,8 @@ class Evidence(BaseModel):                   # 字段与代码一致：无 evide
     weight: float = 0.5                      # 证据强度 [0,1]，默认按工具类型表（5.7），T-5
     ref_id: str | None = None                # 可追溯引用：稳定业务标识优先（image_url/product_id/merchant_id/case_id/clause_id，O-1）；无稳定 ref 时 None（去重 key 回退 value，见 §2.5）
     extra: dict = {}                         # 结构化附加数值（similarity/removals 等），供确定性函数读取（代码已落地）
-    # evidence_id 不进 DTO：由 ToolNode 按 E_<nn> 运行序号分配，用于 result_ref / evidence_for 引用与 DB evidence 主键
+    # evidence_id 不进 DTO（O-1）：result_ref / evidence_added / evidence_for 一律用引用串 f"{type} {value}"（≤200 字符）；
+    # E_<nn> 运行序号只存在于 DB evidence 主键（evidence_id），DTO/审计不用 E_nn
 
 # —— AgentState 中 list 字段的元素为 dict（与代码/《00》§3 JSON 一致）；字段约束如下 ——
 # investigation_queue[] 元素:  {"q": str, "priority": int(1..5), "status": "OPEN"|"DONE"}
@@ -157,12 +158,12 @@ class Evidence(BaseModel):                   # 字段与代码一致：无 evide
 # tool_call_history[] 元素（每次工具调用一条，含边际增益 4 字段，见 §5.8；G 项拍板）
 {
   "seq": 1, "tool": "ImageAnalysisTool", "args": {...},
-  "result_ref": "E_01",                     # 命中的证据运行序号（Evidence 无 DTO id 时用 E_nn）
+  "result_ref": "IMAGE_SIMILARITY similarity=0.91, match=某品牌经典鞋款",   # 本次调用新增首条证据的引用串 f"{type} {value}"（O-1）
   "latency_ms": 1200, "tokens": 800,
   "status": "ok" | "error" | "skipped",     # skipped=被 dedup/预算截断
   "before_confidence": 0.42,                # 本次调用前 decision_confidence 代理值（确定性，见 5.8）
   "after_confidence": 0.73,                 # 本次调用后 decision_confidence 代理值
-  "evidence_added": ["E_01"],               # 本次调用新增的 evidence 序号列表（无新增 = []）
+  "evidence_added": ["IMAGE_SIMILARITY similarity=0.91, match=某品牌经典鞋款"],  # 本次调用新增证据的引用串列表（无新增 = []）
   "decision_changed": false                 # 本次调用是否翻转 Gate 探测结果（gate_probe(before)!=gate_probe(after)）
 }
 ```
@@ -595,13 +596,14 @@ async def tools_node(state):
         updates.budget.tool_calls += 1
         if not result.ok: record(seq, status="error", error=result.error); continue
         raw = tool.to_evidence(result)                                  # 工具原始结果（5.x 表，不过滤）
-        evs = quality_filter(raw, EVIDENCE_MIN_SIM, EVIDENCE_STRONG)    # ② 确定性证据质量过滤 + Strong 标记
+        evs = quality_filter(raw)    # ② 确定性证据质量过滤（单参：下限默认 EVIDENCE_MIN_SIM=0.70；Strong 档由 ③ backfill_extra 写 extra.strong 承载）
         evs = backfill_extra(evs)                                       # ③ 把 similarity/removals 等数值写入 Evidence.extra
         updates.evidence = merge_evidence(state.evidence + evs)         # 走 reducer 语义（去重合并）
         after = decision_conf_probe(updates)                            # ④ 调用后 decision_confidence 代理
-        record(seq, status="ok", result_ref=evs[0] 的 E_nn if evs else None,
+        refs = [f"{e.type} {e.value}" for e in evs]                   # 引用串（O-1：DTO 无 E_nn，用 type+value 摘要）
+        record(seq, status="ok", result_ref=refs[0] if refs else None,
                before_confidence=before, after_confidence=after,
-               evidence_added=[e 的 E_nn for e in evs],                 # 无新增 = []
+               evidence_added=refs,                                    # 本次新增证据的引用串列表（无新增 = []）
                decision_changed=gate_probe(before 态) != gate_probe(after 态))
     return updates
 
@@ -842,7 +844,7 @@ def finalize_decision_confidence(state) -> float:
   "decision": "HUMAN_REVIEW",
   "risk_level": "HIGH",
   "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
-  "decision_confidence": 0.91,
+  "decision_confidence": 0.87,
   "evidence": [ { "type": "IMAGE_SIMILARITY", "source": "ImageAnalysisTool",
                   "value": "similarity=0.91, match=某品牌经典鞋款", "weight": 0.91,
                   "ref_id": null, "extra": {"similarity": 0.91} } ],
@@ -855,6 +857,7 @@ def finalize_decision_confidence(state) -> float:
 ```
 
 > `decision_confidence` = 自动决策安全门槛（§7.5，确定性重算）。伪代码里 `build_decision(..., decision_confidence=dc)` 的形参即 DTO 字段 `decision_confidence`（O-7 已拍板改名，与代码一致）。
+> 示例 0.87 = §7.5 确定性重算终值（0.91 只是 LLM 提案 confidence 参考值，demo 断言 ≥0.7）。
 > `overrides` 记录确定性 overlay 的改判/归因原因码
 > （R1_HARD_RULE / R2_REJECT_GATE_FAIL / R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT / R3_KEY_TOOL_FAILED /
 > R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；
@@ -880,9 +883,9 @@ def finalize_decision_confidence(state) -> float:
 | 3 | `plan` | "需要先例 + 政策支撑才能判" → `call_tools, tools=[{CaseSearchTool, priority:1}, {PolicySearchTool, priority:2}]` | plan→tools |
 | 3 | `tools` | CaseSearchTool → CASE_1832 高度相似 → REJECT（**E_04** CASE_PRECEDENT, ref_id=CASE_1832）；PolicySearchTool → POLICY_3.2"外观高度模仿高风险转人工"（**E_05** POLICY_REF, ref_id=clause）；tool_calls=5 | tools→reevaluate |
 | 3 | `reevaluate` | 证据链补全：无未定论假设，且已存在可引用依据（E_04/E_05） | route_after_reevaluate：`is_converged=true` → **decide** |
-| 4 | `decide` | LLM 提案：`HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / decision_confidence 0.91 / evidence E_01..E_05 / policy [POLICY_3.2]`；overlay：R1 硬规则未命中 → abstention 清单（预算/关键冲突/工具失败/政策不确定/多假设不可分/降级）均不成立 → 提案即 HUMAN_REVIEW，PASS/REJECT Gate 不适用 → 采纳；`decision.decision_confidence`（确定性）=0.91、`overrides=[]`；worker 置 DB `agent_run.status=DECIDED`（图唯一终态） | 终结点（无出边） |
+| 4 | `decide` | LLM 提案：`HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / decision_confidence 0.91 / evidence E_01..E_05 / policy [POLICY_3.2]`；overlay：R1 硬规则未命中 → abstention 清单（预算/关键冲突/工具失败/政策不确定/多假设不可分/降级）均不成立 → 提案即 HUMAN_REVIEW，PASS/REJECT Gate 不适用 → 采纳；`decision.decision_confidence`（确定性重算）=0.87（0.91 只是 LLM 提案 confidence 参考值，终值=确定性重算 0.87，demo 断言 ≥0.7）、`overrides=[]`；worker 置 DB `agent_run.status=DECIDED`（图唯一终态） | 终结点（无出边） |
 
-**"为什么第 4 步是 HUMAN_REVIEW 而不是 REJECT"的契约解释**：overlay 的 REJECT Gate 其实已可满足（H2/H3 SUPPORTED + 证据充分 + E_04/E_05 可引用依据 + decision_confidence 0.91≥0.7 + 无矛盾），但 LLM 提案为 HUMAN_REVIEW 且 POLICY_3.2 指引是"高风险转人工"（仿冒属主观判定）——overlay 只做**下限守卫**（防止不安全自动判），**不把 HUMAN 提案强行升为 REJECT**。这体现 Agent"知道什么时候该人介入"（《00》§4.4 注意行）。若未来该案改为可自动判，只动政策指引与提案，Gate 结构不变。
+**"为什么第 4 步是 HUMAN_REVIEW 而不是 REJECT"的契约解释**：overlay 的 REJECT Gate 其实已可满足（H2/H3 SUPPORTED + 证据充分 + E_04/E_05 可引用依据 + decision_confidence 0.87≥0.7 + 无矛盾），但 LLM 提案为 HUMAN_REVIEW 且 POLICY_3.2 指引是"高风险转人工"（仿冒属主观判定）——overlay 只做**下限守卫**（防止不安全自动判），**不把 HUMAN 提案强行升为 REJECT**。这体现 Agent"知道什么时候该人介入"（《00》§4.4 注意行）。若未来该案改为可自动判，只动政策指引与提案，Gate 结构不变。
 
 **预算核查（Guardrail 语义，对齐 6.4）**：llm_calls=8 ≤ **10**（Guardrail 上界，余量 2，主链路常态 8 次明显低于上限）、tool_calls=5 ≤ **15**、tokens/latency 未超 → 主链路在预算内走通；余量保留给 schema 重试/工具失败恢复（T-7 拍板 10/15）。
 

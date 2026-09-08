@@ -161,6 +161,10 @@ def build_agent_graph(*, tools: list[Any] | None = None,
     return builder.compile(checkpointer=checkpointer)
 ```
 
+> 落地注（graph.py 已实现，与 §9 tools_node 行口径一致）：模块**无**模块级 `tools_node` 符号 —— tools 节点由
+> `make_tools_node(tools)` 闭包工厂生成（闭包内注册私有 ToolRegistry 并返回 `async tools_node(state, config)`）；
+> 装配处 `tools_action = make_tools_node(tools)` 后再 `add_node(N_TOOLS, tools_action)`，上方 import/add_node 为草稿示意。
+
 > 实现提示（LangGraph 1.2.x 行为，已实测）：条件边 path 在每个上游节点写入 state 之后、进入下一节点之前执行，
 > 因此 `route_after_plan` 能读到 plan 刚写入的 `pending_tool_calls`、`route_after_reevaluate` 能读到
 > reevaluate 更新后的 `hypotheses`。路由函数保持**纯确定性**（预算/收敛谓词下沉 guardrails）。
@@ -667,7 +671,7 @@ budget 超限各走向 decide）。
 | `pra/agent/nodes/plan.py` | 调查计划（LLM→PlanOutput→pending_tool_calls，经 dedup） | `async plan_node(state, config) -> dict` |
 | `pra/agent/nodes/reevaluate.py` | 证据综合（LLM→ReevaluateOutput→hypotheses/queue 更新） | `async reevaluate_node(state, config) -> dict` |
 | `pra/agent/nodes/decide.py` | 提案 + overlay 收口 | `async decide_node(state, config) -> dict` |
-| `pra/agent/tools_node.py` | 执行 pending_tool_calls（预算/校验/重试/过滤/转证据/记账/边际增益） | `async tools_node(state, config) -> dict`；`_execute_one(call, seq)` |
+| `pra/agent/tools_node.py` | 执行 pending_tool_calls（预算/校验/重试/过滤/转证据/记账/边际增益） | `make_tools_node(tools) -> Callable`（闭包工厂：注册私有 ToolRegistry 后返回 `async tools_node(state, config) -> dict`；tools 经 `build_agent_graph(tools=...)` 注入） |
 | `pra/agent/guardrails/budget.py` | 预算四维检查与记账 | `budget_exceeded(budget)`；`bump_llm_usage`；`bump_tool_usage`；`snapshot_budget` |
 | `pra/agent/guardrails/converge.py` | 收敛判定 | `is_converged(state)` |
 | `pra/agent/guardrails/decision_guardrail.py` | 三 Gate overlay 与 decision 组装 | `run_decision_overlay`；`pass_gate`；`reject_gate`；`finalize_decision_confidence`；`build_decision` |
@@ -676,7 +680,7 @@ budget 超限各走向 decide）。
 | `pra/agent/guardrails/metrics.py` | 边际增益探针（纯函数） | `decision_conf_probe(state)`；`gate_probe(state)` |
 | `pra/agent/guardrails/errors.py` | 错误分级与关键失败判定 | `key_tool_failure(state, failures)` |
 | `pra/agent/guardrails/llm_shell.py` | LLM 结构化调用壳（重试 1 次/记账/降级短路） | `call_structured_llm(*, OutputModel, state, config)`；`_llm_node_guarded(...)` |
-| `pra/agent/guardrails/evidence.py` | 证据质量过滤与 extra 回填 | `quality_filter(raw, EVIDENCE_MIN_SIM=0.70, EVIDENCE_STRONG=0.85)`；`backfill_extra(evs)` |
+| `pra/agent/guardrails/evidence.py` | 证据质量过滤与 extra 回填 | `quality_filter(raw, *, evid_min_sim=0.70)`；`backfill_extra(evs, *, case=None)`（Strong 档非过滤参数：由 `backfill_extra` 写 `extra.strong` 键、gate 谓词消费） |
 | `pra/agent/checkpointer.py` | saver/serde 工厂 | `make_serde()`；`make_memory_checkpointer()`；（未来 `make_sqlite/postgres`） |
 | `pra/tools/base.py`（O-5 已拍板落地） | Tool 暴露 args schema 供 tools_node 解析 | ✅ `Tool.args_model: type[ToolArgs]` + `ToolRegistry.parse_args(name, raw)`（tools_node 校验/解析入口，见 §5/§10 O-5） |
 

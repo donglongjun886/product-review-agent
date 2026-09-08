@@ -134,7 +134,7 @@ Case 是系统的核心数据对象，**输入是商品事实，输出是结构�
   "decision": "HUMAN_REVIEW",
   "risk_level": "HIGH",
   "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
-  "decision_confidence": 0.91,
+  "decision_confidence": 0.87,
   "evidence": [
     { "type": "IMAGE_SIMILARITY", "source": "ImageAnalysisTool", "value": "similarity=0.91, match=某品牌经典鞋款", "weight": 0.9 },
     { "type": "MERCHANT_HISTORY", "source": "MerchantTool", "value": "23 similar / 5 removals / 3 relisting", "weight": 0.85 },
@@ -197,7 +197,7 @@ Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的�
     { "q": "商家是否系统性类似行为?", "priority": 2, "status": "DONE" }
   ],
   "tool_call_history": [               // 调用审计
-    { "seq": 1, "tool": "ImageAnalysisTool", "args": "{...}", "result_ref": "E_01", "latency_ms": 1200, "tokens": 800 }
+    { "seq": 1, "tool": "ImageAnalysisTool", "args": "{...}", "result_ref": "IMAGE_SIMILARITY similarity=0.91, match=某品牌经典鞋款", "latency_ms": 1200, "tokens": 800 }
   ],
   "budget": {
     "llm_calls": 0, "tool_calls": 0, "tokens": 0,
@@ -325,7 +325,7 @@ app = graph.compile(checkpointer=mysql_checkpointer)  # State 持久化、可恢
 | 3 | tools | RAG 查类似案例 | CASE_1832 高度相似 → REJECT → E_04 |
 | 3 | tools | RAG 查政策 | POLICY_3.2 支持高风险转人工 → E_05 |
 | 3 | reevaluate | 证据链完整 | 收敛 |
-| 4 | decide | 证据充分但涉及"仿冒"主观判定 → 转人工 | `HUMAN_REVIEW / HIGH / 0.91` |
+| 4 | decide | 证据充分但涉及"仿冒"主观判定 → 转人工 | `HUMAN_REVIEW / HIGH / 0.87` |
 
 > 注意第 4 步：Agent 的价值不仅是"自动判掉"，更是"知道什么时候证据足够、什么时候该人介入"。
 

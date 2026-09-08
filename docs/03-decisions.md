@@ -109,7 +109,7 @@ def is_converged(state) -> bool:
 ```
 
 **(e) 矛盾启发式 v1（唯一一条，配置化）**：存在 `IMAGE_SIMILARITY` 证据且 `extra.similarity >= EVIDENCE_STRONG`（0.85），
-同时存在 `MERCHANT_HISTORY` 证据且 `extra.removals == 0 and extra.violations_total == 0` → 关键矛盾 →
+同时存在 `MERCHANT_HISTORY` 证据且 `extra.removals == 0 and extra.title == 0`（O-8 回填字段无 `violations_total`；`extra.title` = value 中 title-relisting 计数，干净=removals 与 title-relisting 均为 0）→ 关键矛盾 →
 overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 
 - **理由**：abstention 的落点是"证据是否足以支撑自动决策"，而不是一个孤立的置信数字；
@@ -166,6 +166,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
     - `PASS` → `risk_level=NONE`、`risk_type=[]`；
     - `REJECT / HUMAN_REVIEW` → 默认映射：`POTENTIAL_IP_RISK / EVASION_PATTERN` 起步 `HIGH`（《00》走查即 HIGH）；`FALSE_CLAIM / FIELD_CONFLICT` 默认 `MEDIUM`，允许 LLM 提案按证据强弱给 LOW/MEDIUM/HIGH。
   - **该映射仅用于展示与人工队列排序，不参与任何路由/overlay 判定**（避免把展示口径变成判定逻辑；overlay 决策只认 decision/decision_confidence/证据，不认 risk_level）。
+  - **v2 落地口径（代码 `gate.py::finalize_risk_level` 已落地，契约 §5.3）**：上表"默认映射"是 **prompt 指导**（供 LLM 提案时参考，非强制）；当提案**未声明** `risk_level` 时，确定性终值按最高 SUPPORTED posterior 派生：`≥0.8 → HIGH / ≥0.5 → MEDIUM / ≥0.2 → LOW / 其余 → NONE`。低危案（派生为 NONE）可产出 `risk_level=NONE` 的 HUMAN_REVIEW —— risk_level 纯展示字段（只进队列排序），无路由影响。
 - **v2 补强（review E，写进《00》§7.5）**：**risk_level ≠ decision** —— 决策由 §2.4(b) 的 Decision Gate 判定（证据 + 政策依据 + decision_confidence），
   risk_level 高低不改变决策：**HIGH risk + 证据不足 = HUMAN_REVIEW（而非 HIGH → REJECT）**；LOW risk + 证据矛盾同样 HUMAN_REVIEW。
 - **理由**：词表与映射是输出格式问题，不改变判决策略；NONE 让 PASS 在统计/队列里语义干净。
