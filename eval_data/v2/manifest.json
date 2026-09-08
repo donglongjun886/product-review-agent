@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "dataset_version": "v2",
+  "file": "cases_v2.jsonl",
+  "generator": "scripts/eval_dataset_gen.py",
+  "generator_command": "uv run python scripts/eval_dataset_gen.py --out eval_data/v2 --count 320 --seed 42",
+  "seed": 42,
+  "total": 320,
+  "scene_distribution": {
+    "normal": 64,
+    "violation": 64,
+    "boundary": 96,
+    "multi-signal": 64,
+    "evasion": 32
+  },
+  "expected_decision_distribution": {
+    "PASS": 134,
+    "REJECT": 140,
+    "HUMAN_REVIEW": 46
+  },
+  "abstain_distribution": {
+    "AUTO_DECIDABLE": 274,
+    "SHOULD_ABSTAIN": 46,
+    "LEGACY_UNLABELED": 0,
+    "auto_decidable_equivalent": 274,
+    "auto_share": 0.86,
+    "abstain_share": 0.14
+  },
+  "abstain_by_scene": {
+    "normal": {
+      "total": 64,
+      "AUTO_DECIDABLE": 64,
+      "SHOULD_ABSTAIN": 0
+    },
+    "violation": {
+      "total": 64,
+      "AUTO_DECIDABLE": 64,
+      "SHOULD_ABSTAIN": 0
+    },
+    "boundary": {
+      "total": 96,
+      "AUTO_DECIDABLE": 70,
+      "SHOULD_ABSTAIN": 26
+    },
+    "multi-signal": {
+      "total": 64,
+      "AUTO_DECIDABLE": 56,
+      "SHOULD_ABSTAIN": 8
+    },
+    "evasion": {
+      "total": 32,
+      "AUTO_DECIDABLE": 20,
+      "SHOULD_ABSTAIN": 12
+    }
+  },
+  "hard_case": {
+    "count": 170,
+    "share": 0.53
+  },
+  "source_type_distribution": {
+    "VARIANT": 242,
+    "SYNTHETIC": 78
+  },
+  "world": {
+    "label": "InMemory 种子世界 v1（含 P_88231/M_5512 演示种子扩展）",
+    "products": 12,
+    "merchants": 5,
+    "image_urls": 11,
+    "precedents": 4,
+    "policy_clauses": 3
+  },
+  "threshold_snapshot": {
+    "EVIDENCE_MIN_SIM": 0.7,
+    "EVIDENCE_STRONG": 0.85,
+    "CONFIDENCE_ABSTAIN_THRESHOLD": 0.7
+  },
+  "annotation_notes": "Phase 2 正式集：以 v1 35 条为模板的程序化确定性变异（seed 固定、可重放）；真值三值语义与 abstention 口径见 scripts/eval_dataset_gen.py 模块 docstring 与docs/02 §4.4：明确违规→REJECT/AUTO，明确正常→PASS/AUTO，单弱信号/brand·类目空缺/品牌词可能为适配描述→HUMAN_REVIEW/SHOULD_ABSTAIN；'需调查才能判'的 AUTO 案（Rule/Single 会 COMPLEX/HUMAN、Agent 经 EVAL_* 世界工具可判对）在 annotation.notes 注明设计意图；标注阈值口径与 EvalContext 运行时一致（EVIDENCE_MIN_SIM=0.7 / EVIDENCE_STRONG=0.85 / CONFIDENCE_ABSTAIN_THRESHOLD=0.7）。",
+  "lineage_notes": "每条 lineage 记录 seed_case_id（v1 老案 EC_xxxx 或 SEED_V2_* 语义种子）与 mutation 摘要。"
+}
