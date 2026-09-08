@@ -20,6 +20,13 @@
 注入真实 Policy/Case KB，见 ``make_rag_world_tools``）在同一 eval_data 上复核
 （M4：InMemory vs RAG 差异 + BM25/Vector/Hybrid 三路对比）。
 
+**real 模式（Phase 3 · 真实 LLM 接线）**：``AgentScheme(llm=<对象>)`` 把调用方注入
+的 LLMBackend 实例直接交给 ``build_agent_graph(llm=...)``（跳过上述确定性审查员
+桩；工具仍按 ``ctx.tool_world`` 装配 —— 种子世界不变，与 scripted 的差异只归因于
+LLM）。real 模式**非确定性、不可重放**（同 case 重跑输出可能不同），且需 API key
+与调用费用 —— 仅作观测对照，不参与确定性回归基线（基线恒为 None 分支的
+scripted 模式；评测的确定性约束不覆盖 real 分支）。
+
 确定性"审查员模型"（规则即文档，见各方法 docstring）：
 1. hypothesize：按**表面信号**生成假设 —— 外观模仿（有图才建）、品牌核验（案件
    brand 空缺时 prior 高且 statement 带「案件品牌空缺」标记，供后续节点识别）、
@@ -1118,16 +1125,62 @@ class AgentScheme(SchemeRunner):
       RAG 索引，其余事实工具沿用 eval 世界；检索模式随 ``ctx.rag_mode`` 切换，
       None → hybrid）—— 评测默认 "eval" 不受影响（R-4）。
     - ctx.evidence_thresholds：见 ``EvalContext``（sweep 注入相似度分档）。
+    - ``llm``：**Phase 3 real 模式注入** —— 非 None 时 ``run()`` 直接把该对象当
+      LLMBackend 交给 ``build_agent_graph``（跳过 ``EvalScriptedLLMBackend`` 确定性
+      桩；工具仍按 ctx.tool_world 装配，见模块 docstring "real 模式"）；None =
+      确定性审查员桩（默认，Phase 1/2 行为逐字节不变）。注入对象须实现
+      ``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol（``name`` 属性 +
+      ``async complete(*, node, messages, json_schema)``）；run 的 finally 仍统一
+      恢复 ``set_llm_backend(None)``，与 None 分支同路径。real 非确定性 / 不可重放 /
+      需 API key —— 结论边界见模块 docstring。
+    - ``budget_limits``：**评测侧预算覆盖**（None = 默认 10/15/40000/30000，行为不
+      变）—— 键为 ``BudgetLimits`` 字段名（如 ``{"max_latency_ms": 600000}``），
+      在每次 run 的 ``build_initial_state`` 之后对 ``budget.limits`` 做 model_copy
+      覆盖。**用途：real 模式放宽墙钟护栏** —— 真实 LLM 每案 ~9 次串行调用天然
+      >30s（30s 是生产护栏，T-7 拍板），不放宽则每案都被 LATENCY 超限截胡转人工，
+      评测测不到 LLM 决策质量（scripted 毫秒级跑完不触发，无需放宽）。只动评测
+      装配层，不改生产图/护栏代码。
     """
 
     name = "agent"
 
-    def __init__(self, allowed_tools: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        allowed_tools: set[str] | None = None,
+        *,
+        llm: object | None = None,  # Phase 3 real 模式：注入 LLMBackend（None=确定性桩）
+        budget_limits: dict | None = None,  # 评测侧预算覆盖（None=默认；real 放宽 latency 用）
+    ) -> None:
         # 审查员后端改为**每次 run 按 ctx 装配**（阈值/裁剪随 EvalContext 变），
         # 不在构造期缓存 —— sweep/ablation 同进程换 ctx 重跑才能生效。
         self._allowed_tools: frozenset[str] | None = (
             None if allowed_tools is None else frozenset(allowed_tools)
         )
+        # real 模式注入的后端对象（None → run() 按 ctx 装配 EvalScriptedLLMBackend）；
+        # 每次 run 仍统一经 build_agent_graph(llm=...) 注入并在 finally 恢复默认桩。
+        self._llm: object | None = llm
+        # 评测侧预算覆盖（None = 不覆盖，默认 10/15/40000/30000；real 模式放宽
+        # max_latency_ms 用 —— 只改每次 run 初始 state 的 budget.limits，见 run()）。
+        self._budget_limits: dict | None = dict(budget_limits or {}) or None
+
+    @staticmethod
+    def _apply_budget_limits(state: dict, overrides: dict | None) -> dict:
+        """对 ``build_initial_state`` 产物覆盖 ``budget.limits``（只动评测装配层）。
+
+        overrides 为 ``BudgetLimits`` 字段名→值的 dict（None/空 = 原样返回）；用
+        model_copy 逐层拷贝，不改生产 Budget/BudgetLimits 对象与默认值。
+        """
+        if not overrides:
+            return state
+        budget = state.get("budget")
+        if budget is None:
+            return state  # 防御：初始 state 恒有 budget，缺省不覆盖
+        from pra.domain.models import BudgetLimits  # 惰性 import：仅覆盖路径需要
+
+        limits = budget.limits
+        updated = limits.model_copy(update=dict(overrides))
+        state["budget"] = budget.model_copy(update={"limits": updated})
+        return state
 
     async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
         from pra.agent.guardrails import llm_shell
@@ -1142,18 +1195,28 @@ class AgentScheme(SchemeRunner):
         if tools is not None and self._allowed_tools is not None:
             # 工具注册层裁剪（只保留允许子集；连同 plan 侧裁剪 = 完整装配裁剪）
             tools = [t for t in tools if t.name in self._allowed_tools]
-        backend = EvalScriptedLLMBackend(
-            allowed_tools=set(self._allowed_tools) if self._allowed_tools is not None else None,
-            evidence_thresholds=ctx.evidence_thresholds,
-        )
+        if self._llm is not None:
+            # Phase 3 real 模式：调用方注入对象即为 LLM 后端（构造与 tools 配置由
+            # 调用方负责，本层不额外处理）；工具仍按 ctx.tool_world 装配（同上）。
+            backend = self._llm
+        else:
+            # 确定性审查员桩（Phase 1/2 默认；同 case 同 ctx → 同输出，可重放）
+            backend = EvalScriptedLLMBackend(
+                allowed_tools=set(self._allowed_tools) if self._allowed_tools is not None else None,
+                evidence_thresholds=ctx.evidence_thresholds,
+            )
         graph: CompiledStateGraph = build_agent_graph(
             tools=tools,
             checkpointer=make_memory_checkpointer(),
             llm=backend,
         )
         try:
+            initial_state = build_initial_state(case.input)
+            if self._budget_limits is not None:
+                # 评测侧预算覆盖（real 放宽 max_latency_ms 用；None 分支原样返回）
+                initial_state = self._apply_budget_limits(initial_state, self._budget_limits)
             final_state = await graph.ainvoke(
-                build_initial_state(case.input),
+                initial_state,
                 {"configurable": {"thread_id": f"eval-agent-{case.eval_case_id}"}},
             )
         finally:
