@@ -2,17 +2,23 @@
 
 端点：
 - ``POST /api/v1/reviews``：受理一次审核案件 —— 请求体即 domain ``ProductReviewCase``
-  （extra="forbid"，字段即 OpenAPI 文档，见 schemas.py 说明），调用 ``run_review`` 同步
-  执行完整调查图后返回 ``ReviewRunResult``（HTTP 200）。错误语义：
+  （extra="forbid"，字段即 OpenAPI 文档，见 schemas.py 说明），调用
+  ``persist_service.run_and_persist`` 同步执行完整调查图**并落库**（五表：
+  review_case/review_run/review_trace/review_evidence/review_result，见
+  pra/infra/persist_service.py），随后按同构 ``ReviewRunResult`` 形状返回
+  （HTTP 200）——**HTTP 响应形状与切换前一致**（run_id + review_decision），现有
+  TestClient 断言不受影响。错误语义：
   - 请求体不合法（缺字段/未知字段/类型错）→ FastAPI 校验层自动 422（不进本路由）；
-  - case 语义/图执行异常 → 统一捕获转 ``HTTPException 500``：detail 为**人读信息**
+  - case 语义/图执行/落库异常 → 统一捕获转 ``HTTPException 500``：detail 为**人读信息**
     （异常类型 + 消息），**不暴露堆栈**（堆栈仅打日志，防内部细节泄漏给调用方）。
 - ``GET /api/v1/health``：存活探针，返回 ``{"status": "ok"}``（负载均衡/容器健康检查用）。
 
-演进路径：async 端点语义保持"同步执行完再返回"；未来 MQ/worker 化后本路由退化为
+演进路径（2026-09 接线说明）：原 ``service.run_review``（纯执行、不落库）**保留**，
+供无 DB 场景 / 单测 / 未来 MQ worker 消费复用 —— 本端点已切到
+``persist_service.run_and_persist``（执行 + 落库闭环）；MQ/worker 化后本路由退化为
 **受理口**（校验 + 投 ``product_review_request`` topic + 立即返回受理回执），真正执行
-移交给消费同一 ``run_review`` 的 worker（service.py docstring 演进说明）—— 届时本文件
-新增查询/回调端点，POST 语义与响应信封同步调整。
+移交给消费同一落库入口的 worker（persist_service.py docstring 演进说明）—— 届时本
+文件新增查询/回调端点，POST 语义与响应信封同步调整。
 """
 
 from __future__ import annotations
@@ -22,8 +28,8 @@ import logging
 from fastapi import APIRouter, HTTPException, status
 
 from pra.api.schemas import ReviewRunResult
-from pra.api.service import run_review
 from pra.domain.models import ProductReviewCase
+from pra.infra.persist_service import run_and_persist
 
 logger = logging.getLogger(__name__)
 
@@ -36,20 +42,26 @@ __all__ = ["router"]
     "/reviews",
     response_model=ReviewRunResult,
     status_code=status.HTTP_200_OK,
-    summary="受理并执行一次复杂风险调查（同步返回最终裁决）",
+    summary="受理并执行一次复杂风险调查（同步执行 + 落库，返回最终裁决）",
     tags=["reviews"],
 )
 async def create_review(case: ProductReviewCase) -> ReviewRunResult:
-    """POST /api/v1/reviews —— 总链路 A·1 主端点。
+    """POST /api/v1/reviews —— 总链路 A·1 主端点（接入 → 落库闭环）。
 
-    请求体 = ``ProductReviewCase``（P_88231/M_5512 等真实案件快照），响应 =
-    ``ReviewRunResult{run_id, review_decision}``。run_id 未在 body 中提供（它属运行
-    上下文而非案件事实），由 service 自动生成 uuid4 hex 并作为 LangGraph thread_id（O-6）。
+    请求体 = ``ProductReviewCase``（P_88231/M_5512 等真实案件快照），执行调查图并落库
+    后按原响应形状返回 ``ReviewRunResult{run_id, review_decision}``（HTTP 形状不变；
+    额外落库的 review_run/result/trace/evidence 行不对 HTTP 暴露）。run_id 未在 body
+    中提供（它属运行上下文而非案件事实），由 ``run_and_persist`` 自动生成 uuid4 hex
+    并作为 LangGraph thread_id（O-6）。
     """
     try:
-        return await run_review(case)
-    except Exception as exc:  # 图执行期异常：人读信息转 500，堆栈留日志不外泄
-        logger.exception("run_review 执行失败 case_id=%s", case.case_id)
+        summary = await run_and_persist(case)
+        return ReviewRunResult(
+            run_id=summary["run_id"],
+            review_decision=summary["decision"],
+        )
+    except Exception as exc:  # 图执行/落库期异常：人读信息转 500，堆栈留日志不外泄
+        logger.exception("run_and_persist 执行失败 case_id=%s", case.case_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"案件调查执行失败（{type(exc).__name__}）：{exc}",
