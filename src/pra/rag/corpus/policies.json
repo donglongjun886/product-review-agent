@@ -1,0 +1,326 @@
+{
+  "meta": {
+    "source": "手写（电商平台商品内容治理常见政策为蓝本；非 eval 世界种子复制）",
+    "isolation_declaration": "Policy KB 独立于 eval mock 世界；编号避开 eval 的 POLICY_3.2/4.1/5.2，避免跨世界引用混淆",
+    "generated_by": "scripts/build_rag_corpus.py",
+    "counts": {
+      "clauses": 24,
+      "effective": 21,
+      "expired": 3
+    }
+  },
+  "policies": [
+    {
+      "policy_id": "POLICY_1.1",
+      "version": 1,
+      "clause_id": "POLICY_1.1_v1_c1",
+      "title": "仿冒商品禁售（旧版）",
+      "text": "禁止销售仿冒、假冒注册商标的商品；商家应确保所售商品为授权正品或自有设计，仿冒商品一经查实下架处理（旧版，已失效）。",
+      "category": "全类目",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EXPIRED",
+      "effective_date": "2023-03-01"
+    },
+    {
+      "policy_id": "POLICY_1.1",
+      "version": 2,
+      "clause_id": "POLICY_1.1_v2_c1",
+      "title": "仿冒/高仿/复刻商品禁售",
+      "text": "禁止销售仿冒、高仿、复刻他人品牌的商品；无品牌授权或自有版权的同款设计不得上架，判定为仿冒的强制下架并计入商家违规记录。",
+      "category": "全类目",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-06-01"
+    },
+    {
+      "policy_id": "POLICY_1.1",
+      "version": 2,
+      "clause_id": "POLICY_1.1_v2_c2",
+      "title": "仿冒认定要素",
+      "text": "仿冒认定包含：使用注册商标相同或近似标识、直接复制他人商品外观或图案、冒用他人品牌背书（详情页/包装出现他人品牌信息）。",
+      "category": "全类目",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-06-01"
+    },
+    {
+      "policy_id": "POLICY_1.2",
+      "version": 1,
+      "clause_id": "POLICY_1.2_v1_c1",
+      "title": "高仿/复刻兜售词限制",
+      "text": "标题与描述不得使用“原单”“尾单”“复刻”“高仿”“A货”等暗示仿冒来源的词；未经授权不得使用他人品牌名做引流。",
+      "category": "全类目",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-01-01"
+    },
+    {
+      "policy_id": "POLICY_1.3",
+      "version": 1,
+      "clause_id": "POLICY_1.3_v1_c1",
+      "title": "未授权品牌 logo/商标使用",
+      "text": "未经权利人授权，商品图片、视频、包装不得出现他人注册商标或近似图形；翻转、镜像、裁剪等变形处理规避识别的同样违规。",
+      "category": "全类目",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-03-01"
+    },
+    {
+      "policy_id": "POLICY_1.4",
+      "version": 1,
+      "clause_id": "POLICY_1.4_v1_c1",
+      "title": "鞋靴外观高度模仿知名品牌",
+      "text": "鞋靴类商品整体外观（鞋型、配色、细节组合）高度模仿知名品牌在售款且无品牌授权，判定为高风险违规；外观相似度不低于 0.85 为强参考信号。",
+      "category": "女鞋/运动鞋",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-03-01"
+    },
+    {
+      "policy_id": "POLICY_1.5",
+      "version": 1,
+      "clause_id": "POLICY_1.5_v1_c1",
+      "title": "箱包外观高度模仿知名品牌",
+      "text": "箱包类商品（含手袋、托特包、双肩包）外观高度模仿知名品牌设计（廓形、印花、五金组合）且无授权，判定为高风险违规。",
+      "category": "箱包/女包",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-05-01"
+    },
+    {
+      "policy_id": "POLICY_1.6",
+      "version": 1,
+      "clause_id": "POLICY_1.6_v1_c1",
+      "title": "服装图案/版型模仿知名品牌",
+      "text": "服装（含卫衣、外套）的图案、印花、版型组合高度模仿知名潮牌设计且无授权，判定为高风险违规。",
+      "category": "服装/卫衣",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-06-01"
+    },
+    {
+      "policy_id": "POLICY_2.1",
+      "version": 1,
+      "clause_id": "POLICY_2.1_v1_c1",
+      "title": "功效夸大禁止（旧版）",
+      "text": "禁止功效类夸大表述，如“永久去皱”“根治脚气”等绝对化功效词（旧版，已失效）。",
+      "category": "全类目",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "status": "EXPIRED",
+      "effective_date": "2023-05-01"
+    },
+    {
+      "policy_id": "POLICY_2.1",
+      "version": 2,
+      "clause_id": "POLICY_2.1_v2_c1",
+      "title": "无依据功效夸大禁止",
+      "text": "禁止无依据的功效夸大宣称：如鞋类“增高 5cm”“磁疗改善循环”、服装“抑菌 90 天”、箱包“防弹”等；宣称须能出具权威检测或临床依据，否则下架处理。",
+      "category": "全类目",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-04-01"
+    },
+    {
+      "policy_id": "POLICY_2.2",
+      "version": 1,
+      "clause_id": "POLICY_2.2_v1_c1",
+      "title": "服饰功能宣称需检测依据",
+      "text": "服饰商品宣称抗菌、防紫外线、发热、凉感等功能须提供对应检测报告；无报告仅以功能词描述视为虚假宣传。",
+      "category": "服装/卫衣",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-05-01"
+    },
+    {
+      "policy_id": "POLICY_2.3",
+      "version": 1,
+      "clause_id": "POLICY_2.3_v1_c1",
+      "title": "材质/成分虚假声称",
+      "text": "商品宣称材质或成分与实际不符视为虚假宣传：如将 PU 标注为真皮、将混纺标注为纯棉、以次充好，按违规处置。",
+      "category": "全类目",
+      "risk_type": [
+        "FALSE_CLAIM",
+        "FIELD_CONFLICT"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-02-01"
+    },
+    {
+      "policy_id": "POLICY_3.1",
+      "version": 1,
+      "clause_id": "POLICY_3.1_v1_c1",
+      "title": "鞋类真皮标识凭证",
+      "text": "鞋类商品标题/详情宣称“真皮”“头层牛皮”的，须提交材质质检或授权标识凭证；无法证明真皮却宣称的，判定虚假标识。",
+      "category": "女鞋/运动鞋",
+      "risk_type": [
+        "FIELD_CONFLICT"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-03-01"
+    },
+    {
+      "policy_id": "POLICY_3.3",
+      "version": 1,
+      "clause_id": "POLICY_3.3_v1_c1",
+      "title": "箱包材质与五金标识一致",
+      "text": "箱包材质（真皮/PU/帆布）与五金材质标注须与实物及质检一致；“纯皮”“原版五金”等表述需可核验凭证。",
+      "category": "箱包/女包",
+      "risk_type": [
+        "FIELD_CONFLICT"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-05-01"
+    },
+    {
+      "policy_id": "POLICY_3.4",
+      "version": 1,
+      "clause_id": "POLICY_3.4_v1_c1",
+      "title": "服装面料成分标注规范",
+      "text": "服装须按洗标与质检标注面料成分及含量（如棉含量百分比）；标注与实检不符判定违规。",
+      "category": "服装/卫衣",
+      "risk_type": [
+        "FIELD_CONFLICT"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-01-01"
+    },
+    {
+      "policy_id": "POLICY_3.5",
+      "version": 1,
+      "clause_id": "POLICY_3.5_v1_c1",
+      "title": "类目错挂/蹭类目流量",
+      "text": "商品须按真实属性挂载正确类目；借他类目流量（如普通鞋挂“增高鞋”类目、普通服饰挂“防护服”类目）判定类目错挂违规。",
+      "category": "全类目",
+      "risk_type": [
+        "FIELD_CONFLICT"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-01-01"
+    },
+    {
+      "policy_id": "POLICY_4.2",
+      "version": 1,
+      "clause_id": "POLICY_4.2_v1_c1",
+      "title": "改标题重上架（旧版）",
+      "text": "因违规被下架的商品不得通过修改标题后重新上架规避审核（旧版，已失效）。",
+      "category": "全类目",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "status": "EXPIRED",
+      "effective_date": "2023-07-01"
+    },
+    {
+      "policy_id": "POLICY_4.2",
+      "version": 2,
+      "clause_id": "POLICY_4.2_v2_c1",
+      "title": "改标题/描述规避重上架",
+      "text": "因违规被下架的商品不得通过修改标题、描述、属性后重新上架规避审核；同一商品多次（≥3 次）改标题重上架视为系统性规避，从重处理。",
+      "category": "全类目",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-01-15"
+    },
+    {
+      "policy_id": "POLICY_4.3",
+      "version": 1,
+      "clause_id": "POLICY_4.3_v1_c1",
+      "title": "换图/换主图规避",
+      "text": "不得通过更换主图、详情图或翻转镜像图片等方式规避图片审核；图片与实物、标题明显不符亦属违规。",
+      "category": "全类目",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-02-01"
+    },
+    {
+      "policy_id": "POLICY_4.4",
+      "version": 1,
+      "clause_id": "POLICY_4.4_v1_c1",
+      "title": "SKU 拆分/多链接铺货规避",
+      "text": "不得将同一违规商品拆分为多个 SKU 或多链接铺货，或复用违规图文到新链接以规避单链接处罚；关联链接一并处置。",
+      "category": "全类目",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-02-01"
+    },
+    {
+      "policy_id": "POLICY_4.5",
+      "version": 1,
+      "clause_id": "POLICY_4.5_v1_c1",
+      "title": "规避叠加仿冒从重处置",
+      "text": "规避审核行为与品牌模仿、虚假宣传等风险叠加出现时（如高仿鞋改标题重上架），按从重档处置：直接拒绝并累计商家信用分扣减。",
+      "category": "全类目",
+      "risk_type": [
+        "EVASION_PATTERN",
+        "POTENTIAL_IP_RISK"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-03-01"
+    },
+    {
+      "policy_id": "POLICY_4.6",
+      "version": 1,
+      "clause_id": "POLICY_4.6_v1_c1",
+      "title": "规避行为认定要素",
+      "text": "认定规避需满足：存在被处置记录、再次上架、信息变更但实质商品未变；单次改名不构成，商家历史（下架≥3 或改标题≥3）为系统性信号参考。",
+      "category": "全类目",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-03-01"
+    },
+    {
+      "policy_id": "POLICY_5.1",
+      "version": 1,
+      "clause_id": "POLICY_5.1_v1_c1",
+      "title": "商家系统性违规处置",
+      "text": "同一商家多链接、多类目系统性违规（如相似高仿商品 20+ 链接在架）触发店铺级处置；情节严重暂停上新资格。",
+      "category": "全类目",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-04-01"
+    },
+    {
+      "policy_id": "POLICY_5.3",
+      "version": 1,
+      "clause_id": "POLICY_5.3_v1_c1",
+      "title": "证据不足转人工复核",
+      "text": "外观真伪等需主观判定的情形证据不足时，转人工复核；人工复核结论回流沉淀为后续同类商品判断的先例依据。",
+      "category": "全类目",
+      "risk_type": [],
+      "status": "EFFECTIVE",
+      "effective_date": "2024-01-01"
+    }
+  ]
+}

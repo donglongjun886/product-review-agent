@@ -46,7 +46,10 @@ class EvalContext(BaseModel):
       docs/02-evaluation.md §4.5 与 gate.CONFIDENCE_ABSTAIN_THRESHOLD=0.7 口径）；
     - ``tool_world``：Agent 使用的 InMemory 工具数据源 —— "eval" = 与
       eval_data/v1 同一份种子世界（三方案公平性：Rule/Single-call 只用基础输入，
-      Agent 经工具取"基础输入之外"的证据，见《00》§12.0）。
+      Agent 经工具取"基础输入之外"的证据，见《00》§12.0）；"rag" = **RAG 世界**
+      （rag-implementation-plan.md R-4：CaseSearch/PolicySearch 注入真实 RAG 索引，
+      事实工具沿用 eval 世界 —— 评测默认仍 "eval"，RAG 单独模式跑，见
+      agent_scheme.make_rag_world_tools）。
     Phase 2 新增字段（sweep / ablation 用，docs/02-evaluation.md §5.1"只动配置"）：
     - ``evidence_thresholds``：Evidence 阈值覆盖 —— dict {"min_sim": float,
       "strong": float}，None = 用当前默认（min_sim=0.70 / strong=0.85，镜像
@@ -56,6 +59,9 @@ class EvalContext(BaseModel):
       注入生效范围 = 评测侧相似度分档读取路径（agent_scheme 的确定性审查员模型），
       真实图 tools_node 的 quality_filter / gate overlay 常量属 pra.agent 业务层，
       不经本字段改动（报告须注明，见 sweep.py）。
+    RAG 世界参数（仅 tool_world="rag" 生效；默认 None → hybrid）：
+    - ``rag_mode``：检索模式 "bm25" / "vector" / "hybrid" —— 三路对比实验用
+      （R-6：不预设 Hybrid 优于单路，由 Evaluation 实验回答）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -63,8 +69,13 @@ class EvalContext(BaseModel):
     abstain_confidence_threshold: float = Field(
         default=0.7, ge=0.0, le=1.0, description="Single-call REJECT 候选转人工的置信门槛"
     )
-    tool_world: Literal["eval", "default"] = Field(
-        default="eval", description="Agent 工具数据源：eval=评测种子世界 / default=仓库默认演示种子"
+    tool_world: Literal["eval", "default", "rag"] = Field(
+        default="eval",
+        description="Agent 工具数据源：eval=评测种子世界 / default=仓库默认演示种子 / rag=RAG 世界（真实 Policy/Case KB）",
+    )
+    rag_mode: Literal["bm25", "vector", "hybrid"] | None = Field(
+        default=None,
+        description="RAG 世界检索模式（tool_world='rag' 时生效；None → hybrid 0.5/0.5）",
     )
     evidence_thresholds: dict | None = Field(
         default=None,

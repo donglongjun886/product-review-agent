@@ -14,9 +14,11 @@
   的无 DB 执行方式）；每 case 独立 build + compile 一个图、thread_id 唯一 → 天然
   隔离、可重放（compile 开销小，确定性优先于性能）。
 
-**结论边界（报告必标注，docs/02-evaluation.md §3.4）**：工具为 InMemory 种子数据、
-LLM 为确定性桩 —— 种子里查不到的先例/规避史会低估 Agent 上限；真实 RAG/商家库
-接入后以 real 模式复核（Phase 2）。
+**结论边界（报告必标注，docs/02-evaluation.md §3.4）**：默认评测工具为 InMemory
+种子数据、LLM 为确定性桩 —— 种子里查不到的先例/规避史会低估 Agent 上限；
+本模块另提供 **RAG 世界**（``EvalContext.tool_world="rag"``，CaseSearch/PolicySearch
+注入真实 Policy/Case KB，见 ``make_rag_world_tools``）在同一 eval_data 上复核
+（M4：InMemory vs RAG 差异 + BM25/Vector/Hybrid 三路对比）。
 
 确定性"审查员模型"（规则即文档，见各方法 docstring）：
 1. hypothesize：按**表面信号**生成假设 —— 外观模仿（有图才建）、品牌核验（案件
@@ -69,9 +71,11 @@ __all__ = [
     "EVAL_PRECEDENTS",
     "EVAL_PRODUCTS",
     "EVAL_WORLD_LABEL",
+    "RAG_WORLD_LABEL",
     "AgentScheme",
     "EvalScriptedLLMBackend",
     "make_eval_world_tools",
+    "make_rag_world_tools",
 ]
 
 # ---------------------------------------------------------------------------
@@ -449,6 +453,9 @@ EVAL_POLICY_CLAUSES: list[dict[str, Any]] = [
 
 # 评测世界标识（报告"结论边界"标注用）
 EVAL_WORLD_LABEL = "InMemory 种子世界 v1（含 P_88231/M_5512 演示种子扩展）"
+# RAG 世界标识：真实 Policy KB / Case KB + 确定性 mock embedding + BM25 + 余弦
+# （mode 由运行 ctx 注入，报告里拼上实际 mode —— 见 run_rag_eval.py）
+RAG_WORLD_LABEL = "RAG 世界（真实 Policy/Case KB · 确定性 mock embedding + BM25 + 余弦）"
 
 
 def make_eval_world_tools():
@@ -475,6 +482,40 @@ def make_eval_world_tools():
         MerchantTool(repo=InMemoryMerchantRepository(EVAL_MERCHANTS)),
         CaseSearchTool(index=InMemoryCaseIndex(EVAL_PRECEDENTS)),
         PolicySearchTool(index=InMemoryPolicyIndex(EVAL_POLICY_CLAUSES)),
+    ]
+    return tools
+
+
+def make_rag_world_tools(*, mode: str = "hybrid"):
+    """构造 **RAG 世界** 的 Agent 工具（评测 RAG 单独模式，R-4/R-6）。
+
+    与 ``make_eval_world_tools`` 的差异只在两个"知识库检索"工具：
+    CaseSearchTool / PolicySearchTool 注入**真实 RAG 索引**（Policy KB / Case KB，
+    确定性 mock embedding + BM25 + 余弦，三模式可切换）；Product / Image /
+    Merchant 仍沿用 eval 世界种子（案件事实锚点，不属"知识库"，两世界共用 →
+    差异只归因于检索数据源，便于 InMemory vs RAG 对比归因）。
+
+    :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid 0.5/0.5；R-6 不预设
+        Hybrid 最优 —— 三路对比由 Evaluation 实验回答）。
+    """
+    # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
+    from pra.rag.factory import build_case_index, build_policy_index
+    from pra.tools.base import Tool
+    from pra.tools.case_search.tool import CaseSearchTool
+    from pra.tools.image_analysis.tool import (
+        ImageAnalysisTool,
+        MockImageAnalysisProvider,
+    )
+    from pra.tools.merchant.tool import InMemoryMerchantRepository, MerchantTool
+    from pra.tools.policy_search.tool import PolicySearchTool
+    from pra.tools.product.tool import InMemoryProductRepository, ProductTool
+
+    tools: list[Tool] = [
+        ProductTool(repo=InMemoryProductRepository(EVAL_PRODUCTS)),
+        ImageAnalysisTool(provider=MockImageAnalysisProvider(EVAL_IMAGE_MATCHES)),
+        MerchantTool(repo=InMemoryMerchantRepository(EVAL_MERCHANTS)),
+        CaseSearchTool(index=build_case_index(mode=mode)),
+        PolicySearchTool(index=build_policy_index(mode=mode)),
     ]
     return tools
 
@@ -1073,6 +1114,9 @@ class AgentScheme(SchemeRunner):
       图工具注册与 plan 的 tool schema 都只给该子集（不动判定逻辑）；
       None = eval 世界全 6 工具。裁剪时若某工具的注册被去掉，plan 不会再排程它，
       证据链自然缺该类证据 → 决策差异即"该组件必要性"的归因。
+    - ctx.tool_world == "rag"：RAG 世界评测（CaseSearch/PolicySearch 注入真实
+      RAG 索引，其余事实工具沿用 eval 世界；检索模式随 ``ctx.rag_mode`` 切换，
+      None → hybrid）—— 评测默认 "eval" 不受影响（R-4）。
     - ctx.evidence_thresholds：见 ``EvalContext``（sweep 注入相似度分档）。
     """
 
@@ -1091,9 +1135,13 @@ class AgentScheme(SchemeRunner):
         tools = None
         if ctx.tool_world == "eval":
             tools = make_eval_world_tools()
-            if self._allowed_tools is not None:
-                # 工具注册层裁剪（只保留允许子集；连同 plan 侧裁剪 = 完整装配裁剪）
-                tools = [t for t in tools if t.name in self._allowed_tools]
+        elif ctx.tool_world == "rag":
+            # RAG 世界（R-4/R-6）：先例/政策检索注入真实 RAG 索引，检索模式可切换
+            # （EvalContext.rag_mode，默认 None → hybrid）—— 评测默认路径不动。
+            tools = make_rag_world_tools(mode=ctx.rag_mode or "hybrid")
+        if tools is not None and self._allowed_tools is not None:
+            # 工具注册层裁剪（只保留允许子集；连同 plan 侧裁剪 = 完整装配裁剪）
+            tools = [t for t in tools if t.name in self._allowed_tools]
         backend = EvalScriptedLLMBackend(
             allowed_tools=set(self._allowed_tools) if self._allowed_tools is not None else None,
             evidence_thresholds=ctx.evidence_thresholds,

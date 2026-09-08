@@ -1,0 +1,1194 @@
+{
+  "meta": {
+    "source": "手写种子（demo P_88231/M_5512 剧情改写 + 合成各案型） + 程序化变体（固定 seed）",
+    "isolation_declaration": "红线 R-4：Case KB 与 eval_data/v1、v2 的 ground-truth 严格隔离 —— case_id 统一 RAG_CASE_ 前缀（与 EC_*/EC_V2_*/CASE_EC_*/CASE_EC_V2_* 无交集），剧情不与任何 eval 违规案一一对应（防检索到 GT = 评测作弊）",
+    "generated_by": "scripts/build_rag_corpus.py",
+    "seed": 20260908,
+    "counts": {
+      "total": 67,
+      "curated": 25,
+      "variants": 42
+    }
+  },
+  "cases": [
+    {
+      "case_id": "RAG_CASE_0001",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的女款复古跑鞋，外观高度模仿某知名品牌经典复古跑鞋（相似度 0.91，无 logo）；商家近 90 天 5 次被下架、3 次改标题重上架，系统性规避明显。",
+      "key_evidence": [
+        "image_similarity>=0.91",
+        "merchant_removals=5",
+        "title_relisting=3"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_4.2",
+        "POLICY_4.5"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0002",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的大容量托特包，廓形与印花组合高度模仿某知名品牌在售手袋（相似度 0.95）；同商家历史 7 次下架、4 次改标题重上架。",
+      "key_evidence": [
+        "image_similarity>=0.95",
+        "merchant_removals=7",
+        "title_relisting=4"
+      ],
+      "policy_refs": [
+        "POLICY_1.5",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0003",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "复古印花宽松卫衣，图案与版型高度模仿某知名潮牌（相似度 0.9，无授权）；商家多次换主图重上架规避审核。",
+      "key_evidence": [
+        "image_similarity>=0.9",
+        "image_swap_relisting>=3"
+      ],
+      "policy_refs": [
+        "POLICY_1.6",
+        "POLICY_4.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0004",
+      "category": "女鞋/运动鞋",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌轻弹缓震跑步鞋，无品牌模仿、无风险词，商家历史干净（无下架无改标题），机审与人工复核一致放行。",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0005",
+      "category": "箱包/女包",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌极简通勤托特包，帆布材质，无相似外观无违规词，商家信用良好，正常放行。",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0006",
+      "category": "服装/卫衣",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自主品牌基础款纯色卫衣，无印花无品牌关联，面料成分标注齐全，商家无历史违规，正常放行。",
+      "key_evidence": [
+        "fabric_label_ok",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0007",
+      "category": "女鞋/运动鞋",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有设计休闲鞋与某品牌经典款存在 0.72 弱相似（共性仅为通用板鞋元素），商家干净无系统性行为，判定不构成高度模仿，放行。",
+      "key_evidence": [
+        "image_similarity=0.72",
+        "merchant_clean"
+      ],
+      "policy_refs": [
+        "POLICY_1.4"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0008",
+      "category": "箱包/女包",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "无品牌托特包与某品牌款相似度 0.8（弱偏中），商家历史中性（1 次下架），无其他佐证，转人工比对确认是否构成高度模仿。",
+      "key_evidence": [
+        "image_similarity=0.8",
+        "merchant_removals=1"
+      ],
+      "policy_refs": [
+        "POLICY_1.5",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0009",
+      "category": "女鞋/运动鞋",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌鞋与知名款相似度 0.78（弱相似），但商家历史 4 次下架达系统性阈值，交叉证据下转人工综合判定。",
+      "key_evidence": [
+        "image_similarity=0.78",
+        "merchant_removals=4"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0010",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "标题含“复刻”“同款”等暗示仿冒词，无品牌标识、外观与知名跑鞋高度相似（0.89）；商家 6 次改标题重上架，规避叠加仿冒从重拒绝。",
+      "key_evidence": [
+        "title_evasion_word",
+        "image_similarity>=0.89",
+        "title_relisting=6"
+      ],
+      "policy_refs": [
+        "POLICY_1.2",
+        "POLICY_4.5"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0011",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "包面检测到某奢侈品牌双 G 字样 logo（置信 0.9），商品无授权凭证亦非二手转售说明，判定未授权使用品牌商标。",
+      "key_evidence": [
+        "logo_detect>=0.9",
+        "no_authorization"
+      ],
+      "policy_refs": [
+        "POLICY_1.3",
+        "POLICY_1.1"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0012",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "卫衣胸前印花经镜像翻转规避识别的某品牌图形商标，图像鉴权确认来源品牌，判定未授权 logo 变形规避使用。",
+      "key_evidence": [
+        "logo_flipped_detect",
+        "image_similarity>=0.86"
+      ],
+      "policy_refs": [
+        "POLICY_1.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0013",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "标称自有品牌“轻缓跑鞋”，但鞋型与知名品牌款相似度达 0.93；自有品牌标识不豁免高度模仿，判定高风险拒绝。",
+      "key_evidence": [
+        "image_similarity>=0.93",
+        "own_brand_claimed"
+      ],
+      "policy_refs": [
+        "POLICY_1.4"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0014",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "标称自创品牌卫衣整体版型与印花构图高度复刻某潮牌（0.9），仅替换了名称，判定换名不换样的仿冒。",
+      "key_evidence": [
+        "image_similarity>=0.9",
+        "own_brand_claimed"
+      ],
+      "policy_refs": [
+        "POLICY_1.6",
+        "POLICY_1.1"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0015",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "普通运动鞋宣称“增高 5cm”“磁疗缓解疲劳”，无任何临床或检测依据，功效夸大且涉医疗暗示，拒绝。",
+      "key_evidence": [
+        "claim_no_evidence",
+        "medical_word"
+      ],
+      "policy_refs": [
+        "POLICY_2.1"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0016",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "卫衣宣称“抑菌 90 天”“自发热”但无法提供对应检测报告，功能宣称无依据，判定虚假宣传。",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0017",
+      "category": "箱包/女包",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "背包宣称“军工级防弹面料”且商家无法出具报告，宣传夸大属实但需人工确认材质与话术定性后处置。",
+      "key_evidence": [
+        "claim_no_report",
+        "extreme_word"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0018",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FIELD_CONFLICT",
+        "FALSE_CLAIM"
+      ],
+      "summary": "详情页宣称“头层牛皮”的鞋，质检实为 PU 合成革；材质标识与实物冲突且构成以次充好。",
+      "key_evidence": [
+        "material_conflict_leather_pu"
+      ],
+      "policy_refs": [
+        "POLICY_3.1",
+        "POLICY_2.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0019",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FIELD_CONFLICT"
+      ],
+      "summary": "卫衣洗标标注棉含量 100%，实检棉 60% 聚酯 40%；面料成分标注与实检不符。",
+      "key_evidence": [
+        "fabric_conflict_cotton_60"
+      ],
+      "policy_refs": [
+        "POLICY_3.4"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0020",
+      "category": "女鞋/运动鞋",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "商品如实标注 PU 材质且提供质检凭证，无功效宣称无品牌模仿，商家干净，正常放行。",
+      "key_evidence": [
+        "material_label_ok",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0021",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "普通休闲鞋此前因违规被下架，商家连续 3 次仅改标题（加空格/换字序）后重新上架，实质商品未变，判定系统性规避。",
+      "key_evidence": [
+        "title_relisting=3",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0022",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "下架卫衣通过更换主图（正反镜像）后重新上架，规避图片审核，判定换图规避。",
+      "key_evidence": [
+        "image_swap_relisting=2",
+        "mirror_image"
+      ],
+      "policy_refs": [
+        "POLICY_4.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0023",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "同一违规托特包拆分为 3 个不同 SKU 链接分别上架，图文复用规避单链接处罚，关联链接一并下架。",
+      "key_evidence": [
+        "sku_split=3",
+        "multi_link_relisting"
+      ],
+      "policy_refs": [
+        "POLICY_4.4"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0024",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "LOW",
+      "risk_type": [
+        "FIELD_CONFLICT"
+      ],
+      "summary": "普通休闲鞋挂载“增高鞋”类目获取错误流量，商品本身无违规但类目错挂，勒令改挂正确类目。",
+      "key_evidence": [
+        "category_misplaced"
+      ],
+      "policy_refs": [
+        "POLICY_3.5"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0025",
+      "category": "箱包/女包",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "LOW",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "商家 2 次换标题重上架未达系统性阈值（<3），商品本身干净，单次改名不构成规避，转人工复核商家整体历史。",
+      "key_evidence": [
+        "title_relisting=2"
+      ],
+      "policy_refs": [
+        "POLICY_4.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0026",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的双肩包，外观高度模仿某知名品牌款（相似度 0.95），商家近 90 天 5 次下架、4 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.95",
+        "merchant_removals=5"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0027",
+      "category": "服装/卫衣",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有设计的连帽卫衣与某品牌款相似度 0.79（弱相似），商家历史干净，判定不构成高度模仿，放行",
+      "key_evidence": [
+        "image_similarity=0.79",
+        "merchant_removals=2"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0028",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "休闲鞋宣称“增高 3cm”但无任何检测或临床依据，功效夸大",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0029",
+      "category": "箱包/女包",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌双肩包，无相似外观、无风险词、无规避史，商家信用良好，正常放行",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0030",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "基础款卫衣曾因轻微违规被下架，商家 3 次改标题/换图重上架，实质商品未变，判定系统性规避",
+      "key_evidence": [
+        "title_relisting=3",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.3",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0031",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的板鞋，外观高度模仿某知名品牌款（相似度 0.9），商家近 90 天 9 次下架、4 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.9",
+        "merchant_removals=9"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0032",
+      "category": "箱包/女包",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "自有设计的双肩包与某品牌款相似度 0.84（弱相似），商家历史 3 次下架达系统性参考线，转人工综合判定",
+      "key_evidence": [
+        "image_similarity=0.84",
+        "merchant_removals=3"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0033",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "基础款卫衣宣称“自发热保暖”但无任何检测或临床依据，功效夸大",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0034",
+      "category": "女鞋/运动鞋",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌缓震跑步鞋，无相似外观、无风险词、无规避史，商家信用良好，正常放行",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0035",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "托特包曾因轻微违规被下架，商家 3 次改标题/换图重上架，实质商品未变，判定系统性规避",
+      "key_evidence": [
+        "title_relisting=3",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.3",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0036",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的基础款卫衣，外观高度模仿某知名品牌款（相似度 0.96），商家近 90 天 3 次下架、5 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.96",
+        "merchant_removals=3"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0037",
+      "category": "女鞋/运动鞋",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "自有设计的缓震跑步鞋与某品牌款相似度 0.72（弱相似），商家历史 4 次下架达系统性参考线，转人工综合判定",
+      "key_evidence": [
+        "image_similarity=0.72",
+        "merchant_removals=4"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0038",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "斜挎小方包宣称“增高 3cm”但无任何检测或临床依据，功效夸大",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0039",
+      "category": "服装/卫衣",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌宽松卫衣，无相似外观、无风险词、无规避史，商家信用良好，正常放行",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0040",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "复古跑鞋曾因轻微违规被下架，商家 4 次改标题/换图重上架，实质商品未变，判定系统性规避",
+      "key_evidence": [
+        "title_relisting=4",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.3",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0041",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的斜挎小方包，外观高度模仿某知名品牌款（相似度 0.88），商家近 90 天 9 次下架、5 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.88",
+        "merchant_removals=9"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0042",
+      "category": "服装/卫衣",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有设计的连帽卫衣与某品牌款相似度 0.71（弱相似），商家历史干净，判定不构成高度模仿，放行",
+      "key_evidence": [
+        "image_similarity=0.71",
+        "merchant_removals=2"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0043",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "休闲鞋宣称“自发热保暖”但无任何检测或临床依据，功效夸大",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0044",
+      "category": "箱包/女包",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌斜挎小方包，无相似外观、无风险词、无规避史，商家信用良好，正常放行",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0045",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "宽松卫衣曾因轻微违规被下架，商家 3 次改标题/换图重上架，实质商品未变，判定系统性规避",
+      "key_evidence": [
+        "title_relisting=3",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.3",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0046",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的板鞋，外观高度模仿某知名品牌款（相似度 0.87），商家近 90 天 4 次下架、5 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.87",
+        "merchant_removals=4"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0047",
+      "category": "箱包/女包",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "自有设计的斜挎小方包与某品牌款相似度 0.8（弱相似），商家历史 3 次下架达系统性参考线，转人工综合判定",
+      "key_evidence": [
+        "image_similarity=0.8",
+        "merchant_removals=3"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0048",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "印花外套宣称“防紫外线 50+”但无任何检测或临床依据，功效夸大",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0049",
+      "category": "女鞋/运动鞋",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌缓震跑步鞋，无相似外观、无风险词、无规避史，商家信用良好，正常放行",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0050",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "斜挎小方包曾因轻微违规被下架，商家 7 次改标题/换图重上架，实质商品未变，判定系统性规避",
+      "key_evidence": [
+        "title_relisting=7",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.3",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0051",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的基础款卫衣，外观高度模仿某知名品牌款（相似度 0.93），商家近 90 天 5 次下架、6 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.93",
+        "merchant_removals=5"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0052",
+      "category": "女鞋/运动鞋",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有设计的板鞋与某品牌款相似度 0.72（弱相似），商家历史干净，判定不构成高度模仿，放行",
+      "key_evidence": [
+        "image_similarity=0.72",
+        "merchant_removals=0"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0053",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "通勤手提包宣称“抗菌 90 天”但无任何检测或临床依据，功效夸大",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0054",
+      "category": "服装/卫衣",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌宽松卫衣，无相似外观、无风险词、无规避史，商家信用良好，正常放行",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0055",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "缓震跑步鞋曾因轻微违规被下架，商家 4 次改标题/换图重上架，实质商品未变，判定系统性规避",
+      "key_evidence": [
+        "title_relisting=4",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.3",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0056",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的托特包，外观高度模仿某知名品牌款（相似度 0.93），商家近 90 天 7 次下架、6 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.93",
+        "merchant_removals=7"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0057",
+      "category": "服装/卫衣",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "自有设计的印花外套与某品牌款相似度 0.76（弱相似），商家历史 4 次下架达系统性参考线，转人工综合判定",
+      "key_evidence": [
+        "image_similarity=0.76",
+        "merchant_removals=4"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0058",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "休闲鞋宣称“抗菌 90 天”但无任何检测或临床依据，功效夸大",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0059",
+      "category": "箱包/女包",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌通勤手提包，无相似外观、无风险词、无规避史，商家信用良好，正常放行",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0060",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "连帽卫衣曾因轻微违规被下架，商家 4 次改标题/换图重上架，实质商品未变，判定系统性规避",
+      "key_evidence": [
+        "title_relisting=4",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.3",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0061",
+      "category": "女鞋/运动鞋",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的复古跑鞋，外观高度模仿某知名品牌款（相似度 0.87），商家近 90 天 5 次下架、6 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.87",
+        "merchant_removals=5"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0062",
+      "category": "箱包/女包",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "自有设计的斜挎小方包与某品牌款相似度 0.71（弱相似），商家历史 4 次下架达系统性参考线，转人工综合判定",
+      "key_evidence": [
+        "image_similarity=0.71",
+        "merchant_removals=4"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0063",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "FALSE_CLAIM"
+      ],
+      "summary": "宽松卫衣宣称“防紫外线 50+”但无任何检测或临床依据，功效夸大",
+      "key_evidence": [
+        "claim_no_report"
+      ],
+      "policy_refs": [
+        "POLICY_2.1",
+        "POLICY_2.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0064",
+      "category": "女鞋/运动鞋",
+      "decision": "PASS",
+      "risk_level": "NONE",
+      "risk_type": [],
+      "summary": "自有品牌板鞋，无相似外观、无风险词、无规避史，商家信用良好，正常放行",
+      "key_evidence": [
+        "image_similarity=0.0",
+        "merchant_clean"
+      ],
+      "policy_refs": []
+    },
+    {
+      "case_id": "RAG_CASE_0065",
+      "category": "箱包/女包",
+      "decision": "REJECT",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "EVASION_PATTERN"
+      ],
+      "summary": "斜挎小方包曾因轻微违规被下架，商家 3 次改标题/换图重上架，实质商品未变，判定系统性规避",
+      "key_evidence": [
+        "title_relisting=3",
+        "relisting_after_removal"
+      ],
+      "policy_refs": [
+        "POLICY_4.2",
+        "POLICY_4.3",
+        "POLICY_4.6"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0066",
+      "category": "服装/卫衣",
+      "decision": "REJECT",
+      "risk_level": "HIGH",
+      "risk_type": [
+        "POTENTIAL_IP_RISK",
+        "EVASION_PATTERN"
+      ],
+      "summary": "无品牌标识的宽松卫衣，外观高度模仿某知名品牌款（相似度 0.95），商家近 90 天 4 次下架、6 次改标题重上架",
+      "key_evidence": [
+        "image_similarity>=0.95",
+        "merchant_removals=4"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_4.2"
+      ]
+    },
+    {
+      "case_id": "RAG_CASE_0067",
+      "category": "女鞋/运动鞋",
+      "decision": "HUMAN_REVIEW",
+      "risk_level": "MEDIUM",
+      "risk_type": [
+        "POTENTIAL_IP_RISK"
+      ],
+      "summary": "自有设计的休闲鞋与某品牌款相似度 0.83（弱相似），商家历史 3 次下架达系统性参考线，转人工综合判定",
+      "key_evidence": [
+        "image_similarity=0.83",
+        "merchant_removals=3"
+      ],
+      "policy_refs": [
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
+      ]
+    }
+  ]
+}
