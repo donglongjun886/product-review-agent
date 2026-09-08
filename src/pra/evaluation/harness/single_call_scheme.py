@@ -27,6 +27,15 @@ mock 表面启发式（确定性，规则即文档）：
 真实 single-call LLM 的不稳定性主要由"看不到调查证据"体现：多信号/对抗类案在
 mock 视角可能表面干净 → 误 PASS（漏放）—— 这是"缺证据"的诚实近似（§12.2 变体
 2a：仅商品原始数据）。
+
+**Phase 2 Ablation 变体 2b（RAG-in-prompt）**（docs/02-evaluation.md §3.3）：
+``SingleCallScheme(llm_fn=…, extra_context=[…])`` —— 预塞政策/先例**文本摘要**进
+prompt（仍不给工具）。extra_context=None 时本模块行为与 Phase 1 **完全一致**；
+给定列表时方案把该静态文本注入 llm_fn 的入参 dict（键 ``extra_context``），并由
+确定性 ``ContextAwareSingleCallMock``（RAG 变体 mock，name=single-call-rag-mock-v1）
+按 docstring 的规则消费。**公平性**：预塞的只能是"基础输入外的事实文本"
+（评测世界里可查的政策/先例），不得含 expected 答案 —— 注入键由 mock 显式读取，
+不进 EvalRecord 证据链（单次调用仍无工具/无在库查询）。
 """
 
 from __future__ import annotations
@@ -40,8 +49,15 @@ from pra.screening.rule_engine.terms import BRAND_TERMS, EVASION_TERMS
 
 # mock 名称常量（审计/报告标识）
 DEFAULT_MOCK_NAME = "single-call-mock-v1"
+RAG_MOCK_NAME = "single-call-rag-mock-v1"
 
-__all__ = ["DefaultSingleCallMock", "SingleCallScheme", "apply_abstain_threshold"]
+__all__ = [
+    "ContextAwareSingleCallMock",
+    "DefaultSingleCallMock",
+    "SingleCallScheme",
+    "apply_abstain_threshold",
+    "rag_decision_from_context",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +217,129 @@ def _surface_predict(case_json: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 2b 变体：RAG-in-prompt（政策/先例文本预塞，docs/02-evaluation.md §3.3）
+# ---------------------------------------------------------------------------
+# 确定性触发器（规则即文档，仅供 scripted 近似 —— 真实 LLM 的"读了检索文本所以敢
+# 下结论"在此用显式规则模拟，语义诚实、可单测、无真 LLM）：
+#
+# R-2b：基础 raw 决策为 **REJECT 候选但置信 < 0.7**（本会确定性转人工 —— 规则 ②
+# OCR 弱证据案）时，若注入的 extra_context 中存在**判例行**满足：
+#   1) 以 ``判例:`` 开头；
+#   2) 含结论标记 ``→ REJECT``（判例是自动拒绝，非转人工）；
+#   3) 类目作用域（形如 ``类目[<scope>]``，可省）与案件类目一致；
+#   4) 行内含案件**已观测的表面信号词**（OCR/标题仿冒词或品牌词，_scan_hits 口径）——
+#      "检索到与本案表面特征同型的自动拒绝先例"；
+# 则把该 REJECT 候选的置信抬到 0.85（> abstain 门槛 → 不再转人工），理由标注命中行。
+# 语义：RAG 让"弱怀疑 + 同型先例"收敛为可自动拒绝；反之（无命中行/先例是转人工）
+# 维持原样 —— 预塞文本不得让 mock 凭空造证据。
+#
+# 判定行由 ablation.py 的 ``build_rag_context`` 从评测世界静态文本（EVAL_PRECEDENTS /
+# EVAL_POLICY_CLAUSES）生成 —— 只含政策/先例事实，不含 expected 答案。
+
+_CTX_LINE_PREFIX = "判例:"
+_CTX_REJECT_MARK = "→ REJECT"
+_CTX_SCOPE_RE = re.compile(r"类目\[([^\]]+)\]")
+_CONF_ABSTAIN_DEFAULT = 0.7  # 与 EvalContext.abstain_confidence_threshold 默认同值
+
+RAG_UPGRADE_CONFIDENCE = 0.85  # 抬到 > 0.7 → 不再被确定性后处理转人工
+
+
+def _observed_surface_terms(signals: dict) -> list[str]:
+    """把 mock 表面信号里的命中词收敛成排序去重列表（RAG 判例行的匹配词源）。"""
+    terms: set[str] = set()
+    for key in ("text_evasion", "ocr_evasion", "text_brand", "ocr_brand"):
+        for t in signals.get(key) or []:
+            if isinstance(t, str) and t:
+                terms.add(t)
+    return sorted(terms)
+
+
+def _line_scope_matches(line: str, category: str | None) -> bool:
+    """判例行作用域 ``类目[...]`` 与案件类目一致；行无作用域声明则放行。"""
+    m = _CTX_SCOPE_RE.search(line)
+    if m is None:
+        return True
+    scope = m.group(1).strip()
+    return bool(category) and _fold(scope) == _fold(category)
+
+
+def rag_decision_from_context(
+    base_raw: dict, context_lines: list[str], case_json: dict
+) -> dict | None:
+    """R-2b 确定性触发器：命中返回升级后的 raw dict，未命中返回 None。
+
+    :param base_raw: ``_surface_predict`` 的输出（含 decision/confidence/signals）。
+    :param context_lines: 预塞的判例/政策文本行（extra_context）。
+    :param case_json: 案件 JSON（读 product.category 做作用域匹配）。
+    """
+    if base_raw.get("decision") != "REJECT":
+        return None  # 只处理"弱怀疑 REJECT 候选"（规则见模块 docstring）
+    if (base_raw.get("confidence") or 0.0) >= _CONF_ABSTAIN_DEFAULT:
+        return None  # 本就不转人工 → RAG 无增量
+    if not context_lines:
+        return None
+    signals = base_raw.get("signals") or {}
+    observed = _observed_surface_terms(signals)
+    if not observed:
+        return None  # 无已观测表面词 → 无法与判例特征对位
+    product = case_json.get("product") or {}
+    category = (product.get("category") or "") or None
+
+    matched_line: str | None = None
+    for line in context_lines:
+        text = str(line)
+        if not text.startswith(_CTX_LINE_PREFIX) or _CTX_REJECT_MARK not in text:
+            continue
+        if not _line_scope_matches(text, category):
+            continue
+        hits = _scan_hits(text, frozenset(observed))
+        if hits:
+            matched_line = text
+            break
+
+    if matched_line is None:
+        return None
+    upgraded = dict(base_raw)
+    upgraded["decision"] = "REJECT"
+    upgraded["confidence"] = RAG_UPGRADE_CONFIDENCE
+    upgraded["risk_level"] = "HIGH"
+    if not upgraded.get("risk_type"):
+        upgraded["risk_type"] = ["POTENTIAL_IP_RISK"]
+    upgraded["policy"] = []
+    upgraded["rationale"] = (
+        "基础为弱证据 REJECT 候选（本会转人工）；预塞判例文本命中本案表面特征，"
+        "RAG-in-prompt 收口为自动拒绝。"
+    )
+    upgraded["reasons"] = list(base_raw.get("reasons") or []) + [
+        f"RAG 命中判例行: {matched_line[:140]}"
+    ]
+    upgraded["rag_hit_line"] = matched_line
+    return upgraded
+
+
+class ContextAwareSingleCallMock:
+    """2b RAG 变体 mock（确定性；name=single-call-rag-mock-v1）。
+
+    与默认 mock 同基础表面审查（复用 ``_surface_predict``）；随后按 R-2b
+    （``rag_decision_from_context``）消费 ``case_json["extra_context"]`` 里预塞的
+    判例/政策文本 —— 命中 → 把本会转人工的弱 REJECT 候选升级为自动拒绝，未命中 →
+    原样返回。不读 expected、不造证据、不加工具。
+    """
+
+    name = RAG_MOCK_NAME
+
+    def __call__(self, case_json: dict) -> dict:
+        base = _surface_predict(case_json)
+        lines = [
+            str(x)
+            for x in (case_json.get("extra_context") or [])
+            if isinstance(x, str) and x.strip()
+        ]
+        upgraded = rag_decision_from_context(base, lines, case_json)
+        return upgraded if upgraded is not None else base
+
+
+# ---------------------------------------------------------------------------
 # 置信门槛后处理（§4.5：REJECT 候选 conf < 门槛 → HUMAN_REVIEW）
 # ---------------------------------------------------------------------------
 
@@ -226,12 +365,45 @@ SingleCallLLMFn = Callable[[dict], dict]
 
 
 class SingleCallScheme(SchemeRunner):
-    """Baseline 2 —— 单次 LLM 调用（Phase 1 = 确定性 mock，可注入 llm_fn）。"""
+    """Baseline 2 —— 单次 LLM 调用（Phase 1 = 确定性 mock，可注入 llm_fn）。
+
+    2b 变体（Ablation，docs §3.3）：``extra_context`` 非 None → RAG-in-prompt ——
+    把静态政策/先例文本预塞进 prompt（经 ``ContextAwareSingleCallMock`` 消费），
+    默认 None = Phase 1 现行为（Raw Input，2a），**零行为变化**。
+    """
 
     name = "single_call_llm"
 
-    def __init__(self, llm_fn: SingleCallLLMFn | None = None) -> None:
-        self._llm_fn: SingleCallLLMFn = llm_fn or DefaultSingleCallMock()
+    def __init__(
+        self,
+        llm_fn: SingleCallLLMFn | None = None,
+        extra_context: list[str] | None = None,
+    ) -> None:
+        self._extra_context: list[str] | None = (
+            None if extra_context is None else [str(x) for x in extra_context]
+        )
+        if self._extra_context is None:
+            # 2a：现行为（默认 mock / 用户注入 llm_fn），llm_fn 直接消费 case_json
+            self._llm_fn: SingleCallLLMFn = llm_fn or DefaultSingleCallMock()
+        else:
+            # 2b：llm_fn 缺省换 RAG 变体 mock；无论哪种都把预塞文本注入调用入参
+            context = list(self._extra_context)
+            base_fn: SingleCallLLMFn = llm_fn or ContextAwareSingleCallMock()
+
+            def _inject(case_json: dict) -> dict:
+                injected = dict(case_json)
+                injected["extra_context"] = context
+                return injected
+
+            def _call(case_json: dict) -> dict:
+                return base_fn(_inject(case_json))
+
+            self._llm_fn = _call
+
+    @property
+    def extra_context(self) -> list[str] | None:
+        """预塞文本（None = 2a Raw Input；列表 = 2b RAG-in-prompt）。"""
+        return self._extra_context
 
     async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
         case_json = case.input.model_dump(mode="json")

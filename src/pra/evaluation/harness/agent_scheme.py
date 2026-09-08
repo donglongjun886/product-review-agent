@@ -493,6 +493,7 @@ _T_CASE = "CASE_PRECEDENT"
 _T_POLICY = "POLICY_REF"
 
 _SIM_STRONG = 0.85  # 与 image_analysis.EVIDENCE_STRONG 同口径
+_SIM_MIN = 0.70  # 与 image_analysis.EVIDENCE_MIN_SIM 同口径（评测审查员读证据视图的下限）
 _LOGO_CONF = 0.70  # Logo 视为强视觉信号的置信下限
 _HIGH_PRIOR = 0.3  # 与 gate.HIGH_PRIOR_THRESHOLD 同口径（Gate 只看 >=0.3 的假设）
 _MERCHANT_DIRTY = 3  # removals/title >= 3 = 系统性（gate extra 口径一致）
@@ -568,11 +569,32 @@ def _ev_types(evs: list[dict]) -> set:
     return {e.get("type") for e in evs if isinstance(e.get("type"), str)}
 
 
-def _sim_stats(evs: list[dict]) -> tuple[float, bool, bool]:
-    """(sim_max, sim_strong, any_sim)；similarity 即 IMAGE_SIMILARITY.weight。"""
-    sims = [float(e.get("weight") or 0.0) for e in evs if e.get("type") == _T_IMAGE_SIM]
+def _visible_sim_evidence(evs: list[dict], *, min_sim: float = _SIM_MIN) -> list[dict]:
+    """审查员"看得见"的 IMAGE_SIMILARITY 证据（仅相似度证据，weight >= min_sim）。
+
+    Phase 2 sweep 的最小侵入注入点（docs/02-evaluation.md §5.1"只动配置"）：
+    真实图 tools_node 的 quality_filter 常量（pra.agent，业务层不动）先以 0.70 兜底，
+    评测审查员模型在读证据视图时再按 ``EvalContext.evidence_thresholds.min_sim`` 过滤
+    —— 只在评测侧模拟"更低/更高证据下限"的校准视图；原始 state 证据不动（审计可溯）。
+    只返回 IMAGE_SIMILARITY 类型条目（相似度分档/证据引用只针对相似度证据）。
+    """
+    return [
+        e for e in evs
+        if e.get("type") == _T_IMAGE_SIM and float(e.get("weight") or 0.0) >= min_sim
+    ]
+
+
+def _sim_stats(
+    evs: list[dict], *, strong: float = _SIM_STRONG, min_sim: float = _SIM_MIN
+) -> tuple[float, bool, bool]:
+    """(sim_max, sim_strong, any_sim)；similarity 即 IMAGE_SIMILARITY.weight。
+
+    ``strong``/``min_sim`` 为 sweep 注入的相似度分档阈值（默认 0.85/0.70 保持现行为）：
+    sim_strong = 可见强相似中 sim_max >= strong；any_sim = 可见证据里存在相似命中。
+    """
+    sims = [float(e.get("weight") or 0.0) for e in _visible_sim_evidence(evs, min_sim=min_sim)]
     sim_max = max(sims) if sims else 0.0
-    return sim_max, sim_max >= _SIM_STRONG, bool(sims)
+    return sim_max, sim_max >= strong, bool(sims)
 
 
 def _logo_conf(evs: list[dict]) -> float:
@@ -644,9 +666,29 @@ class EvalScriptedLLMBackend:
     规则语义见模块 docstring / 各方法 docstring。注意：reevaluate / decide 的
     __STATE__ 只含 hypotheses + evidence（节点契约不带 case）→ 本层一律不自造事实，
     只消费假设标记与证据；hypothesize 阶段已把表面信号固化进假设 prior/statement。
+
+    Phase 2 可注入参数（均默认 None/默认值 → 与 Phase 1 行为逐字节一致）：
+    - ``allowed_tools``：装配层裁剪（Ablation 组件级，docs §6）——plan 只排程该
+      子集内的工具（plan 的 tool schema 侧裁剪），图工具注册由 AgentScheme 另行
+      过滤；None = 全工具。
+    - ``evidence_thresholds``：证据阈值覆盖（sweep，docs §5）——min_sim 过滤审查员
+      读到的相似度证据视图，strong 决定强相似分档；None = 0.70/0.85。
     """
 
     name = "eval-scripted-reviewer"
+
+    def __init__(
+        self,
+        *,
+        allowed_tools: set[str] | None = None,
+        evidence_thresholds: dict | None = None,
+    ) -> None:
+        self._allowed_tools: frozenset[str] | None = (
+            None if allowed_tools is None else frozenset(allowed_tools)
+        )
+        overrides = dict(evidence_thresholds or {})
+        self._min_sim: float = float(overrides.get("min_sim", _SIM_MIN))
+        self._strong: float = float(overrides.get("strong", _SIM_STRONG))
 
     async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
         from pra.agent.guardrails.llm_shell import LLMBackendError
@@ -782,6 +824,11 @@ class EvalScriptedLLMBackend:
                  "reason": "检索外观高度模仿品牌设计的政策条款", "priority": 5}
             )
 
+        if self._allowed_tools is not None:
+            # 装配层裁剪（组件级 Ablation）：plan 的 tool schema 侧不给被裁工具 ——
+            # 候选仍按原缺口逻辑生成，但只排程允许子集内工具（不动判定逻辑）。
+            candidates = [c for c in candidates if c["tool"] in self._allowed_tools]
+
         if not candidates:
             # 已无新证据可补（商品/商家缺失的畸形案由上面条件自然收尾）
             return {
@@ -800,7 +847,9 @@ class EvalScriptedLLMBackend:
     def _reevaluate(self, state: dict) -> dict:
         evs = _evidence_list(state)
         hyps = _hypothesis_list(state)
-        sim_max, sim_strong, any_sim = _sim_stats(evs)
+        sim_max, sim_strong, any_sim = _sim_stats(
+            evs, strong=self._strong, min_sim=self._min_sim
+        )
         logo = _logo_conf(evs)
         merch_dirty, merch_clean, merch_known = _merchant_flags(evs)
         prod_found = _product_found(evs)
@@ -817,10 +866,16 @@ class EvalScriptedLLMBackend:
             if dim == "VISUAL":
                 if sim_strong or logo >= _LOGO_CONF:
                     posterior = max(sim_max, logo)
-                    refs = [self._citation(e) for e in evs if e["type"] in {_T_IMAGE_SIM, _T_IMAGE_LOGO}]
+                    refs = [
+                        self._citation(e) for e in _visible_sim_evidence(evs, min_sim=self._min_sim)
+                    ] + [
+                        self._citation(e) for e in evs if e["type"] == _T_IMAGE_LOGO
+                    ]
                     target = ("SUPPORTED", round(posterior, 2), refs, [])
                 elif any_sim:  # 弱相似(0.70~0.85)：弱支持（不构成"高度模仿"确证）
-                    refs = [self._citation(e) for e in evs if e["type"] == _T_IMAGE_SIM]
+                    refs = [
+                        self._citation(e) for e in _visible_sim_evidence(evs, min_sim=self._min_sim)
+                    ]
                     target = ("SUPPORTED", round(sim_max, 2), refs, [])
                 else:
                     target = ("UNRESOLVED", None, [], [])  # 无命中/无可比 → 查无结论
@@ -894,10 +949,13 @@ class EvalScriptedLLMBackend:
     def _decide(self, state: dict) -> dict:
         evs = _evidence_list(state)
         hyps = _hypothesis_list(state)
-        _sim_max, sim_strong, _ = _sim_stats(evs)
+        _sim_max, sim_strong, _ = _sim_stats(
+            evs, strong=self._strong, min_sim=self._min_sim
+        )
         logo = _logo_conf(evs)
         merch_dirty, _, _ = _merchant_flags(evs)
         has_citable = _has_citable(evs)
+        visible_sim = _visible_sim_evidence(evs, min_sim=self._min_sim)
 
         def _pri(h: dict) -> float:
             try:
@@ -923,7 +981,8 @@ class EvalScriptedLLMBackend:
         )
 
         risk_types: list[str] = []
-        if any(e.get("type") == _T_IMAGE_SIM for e in evs) or any(e.get("type") == _T_IMAGE_LOGO for e in evs):
+        # 视觉风险类型按"审查员可见证据视图"派生（sweep 抬 min_sim → 弱相似不再记 IP 风险）
+        if visible_sim or any(e.get("type") == _T_IMAGE_LOGO for e in evs):
             risk_types.append("POTENTIAL_IP_RISK")
         if merch_dirty:
             risk_types.append("EVASION_PATTERN")
@@ -1008,21 +1067,41 @@ class AgentScheme(SchemeRunner):
 
     每 case 独立 build + compile 一个图（checkpointer=InMemory、thread_id 唯一），
     天然隔离、可重放；运行后把进程级 LLM 后端恢复为默认桩（防污染后续进程）。
+
+    Phase 2 装配参数（Ablation / sweep，均默认 None → Phase 1 行为逐字节不变）：
+    - ``allowed_tools``：允许的工具子集（组件级 Ablation 的**装配层裁剪**）——
+      图工具注册与 plan 的 tool schema 都只给该子集（不动判定逻辑）；
+      None = eval 世界全 6 工具。裁剪时若某工具的注册被去掉，plan 不会再排程它，
+      证据链自然缺该类证据 → 决策差异即"该组件必要性"的归因。
+    - ctx.evidence_thresholds：见 ``EvalContext``（sweep 注入相似度分档）。
     """
 
     name = "agent"
 
-    def __init__(self) -> None:
-        self._llm_backend = EvalScriptedLLMBackend()
+    def __init__(self, allowed_tools: set[str] | None = None) -> None:
+        # 审查员后端改为**每次 run 按 ctx 装配**（阈值/裁剪随 EvalContext 变），
+        # 不在构造期缓存 —— sweep/ablation 同进程换 ctx 重跑才能生效。
+        self._allowed_tools: frozenset[str] | None = (
+            None if allowed_tools is None else frozenset(allowed_tools)
+        )
 
     async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
         from pra.agent.guardrails import llm_shell
 
-        tools = make_eval_world_tools() if ctx.tool_world == "eval" else None
+        tools = None
+        if ctx.tool_world == "eval":
+            tools = make_eval_world_tools()
+            if self._allowed_tools is not None:
+                # 工具注册层裁剪（只保留允许子集；连同 plan 侧裁剪 = 完整装配裁剪）
+                tools = [t for t in tools if t.name in self._allowed_tools]
+        backend = EvalScriptedLLMBackend(
+            allowed_tools=set(self._allowed_tools) if self._allowed_tools is not None else None,
+            evidence_thresholds=ctx.evidence_thresholds,
+        )
         graph: CompiledStateGraph = build_agent_graph(
             tools=tools,
             checkpointer=make_memory_checkpointer(),
-            llm=self._llm_backend,
+            llm=backend,
         )
         try:
             final_state = await graph.ainvoke(

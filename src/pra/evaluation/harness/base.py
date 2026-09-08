@@ -47,6 +47,15 @@ class EvalContext(BaseModel):
     - ``tool_world``：Agent 使用的 InMemory 工具数据源 —— "eval" = 与
       eval_data/v1 同一份种子世界（三方案公平性：Rule/Single-call 只用基础输入，
       Agent 经工具取"基础输入之外"的证据，见《00》§12.0）。
+    Phase 2 新增字段（sweep / ablation 用，docs/02-evaluation.md §5.1"只动配置"）：
+    - ``evidence_thresholds``：Evidence 阈值覆盖 —— dict {"min_sim": float,
+      "strong": float}，None = 用当前默认（min_sim=0.70 / strong=0.85，镜像
+      pra.tools.image_analysis.tool 的 EVIDENCE_MIN_SIM / EVIDENCE_STRONG）。
+      **只动配置不改判定逻辑**：sweep 每档阈值换一个 EvalContext 重跑即可；
+      CONFIDENCE_ABSTAIN_THRESHOLD 本轮不参与扫描（固定 0.7，见 sweep.py docstring）。
+      注入生效范围 = 评测侧相似度分档读取路径（agent_scheme 的确定性审查员模型），
+      真实图 tools_node 的 quality_filter / gate overlay 常量属 pra.agent 业务层，
+      不经本字段改动（报告须注明，见 sweep.py）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -57,6 +66,25 @@ class EvalContext(BaseModel):
     tool_world: Literal["eval", "default"] = Field(
         default="eval", description="Agent 工具数据源：eval=评测种子世界 / default=仓库默认演示种子"
     )
+    evidence_thresholds: dict | None = Field(
+        default=None,
+        description="Evidence 阈值覆盖 {\"min_sim\": float, \"strong\": float}；None = 默认 0.70/0.85",
+    )
+
+    def resolve_evidence_thresholds(self) -> dict:
+        """把本 ctx 的 ``evidence_thresholds`` 解析为确定性 (min_sim, strong) 字段 dict。
+
+        None（或只给一档）→ 另一档取当前默认：``EVIDENCE_MIN_SIM=0.70`` /
+        ``EVIDENCE_STRONG=0.85``（镜像 tools 常量，避免评测侧手抄漂移）。
+        惰性 import tools 常量，避免本模块导入期拉起工具包。
+        """
+        from pra.tools.image_analysis.tool import EVIDENCE_MIN_SIM, EVIDENCE_STRONG
+
+        overrides = dict(self.evidence_thresholds or {})
+        return {
+            "min_sim": float(overrides.get("min_sim", EVIDENCE_MIN_SIM)),
+            "strong": float(overrides.get("strong", EVIDENCE_STRONG)),
+        }
 
 
 class SchemeRunner(ABC):

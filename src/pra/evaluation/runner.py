@@ -48,9 +48,19 @@ ALL_SCHEMES: tuple[str, ...] = ("rule", "single_call_llm", "agent")
 
 
 def expected_index(cases: list[EvalCase]) -> dict[str, dict]:
-    """由数据集构造 expected 索引：``{eval_case_id: {"decision": ..., "scene": ...}}``。"""
+    """由数据集构造 expected 索引：``{eval_case_id: {"decision": …, "scene": …}}``。
+
+    Phase 2 起追加 ``abstain_label``（AUTO_DECIDABLE / SHOULD_ABSTAIN；A 面 schema 未
+    升级时经 ``getattr`` 兼容读取 → None，等价 Phase 1 全 AUTO_DECIDABLE，见
+    metrics/abstention.py）。``DecisionEvaluator`` 只消费 decision / scene（行为不变），
+    ``AbstentionEvaluator`` 消费 abstain_label —— 两指标层共享同一索引，不重复构造。
+    """
     return {
-        c.eval_case_id: {"decision": c.expected.decision, "scene": c.scene}
+        c.eval_case_id: {
+            "decision": c.expected.decision,
+            "scene": c.scene,
+            "abstain_label": getattr(c.expected, "abstain_label", None),
+        }
         for c in cases
     }
 
