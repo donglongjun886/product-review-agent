@@ -18,7 +18,7 @@
 | 缓存 / 幂等 | Redis |
 | 可选 extras | RAG：Qdrant（qdrant-client）；可观测：Langfuse + OpenTelemetry |
 
-> 模块划分遵循 `docs/00-system-design.md` §15 的 src 布局：`src/cg/{common,domain,screening,agent,tools,rag,evaluation,api,infra}`。
+> 模块划分遵循 `docs/00-system-design.md` §15 的 src 布局：`src/pra/{common,domain,screening,agent,tools,rag,evaluation,api,infra}`。
 
 ## 快速开始
 
@@ -30,18 +30,18 @@ uv sync
 uv sync --extra rag --extra observability
 
 # 3. 校验（骨架阶段暂无业务代码，pytest 需在 tests/ 有用例后运行）
-uv run ruff check src/cg
+uv run ruff check src/pra
 uv run pytest          # 当前骨架阶段：无测试用例
 ```
 
 ## 文档
 
-- [docs/00-system-design.md](docs/00-system-design.md) —— 系统设计总览（业务架构 / §15 包结构 / §16 面试答辩备忘）
+- [docs/00-system-design.md](docs/00-system-design.md) —— 系统设计总览（业务架构 / §15 包结构）
 
 ## 目录速览
 
 ```
-src/cg/
+src/pra/
 ├── common/       通用：雪花 ID、JSON 工具、错误码
 ├── domain/       领域模型：Case / AgentState / Evidence / Decision（Pydantic）
 ├── screening/    传统机审初筛 + 三分流（rule_engine / triage）

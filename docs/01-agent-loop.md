@@ -1,11 +1,15 @@
-# 复杂风险调查 Agent —— StateGraph 节点 / 边 / 状态契约细化（01-agent-loop v1）
+# 复杂风险调查 Agent —— StateGraph 节点 / 边 / 状态契约细化（01-agent-loop v2）
 
-> 本文档是《00-system-design.md》在 **Agent Loop（实现层）** 上的细化与契约化，服务对象是实现者（写 `src/cg/domain`、`src/cg/agent/**`、`src/cg/tools/**` 的人）。
+> 本文档是《00-system-design.md》在 **Agent Loop（实现层）** 上的细化与契约化，服务对象是实现者（写 `src/pra/domain`、`src/pra/agent/**`、`src/pra/tools/**` 的人）。
 > 引用约定：凡提到总设计原文均写作 **《00》§x.y**（如《00》§4.2），避免与本文编号混淆。
 >
-> **对齐承诺**：本文档不推翻《00》任何决策；与《00》冲突时以《00》为准，并在第 9 章"待定项"登记，交设计方拍板后再修订本文。
+> **v2 修订（review 复核，与 03-decisions v2 / 代码同步）**：§2 AgentState 与落地 `state.py`/`domain/models.py` 对齐（run_id/case_id→thread、status→DB、posterior=None、Evidence.source/extra、dict 元素）；
+> §6 收敛谓词改为证据级可引用（不过滤 prior）；§7 decide overlay 升级为 **Decision Gate**（decision_confidence 与 risk 分离、PASS/REJECT Gate、abstention 清单）；
+> §2.4/§5.8 增 tool_call_history 边际增益 4 字段（Marginal Evidence Gain 取数）；§6.4 预算按 T-7 为 10/15 Guardrail；§5.2/§5.7 相似度三档 0.70/0.85（EVIDENCE_MIN_SIM/EVIDENCE_STRONG）；§9 改为已拍板索引。
 >
-> **本文档不包含业务代码**：只写 TypedDict/Pydantic 伪代码、JSON Schema、确定性路由/Guardrail 伪代码；这些是"契约"，不是 `src/cg/` 下可直接运行的实现。
+> **对齐承诺**：本文档不推翻《00》任何决策；与《00》冲突时以《00》为准，冲突与拍板记录见第 9 章"待定项状态索引"（T-1~T-12 已全部拍板，权威值 docs/03-decisions.md）与 03-decisions.md。
+>
+> **本文档不包含业务代码**：只写 TypedDict/Pydantic 伪代码、JSON Schema、确定性路由/Guardrail 伪代码；这些是"契约"，不是 `src/pra/` 下可直接运行的实现。
 
 ---
 
@@ -36,14 +40,14 @@ entry ──> hypothesize ──> plan ──(条件)──> tools ──> reeva
 ```
 
 - 目录落点（实现者照此创建文件，本文档只描述契约，不替你创建代码文件）：
-  - `src/cg/domain/`：Pydantic 领域模型（Case / Evidence / Hypothesis / Budget / ReviewDecision / 各类 LLM 输出模型）。
-  - `src/cg/agent/state.py`：`AgentState` TypedDict + reducer 声明（第 2 章）。
-  - `src/cg/agent/graph.py`：节点注册、静态边、`add_conditional_edges`、编译（第 6 章）。
-  - `src/cg/agent/nodes/`：hypothesize / plan / reevaluate / decide 四节点（第 3、4、7 章）。
-  - `src/cg/agent/tools_node.py`：ToolNode（执行、args 校验、结果→Evidence、预算记账）（第 4、5 章）。
-  - `src/cg/agent/guardrails/`：`budget.py`（budget_check）、`hard_rules.py`、`decision_guardrail.py`、`dedup.py`（第 6、7 章确定性代码）。
-  - `src/cg/agent/checkpointer.py`：MySQL Checkpointer 接入。
-  - `src/cg/tools/<six>/`：6 个工具子包 + `ToolRegistry` + 统一 `Tool` 接口（第 5 章）。
+  - `src/pra/domain/`：Pydantic 领域模型（Case / Evidence / Hypothesis / Budget / ReviewDecision / 各类 LLM 输出模型）。
+  - `src/pra/agent/state.py`：`AgentState` TypedDict + reducer 声明（第 2 章）。
+  - `src/pra/agent/graph.py`：节点注册、静态边、`add_conditional_edges`、编译（第 6 章）。
+  - `src/pra/agent/nodes/`：hypothesize / plan / reevaluate / decide 四节点（第 3、4、7 章）。
+  - `src/pra/agent/tools_node.py`：ToolNode（执行、args 校验、结果→Evidence、预算记账）（第 4、5 章）。
+  - `src/pra/agent/guardrails/`：`budget.py`（budget_check）、`hard_rules.py`、`decision_guardrail.py`、`dedup.py`（第 6、7 章确定性代码）。
+  - `src/pra/agent/checkpointer.py`：MySQL Checkpointer 接入。
+  - `src/pra/tools/<six>/`：6 个工具子包 + `ToolRegistry` + 统一 `Tool` 接口（第 5 章）。
 
 ### 1.3 三条贯穿性原则（实现时不可违背）
 
@@ -57,114 +61,108 @@ entry ──> hypothesize ──> plan ──(条件)──> tools ──> reeva
 
 ### 2.1 总述
 
-`AgentState` 声明为 `TypedDict`（LangGraph channel 声明用），**字段值**用 `src/cg/domain/` 下的 Pydantic 模型承载（校验、序列化、JSON Schema 生成）。全部字段必须可 JSON 序列化（Checkpointer 每步落库，《00》§3.1）。
+`AgentState` 声明为 `TypedDict`（LangGraph channel 声明用），**字段值**用 `src/pra/domain/` 下的 Pydantic 模型承载（校验、序列化、JSON Schema 生成）。全部字段必须可 JSON 序列化（Checkpointer 每步落库，《00》§3.1）。
 
 各节点只**返回自己负责的字段**（partial update），LangGraph 按各字段的 reducer 语义合并进状态。
 
 ```python
-# src/cg/agent/state.py 契约（伪代码，不落地）
+# src/pra/agent/state.py 契约（已与落地代码对齐；伪代码示意 reducer）
 from typing import TypedDict, Annotated, Literal, NotRequired
 from operator import add
 
 class AgentState(TypedDict):
-    run_id: str                        # 见 2.3
-    case_id: str                       # 见 2.3
-    case: ProductReviewCase            # 见 2.3
-    status: AgentRunStatus             # PENDING|INVESTIGATING|DECIDED|ESCALATED|BUDGET_EXCEEDED|FAILED
+    case: ProductReviewCase            # 输入事实快照（只读，调查起点）
     hypotheses: list[Hypothesis]       # 无 reducer（覆盖写，见 2.5）
     evidence: Annotated[list[Evidence], merge_evidence]      # 自定义去重合并 reducer
-    investigation_queue: list[InvestigationItem]             # 无 reducer（覆盖写）
-    tool_call_history: Annotated[list[ToolCallRecord], add]  # append 合并
-    pending_tool_calls: list[PlannedToolCall]                # 无 reducer（覆盖写）〔细化新增〕
+    investigation_queue: list[dict]    # 待验证问题 {q, priority, status}；无 reducer（覆盖写）
+    tool_call_history: Annotated[list[dict], add]            # 调用审计（含边际增益 4 字段，见 2.4）
+    pending_tool_calls: list[dict]     # plan→tools 计划传递 {tool,args,reason,priority}；无 reducer（覆盖写）
     budget: Budget                     # 无 reducer（整体覆盖写）
     decision: ReviewDecision | None    # 无 reducer（终局写入）
-    degraded: bool                     # 〔细化新增〕上一 LLM 步校验失败降级标记
-    failures: Annotated[list[StepFailure], add]              # 〔细化新增〕失败审计
+    degraded: bool                     # 上一 LLM 步校验失败降级标记（覆盖写）
+    failures: Annotated[list[dict], add]                     # 步骤失败审计 {step_type, reason, ts}
 ```
 
-> 〔细化新增〕带此标记的 4 个字段（`pending_tool_calls / degraded / failures`）在《00》§3 的状态 JSON 示例里没有，是让第 3~7 章契约可落地的**图内部通道**：`pending_tool_calls` 承载 plan→tools 的计划传递；`degraded` 承载 LLM 校验失败的降级信号；`failures` 供 decide overlay 与审计引用。语义与《00》§3 的"显式状态 / 过程审计"一致，非业务矛盾。是否允许保留，见待定项 T-9。
+> **与落地代码/拍板的一致性（本版修订）**：`run_id / case_id` **不在 State**——映射为 LangGraph **thread_id**
+> （Checkpointer 线程键，调用方携带）；`status` **不在 State**——由 DB `agent_run.status` 承载，**DECIDED 是图内唯一终态**
+> （PASS/REJECT/HUMAN_REVIEW 是 `ReviewDecision.decision` 取值；预算耗尽/工具失败/降级通过 `decision.overrides` 记录，
+> 见第 7 章）。字段清单与 `src/pra/agent/state.py` 一致（10 字段）。〔细化新增〕通道
+> `pending_tool_calls / degraded / failures` 为让第 3~7 章契约可落地的图内部通道，语义与《00》§3 的
+> "显式状态 / 过程审计"一致（拍板见 03-decisions.md T-9）。
 
 ### 2.2 字段级契约表
 
-类型列给出 Pydantic 模型名（域模型定义见 `src/cg/domain/`）；「写入方」列只列**唯一合法写入方**；「读方」列列出会读取该字段的节点/函数。
+类型列给出 Pydantic 模型名（域模型定义见 `src/pra/domain/`）；「写入方」列只列**唯一合法写入方**；「读方」列列出会读取该字段的节点/函数。
 
 | # | 字段 | 类型 | 含义 | 写入方 | 读方 |
 |---|---|---|---|---|---|
-| 1 | `run_id` | `str` | Agent 运行唯一 id（如 `RUN_CASE_20240907_001_01`），一次消费一次运行 | 入口 worker（写一次后只读） | 全部节点（审计/落库用） |
-| 2 | `case_id` | `str` | 案件 id，与 `case.case_id` 一致 | 入口 worker | 全部节点 |
-| 3 | `case` | `ProductReviewCase` | 商品事实快照：`case_id / product{title,description,category,brand,attributes,sku_list,images,listing_time,version} / merchant_id / event_type / screening_signals[]`（《00》§2.1 原样）。**只读快照**，Agent 不修改 | 入口 worker（由 MQ 负载构造） | hypothesize / plan / reevaluate / decide / 硬规则 |
-| 4 | `status` | `AgentRunStatus` | 运行状态枚举：`PENDING / INVESTIGATING / DECIDED / ESCALATED / BUDGET_EXCEEDED / FAILED`（《00》§3 原样） | 入口置 `INVESTIGATING`；decide 节点收尾置终态 | decide / worker / ops |
-| 5 | `hypotheses` | `list[Hypothesis]` | **核心推理状态**：假设集合，每条含 `id/statement/prior/posterior/status/evidence_for/evidence_against` | hypothesize（初始化）；reevaluate（更新 posterior/status/证据链接、追加新假设） | plan / reevaluate / decide / is_converged |
-| 6 | `evidence` | `list[Evidence]` | **结论依据**：已收集、去重、合并的证据链（与 tool_call_history 分离，《00》§3.1.4） | tools_node（Tool 结果→Evidence 转换器） | reevaluate / decide / overlay / is_converged |
-| 7 | `investigation_queue` | `list[InvestigationItem]` | 待验证问题（含已解决项），`{q, priority, status}`，供 plan 排序取用 | hypothesize（初始化）；reevaluate（标记 DONE/新增） | plan / reevaluate |
-| 8 | `tool_call_history` | `list[ToolCallRecord]` | **过程审计**：每次工具调用的完整记录 `{seq, tool, args, result_ref, latency_ms, tokens, status}` | tools_node（append，seq 自增）；dedup guardrail 被跳过的调用也记录 `status=skipped` | decide / 审计 / eval 重放 |
-| 9 | `pending_tool_calls` | `list[PlannedToolCall]` | 本轮 plan 决定要执行、尚未消费的工具调用 `{tool, args}`（按 priority 排序） | plan（写入）；tools_node（消费后置 `[]`） | route_after_plan / tools_node / dedup |
-| 10 | `budget` | `Budget` | `{llm_calls, tool_calls, tokens, start_time, limits{max_llm_calls:8, max_tool_calls:12, max_tokens:40000, max_latency_ms:30000}}`（《00》§3 / §8.1 原样） | 入口初始化（`start_time=now`）；各 LLM 节点壳记账 `llm_calls/tokens`；tools_node 记账 `tool_calls` | budget_check / route_* / decide overlay / prompt 注入剩余预算 |
-| 11 | `decision` | `ReviewDecision | None` | 终局裁决，收敛后一次写入（《00》§2.2 形状，含 `hypothesis_trace / budget_used`） | decide（overlay 之后） | worker / 下游落库 |
-| 12 | `degraded` | `bool` | 最近一次 LLM 步是否因 schema 校验失败（重试 1 次后仍失败）而降级。True 时后续 LLM 节点**不再调用 LLM**，透传至 decide（见 3.1/6.2） | 各 LLM 节点：失败置 True；成功置 False（默认 False） | 各节点入口 / route_after_* / decide |
-| 13 | `failures` | `list[StepFailure]` | 步骤失败审计 `{step_type, reason, ts}`，一次一追加，供 decide overlay（T-8 涉及）与人工/运维追溯 | 各 LLM 节点 / tools_node（工具执行失败） | decide overlay / 审计 |
+| 1 | `case` | `ProductReviewCase` | 商品事实快照：`case_id / product{title,description,category,brand,attributes,sku_list,images,listing_time,version} / merchant_id / event_type / screening_signals[]`（《00》§2.1 原样）。**只读快照**，Agent 不修改 | 入口 worker（由 MQ 负载构造） | hypothesize / plan / reevaluate / decide / 硬规则 |
+| 2 | `hypotheses` | `list[Hypothesis]` | **核心推理状态**：假设集合，每条含 `id/statement/prior/posterior/status/evidence_for/evidence_against` | hypothesize（初始化）；reevaluate（更新 posterior/status/证据链接、追加新假设） | plan / reevaluate / decide / is_converged |
+| 3 | `evidence` | `list[Evidence]` | **结论依据**：已收集、去重、合并的证据链（与 tool_call_history 分离，《00》§3.1.4）；`Evidence{type,source,value,weight,ref_id,extra}`（字段与代码对齐，见 2.4） | tools_node（Tool 结果→Evidence 转换器 + 证据质量过滤） | reevaluate / decide / overlay / is_converged |
+| 4 | `investigation_queue` | `list[dict]` | 待验证问题（含已解决项），元素 `{q, priority, status}`（dict 形态，与代码/《00》§3 JSON 一致），供 plan 排序取用 | hypothesize（初始化）；reevaluate（标记 DONE/新增） | plan / reevaluate |
+| 5 | `tool_call_history` | `list[dict]` | **过程审计**：每次工具调用的完整记录 `{seq, tool, args, result_ref, latency_ms, tokens, status, before_confidence, after_confidence, evidence_added, decision_changed}`（dict 形态，与代码一致；边际增益 4 字段见 2.4/5.8） | tools_node（append，seq 自增）；dedup guardrail 被跳过的调用也记录 `status=skipped` | decide / 审计 / eval 重放 / Marginal Evidence Gain 指标 |
+| 6 | `pending_tool_calls` | `list[dict]` | 本轮 plan 决定要执行、尚未消费的工具调用，元素 `{tool, args, reason, priority}`（按 priority 排序） | plan（写入）；tools_node（消费后置 `[]`） | route_after_plan / tools_node / dedup |
+| 7 | `budget` | `Budget` | `{llm_calls, tool_calls, tokens, latency_ms, start_time, limits{max_llm_calls:10, max_tool_calls:15, max_tokens:40000, max_latency_ms:30000}}`（拍板 T-7；默认值与 `models.py BudgetLimits` 一致） | 入口初始化（`start_time=now`）；各 LLM 节点壳记账 `llm_calls/tokens`；tools_node 记账 `tool_calls` | budget_check / route_* / decide overlay / prompt 注入剩余预算 |
+| 8 | `decision` | `ReviewDecision | None` | 终局裁决，收敛后一次写入（《00》§2.2 形状，含 `hypothesis_trace / budget_used / overrides`） | decide（overlay 之后） | worker / 下游落库 |
+| 9 | `degraded` | `bool` | 最近一次 LLM 步是否因 schema 校验失败（重试 1 次后仍失败）而降级。True 时后续 LLM 节点**不再调用 LLM**，透传至 decide（见 3.1/6.2） | 各 LLM 节点：失败置 True；成功置 False（默认 False） | 各节点入口 / route_after_* / decide |
+| 10 | `failures` | `list[dict]` | 步骤失败审计 `{step_type, reason, ts}`，一次一追加，供 decide overlay（T-8 涉及）与人工/运维追溯 | 各 LLM 节点 / tools_node（工具执行失败） | decide overlay / 审计 |
 
-**只读约定**：入口写入后，`run_id / case_id / case / budget.start_time / budget.limits` 一律只读；任何节点不得修改 `case`（商品事实是历史快照）。
+**身份/状态字段不在 State（拍板 03 T-8/T-9）**：`run_id / case_id` → LangGraph thread_id（Checkpointer 线程键）；
+`status` → DB `agent_run.status`（worker 层维护，DECIDED 为图唯一终态）。**只读约定**：入口写入后 `case / budget.start_time / budget.limits` 一律只读；任何节点不得修改 `case`。
 
 ### 2.3 初始化（入口 worker 负责，非任何节点）
 
 ```
 AgentState = {
-  run_id, case_id, case: <MQ 负载构造的 ProductReviewCase>,
-  status: "INVESTIGATING",
+  case: <MQ 负载构造的 ProductReviewCase>,
   hypotheses: [], evidence: [], investigation_queue: [],
   tool_call_history: [], pending_tool_calls: [],
-  budget: {llm_calls:0, tool_calls:0, tokens:0, start_time: now,
-           limits: <来自配置，默认 8/12/40000/30000>},
+  budget: {llm_calls:0, tool_calls:0, tokens:0, latency_ms:0, start_time: now,
+           limits: <来自配置/代码默认 10/15/40000/30000，运行时可由配置覆盖>},
   decision: None, degraded: False, failures: []
 }
+# run_id/case_id 由 worker 以 thread_id 携带；agent_run.status 由 worker/DB 维护（03 T-8）
 ```
 
-### 2.4 Hypothesis / Evidence / 队列等子模型字段契约
+### 2.4 子模型字段契约（与落地代码 `domain/models.py` / `agent/state.py` 对齐）
 
 ```python
-class Hypothesis(BaseModel):                 # 《00》§3 示例原字段
+# —— Pydantic 领域模型（domain/models.py 已落地）——
+class Hypothesis(BaseModel):
     id: str                                  # 形如 "H1".."H4"，同一 run 内唯一
     statement: str                           # 一句话假设（可解释性核心）
-    prior: float                             # 初始先验 [0,1]，由 hypothesize 给出（T-1）
-    posterior: float = 0.0                   # 当前后验 [0,1]，reevaluate 更新
-    status: HypothesisStatus                 # 见下方枚举（T-3）
-    evidence_for: list[str] = []             # 支持证据的 evidence_key 列表（不是全文）
-    evidence_against: list[str] = []         # 反驳证据的 evidence_key 列表
+    prior: float | None = None               # 先验 [0,1]；hypothesize 显式给出（T-1），未赋值前 None（代码口径）
+    posterior: float | None = None           # 后验 [0,1]；reevaluate 更新，未更新前 None（聚合公式对 None 按 0）
+    status: HypothesisStatus                 # PENDING/SUPPORTED/REFUTED/UNRESOLVED（T-3，代码已重命名）
+    evidence_for: list[str] = []             # 支持本假设的证据引用/摘要字符串
+    evidence_against: list[str] = []         # 反驳证据的引用/摘要字符串
 
-class Evidence(BaseModel):
-    evidence_id: str                         # 如 "E_01"；同 run 唯一（也对应《00》§9.1 evidence 表）
-    type: EvidenceType                       # 受控枚举，见 5.x 每工具的映射表
-    source_tool: str                         # 来源工具名（ProductTool 等）
+class Evidence(BaseModel):                   # 字段与代码一致：无 evidence_id / 无 source_tool
+    type: str                                # 开放文本，运行时收敛到 §5.7 受控集（guardrails 常量，不进枚举）
+    source: str                              # 来源工具名（如 ImageAnalysisTool）—— 字段名以《00》§2.2/代码为准
     value: str                               # 人类可读证据值，如 "similarity=0.91, match=某品牌经典鞋款"
-    weight: float = 0.5                      # 证据强度/可信度 [0,1]，默认按工具类型表（5.7），T-5
+    weight: float = 0.5                      # 证据强度 [0,1]，默认按工具类型表（5.7），T-5
     ref_id: str | None = None                # 可追溯引用：policy clause_id / case_id（RAG 必填）
-    extra: dict = {}                         # 结构化附加（相似度数值、Top-K、bbox 等），便于确定性函数读取
+    extra: dict = {}                         # 结构化附加数值（similarity/removals 等），供确定性函数读取（代码已落地）
+    # evidence_id 不进 DTO：由 ToolNode 按 E_<nn> 运行序号分配，用于 result_ref / evidence_for 引用与 DB evidence 主键
 
-class InvestigationItem(BaseModel):          # 《00》§3 原字段
-    q: str                                   # 待验证问题，如 "商品外观是否对应某品牌?"
-    priority: int                            # 越小越优先（1..5）
-    status: Literal["OPEN", "DONE"]          # OPEN=待查；DONE=已由证据回答（T-3 相关）
+# —— AgentState 中 list 字段的元素为 dict（与代码/《00》§3 JSON 一致）；字段约束如下 ——
+# investigation_queue[] 元素:  {"q": str, "priority": int(1..5), "status": "OPEN"|"DONE"}
+# pending_tool_calls[] 元素:  {"tool": ToolName, "args": dict, "reason": str, "priority": int(1..5)}
+# failures[] 元素:            {"step_type": "HYPOTHESIZE"|"PLAN"|"TOOL_CALL"|"REEVALUATE"|"DECIDE",
+#                               "reason": str, "ts": ISO8601}
 
-class PlannedToolCall(BaseModel):            # 〔细化新增〕plan 的“下一步动作”
-    tool: ToolName                           # 6 工具受控名
-    args: dict[str, Any]                     # 与工具 args Schema 对齐（第 5 章）
-    reason: str                              # plan 给的选取理由（进审计）
-    priority: int                            # 1..5，1 最高（第 4 章）
-
-class ToolCallRecord(BaseModel):             # 《00》§3 原字段 + status
-    seq: int                                 # 自增，= 上一 seq + 1
-    tool: str
-    args: dict[str, Any]                     # 实际入参（含默认值回填后的规范形）
-    result_ref: str | None = None            # 命中的 Evidence.evidence_id（若产出）
-    latency_ms: int = 0
-    tokens: int = 0                          # 本次工具调用估算 token（可选，默认 0）
-    status: Literal["ok", "error", "skipped"]  # skipped=被 dedup/预算截断
-
-class StepFailure(BaseModel):                # 〔细化新增〕
-    step_type: Literal["HYPOTHESIZE","PLAN","TOOL_CALL","REEVALUATE","DECIDE"]
-    reason: str
-    ts: str                                  # ISO8601
+# tool_call_history[] 元素（每次工具调用一条，含边际增益 4 字段，见 §5.8；G 项拍板）
+{
+  "seq": 1, "tool": "ImageAnalysisTool", "args": {...},
+  "result_ref": "E_01",                     # 命中的证据运行序号（Evidence 无 DTO id 时用 E_nn）
+  "latency_ms": 1200, "tokens": 800,
+  "status": "ok" | "error" | "skipped",     # skipped=被 dedup/预算截断
+  "before_confidence": 0.42,                # 本次调用前 decision_confidence 代理值（确定性，见 5.8）
+  "after_confidence": 0.73,                 # 本次调用后 decision_confidence 代理值
+  "evidence_added": ["E_01"],               # 本次调用新增的 evidence 序号列表（无新增 = []）
+  "decision_changed": false                 # 本次调用是否翻转 Gate 探测结果（gate_probe(before)!=gate_probe(after)）
+}
 ```
 
 **假设状态枚举**（《00》只出现 SUPPORTED/REFUTED 两个终态示例，本文补齐生命周期，见 T-3）：
@@ -182,13 +180,13 @@ UNRESOLVED 证据不足、未能证实也未证伪（reevaluate 置位，→ 导
 
 | 字段 | reducer | 语义与理由 |
 |---|---|---|
-| `evidence` | **自定义 `merge_evidence`** | 按 `evidence_key = (type, source_tool, ref_id)` 去重合并：已存在则**丢弃重复项**（不覆盖——证据一旦收集不可篡改）；新增项 append。实现：`sorted(list, key)` 或 dict 归并均可，保证可序列化、幂等（图重放不产生重复证据，对齐《00》§8.2.5 幂等语义的 agent 内版本） |
+| `evidence` | **自定义 `merge_evidence`** | 按 `evidence_key = (type, source, ref_id)` 去重合并：已存在则**丢弃重复项**（不覆盖——证据一旦收集不可篡改）；新增项 append。实现：`sorted(list, key)` 或 dict 归并均可，保证可序列化、幂等（图重放不产生重复证据，对齐《00》§8.2.5 幂等语义的 agent 内版本） |
 | `tool_call_history` | `operator.add`（append） | 只追加不合并，审计日志语义 |
 | `failures` | `operator.add`（append） | 只追加 |
 | `hypotheses` | **无 reducer（覆盖写）** | 单条执行路径上每个时点只有一个合法写入方（hypothesize 或 reevaluate），它返回**计算后的全集**即可；用覆盖写避免合并歧义。注意：写入方必须返回完整假设列表（含未被本次更新的假设），否则丢假设 |
 | `investigation_queue` | 无 reducer（覆盖写） | 同上，写入方返回完整队列 |
 | `budget` | 无 reducer（覆盖写） | 每次只有一个节点记账，返回整对象 |
-| `decision / status / degraded / pending_tool_calls / case / run_id / case_id` | 无 reducer（覆盖写） | 单写方字段 |
+| `decision / degraded / pending_tool_calls / hypotheses / investigation_queue / budget / case` | 无 reducer（覆盖写） | 单写方字段（`run_id/case_id→thread`、`status→DB agent_run`，均不在 State） |
 
 > 并发提示：本图是**单路径线性链**，不存在两个节点同轮写同一字段，因此除 3 个 append/merge 字段外都用覆盖写，最简单且无歧义。若未来引入并行子调查（当前明确不做，见《00》§14.3 Multi-Agent），再为 `evidence` 设计更细的并发合并。
 
@@ -252,7 +250,7 @@ async def llm_node(state):
 | 重试仍失败 | 不再重试：节点返回降级结果并置 `degraded=True` + 追加 `failures`；**后续 LLM 节点不再调用 LLM**（`degraded_short_circuit` 只做必要透传），直到路由进入 decide |
 | 降级的业务语义 | 统一视为**"证据不足"**：哪怕之前已收集部分证据，未完成语义综合的链不自动放行 → 路由最终落 decide，由确定性 overlay 产出 `HUMAN_REVIEW`（硬规则命中除外，见第 7 章） |
 | 降级短路具体行为 | `plan/reevaluate`：返回空更新 `{}`（不动任何推理字段，degraded 保持 True）→ 各自条件边读 `degraded=True` 直接路由 decide；`decide`：跳过 LLM 提案（见 7.3 的预算/降级分支） |
-| 无限重试防护 | 重试上限 1；全局还有 budget（llm_calls≤8）兜底 |
+| 无限重试防护 | 重试上限 1；全局还有 budget（llm_calls ≤ max_llm_calls，默认 10，见 6.4/T-7）兜底 |
 
 ### 3.1 hypothesize 节点（能力 1：Risk Hypothesis Generation）
 
@@ -265,7 +263,7 @@ async def llm_node(state):
 **prompt 注入上下文**（`build_messages` 组装，均序列化为 JSON）：
 1. 商品事实：`product_id / title / description / category / brand / attributes / sku_list 摘要 / images 数量与 source / listing_time / version`；
 2. `screening_signals` 完整列表（`name/result/score`，避免 Agent 重复机审已做的事，《00》§2.3.2）；
-3. 系统指令：说明这是"假设生成"而非"终判"；要求包含一条"低风险/无违规"假设（PASS 前提需要，见 7.4）；prior 含义 = 未经调查的先验怀疑度（T-1）；每条假设一句话可验证；每轮调查只验证最值得的那一两条（T-2 关联）。
+3. 系统指令：说明这是"假设生成"而非"终判"；要求包含一条"低风险/无违规"假设（PASS 前提需要，见 §7.2 PASS Gate）；prior 含义 = 未经调查的先验怀疑度（T-1）；每条假设一句话可验证；每轮调查只验证最值得的那一两条（T-2 关联）。
 
 **输出 Pydantic 模型（字段级契约）**：
 
@@ -285,9 +283,9 @@ class QueueProposal(BaseModel):
     priority: int = Field(ge=1, le=5)        # 1 最优先
 ```
 
-**写入 state**：`hypotheses`（初始化全集，`status=PENDING`、`posterior=0.0`、`evidence_for/against=[]`）；`investigation_queue`（全部 `OPEN`）；`degraded=False`；`budget`（LLM 记账）。
+**写入 state**：`hypotheses`（初始化全集，`status=PENDING`、`prior` 用 LLM 输出、`posterior=None`（未评估）、`evidence_for/against=[]`）；`investigation_queue`（全部 `OPEN`）；`degraded=False`；`budget`（LLM 记账）。
 
-**降级结果（重试后仍失败）**：返回 `hypotheses=[]`、`investigation_queue=[]`、`degraded=True`。下游：plan 短路 → decide → overlay：`failures` 非空且无硬规则 → `HUMAN_REVIEW`（原因：假设生成失败、证据不足），不会因"没有假设"而被误判 PASS（见 7.4 PASS 前置校验）。
+**降级结果（重试后仍失败）**：返回 `hypotheses=[]`、`investigation_queue=[]`、`degraded=True`。下游：plan 短路 → decide → overlay：`failures` 非空且无硬规则 → `HUMAN_REVIEW`（原因：假设生成失败、证据不足），不会因"没有假设"而被误判 PASS（见 §7.2 PASS Gate：高优先假设须全部充分证伪）。
 
 **契约约束**：hypotheses 至少 1 条（否则视为异常输出计入校验失败）；id 由 run 内序号 `H1..Hn` 生成，LLM 不写 id（避免冲突）。
 
@@ -301,7 +299,7 @@ class QueueProposal(BaseModel):
 
 **prompt 注入上下文**：
 1. 全部假设的"仪表盘"：`id / statement / prior / posterior / status / 证据数`（证据全文不注入，控制 token）；
-2. 已收集证据摘要（按 recency 取最近 ≤20 条：`type/source_tool/value 截断 120 字/ref_id`）；
+2. 已收集证据摘要（按 recency 取最近 ≤20 条：`type/source/value 截断 120 字/ref_id`）；
 3. `investigation_queue` 中 `OPEN` 项（按 priority 排序）；
 4. 剩余预算（`budget.llm_calls/tool_calls/tokens` vs limits）——提示它克制；
 5. **6 个工具的 JSON Schema（name + description + args schema）**，来自 ToolRegistry（`tool.json_schema()`），让 LLM 产出合法 args；
@@ -328,11 +326,11 @@ class PlanOutput(BaseModel):
 
 **职责一句话**：把本批新证据综合进假设（更新 posterior/status、标注支持/反驳证据、关闭/新增调查队列项），并给出"是否可收敛"的语义判定**供确定性路由参考**（路由权威是确定性谓词，见 6.3，LLM 只给数据不给路由）。
 
-**输入（读 state 字段）**：`hypotheses`、`evidence`（重点：自上次 reevaluate 后新增的证据，用 evidence_id 集合差集找出）、`investigation_queue`、`case`（摘要）、上一轮 `pending_tool_calls`（本批查了什么）。
+**输入（读 state 字段）**：`hypotheses`、`evidence`（重点：自上次 reevaluate 后新增的证据，用 E_nn 运行序号集合差集找出）、`investigation_queue`、`case`（摘要）、上一轮 `pending_tool_calls`（本批查了什么）。
 
 **prompt 注入上下文**：
 1. 假设仪表盘（同上）；
-2. **本批新增证据**（全文，≤10 条，逐条带 evidence_id/type/value/weight/ref_id）；
+2. **本批新增证据**（全文，≤10 条，逐条带 E_nn 序号/type/value/weight/ref_id）；
 3. 历史证据仅给摘要（避免重复推理全量）；
 4. 系统指令：
    - 只依据已给证据更新，不许臆造证据（证据 id 必须存在于注入列表，否则校验失败）；
@@ -355,7 +353,7 @@ class HypothesisUpdate(BaseModel):
     id: str                                      # 必须命中已有假设 id
     posterior: float = Field(ge=0, le=1)
     status: HypothesisStatus                     # SUPPORTED/REFUTED/UNRESOLVED
-    evidence_for: list[str] = []                 # 引用的 evidence_id，必须真实存在
+    evidence_for: list[str] = []                 # 引用的证据 E_nn 序号，必须真实存在
     evidence_against: list[str] = []
 
 class QueueUpdate(BaseModel):
@@ -363,7 +361,7 @@ class QueueUpdate(BaseModel):
     status: Literal["OPEN", "DONE"]
 
 class ConflictNote(BaseModel):
-    between: list[str]                           # 两个 evidence_id
+    between: list[str]                           # 两个冲突证据的 E_nn 序号
     description: str
 ```
 
@@ -382,27 +380,27 @@ class ConflictNote(BaseModel):
 **prompt 注入上下文**：
 1. 假设仪表盘（同上，含 SUPPORTED 假设的证据全文）；
 2. **可引用依据候选**：evidence 中 `type ∈ {POLICY_REF, CASE_PRECEDENT}` 的项全文（policy 条款原文/案例裁决摘要），这是 REJECT 的依据来源（《00》§7.2.2）；
-3. 矛盾证据说明（reevaluate 的 conflicts + 确定性矛盾检测结果，见 7.3）；
+3. 矛盾证据说明（reevaluate 的 conflicts + 确定性矛盾检测结果，见 §7.2 abstention 清单 R3_CRITICAL_CONFLICT；启发式见 03-decisions T-4(e)）；
 4. 三分类语义（《00》§7.1 表格原文）与风险类型受控词表（《00》§7.3，4 个枚举原样）；
 5. 剩余/已用预算；
-6. 系统指令：决策必须能引用 evidence（`evidence_ids` 必须存在）；`policy` 只能填证据中真实出现的 policy_id/条款；不确定就 `HUMAN_REVIEW`（这是"克制地转人工"，不是失败）。
+6. 系统指令：决策必须能引用 evidence（`evidence_ids`（E_nn 序号）必须存在）；`policy` 只能填证据中真实出现的 policy_id/条款；不确定就 `HUMAN_REVIEW`（这是"克制地转人工"，不是失败）。
 
 **输出 Pydantic 模型（字段级契约）——LLM 只产"提案"**：
 
 ```python
 class DecisionProposal(BaseModel):
     decision: Literal["PASS", "REJECT", "HUMAN_REVIEW"]
-    risk_level: Literal["LOW", "MEDIUM", "HIGH"]       # 默认映射建议 LOW/MEDIUM/HIGH（T-10）
+    risk_level: Literal["NONE", "LOW", "MEDIUM", "HIGH"]   # 词表含 NONE（PASS）；T-10，仅展示/队列排序
     risk_type: list[RiskType] = []                     # 受控词表 4 项，可为空
-    confidence: float = Field(ge=0, le=1)              # 提案置信度（7.5 会被 overlay 校准）
-    evidence_ids: list[str] = []                       # 支撑证据，必须存在
+    confidence: float = Field(ge=0, le=1)              # decision_confidence 提案值（overlay 会重算并作 Gate 输入，见 §7.2/§7.5）
+    evidence_ids: list[str] = []                       # 支撑证据（E_nn 序号），必须存在
     policy: list[str] = []                             # policy_id / clause 引用，必须存在于证据
     rationale: str
 
 RiskType = Literal["POTENTIAL_IP_RISK", "EVASION_PATTERN", "FALSE_CLAIM", "FIELD_CONFLICT"]  # 《00》§7.3
 ```
 
-**写入 state**：`decision`（overlay 后的最终 ReviewDecision，字段见第 7 章 7.6）；`status`（终态，取值规则见 T-8）；`degraded`（消费后置 False）；`failures`（若本次因预算/降级没跑 LLM，也可记 note）。
+**写入 state**：`decision`（overlay 后的最终 ReviewDecision，字段见第 7 章 7.6）；`degraded`（消费后置 False）；`failures`（若本次因预算/降级没跑 LLM，也可记 note）。**终态不在 State 写**：worker 在 invoke 返回且 `decision` 非空后置 DB `agent_run.status=DECIDED`（PASS/REJECT/HUMAN_REVIEW 都是 decision 取值；03 T-8）。
 
 **降级结果（decide 自身 LLM 失败）**：无提案 → overlay 以空提案执行：无硬规则 → `HUMAN_REVIEW`（原因：决策推理失败）。
 
@@ -413,7 +411,7 @@ decide_node(state):
   1. if budget_exceeded or degraded: proposal = None        # 7.3 预算/降级分支
      else: proposal = call_structured_llm(DecisionProposal) # 仍失败 → None
   2. final = run_decision_overlay(state, proposal)          # 第 7 章确定性 overlay（永远执行，含硬规则）
-  3. return {decision: final, status: 终态, degraded: False, budget: 记账(如调过 LLM)}
+  3. return {decision: final, degraded: False, budget: 记账(如调过 LLM)}   # 终态由 worker 落 DB（DECIDED，03 T-8）
 ```
 
 ---
@@ -478,7 +476,8 @@ class Tool(Protocol):
 
 - `ToolResult`：`{ok: bool, data: dict | None, error: str | None}`。**确定性错误**（业务无结果）返回 `ok=False + error`，不抛异常；基础设施级瞬态错误（超时/连接）允许 infra 层重试 1 次。
 - 每个工具实现**结果→Evidence 转换器**（`to_evidence(result) -> list[Evidence]`），由 ToolNode 在工具返回后调用并入 `state.evidence`（《00》§4.3：转换与去重合并是确定性 Python，不进 LLM）。
-- Evidence 的 `source_tool` = 工具名；`evidence_id` 由 ToolNode 按 `E_<nn>` 顺序分配。
+- Evidence 的 `source` = 工具名（字段名以代码/《00》§2.2 为准）；`evidence_id` 不进 DTO，由 ToolNode 按 `E_<nn>` 运行序号分配，用于 `result_ref` / `evidence_for` 引用与 DB evidence 主键。
+- **证据质量过滤在确定性层**：相似度下限等过滤在 tools_node/guardrails 层执行（工具本身只返回原始结果，与已落地代码一致，见 5.2/5.8），过滤依据 `EVIDENCE_MIN_SIM / EVIDENCE_STRONG`（T-11 拍板，0.70/0.85）。
 - **脱敏**（《00》§8.2.3）：工具返回给 LLM 前（即进 state/进 prompt 前）由 ToolNode 统一过 PII 脱敏过滤器（商家联系方式等字段打码）；脱敏逻辑单测覆盖。
 - args 校验失败（LLM 给错参）：工具不执行，记 `tool_call_history{status:"error", error=args 校验错误}`；当轮继续执行其余合法调用；不单独为坏 args 重试 LLM（证据缺口会在下一轮 plan 自然暴露）。
 - 本表「→ Evidence」列给出转换规则与 `weight` 默认值（T-5 校准）。
@@ -492,7 +491,7 @@ class Tool(Protocol):
 | args Schema | `{ "product_id": str required, "version": int optional(默认取库中最新) }` |
 | result data | `{ product_id, merchant_id, title, description, category, brand: str|null, attributes: dict[str,str], sku_list: [{sku_id,color,size,price}], images: [{url, source}], version: int, listing_time: str, status: str }` |
 | 确定性说明 | 读 MySQL `product/product_sku/product_image`；返回库中最新 version；`images` 不含 ocr_text（OCR 归 OCRTool），避免重复劳动 |
-| → Evidence | 每商品 1 条：`Evidence{type="PRODUCT_FACT", source_tool="ProductTool", value="brand=null, 标题/描述无品牌词, version=3（与 case 快照一致）", weight=0.6, extra={...关键字段}}`。**版本比对**：库中 version ≠ `case.product.version` 时在 extra 标注 `version_drift=true`（提示决策时案件基于旧快照） |
+| → Evidence | 每商品 1 条：`Evidence{type="PRODUCT_FACT", source="ProductTool", value="brand=null, 标题/描述无品牌词, version=3（与 case 快照一致）", weight=0.6, extra={...关键字段}}`。**版本比对**：库中 version ≠ `case.product.version` 时在 extra 标注 `version_drift=true`（提示决策时案件基于旧快照） |
 | 回答的业务问题 | 判断"规避品牌"前先确认 brand 是否真空缺（《00》§5.1） |
 
 ### 5.2 ImageAnalysisTool —— 多模态核心（混合：图片向量检索 + 视觉 LLM）
@@ -504,7 +503,7 @@ class Tool(Protocol):
 | args Schema | `{ "image_urls": [str] required(1..5), "top_k": int optional(默认 5, 1..10), "detect_logo": bool optional(默认 true) }` |
 | result data | `{ items: [ { image_url, top_similar: [{brand_ref: str, similarity: float 0..1}], logos: [{brand: str, confidence: float}], visual_risk: str, } ] }`（top_similar 按相似度降序；`brand_ref` 指向图片品牌向量库条目，保留引用） |
 | 混合实现说明 | 图片向量库召回（《00》§6.4 图片向量单独存）粗召回 Top-K → 视觉 LLM 复核输出结构化结果 |
-| → Evidence | 对**每个品牌命中**（similarity ≥ EVIDENCE_MIN_SIM，默认 0.60，T-11）产 1 条：`type="IMAGE_SIMILARITY"`，`value="similarity=0.91, match=某品牌经典鞋款"`，`weight=similarity 数值`，`extra={image_url, similarity}`；Logo 命中每条产 `type="IMAGE_LOGO"`，`value="logo=某品牌, conf=0.93"`，`weight=confidence`。无命中（全部低于阈值）产 0 条证据，不污染证据链（"没查到"与"证明无"的区分见 7.4） |
+| → Evidence | 转换器（已落地 `image_analysis/tool.py`）对**每个返回命中**（不做阈值过滤）产 1 条原始 Evidence：`type="IMAGE_SIMILARITY"`，`value="similarity=0.91, match=某品牌经典鞋款"`，`weight=similarity 数值`；Logo 命中每条产 `type="IMAGE_LOGO"`，`value="logo=某品牌, conf=0.93"`，`weight=confidence`。**阈值裁决在确定性层（tools_node/guardrails）**：`similarity < 0.70`（EVIDENCE_MIN_SIM）不入证据链 / `0.70 ≤ similarity < 0.85` 普通证据 / `≥ 0.85`（EVIDENCE_STRONG，即 03 的 SIM_HIGH_CONTRADICT，同值同义）**Strong Evidence** 档（矛盾启发式的"高相似"判据也用它）；入链时确定性层把 `extra.similarity` 等数值补进 Evidence（供矛盾检测机器读取）。无命中产 0 条证据（"没查到"与"证明无"的区分见 §7.2 PASS/REJECT Gate） |
 | 回答的业务问题 | 外观相似是本案最大、规则无法覆盖的证据缺口（《00》§5.1） |
 
 ### 5.3 OCRTool —— 交叉验证（确定性 OCR 服务）
@@ -559,6 +558,12 @@ EvidenceType = PRODUCT_FACT | IMAGE_SIMILARITY | IMAGE_LOGO | OCR_TEXT
 可引用依据类型（REJECT/HUMAN 判定的 citable 集合）: CASE_PRECEDENT | POLICY_REF
 ```
 
+> 相似度三档语义（T-11 已拍板，代码常量 `EVIDENCE_MIN_SIM=0.70` / `EVIDENCE_STRONG=0.85`）：
+> `<0.70` 不作 IMAGE_SIMILARITY 证据；`0.70~0.85` 普通证据；`≥0.85` **Strong Evidence**（也是矛盾启发式"高相似"判据，
+> 代码名 `EVIDENCE_STRONG` 与拍板表旧名 `SIM_HIGH_CONTRADICT` 同值同义，文档统一用 `EVIDENCE_STRONG`）。
+> 两个阈值是 **v1 工程初始值、非理论最优**，全部**配置化**（不写死），02-evaluation 在 validation set 上做
+> **threshold sweep**（0.60/0.65/0.70/0.75/0.80/0.85/0.90）看 Recall/Precision/FPR/Human Review Rate 选 operating point（《00》§11.5）。
+
 ### 5.8 ToolRegistry 与 ToolNode 契约（确定性）
 
 ```python
@@ -568,19 +573,33 @@ class ToolRegistry:
     validate_args(tool_name, args) -> None | str(错误信息)            # JSON Schema 校验
 
 async def tools_node(state):
-    """执行 pending_tool_calls：按 priority 升序，逐个：预算→校验→脱敏→执行→转证据→记账。"""
+    """执行 pending_tool_calls：按 priority 升序，逐个：预算→校验→脱敏→执行→证据质量过滤→转证据→记账→记边际增益。
+
+    全程确定性 Python，不调 LLM。每次调用在 tool_call_history 落 before_confidence /
+    after_confidence / evidence_added / decision_changed（Marginal Evidence Gain 取数，见 2.4 与《00》§11.3）。
+    """
     updates = {pending_tool_calls: [], budget: copy(state.budget)}
     for call in sorted(state["pending_tool_calls"], key=lambda c: c.priority):
-        if updates.budget.tool_calls >= limits.max_tool_calls: break    # 预算截断，剩余不执行
+        if updates.budget.tool_calls >= limits.max_tool_calls: break    # 预算截断（Guardrail 上界），剩余不执行
         if err := registry.validate_args(call.tool, call.args):         # args 校验
             record(seq, status="error", error=err); continue
+        before = decision_conf_probe(updates)                           # ① 调用前 decision_confidence 代理
         result = await tool.call(desensitize(call.args), ctx)           # 瞬态错误 infra 重试 1 次
         updates.budget.tool_calls += 1
         if not result.ok: record(seq, status="error", error=result.error); continue
-        evidences = tool.to_evidence(result)                             # → Evidence（5.x 表）
-        updates.evidence = merge_evidence(state.evidence + evidences)    # 走 reducer 语义
-        record(seq, status="ok", result_ref=evidences[0].evidence_id if evidences else None)
+        raw = tool.to_evidence(result)                                  # 工具原始结果（5.x 表，不过滤）
+        evs = quality_filter(raw, EVIDENCE_MIN_SIM, EVIDENCE_STRONG)    # ② 确定性证据质量过滤 + Strong 标记
+        evs = backfill_extra(evs)                                       # ③ 把 similarity/removals 等数值写入 Evidence.extra
+        updates.evidence = merge_evidence(state.evidence + evs)         # 走 reducer 语义（去重合并）
+        after = decision_conf_probe(updates)                            # ④ 调用后 decision_confidence 代理
+        record(seq, status="ok", result_ref=evs[0] 的 E_nn if evs else None,
+               before_confidence=before, after_confidence=after,
+               evidence_added=[e 的 E_nn for e in evs],                 # 无新增 = []
+               decision_changed=gate_probe(before 态) != gate_probe(after 态))
     return updates
+
+# decision_conf_probe / gate_probe：确定性轻量函数 —— 用 §7.5 的 decision_confidence 公式与 §7.2 的
+# Gate 判定，对"当前证据集/hypotheses"快照算代理值；仅供边际增益审计，不驱动图内路由（路由只认 §6 谓词）。
 ```
 
 ---
@@ -634,23 +653,24 @@ def route_after_reevaluate(state) -> Literal["continue", "decide"]:
         return "decide"
     return "continue"                        # 证据不足且预算够 → 回 plan 再查
 
-# —— 收敛判定（guardrails/converge.py；纯确定性，可单测）——
-HIGH_PRIOR_THRESHOLD = 0.3                    # T-1（待定项默认值）
+# —— 收敛判定（guardrails/converge.py；纯确定性，可单测；拍板 03 T-4(b)）——
 CITABLE_TYPES = {"CASE_PRECEDENT", "POLICY_REF"}
 
 def is_converged(state) -> bool:
-    hs = state["hypotheses"]
-    high = [h for h in hs if h.prior >= HIGH_PRIOR_THRESHOLD]
-    if not high:                              # 无高优先假设（如假设生成失败场景，另有 degraded）
-        return False                          # 保守：不收敛 → 走 decide 也会 HUMAN_REVIEW
-    open_hp  = [h for h in high if h.status in {"PENDING", "UNRESOLVED"}]
-    # 关键：SUPPORTED 假设若无"可引用依据"证据 → 不算收敛，继续查 Case/Policy（对齐《00》§7.2.2）
-    uncited  = [h for h in high if h.status == "SUPPORTED"
-                and not any(e.type in CITABLE_TYPES for e in citing_evidence(state, h))]
-    return not open_hp and not uncited
+    # ① 还有假设未定论（PENDING/UNRESOLVED，含低 prior 假设）→ 未收敛（继续调查）
+    open_hp = any(h.status in {"PENDING", "UNRESOLVED"} for h in state["hypotheses"])
+    # ② 存在 SUPPORTED 假设但整个证据链没有任何可引用依据（政策条款/先例）→ 未收敛（继续查 Case/Policy）
+    supported_wo_citation = any(h.status == "SUPPORTED" for h in state["hypotheses"]) and \
+        not any(e.type in CITABLE_TYPES and e.ref_id for e in state["evidence"])
+    return not open_hp and not supported_wo_citation
 ```
 
-> 语义对齐说明：这条谓词让"证据链可支撑自动判"（假设都定了 + SUPPORTED 的可引用）才路由 decide；否则回 plan 继续取证。《00》§4.4 推演里第 3 轮查 CaseSearch/PolicySearch，正是因为 H2/H3/H4 SUPPORTED 但还没有可引用依据（详见第 8 章逐轮验证）。`citing_evidence(state, h)` 从 `h.evidence_for` 的 evidence_id 取回 Evidence。`is_converged` 的精确形态本身是设计拍板项（T-4）。
+> 语义对齐说明（拍板 03 T-4(b)，修订自初版"按 prior≥0.3 过滤"的写法）：收敛判定**不过滤 prior**——走查里的
+> H3/H4（prior 0.2/0.15）在第 1 轮后仍 PENDING，若按初版 prior 过滤会被排除出"待收敛集合"导致提前 decide，
+> 与《00》§4.4 走查矛盾；"可引用依据"也是**证据级**判断（任一 POLICY_REF/CASE_PRECEDENT 带 ref_id），而非假设级。
+> 高优先阈值（0.3）只用于 decide overlay 的 PASS Gate（03 T-1），不用于收敛判定。
+> 有 SUPPORTED 假设但检索不到政策/先例时的预期结局：plan 经 dedup 清空重复动作 / 无新工具可查而 `conclude` →
+> 路由 decide → overlay 的 REJECT Gate 因无可引用依据不给 REJECT → HUMAN_REVIEW（新型风险）——预期克制行为，非缺陷。
 
 ### 6.4 `budget_check`（`guardrails/budget.py`，对齐《00》§8.1）
 
@@ -665,14 +685,15 @@ def budget_exceeded(budget) -> Literal["LLM_CALLS", "TOOL_CALLS", "TOKENS", "LAT
     return None
 ```
 
-| 维度 | v1 阈值（《00》§8.1 原值） | 超限后的路由行为 |
+| 维度 | v1 上限（Guardrail，拍板 03 T-7；与 `BudgetLimits` 默认一致） | 超限后的路由行为 |
 |---|---|---|
-| max_llm_calls | 8 | 路由 decide → overlay 产出 `HUMAN_REVIEW`（带已收集的部分证据） |
-| max_tool_calls | 12 | 同上（tools_node 内部也按此截断单批执行） |
+| max_llm_calls | 10 | 路由 decide → overlay 产出 `HUMAN_REVIEW`（带已收集的部分证据，overrides=R3_BUDGET_EXHAUSTED） |
+| max_tool_calls | 15 | 同上（tools_node 内部也按此截断单批执行） |
 | max_tokens | 40000 | 同上；另：llm_shell 在发起调用前若估算超出也直接放弃该调用（壳层守卫） |
 | max_latency_ms | 30000 | 同上（wall-clock 从 `budget.start_time` 算） |
 
 超限语义（《00》§8.1 原句，写进注释防误读）：**"调查成本已超过可接受范围，证据不足以自动判，转人工最稳妥"——这是正确的业务行为，不是失败。**
+**Guardrail 语义**：上限是"可花费上界"而非目标——主链路走查常态 8 次 LLM / 5 次 Tool，明显低于上限；余量只用于 schema 重试 1 次、工具失败恢复、防无限循环。上限运行时可由配置覆盖；Trace 记录四组占用率（llm/tool/tokens/latency ÷ 上限），评测指标 Budget Utilization（《00》§11.3）。
 
 ### 6.5 循环终止性论证（写在文档里给评审看）
 
@@ -682,71 +703,84 @@ def budget_exceeded(budget) -> Literal["LLM_CALLS", "TOOL_CALLS", "TOKENS", "LAT
 
 ## 7. decide 节点的确定性 overlay（对齐《00》§7.2）
 
-### 7.0 结构：LLM 提案 + 确定性校验，二层不可合并
+### 7.0 结构：LLM 提案 + 确定性 Decision Gate，二层不可合并
 
-decide 节点 = **先**跑 LLM 产出 `DecisionProposal`（第 3.4 章）**后**跑 `run_decision_overlay`。overlay 是普通确定性 Python（`guardrails/decision_guardrail.py`），规则顺序固定，全部可单测。
+decide 节点 = **先**跑 LLM 产出 `DecisionProposal`（第 3.4 章）**后**跑 `run_decision_overlay`。
+overlay 是普通确定性 Python（`guardrails/decision_guardrail.py`），实现《00》§7.2 的
+**PASS Gate / REJECT Gate 与 HUMAN_REVIEW abstention 清单**；规则顺序固定、全部可单测。
+
+**图终态（D 项拍板）**：decide 产出 `decision` 后图即结束——**DECIDED 是图内唯一终态**（worker 落 DB
+`agent_run.status=DECIDED`）；PASS/REJECT/HUMAN_REVIEW 是 `ReviewDecision.decision` 的取值而非图终态；
+预算耗尽 / 工具失败 / 降级 / Gate 改判一律通过 `decision.overrides` 记录，本图不存在
+ESCALATED / BUDGET_EXCEEDED 终结点（03 T-8）。
 
 ### 7.1 overlay 输入
 
 - `state`：`hypotheses / evidence / case / budget / failures / degraded / investigation_queue`；
-- `proposal: DecisionProposal | None`（None = 预算耗尽 / 降级 / decide 自身 LLM 失败时的空提案）。
+- `proposal: DecisionProposal | None`（None = 预算耗尽 / 降级 / decide 自身 LLM 失败时的空提案）；
+- 注意：`proposal.confidence` 只是 LLM 的 **decision_confidence 提案值**，overlay 以**确定性重算值** `dc` 为准（7.5）。
 
-### 7.2 overlay 伪代码（规则优先级自上而下，命中即短路 + 记录 override）
+### 7.2 overlay 伪代码（Decision Gate）
 
 ```python
-def run_decision_overlay(state, proposal) -> ReviewDecision:
-    evidence   = state["evidence"]
-    failures   = state["failures"]
-    budget     = state["budget"]
-    hard_hit   = hard_rule_hit(state)                # R1 硬规则（blacklist/硬违禁），guardrails/hard_rules.py
+CONFIDENCE_ABSTAIN_THRESHOLD = 0.7        # REJECT Gate 安全门槛（拍板 T-4/《00》§7.6，验证集校准）
+CITABLE_TYPES = {"CASE_PRECEDENT", "POLICY_REF"}
 
-    # ---- R1 硬规则优先：不可被 LLM 覆盖（《00》§7.2.1）----
+def run_decision_overlay(state, proposal) -> ReviewDecision:
+    evidence, failures, budget = state["evidence"], state["failures"], state["budget"]
+    hard_hit = hard_rule_hit(state)                        # R1 硬规则（guardrails/hard_rules.py）
+
+    # ---- R1 硬规则优先：不可被 LLM 覆盖（《00》§7.2-1）----
     if hard_hit:
-        return build_decision("REJECT", risk_level="HIGH",
-                              risk_type=hard_hit.risk_types,           # 硬规则给出风险类型
-                              confidence=1.0, evidence=evidence,
-                              overrides=["R1_HARD_RULE"])              # 防漏放，覆盖一切（含 PASS 提案）
+        return build_decision("REJECT", risk_level="HIGH", risk_type=hard_hit.risk_types,
+                              decision_confidence=1.0, evidence=evidence,
+                              overrides=["R1_HARD_RULE"])  # 防漏放，覆盖一切（含 PASS 提案）
 
     proposal = proposal or DecisionProposal(decision="HUMAN_REVIEW",
-                                            risk_level="MEDIUM", confidence=0.0, ...)  # 空提案兜底
-    decision, reasons = proposal.decision, []
+                                            risk_level="NONE", confidence=0.0, ...)  # 空提案兜底
+    dc = finalize_decision_confidence(state)               # 确定性重算 decision_confidence（7.5）
 
-    # ---- R2 REJECT 必须有可引用依据（《00》§7.2.2）----
-    if decision == "REJECT":
-        citable = [e for e in evidence if e.type in CITABLE_TYPES and e.ref_id]
-        if not citable:
-            decision = "HUMAN_REVIEW"; reasons.append("R2_REJECT_NO_CITABLE_BASIS")
+    # ---- HUMAN_REVIEW abstention 清单先行：《00》§7.2-3，任一命中即转人工 ----
+    overrides: list[str] = []
+    if budget_exceeded(budget):              overrides.append("R3_BUDGET_EXHAUSTED")   # 预算耗尽
+    if contradiction_detect(state):          overrides.append("R3_CRITICAL_CONFLICT")   # 关键证据冲突
+    if key_tool_failure(state, failures):    overrides.append("R3_KEY_TOOL_FAILED")     # 关键 Tool 失败致证据缺失
+    if policy_indeterminate(evidence):       overrides.append("R3_POLICY_UNCERTAIN")    # 政策无法确定/无适用条款
+    if indistinguishable_hypotheses(state):  overrides.append("R3_HYPOTHESES_INDISTINGUISHABLE")  # 多假设无法区分
+    if state["degraded"] or failures:        overrides.append("R5_DEGRADED_OR_FAILED_STEP")
+    if overrides:
+        return build_decision("HUMAN_REVIEW", risk_level=finalize_risk_level(proposal),
+                              risk_type=finalize_risk_type(proposal), decision_confidence=dc,
+                              evidence=evidence, policy=citable_policy_ids(evidence),
+                              hypothesis_trace=trace_from(state["hypotheses"]),
+                              budget_used=snapshot_budget(budget), overrides=overrides)
 
-    # ---- R3 HUMAN_REVIEW 触发条件（《00》§7.2.3，任一命中即转人工）----
-    if budget_exceeded(budget):
-        decision = "HUMAN_REVIEW"; reasons.append("R3_BUDGET_EXHAUSTED")     # 预算耗尽
-    if proposal.confidence < 0.7:
-        decision = "HUMAN_REVIEW"; reasons.append("R3_LOW_CONFIDENCE")       # 阈值默认 0.7（T-4）
-    if contradiction_detect(state):                                            # 证据矛盾（如高相似 vs 商家历史干净）
-        decision = "HUMAN_REVIEW"; reasons.append("R3_CONTRADICTORY_EVIDENCE")
-    if not citable_for_reject(proposal) and decision == "REJECT":            # 政策模糊/无先例 → 不许自动 REJECT
-        decision = "HUMAN_REVIEW"; reasons.append("R3_NOVEL_RISK_NO_PRECEDENT")
+    # ---- PASS / REJECT Gate：校验 LLM 提案（《00》§7.2-2/-4），不满足即降 HUMAN_REVIEW ----
+    if proposal.decision == "PASS" and not pass_gate(state):
+        return build_decision("HUMAN_REVIEW", ..., decision_confidence=dc, overrides=["R4_PASS_GATE_FAIL"])
+    if proposal.decision == "REJECT" and not reject_gate(state, dc):
+        return build_decision("HUMAN_REVIEW", ..., decision_confidence=dc, overrides=["R2_REJECT_GATE_FAIL"])
 
-    # ---- R4 PASS 前置条件：所有高优先级假设必须被证伪（《00》§7.2.4）----
-    if decision == "PASS":
-        not_refuted = [h for h in high_priority(state) if h.status != "REFUTED"]
-        if not_refuted:
-            decision = "HUMAN_REVIEW"; reasons.append("R4_PASS_WITHOUT_REFUTATION")  # 区分"证明无风险"和"没查到风险"
+    # 提案 HUMAN_REVIEW，或 Gate 通过 → 采纳（decision_confidence 用确定性 dc）
+    return build_decision(decision=proposal.decision, ..., decision_confidence=dc, overrides=[])
 
-    # ---- R5 降级/失败兜底（第 3 章 degrade 语义）----
-    if state["degraded"] or failures:
-        decision = "HUMAN_REVIEW"; reasons.append("R5_DEGRADED_OR_FAILED_STEP")
+# —— PASS Gate：《00》§7.2-4 ——
+def pass_gate(state) -> bool:
+    return (all(h.status == "REFUTED" and h.evidence_against                      # ① 高优先假设被"充分证据"证伪
+                for h in high_priority(state))                                     #    （有反驳证据，非"没查到"）
+            and key_evidence_complete(state)                                       # ② 关键证据完整（无关键 Tool 失败缺失）
+            and not contradiction_detect(state))                                   # ③ 无未解决关键矛盾
 
-    return build_decision(decision=decision,
-                          risk_level=finalize_risk_level(proposal, decision),   # 见 7.5
-                          risk_type=finalize_risk_type(proposal, decision),
-                          confidence=finalize_confidence(proposal, decision),    # 见 7.5，T-4
-                          evidence=evidence,
-                          policy=citable_policy_ids(evidence),                   # 从 POLICY_REF 收集
-                          hypothesis_trace=trace_from(state["hypotheses"]),      # id/statement/prior/posterior/status
-                          budget_used=snapshot_budget(budget),
-                          overrides=reasons)
+# —— REJECT Gate：《00》§7.2-2 ——
+def reject_gate(state, dc) -> bool:
+    return (any(h.status == "SUPPORTED" for h in high_priority(state))             # ① 高风险假设成立
+            and evidence_sufficient(state)                                         # ② 证据充分
+            and any(e.type in CITABLE_TYPES and e.ref_id for e in state["evidence"])  # ③ 明确政策依据/先例
+            and dc >= CONFIDENCE_ABSTAIN_THRESHOLD                                 # ④ decision_confidence≥0.7（安全门槛）
+            and not contradiction_detect(state))                                   # ⑤ 无关键矛盾
 ```
+
+> `high_priority(h) = h.prior >= HIGH_PRIOR_THRESHOLD(0.3)`（T-1）：prior 只用于 PASS/REJECT Gate 的"高优先"口径与 prompt 强调，**不用于收敛判定**（6.3）。
 
 ### 7.3 预算/降级分支（decide 入口，7.0 的第一步）
 
@@ -755,6 +789,7 @@ def run_decision_overlay(state, proposal) -> ReviewDecision:
     → proposal = None（不调用 LLM，不再烧 token）
 否则正常调 LLM（proposal）
 两种情况都必须进入 run_decision_overlay —— 因为 R1 硬规则可能把结果改成 REJECT。
+预算耗尽/降级最终由 overlay 的 abstention 清单产出 HUMAN_REVIEW（overrides=R3_BUDGET_EXHAUSTED/R5_*）。
 ```
 
 ### 7.4 `hard_rule_hit`（`guardrails/hard_rules.py`，R1 数据来源）
@@ -764,24 +799,31 @@ def run_decision_overlay(state, proposal) -> ReviewDecision:
 - `case.screening_signals` 中带"硬违禁"语义且 result 非 PASS 的信号（正常情况分流层不会把硬违规投进来，但调查中新证据可能触发）；
 - 调查新证据：`IMAGE_LOGO`（识别到黑名单品牌 Logo）、`OCR_TEXT` 命中禁词等——用 `Evidence.extra` 结构化字段判定，不用 LLM。
 
-### 7.5 置信度 / risk_level 的确定性校准（T-4：公式待设计方拍板，先给默认）
+### 7.5 decision_confidence 与 risk 的分离（确定性重算，T-4）
 
-- **risk_level**：proposal 给 LOW/MEDIUM/HIGH；overlay 不做语义重判，仅当 overlay 把决策改成 HUMAN_REVIEW 且原为 HIGH 时保持 HIGH，否则沿用 proposal（默认映射 LOW/MEDIUM/HIGH 与 risk_type 的对应见 T-10）。
-- **confidence 最终值**（写进 decision 的）：按《00》§7.4"confidence = f(最高假设 posterior, 证据链完整性, 是否存在可引用依据, 证据是否矛盾)"的**确定性可解释默认公式**（待 T-4 定稿）：
+- **`decision_confidence`（安全门槛）**：落库 `ReviewDecision.confidence` 的值由确定性函数重算——
+  LLM 提案的 confidence 只作参考，不作为最终值（保证可解释、可单测）：
 
 ```python
-def finalize_confidence(proposal, decision) -> float:
-    top = max((h.posterior for h in hypotheses if h.status == "SUPPORTED"), default=0.0)
-    completeness = len(evidence) / MAX_EXPECTED_EVIDENCE       # 默认 8，见 T-4
-    has_citation = 1.0 if any(e.type in CITABLE_TYPES and e.ref_id for e in evidence) else 0.0
-    contradiction = 0.0 if not contradiction_detect(state) else -0.2   # 矛盾扣分
-    c = 0.45*top + 0.25*min(completeness, 1.0) + 0.20*has_citation + 0.10 + contradiction
+def finalize_decision_confidence(state) -> float:
+    # 产出的是 decision_confidence：对"自动决策安全"的把握（非违规概率）——
+    # 只回答"如果自动判，判错风险够不够低"，不回答"风险有多高"（后者由 risk_level / 假设 posterior 表达）
+    top = max((h.posterior or 0.0 for h in state["hypotheses"] if h.status == "SUPPORTED"), default=0.0)
+    completeness = min(len(state["evidence"]) / MAX_EXPECTED_EVIDENCE, 1.0)     # 分母默认 8（T-4）
+    citation = 1.0 if any(e.type in CITABLE_TYPES and e.ref_id for e in state["evidence"]) else 0.0
+    conflict = 0.2 if contradiction_detect(state) else 0.0
+    c = 0.45 * top + 0.25 * completeness + 0.20 * citation + 0.10 - conflict
     return round(min(max(c, 0.0), 1.0), 2)
 ```
 
-> 注意：overlay 用 LLM 提案的 confidence 触发 R3_LOW_CONFIDENCE（<0.7 转人工），但**落库的 confidence 用上面的确定性公式重算**——保证"confidence 不是 LLM 拍脑袋"（《00》§7.4 原话）且可解释。
+- **与 risk 分离**：`risk_level`（NONE/LOW/MEDIUM/HIGH）与风险强度（最高 SUPPORTED 假设的 `posterior`，见
+  `hypothesis_trace`）表达"风险有多高"，**不参与 Gate 判定**（只用于展示/队列排序，《00》§7.5）；`decision_confidence`
+  单独表达"能不能安全自动判"。
+- **0.7 的用法**：仅作为 **REJECT Gate** 的安全门槛（`reject_gate` 里 `dc >= 0.7`）；**PASS 不因低 decision_confidence
+  转人工**——PASS 由 `pass_gate` 判定（高优先假设充分证伪 + 关键证据完整 + 无关键矛盾），干净商品低风险置信是正常态。
+- `CONFIDENCE_ABSTAIN_THRESHOLD=0.7` / `MAX_EXPECTED_EVIDENCE=8` 均配置化，validation set 校准（《00》§11.5）。
 
-### 7.6 最终 ReviewDecision 形状（对齐《00》§2.2，落库前不变形）
+### 7.6 最终 ReviewDecision 形状（对齐《00》§2.2 与代码 `ReviewDecision`，落库前不变形）
 
 ```json
 {
@@ -789,19 +831,22 @@ def finalize_confidence(proposal, decision) -> float:
   "risk_level": "HIGH",
   "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
   "confidence": 0.91,
-  "evidence": [ { "evidence_id": "E_01", "type": "IMAGE_SIMILARITY",
-                  "source_tool": "ImageAnalysisTool",
+  "evidence": [ { "type": "IMAGE_SIMILARITY", "source": "ImageAnalysisTool",
                   "value": "similarity=0.91, match=某品牌经典鞋款", "weight": 0.91,
-                  "ref_id": null } ],
+                  "ref_id": null, "extra": {"similarity": 0.91} } ],
   "policy": ["POLICY_3.2"],
   "hypothesis_trace": [ { "id": "H3", "statement": "刻意规避品牌识别",
                           "prior": 0.2, "posterior": 0.88, "status": "SUPPORTED" } ],
   "budget_used": { "llm_calls": 8, "tool_calls": 5, "tokens": 18000, "latency_ms": 9200 },
-  "overrides": ["R3_LOW_CONFIDENCE"]          // 〔细化新增，可选〕overlay 改判记录，进 trace
+  "overrides": []
 }
 ```
 
-> `overrides` 是〔细化新增〕字段：只有 overlay 实际改写了 LLM 提案（或走了预算/降级分支）才非空，保证"谁（哪条规则）把 PASS 改成了 HUMAN_REVIEW"可审计（《00》§8.2.4 决策审计）。是否接受字段扩展见 T-8。
+> `confidence` = **decision_confidence**（§7.5，确定性重算）。伪代码里 `build_decision(..., decision_confidence=dc)` 的形参即 DTO 字段 `confidence`。
+> `overrides` 记录确定性 overlay 的改判/归因原因码
+> （R1_HARD_RULE / R2_REJECT_GATE_FAIL / R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT / R3_KEY_TOOL_FAILED /
+> R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；
+> 空 = overlay 未改判（LLM 提案即终值）。`evidence[]` 元素为代码 `Evidence` 形状（无 evidence_id/source_tool，运行序号在 trace）。
 
 ---
 
@@ -816,41 +861,42 @@ def finalize_confidence(proposal, decision) -> float:
 | 0 | `hypothesize`（入口唯一一次） | 建立 H1（普通复古设计，prior 0.5）/ H2（参考知名品牌经典设计，prior 0.4）/ H3（刻意规避品牌识别，prior 0.2）/ H4（商家系统性类似行为，prior 0.15），均 PENDING；队列置 2 个 OPEN 问题 | 静态边 hypothesize→plan |
 | 1 | `plan` | 读仪表盘：H1/H2 高优先（prior≥0.3）且 PENDING；判定"外观是否对应某品牌"最值得查 → `next_action=call_tools, tools=[{ImageAnalysisTool, args:{image_urls:[img1]}, priority:1}]` | 静态边 plan→tools（经 route_after_plan ③：pending 非空、预算 OK、未 degraded） |
 | 1 | `tools`（ToolNode） | 执行 ImageAnalysisTool → similarity=0.91 命中品牌款 → **E_01**（IMAGE_SIMILARITY, weight 0.91）；budget.tool_calls=1 | 静态边 tools→reevaluate |
-| 1 | `reevaluate` | 综合 E_01：H1 REFUTED（证据 against），H2 SUPPORTED（posterior ↑）；H3/H4 仍 PENDING | route_after_reevaluate：未 degraded、预算 OK、`is_converged=false`（H3/H4 高优先 OPEN）→ **continue → plan** |
+| 1 | `reevaluate` | 综合 E_01：H1 REFUTED（证据 against），H2 SUPPORTED（posterior ↑）；H3/H4 仍 PENDING | route_after_reevaluate：未 degraded、预算 OK、`is_converged=false`（H3/H4 仍 PENDING，未定论假设存在，见 6.3 收敛谓词——不过滤 prior）→ **continue → plan** |
 | 2 | `plan` | "需确认商品字段真空缺 + 商家历史" → `call_tools, tools=[{ProductTool, priority:1}, {MerchantTool, priority:2}]` | plan→tools（同 ③） |
 | 2 | `tools` | ProductTool → brand=null、标题/描述无品牌（**E_02** PRODUCT_FACT）；MerchantTool → 23 similar / 5 removals / 3 title-relisting（**E_03** MERCHANT_HISTORY）；tool_calls=3 | tools→reevaluate |
-| 2 | `reevaluate` | E_02/E_03 支持：H3 SUPPORTED（posterior 0.88）、H4 SUPPORTED（posterior 0.85）；队列两问 DONE | route_after_reevaluate：`is_converged=false` —— 高优先假设虽无 OPEN，但 H2/H3/H4 SUPPORTED 且**没有任何 CASE_PRECEDENT/POLICY_REF 可引用依据**（uncited 非空，对齐《00》§7.2.2）→ **continue → plan** |
+| 2 | `reevaluate` | E_02/E_03 支持：H3 SUPPORTED（posterior 0.88）、H4 SUPPORTED（posterior 0.85）；队列两问 DONE | route_after_reevaluate：`is_converged=false` —— 无未定论假设，但存在 SUPPORTED 假设且**证据链仍无任何 CASE_PRECEDENT/POLICY_REF 可引用依据**（supported_wo_citation=true，对齐《00》§7.2-2）→ **continue → plan** |
 | 3 | `plan` | "需要先例 + 政策支撑才能判" → `call_tools, tools=[{CaseSearchTool, priority:1}, {PolicySearchTool, priority:2}]` | plan→tools |
 | 3 | `tools` | CaseSearchTool → CASE_1832 高度相似 → REJECT（**E_04** CASE_PRECEDENT, ref_id=CASE_1832）；PolicySearchTool → POLICY_3.2"外观高度模仿高风险转人工"（**E_05** POLICY_REF, ref_id=clause）；tool_calls=5 | tools→reevaluate |
-| 3 | `reevaluate` | 证据链补全：所有高优先假设已终态，SUPPORTED 假设均有可引用依据；输出 evidence_sufficiency=SUFFICIENT | route_after_reevaluate：`is_converged=true`（open_hp 空、uncited 空）→ **decide** |
-| 4 | `decide` | LLM 提案：`HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / confidence 0.91 / evidence E_01..E_05 / policy [POLICY_3.2]`；overlay：R1 硬规则未命中（无黑名单）→ R2 REJECT 依据检查（提案非 REJECT，跳过）→ R3 各触发条件（confidence 0.91≥0.7、无矛盾、预算未耗尽）均不触发 → R4 PASS 前置（非 PASS，跳过）→ 通过，原样落库；`status → DECIDED`，`decision.budget_used={llm_calls:8, tool_calls:5, tokens:..., latency_ms:...}` | 终结点（无出边） |
+| 3 | `reevaluate` | 证据链补全：无未定论假设，且已存在可引用依据（E_04/E_05） | route_after_reevaluate：`is_converged=true` → **decide** |
+| 4 | `decide` | LLM 提案：`HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / decision_confidence 0.91 / evidence E_01..E_05 / policy [POLICY_3.2]`；overlay：R1 硬规则未命中 → abstention 清单（预算/关键冲突/工具失败/政策不确定/多假设不可分/降级）均不成立 → 提案即 HUMAN_REVIEW，PASS/REJECT Gate 不适用 → 采纳；`decision.confidence`（确定性）=0.91、`overrides=[]`；worker 置 DB `agent_run.status=DECIDED`（图唯一终态） | 终结点（无出边） |
 
-**"为什么第 4 步是 HUMAN_REVIEW 而不是 REJECT"的契约解释**：证据链已充分（假设全部 SUPPORTED + 可引用依据齐备），但 REJECT 属"仿冒主观判定"且 POLICY_3.2 指引是"高风险转人工"——LLM 提案与《00》§4.4 原结果一致，overlay 无改判；这体现 Agent"知道什么时候该人介入"（《00》§4.4 注意行）。若未来把该案改为可自动判，只动 policy 指引与提案，路由/overlay 结构不变。
+**"为什么第 4 步是 HUMAN_REVIEW 而不是 REJECT"的契约解释**：overlay 的 REJECT Gate 其实已可满足（H2/H3 SUPPORTED + 证据充分 + E_04/E_05 可引用依据 + decision_confidence 0.91≥0.7 + 无矛盾），但 LLM 提案为 HUMAN_REVIEW 且 POLICY_3.2 指引是"高风险转人工"（仿冒属主观判定）——overlay 只做**下限守卫**（防止不安全自动判），**不把 HUMAN 提案强行升为 REJECT**。这体现 Agent"知道什么时候该人介入"（《00》§4.4 注意行）。若未来该案改为可自动判，只动政策指引与提案，Gate 结构不变。
 
-**预算核查（对齐 6.4）**：llm_calls=8（hypothesize+plan×3+reevaluate×3+decide）恰抵上限 8、tool_calls=5≤12、tokens/latency 未超 → 主链路在预算内走通。8/8 余量为 0 说明阈值紧贴示例走查（T-7 需要设计方确认是否调阈值）。
+**预算核查（Guardrail 语义，对齐 6.4）**：llm_calls=8 ≤ **10**（Guardrail 上界，余量 2，主链路常态 8 次明显低于上限）、tool_calls=5 ≤ **15**、tokens/latency 未超 → 主链路在预算内走通；余量保留给 schema 重试/工具失败恢复（T-7 拍板 10/15）。
 
 ---
 
-## 9. 开放问题清单（待设计方拍板；本文只给建议默认值，不作最终决定）
+## 9. 待定项状态索引（T-1~T-12 已全部拍板，权威值为 docs/03-decisions.md）
 
-> 每条给出：问题 / 影响面 / 建议默认值。标 🔒 的表示实现可以先按默认值开发，但**定稿前请设计方确认**（因为它们影响 schema 或评测标签，改动会波及 02-evaluation.md）。
+> 初版第 9 章曾列 12 项开放问题；**经拍板（docs/03-decisions.md）全部关闭**。本表只留状态与最终值索引，
+> 权威细节（含选项、理由、一致性核查）一律以 03-decisions.md 为准；实现时不要再按本节旧默认值（如 8/12、0.60）开发。
 
-| ID | 待定项 | 出处/影响 | 建议默认值 |
-|---|---|---|---|
-| T-1 | **prior 初始值谁给**（LLM 输出 vs 确定性规则） | hypotheses、is_converged 的高优先阈值 | hypothesize 的 LLM 输出 prior（0..1），overlay 只做范围钳制；`HIGH_PRIOR_THRESHOLD=0.3`；LLM 需在 prompt 里解释 prior 依据 |
-| T-2 | **假设数量 / 队列 / 每轮工具数上限** | schema、prompt、成本 | `MAX_HYPOTHESES=5`（走查用 4）、`MAX_QUEUE=8`、每轮 tools≤3 🔒 |
-| T-3 | **HypothesisStatus 词表**（《00》只示例 SUPPORTED/REFUTED） | hypotheses 状态机、收敛判定、评测标签 | `PENDING/SUPPORTED/REFUTED/UNRESOLVED`，初始 PENDING 🔒 |
-| T-4 | **confidence 精确公式与"证据矛盾/收敛"的确定性定义** | decide overlay、R3/R4、is_converged | 本文 7.5 默认公式（0.45·top_posterior + 0.25·完整性 + 0.20·可引用 + 0.10 − 0.2·矛盾）；`MAX_EXPECTED_EVIDENCE=8`；矛盾检测 v1 只做一条启发式：IMAGE_SIMILARITY(≥0.85) 与 MERCHANT_HISTORY(0 removal & 0 violation) 并存 🔒 |
-| T-5 | **Evidence.weight 来源**（转换器默认 vs reevaluate 校准） | evidence 表、评测 | v1：转换器默认权重表（5.1~5.6 各 tool 列），reevaluate 不改 weight（只改 posterior/status）；weight 语义=证据强度供审计/展示 |
-| T-6 | **hypothesize 是否可重跑**（图无回到 hypothesize 的边；《00》能力1 写"初始/更新假设"） | 图结构 | 默认只入口跑 1 次；运行中新增假设走 `reevaluate.new_hypotheses`；若评审认为需重生成假设，加 `decide → hypothesize` 条件边再议 |
-| T-7 | **预算阈值与走查余量**（§8 走查 llm_calls=8/8 抵上限） | §8.1、示例 | 保留《00》8/12/40000/30000 原值；评估建议按走查实测把 max_llm_calls 提到 10（给 decide 修正留余量）或确认 8 即可 |
-| T-8 | **运行终态语义**（DECIDED / ESCALATED / BUDGET_EXCEEDED 何时用）+ decision.overrides 扩展 | status 枚举、落库、审计 | 默认：decide 完成后一律 `DECIDED`（含 HUMAN_REVIEW）；BUDGET_EXCEEDED 仅作 trace 标记不进状态机；ESCALATED 由人工工作台侧置位；`decision.overrides` 作为可选字段保留（不进 core schema 时至少进 agent_step 落库）🔒 |
-| T-9 | **4 个〔细化新增〕state 字段是否保留**（pending_tool_calls/degraded/failures + decision.overrides） | state schema、checkpointer 持久化列 | 保留（图内通道，实现必需）；正式 agent_state_json 持久化时与核心字段同库即可 |
-| T-10 | **risk_level LOW/MEDIUM/HIGH 的词表与到 risk_type 的默认映射** | decision schema、评测 | 词表 LOW/MEDIUM/HIGH；默认映射：POTENTIAL_IP_RISK/EVASION_PATTERN 建议 HIGH 起步，FALSE_CLAIM/FIELD_CONFLICT 视证据 MEDIUM；仅做展示不做路由依据 🔒 |
-| T-11 | **ImageAnalysis 相似度阈值**（多少算"命中品牌款"证据） | EVIDENCE_MIN_SIM、矛盾检测、评测集构造 | `EVIDENCE_MIN_SIM=0.60`（产生证据）、矛盾检测用 ≥0.85；两处阈值都做成配置常量 |
-| T-12 | **字段冲突（FIELD_CONFLICT）检测归属**（OCR vs 商品字段的交叉验证放哪层） | 《00》§14.2 支撑场景（二期） | 二期：guardrails 确定性检测器（不占 LLM）；v1 只在 OCRTool extra 里打 conflict_hint，不展开 |
+| ID | 状态 | 最终值（权威：03-decisions.md） |
+|---|---|---|
+| T-1 | 已定 [A] | prior 由 hypothesize LLM 输出（0..1，不归一化）+ 钳制；须含 ≥1 条低风险假设；`HIGH_PRIOR_THRESHOLD=0.3`（仅 PASS Gate / prompt 强调，不用于收敛判定） |
+| T-2 | 已定 [A] | `MAX_HYPOTHESES=5` / `MAX_QUEUE=8` / `MAX_TOOLS_PER_PLAN=3`（配置化） |
+| T-3 | 已定 [A]（代码已落地） | `PENDING / SUPPORTED / REFUTED / UNRESOLVED`；代码 `models.py` 已用 `UNRESOLVED` |
+| T-4 | 已定 [A]（本版按 review 修订为 decision_confidence 口径） | 见 §6.3 收敛谓词 / §7.2 Gate / §7.5 decision_confidence 公式；`CONFIDENCE_ABSTAIN_THRESHOLD=0.7`（仅 REJECT Gate）、`MAX_EXPECTED_EVIDENCE=8` |
+| T-5 | 已定 [A] | 工具转换器写默认权重，reevaluate 不改；weight 仅供审计/展示，不参与 v1 公式 |
+| T-6 | 已定 [A] | hypothesize 仅入口 1 次；新假设走 `reevaluate.new_hypotheses` |
+| T-7 | 已拍板 [B→B] | `10 / 15 / 40000 / 30000`（Guardrail 上界非目标；代码 `BudgetLimits` 默认已改，见 §6.4/§8.1） |
+| T-8 | 已定 [A] | DECIDED 为图唯一终态；ESCALATED/BUDGET_EXCEEDED 不作终态（DB/归因）；`ReviewDecision.overrides` 已落地 |
+| T-9 | 已定 [A]（代码已落地） | `pending_tool_calls / degraded / failures` 通道保留；run_id/case_id→thread、status→DB |
+| T-10 | 已定 [A] | `risk_level=NONE/LOW/MEDIUM/HIGH`（代码已含 NONE，PASS→NONE）；仅展示/队列排序，不参与路由与 Gate |
+| T-11 | 已拍板 [B→B] | `EVIDENCE_MIN_SIM=0.70` / `EVIDENCE_STRONG=0.85`（三档语义 + threshold sweep，见 §5.7；代码常量已落地） |
+| T-12 | 已定 [A] | FIELD_CONFLICT 检测归二期 guardrails；v1 词表保留 |
 
-**使用约定**：T-1~T-5 是"决策机制/评测标签"级，必须先于 02-evaluation.md 定稿；T-6~T-12 可并行，实现按默认值推进，变更只影响本文第 2/3/7 章对应小节。
+**使用约定**：T-1~T-12 实现/评测参数一律取 03-decisions.md §5 常量表；本节与 03 冲突处以 03 为准。
 
 ---
 

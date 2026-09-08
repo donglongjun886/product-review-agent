@@ -1,7 +1,12 @@
-# 电商平台商品内容治理 · 复杂风险调查 Agent —— 系统设计拆解（v1）
+# 电商平台商品内容治理 · 复杂风险调查 Agent —— 系统设计拆解（v1.1）
 
 > 主线：**业务价值 → 决策难点 → 系统设计 → 验证结果**
 > 原则：能用规则解决的，不交给 LLM；传统机审发现异常，Agent 调查复杂异常；Agent 不是全量审核系统，而是机审链路里的"复杂案件处理节点"。
+>
+> v1.1 修订（review 复核）：决策机制升级为 **decision_confidence（自动决策安全门槛）与 risk 分离 + PASS/REJECT/HUMAN_REVIEW 三个 Decision Gate**（§7）；
+> 预算明确为 **Guardrail 上界（10/15/40000/30s）而非目标**，Trace/Evaluation 增 Budget Utilization（§8/§10.3/§11.3）；
+> 相似度阈值三档化并配置化 + validation sweep（§7.6/§11.5）；补三方案公平性前提（§12.0）与 **Ablation Evaluation**（§13.4）；
+> 成本/调查效率指标含 **Marginal Evidence Gain**（§11.3）；顶层包更名 `pra`（§15）。
 
 ---
 
@@ -143,6 +148,9 @@ Case 是系统的核心数据对象，**输入是商品事实，输出是结构�
 }
 ```
 
+> 字段语义修订（v1.1，见 §7）：输出里的 `confidence` 字段即 **`decision_confidence`（自动决策的安全门槛，非模型真实概率）**，
+> 与 `risk_level`（风险本身高低）**相互独立** —— HIGH risk + 证据不足仍应 HUMAN_REVIEW，不能仅因 risk_level=HIGH 就 REJECT（§7.5）。
+
 ### 2.3 Case 模型的设计要点
 
 1. **输入 = 事实，输出 = 裁决 + 证据链**。证据链是核心，需要解释"为什么这么判"时，答案在 `evidence[]` 和 `hypothesis_trace[]` 里。
@@ -194,11 +202,16 @@ Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的�
   "budget": {
     "llm_calls": 0, "tool_calls": 0, "tokens": 0,
     "start_time": "2024-09-07T10:00:00Z",
-    "limits": { "max_llm_calls": 8, "max_tool_calls": 12, "max_tokens": 40000, "max_latency_ms": 30000 }
+    "limits": { "max_llm_calls": 10, "max_tool_calls": 15, "max_tokens": 40000, "max_latency_ms": 30000 }
   },
   "decision": null                     // 收敛后写入 ReviewDecision
 }
 ```
+
+> 实现映射说明（拍板见 03-decisions.md T-8/T-9）：LangGraph 的实际 `AgentState`（01-agent-loop.md §2）**只装调查记忆**——
+> `run_id/case_id` 映射为 LangGraph **thread_id**（Checkpointer 线程键，调用方携带）；`status` 由 DB `agent_run.status` 承载，
+> **DECIDED 是图内唯一终态**（PASS/REJECT/HUMAN_REVIEW 都是 `ReviewDecision.decision` 取值，不是图终态；预算耗尽/工具失败/降级
+> 通过 `decision.overrides` 记录，见 §7/§8）。本节 JSON 是设计视角的全量形态。
 
 ### 3.1 设计要点
 
@@ -206,6 +219,7 @@ Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的�
 2. **状态持久化到 MySQL**：`AgentState` 即 LangGraph 的 State（`TypedDict`/Pydantic），由 LangGraph **Checkpointer** 每步后落库，worker 崩溃可恢复、可断点续跑、可复现（eval 重放）。
 3. **`budget` 是状态的硬字段**：条件边路由函数在每轮进入节点前检查预算，超限即路由到转人工止损。
 4. **`evidence` 与 `tool_call_history` 分离**：前者是"结论依据"，后者是"过程审计"，两者都进 trace。
+5. **实现映射（拍板 03 T-8/T-9）**：`run_id/case_id` → LangGraph thread_id；`status` 落 DB `agent_run.status`（DECIDED 为图唯一终态）；图内另有 `pending_tool_calls / degraded / failures` 三个内部通道（01 §2.1）。
 
 ---
 
@@ -241,7 +255,7 @@ Decision（充分 → PASS/REJECT/HUMAN_REVIEW；不足 → 回到 Plan 或转�
 | 4. Multi-source Investigation | `tools` 节点（6 个 Tool） | 商品/图片/OCR/商家/案例/政策 |
 | 5. RAG | `case_search` / `policy_search` 两个 Tool | 在 `tools` 节点内调用 |
 | 6. Evidence Synthesis | `reevaluate` 节点 | LLM 依据新证据更新假设 posterior |
-| 7. Uncertainty / Abstention | `decide` 节点 + 确定性 guardrail | 证据不足 → HUMAN_REVIEW |
+| 7. Uncertainty / Abstention | `decide` 节点 + 确定性 Decision Gate | 证据不足 / Gate 不通过（含 decision_confidence<0.7、关键矛盾、关键 Tool 失败、预算耗尽）→ HUMAN_REVIEW（§7.2） |
 | 8. Cost / Latency Budget | 条件边的确定性 `budget_check` | 超限 → 直接路由到转人工 |
 
 **StateGraph 草图：**
@@ -412,28 +426,52 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 ## 7. PASS / REJECT / HUMAN_REVIEW 决策机制
 
-### 7.1 三分类语义
+### 7.1 两个概念 + 三分类语义
 
-| 决策 | 语义 | 触发条件（概要） |
+> **Abstention 的核心不是"置信度低于阈值就转人工"，而是"证据是否足以支持安全的自动决策"**。
+> 为此把两个易混的量分开（§7.2 / §7.4 展开）：
+
+| 概念 | 一句话定义 | 说明 |
 |---|---|---|
-| **PASS** | 放行 | 所有高优先级假设被证伪，或风险低于阈值 |
-| **REJECT** | 违规，拒绝上架 | 证据链达到"充分"且命中**可引用的违规依据**（政策/先例） |
-| **HUMAN_REVIEW** | 转人工 | 证据不足 / 置信度低于阈值 / 预算耗尽 / 政策模糊 / 新型风险 |
+| **decision_confidence** | 对"自动决策（不放人工）"的安全性把握 —— **安全门槛量，不是模型判"是否违规"的真实概率** | 输出 `ReviewDecision.confidence` 即此值；只回答"如果自动判，判错风险够不够低"，不回答"风险有多高" |
+| **risk_level / risk confidence** | 风险本身的高低（LOW/MEDIUM/HIGH）与风险强度（如最高支持假设的 posterior） | **独立于决策结论**：HIGH risk + 证据不足 = HUMAN_REVIEW，不是 REJECT（见 §7.5） |
 
-### 7.2 决策规则（确定性兜底，LLM 只"提案"）
+| 决策 | 语义 | 触发条件（概要，完整 Gate 见 §7.2） |
+|---|---|---|
+| **PASS** | 放行 | **PASS Gate**：高优先风险假设全部被**充分证据**证伪 AND 关键证据完整 AND 无未解决关键矛盾 |
+| **REJECT** | 违规，拒绝上架 | **REJECT Gate**：高风险假设成立 AND 证据充分 AND 存在明确政策依据 AND `decision_confidence ≥ 0.7` AND 无关键矛盾 |
+| **HUMAN_REVIEW** | 转人工（克制地 abstain） | 不满足任一自动 Gate：证据不足 / 关键证据冲突 / 政策无法确定 / 多个风险假设无法区分 / REJECT 而 `decision_confidence < 0.7` / 关键 Tool 失败致证据缺失 / Budget Exhausted |
 
-决策分两层：**LLM 提案 → 确定性规则校验**。
+### 7.2 决策规则（确定性兜底：LLM 只"提案"，Gate 做最终校验）
 
-1. **硬规则优先（确定性 Python 代码，不可被 LLM 覆盖）**：
+决策分两层：**LLM 提案 → 确定性 Decision Gate 校验**。LLM 提案给出
+`decision / risk_level / risk_type / decision_confidence / evidence / policy`；
+确定性 overlay 依次执行下列规则，任一不满足即改写为 `HUMAN_REVIEW` 并记录 `overrides` 原因码
+（详细 overlay 伪代码见 01-agent-loop.md §7）。
+
+1. **硬规则优先（确定性代码，不可被 LLM 覆盖）**：
    - 调查中发现黑名单品牌 / 硬违规 → 强制 `REJECT`。
    - 即便 LLM 说 PASS，只要硬规则命中，以 REJECT 为准（防止漏放）。
-2. **REJECT 需要"可引用依据"**：LLM 不能仅凭"感觉像"判 REJECT，必须至少一条证据指向明确政策条款或高度相似先例。**防止误伤商家**（过审拒审也是资损/商誉损失）。
-3. **HUMAN_REVIEW 触发条件（abstention）**：
-   - `confidence < 阈值`（如 0.7）；
-   - 证据相互矛盾（如相似度高但商家历史干净）；
-   - 预算耗尽（`BUDGET_EXCEEDED`）→ 带上已收集的部分证据转人工；
-   - 政策模糊 / 无先例（novel risk）。
-4. **PASS 需要**：所有高优先级假设被**证伪**（而非"没有证据"）——区分"证明无风险"和"没查到风险"。
+2. **REJECT Gate**：可自动 REJECT 当且仅当 **全部满足**：
+   - 存在指向违规的**高风险假设成立**（SUPPORTED 且风险类型明确）；
+   - 证据**充分**（覆盖关键疑点，无关键 Tool 失败导致的证据缺失）；
+   - 存在**明确政策依据**——至少一条证据指向明确政策条款或高度相似先例（**防止误伤商家**，过审拒审也是资损/商誉损失）；
+   - `decision_confidence ≥ 0.7`（**安全门槛**，非模型真实概率，验证集校准，见 §7.4/§7.6）；
+   - 无**关键矛盾**（如相似度极高但商家历史干净）。
+3. **HUMAN_REVIEW 触发条件（abstention）**——下列**任一**成立即转人工（即便 LLM 提案为 PASS/REJECT）：
+   - 证据不足：无法通过 PASS/REJECT Gate 的"证据充分/证伪充分"要求；
+   - **关键证据冲突**：决定性证据互相矛盾；
+   - 政策无法确定：无适用政策条款、政策模糊或相互冲突；
+   - **多个风险假设无法区分**：几条互斥的风险假设都被部分支持，无法确定哪条成立；
+   - 拟自动 REJECT 但 `decision_confidence < 0.7`；
+   - **关键 Tool 失败**导致证据缺失（如 ImageAnalysis 调用失败且无法重试）；
+   - 预算耗尽（Budget Exhausted，§8.1）→ 带上已收集的部分证据转人工；
+   - 新型风险 / 无先例（novel risk）。
+4. **PASS Gate**：可自动 PASS 当且仅当 **全部满足**：
+   - 所有**高优先风险假设**被**充分证据证伪**（REFUTED 且有可引用反驳证据；不是"没查到风险"）；
+   - **关键证据完整**（对应疑点均已调查，无关键缺失）；
+   - 无**未解决的关键矛盾**。
+   - 区分"证明无风险"（可 PASS）与"没查到风险"（应 HUMAN_REVIEW）。
 
 ### 7.3 风险类型受控词表（v1）
 
@@ -446,30 +484,52 @@ FIELD_CONFLICT        商品字段信息冲突
 
 > 受控词表的意义：评测集的 `risk_type` 标签、`Policy KB` 的元数据、决策输出三者用同一套词表，才能做召回/精确率统计。
 
-### 7.4 Confidence 的含义
+### 7.4 decision_confidence 的含义（与 risk confidence 分离）
 
-`confidence` 不是 LLM 拍脑袋的数字，而是**证据完整性 + 假设后验 + 依据强度**的函数（可解释）：
+- **`decision_confidence`**（输出 `ReviewDecision.confidence`，即安全门槛）不是 LLM 拍脑袋的数字，也不是"违规概率"，而是**确定性函数**（可解释、可单测），可作为自动决策是否安全的一个计算来源：
 
-```
-confidence = f(最高假设 posterior, 证据链完整性, 是否存在可引用依据, 证据是否矛盾)
-```
+  ```
+  decision_confidence = f(最高支持假设 posterior, 证据链完整性, 是否存在可引用依据, 证据是否矛盾)
+  ```
 
-confidence 低 → 转人工，这就是"不确定性 / Abstention"能力的落地。
+  它只回答"如果自动判（PASS/REJECT），判错风险是否足够低"——**自动 REJECT 的安全门槛是 0.7**（§7.2-2 / §7.6），低于门槛 → 转人工。
+- **risk confidence / risk_level** 与决策结论**分离**：风险强度由最高支持假设的 `posterior`（见 `hypothesis_trace`）与 `risk_level` 表达；它回答"风险有多高"，**不**单独决定 PASS/REJECT（HIGH risk + 证据不足 → HUMAN_REVIEW，见 §7.5）。
+- Abstention（克制转人工）的判断落点是 **Decision Gate**（§7.2）：`decision_confidence < 0.7` 只约束**自动 REJECT 侧**；PASS 侧由 PASS Gate 判定（高优先假设充分证伪 + 关键证据完整 + 无关键矛盾），**不以低风险置信度转人工**——干净商品低风险置信是正常态，不是 abstention 信号。
+
+### 7.5 risk_level ≠ decision（不参与路由）
+
+- `risk_level`（LOW/MEDIUM/HIGH/NONE）只用于**展示、人工队列排序、审核优先级与统计**；**不作为路由或 overlay 的判定输入**（避免把展示口径变成判定逻辑，拍板见 03-decisions.md T-10）。
+- 典型反例（面试可讲）：**risk_level = HIGH 且证据不足 → HUMAN_REVIEW**，而不是 HIGH → REJECT。风险高 ≠ 可以自动判；能否自动判取决于 §7.2 的 Decision Gate（证据 + 政策依据 + decision_confidence）。
+
+### 7.6 数值口径总览（v1 工程初始值，非理论最优，验证集校准）
+
+> 本节三个数字都是 **v1 工程初始值**（第一版可跑的起点，不是调参后的最优值），全部**配置化**（不写死在逻辑里），并在 **02-evaluation** 的 validation set 上做校准后确定最终 operating point：
+
+| 数值 | 语义 | 校准方式 |
+|---|---|---|
+| 相似度 `0.70 / 0.85` | ImageAnalysis 三档证据分界：`<0.70` 不作证据 / `0.70~0.85` 普通证据 / `≥0.85` **Strong Evidence**（见 §11.5 / 03 T-11） | **threshold sweep**（0.60/0.65/0.70/0.75/0.80/0.85/0.90），看 Recall/Precision/FPR/Human Review Rate 选点 |
+| `decision_confidence 0.7` | 自动 REJECT 的**安全门槛**（非模型真实概率） | validation set 上按误伤（FPR）/漏放（Risk Recall）权衡校准 |
+| LLM `10` / Tool `15` 上限 | **Budget 是 Guardrail 上界、不是目标调用次数**（§8.1）；余量用于 schema 重试 1 次、工具失败恢复与防无限循环 | 观测 Budget Utilization（§11.3）——正常案件应明显低于上限 |
 
 ---
 
 ## 8. Guardrail / Budget 设计
 
-### 8.1 Budget（成本 / 延迟护栏）
+### 8.1 Budget（成本 / 延迟 Guardrail）
 
-| 维度 | v1 阈值 | 超限行为 |
+| 维度 | v1 上限（Guardrail，非目标） | 超限行为 |
 |---|---|---|
-| 最大 LLM 调用次数 | 8 | 停止调查 → 输出部分证据 + HUMAN_REVIEW |
-| 最大 Tool 调用次数 | 12 | 同上 |
+| 最大 LLM 调用次数 | **10**（拍板 03 T-7；代码 `BudgetLimits` 默认 10） | 停止调查 → 输出部分证据 + HUMAN_REVIEW（overrides=R3_BUDGET_EXHAUSTED） |
+| 最大 Tool 调用次数 | **15**（同上） | 同上（tools_node 内部也按此截断单批执行） |
 | 最大 Token | 40,000 | 触发上下文压缩 / 停止 |
 | 最大执行时间 | 30s | 超时 → 转人工 |
 
+- **语义（重要）**：Budget 是 **Guardrail 上界，不是目标调用次数**。正常案件的实际调用应**明显低于上限**——
+  主链路（《00》§4.4 走查）常态为 8 次 LLM / 5 次 Tool，多出的余量只用于覆盖"schema 校验失败→重试 1 次"、
+  工具失败恢复与防无限循环。评测用 **Budget Utilization**（§11.3）证明 Agent 不是为耗完预算而调工具。
 - Budget 在**条件边路由函数里、每次进入节点前**检查（确定性代码），不是"跑完才发现超了"。
+- 上限**运行时可由配置覆盖**（v1 工程初始值，非理论最优，见 §7.6）；Trace 层记录四组占用率：
+  `llm_calls/max_llm_calls`、`tool_calls/max_tool_calls`、`tokens/max_tokens`、`latency/max_latency`（§10.3）。
 - 超限的语义是：**"调查成本已超过可接受范围，证据不足以自动判，转人工最稳妥"**——这本身就是正确的业务行为，不是失败。
 
 ### 8.2 安全 / 业务 Guardrail
@@ -567,7 +627,11 @@ CREATE TABLE agent_step (
 
 ### 10.3 核心指标（见 §11 完整列表）
 
-成本侧：P50/P95 latency、平均/P95 LLM 调用次数、Token、单 case 成本。可靠侧：失败率、重试率、超时转人工率。
+成本侧：P50/P95 latency、平均/P95 LLM 调用次数、Tool 调用次数、Token、单 case 成本。
+预算侧：**Budget Utilization**（四组占用率 `llm_calls/max_llm_calls`、`tool_calls/max_tool_calls`、
+`tokens/max_tokens`、`latency/max_latency`，来自 agent_step/budget 快照）——正常案件占用率应明显低于 1，
+用于证明"Budget 是 Guardrail 而非目标"（§8.1）。
+可靠侧：失败率、重试率、超时/超限转人工率。
 
 ---
 
@@ -600,6 +664,8 @@ CREATE TABLE agent_step (
 ```
 
 > 关键：标签**不是只有 PASS/REJECT**，而是结构化地包含 `expected_decision / risk_type / risk_level / evidence / applicable_policy`。这样评测能区分"结论对但理由错"（Decision Correct vs Reasoning Correct）。
+> `expected.evidence` 里的阈值标签（如 `image_similarity>=0.85`）是标注时的证据口径，与运行时阈值
+> `EVIDENCE_MIN_SIM / EVIDENCE_STRONG`（0.70/0.85，**v1 工程初始值**，§7.6/§11.5）一致；阈值经 sweep 校准变更后同步修订标签。
 
 ### 11.3 评测指标
 
@@ -612,14 +678,28 @@ CREATE TABLE agent_step (
 - Tool Selection Accuracy（选对了工具吗）
 - Evidence Sufficiency（证据是否足以支撑结论）
 - Reasoning Correctness（推理过程是否正确，即使结论对）
+- **Marginal Evidence Gain / Investigation Efficiency**（每次 Tool Call 带来多少新有效信息；数据来自
+  `tool_call_history` 的 before/after 记录，见 01-agent-loop.md §2.4/§5.8）——Investigation Efficiency =
+  Σ(单次调用后 decision_confidence 增量或新增关键证据数) / Tool Calls，用于暴露"为调查而调查"的低效调用
+- **Budget Utilization**：四组占用率（llm_calls / tool_calls / tokens / latency 各 ÷ 对应上限），
+  证明 Budget 是 Guardrail 而非目标（§8.1）
 
-**工程指标**
-- 平均/P95 LLM 调用次数、Tool 调用次数、Token Usage、P50/P95 Latency、单 Case 成本
+**工程指标（成本与调查效率）**
+- LLM Calls（平均/P95）、Tool Calls（平均/P95）、Token Usage、P50/P95 Latency、单 Case 成本（Cost）
+- 上述指标的**分位数与分布**（不只均值），用于回答"Agent 贵在哪、是否值得"
 
 ### 11.4 评测 Harness
 
 - 同一份 `eval_dataset`，三个 scheme（rule / single-call-llm / agent）跑同一 harness，产出可比 metrics。
 - Agent 评测支持**确定性重放**（工具返回 mock 或录制的结果），保证可重复。
+
+### 11.5 阈值与口径校准（threshold sweep）
+
+- 相似度分界 `0.70 / 0.85`（§7.6）与决策门槛 `0.7` 都是 **v1 工程初始值**，必须在 **validation set** 上校准后定 operating point：
+- **threshold sweep**：对 `EVIDENCE_MIN_SIM / EVIDENCE_STRONG` 扫 `0.60 / 0.65 / 0.70 / 0.75 / 0.80 / 0.85 / 0.90`，
+  观察 **Risk Recall / Precision / False Positive Rate / Human Review Rate** 四条曲线的 trade-off，在验证集上选取 operating point；
+  校准只动配置常量（`EVIDENCE_MIN_SIM / EVIDENCE_STRONG`、`CONFIDENCE_ABSTAIN_THRESHOLD`），不动判定逻辑。
+- 校准结果回写 §7.6 口径表与 03-decisions.md §5 常量表；报告必须附 sweep 曲线而不是只报最终点（证明阈值是"选"出来的，不是拍脑袋）。
 
 ---
 
@@ -627,15 +707,29 @@ CREATE TABLE agent_step (
 
 > 这是项目的**核心证明**：同一批测试集，三个方案，回答"Agent 到底多解决了什么"。
 
+### 12.0 公平性前提：三方案共享同一"基础输入"
+
+为避免"各方案看到的材料不一样"的作弊质疑，三方案在**同一份 eval_case 上共享同一基础输入**：
+
+```
+基础输入 = ProductReviewCase 的商品事实快照：
+  标题 / 描述 / 属性 / 类目 / 品牌 / SKU / 图片 / 机审已产出的 OCR 文本（images[].ocr_text，§2.1）/ screening_signals
+```
+
+区别只在**谁允许用这份输入之外的信息**：
+- **Rule**：只允许对基础输入跑确定性规则（含 OCR 文本关键词）；
+- **Single-call LLM**：基础输入一次性全部交给 LLM（一次调用输出决策 JSON）；
+- **Agent**：允许按证据缺口**动态调查**——经 Tools/RAG 获取基础输入之外的证据（商家历史、案例库、政策库等，见 §12.3）。
+
 ### 12.1 Baseline 1：Rule Engine（规则引擎）
 
-- 纯确定性：黑名单、关键词、敏感词、类目规则、Logo 检测、OCR 关键词、风险分阈值。
-- 输出：命中规则 → REJECT，否则 PASS（**没有 HUMAN_REVIEW 语义**，或仅"低置信"即转人工）。
-- 特点：快、零 LLM 成本、确定性，但**无法处理"多源交叉验证 + 上下文依赖"的复杂案件**。
+- **输入**：仅基础输入（§12.0），纯确定性：黑名单、关键词、敏感词、类目规则、Logo 检测、OCR 关键词、风险分阈值。
+- **输出**：命中规则 → REJECT，否则 PASS（**没有 HUMAN_REVIEW 语义**，或仅"低置信"即转人工）。
+- **特点**：快、零 LLM 成本、确定性，但**无法处理"多源交叉验证 + 上下文依赖"的复杂案件**。
 
 ### 12.2 Baseline 2：Single-call LLM（单次 LLM）
 
-- **一次调用**：输入 = 商品原始数据（标题/描述/属性/OCR/图片）+ 少量背景，直接输出结构化决策 JSON。
+- **一次调用**：输入 = 全部基础输入（§12.0：标题/描述/属性/图片/机审 OCR 文本/机审信号）+ 少量背景，直接输出结构化决策 JSON。
 - **关键：不给它商家历史、案例库、政策库**——因为那些正是 Agent 通过工具"调查"获取的证据。否则等于作弊。
 - 变体（可选消融实验）：
   - **2a**：仅商品原始数据（隔离变量 = 多步调查）
@@ -684,6 +778,28 @@ CREATE TABLE agent_step (
 | 无依据宣传 | "7天瘦身""医学专家推荐" | Claim 提取 + 政策查询 + 证据查询 |
 | 弱信号叠加 | 多个弱信号各自 PASS，组合后高风险 | 多源综合 |
 
+> 注：Hard Case 里的相似度（如 0.91）与运行时证据阈值（0.70/0.85，§7.6）口径一致——0.91 属于
+> **Strong Evidence（≥0.85）** 档；阈值是 v1 工程初始值，经 §11.5 sweep 校准。
+
+### 13.4 Ablation Evaluation（Agent 组件必要性）
+
+回答"Agent 里每个组件（Tool/RAG）是否真的必要"——在同一 eval_dataset + 同一 Agent 图结构上**逐组件去掉**跑消融：
+
+| Ablation 变体 | 去掉的能力 | 要回答的问题 |
+|---|---|---|
+| **Full Agent**（基线） | 无 | 完整 Agent 的上限 |
+| Agent - RAG（无 CaseSearch/PolicySearch） | 案例库 + 政策库检索 | 没有"政策依据/先例"时，REJECT 与 HUMAN_REVIEW 的质量掉多少？ |
+| Agent - MerchantTool | 商家历史画像 | 单看商品/图片能否识别"规避模式"（H3/H4 类假设）？ |
+| Agent - CaseTool | 案例先例（Case KB 检索） | 没有先例参照时决策是否漂移？（可看作 RAG 消融的细分） |
+| Agent - ImageTool | 图像相似度/Logo | 没有多模态外观证据时，IP 风险类 Hard Case 是否漏放？ |
+
+- 评价口径：各变体与 Full Agent 在 **Decision Accuracy / Risk Recall / False Positive Rate / Human Review Rate** 上的差异
+  （Agent 无 HUMAN_REVIEW 语义的变体需等价映射后再比）。
+- 判定规则：**去掉某组件后指标几乎不变 → 该组件（或其在 plan 中的使用策略）需要重新审视是否真有必要**；
+  显著变差 → 该组件对某类案件是必要能力。结果同时回答"为什么 6 个工具不多不少"。
+- 实现要点：消融只做"图装配层不给该工具注册 / plan prompt 不注入该工具描述"，**不动判定逻辑与评测集**，
+  保证差异唯一归因于被去掉的组件。
+
 ---
 
 ## 14. MVP 范围：做什么 / 不做什么
@@ -728,7 +844,7 @@ content-governance/
 │   ├── 01-agent-loop.md             # StateGraph 节点/边/状态细化
 │   └── 02-evaluation.md             # 评测方案细化
 │
-├── src/cg/                          # 主包
+├── src/pra/                         # 主包
 │   ├── common/                      # 通用：雪花ID、JSON工具、错误码
 │   ├── domain/                      # 领域模型：Case/AgentState/Evidence/Decision（Pydantic）
 │   ├── screening/                   # 传统机审初筛 + 三分流
