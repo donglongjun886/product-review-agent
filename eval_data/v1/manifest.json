@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "dataset_version": "v1",
+  "file": "cases_v1.jsonl",
+  "total": 35,
+  "scene_distribution": {
+    "normal": 8,
+    "violation": 6,
+    "boundary": 7,
+    "multi-signal": 7,
+    "evasion": 7
+  },
+  "expected_decision_distribution": {
+    "PASS": 15,
+    "REJECT": 20
+  },
+  "world": {
+    "label": "InMemory 种子世界 v1（与 pra.evaluation.harness.agent_scheme EVAL_* 常量同一份事实）",
+    "products": 12,
+    "merchants": 5,
+    "image_urls": 11,
+    "precedents": 4,
+    "policy_clauses": 3
+  },
+  "threshold_snapshot": {
+    "EVIDENCE_MIN_SIM": 0.7,
+    "EVIDENCE_STRONG": 0.85,
+    "CONFIDENCE_ABSTAIN_THRESHOLD": 0.7
+  },
+  "annotation_notes": "Phase 1 手工构造 + 脚本生成；真值仅 PASS/REJECT；每条 annotation.notes 写明三方案设计意图（含 Rule/Single-call 的预期缺陷案，见 EC_0201/0204/0207/0402 等）",
+  "generator": "临时脚本（未入库）；数据行与 world 常量强一致，重新生成即重建"
+}

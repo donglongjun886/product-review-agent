@@ -5,8 +5,9 @@
 > 引用约定：总设计写作 **《00》§x.y**，契约细化写作 **01 §x.y**，拍板记录写作 **03 T-x / 03 §x**。
 >
 > **本文档不包含业务代码**：只写 eval_case schema、模块划分、伪代码与指标口径（与 01 同一原则），它们是"契约"。
-> **版本状态：v0.1 骨架**：多处标 **〔细化待定〕** 或列入 §9 待拍板清单——主 agent 拍板前不得当作已定稿；
-> 本文不评审、不引用 `pra/screening` 的具体规则动作（并行修正集进行中，见 §7），评测框架与具体规则解耦。
+> **版本状态：v1（P-1~P-5 已拍板）**：评测口径按拍板结果定稿，正文不再标 [待拍板]（逐条决策记录见 §9，供追溯）；
+> 正文残留的〔细化待定〕均为**实现者可自行收敛**的落地细节，不阻塞实现；命名/模块结构以 §3.5 为准（实现层别名见该节"命名注"）。
+> 本文不评审、不引用 `pra/screening` 的具体规则动作（并行修正集进行中，见 §7），评测框架与具体规则解耦，只按"运行时当前行为"取数并记录行为快照。
 
 ---
 
@@ -18,7 +19,7 @@
 
 | 《00》章节 | 设计意图 | 本文细化 |
 |---|---|---|
-| §11.1/11.2 | 评测集规模分布 + Case 结构化标签 | §2 eval_dataset 文件格式、schema、构造与版本管理 |
+| §11.1/§11.2 | 评测集规模分布 + Case 结构化标签 | §2 eval_dataset 文件格式、schema、构造与版本管理 |
 | §11.3 | 业务/Agent/工程三组指标 | §4 每个指标的计算口径（分子/分母/取数字段） |
 | §11.4 | 三方案同一 harness、可比 metrics、确定性重放 | §3 harness 模块划分与 SchemeRunner 契约 |
 | §11.5 | threshold sweep、只动配置 | §5 sweep 脚本、曲线与 operating point 选取 |
@@ -45,9 +46,13 @@
 
 ## 2. 评测集 eval_dataset
 
-### 2.1 规模与分布（引用《00》§11.1）
+### 2.1 规模与分布（分阶段落地；引用《00》§11.1）
 
-v1 目标 **300–500 Case**，五类分布如下（标注时按此比例分层抽样，避免案型偏斜）：
+评测集**分两阶段**落地，规模与目标各不相同（P-4 已拍板，记录见 §9）：
+
+- **Smoke 集（≤10 条，先行）**：复用 demo case（P_88231 复古运动鞋等）作冒烟最小集，只验证 loader → harness → EvalRecord 链路可跑；**不混入正式统计**（见 §2.3）。
+- **Phase 1 集（30–50 条）**：目标是**跑通完整框架**：Golden Dataset → Rule → Single-call LLM → Agent → Evaluator → Metrics → Console Report，验证三方案可比口径与指标模块正确性——**不是统计显著**。每条必须有明确 Ground Truth（expected.decision ∈ {PASS, REJECT}，见 §2.2/§4.1）；scene 仍按五类标注，便于分层冒烟，但数量小**不按比例验收**（分布达标自 Phase 2 起）。
+- **Phase 2 正式集（300+ 条）**：作为出数与校准的正式集，五类分布如下（标注时按此比例分层抽样，避免案型偏斜；分布容差每类 ±5 个百分点内）：
 
 | scene（场景标签） | 占比 | 说明 |
 |---|---|---|
@@ -57,7 +62,7 @@ v1 目标 **300–500 Case**，五类分布如下（标注时按此比例分层�
 | `multi-signal` 多信号组合 | 20% | 需要多源交叉验证 |
 | `evasion` 对抗/规避 | 10% | 刻意规避审核（核心 Hard Case） |
 
-〔待拍板 P-4〕规模终值（下限建议 300，质量优先于数量）；分布容差（建议每类 ±5 个百分点内）。
+> HUMAN_REVIEW 期望案（Phase 2 起标注的 `SHOULD_ABSTAIN` 案，见 §4.4）**不强制占比**：每个 case 必须有明确 Ground Truth，**不为凑比例塞数据**（P-4）。
 
 ### 2.2 eval_case 结构化标签 schema（引用《00》§11.2，细化字段清单）
 
@@ -74,7 +79,7 @@ v1 目标 **300–500 Case**，五类分布如下（标注时按此比例分层�
   "hard_reason": ["rule_cannot_judge"],     // rule_cannot_judge | llm_evidence_gap | agent_can_discover（00 §13.1 三选一，可多）
   "input": { "...": "ProductReviewCase" },  // 《00》§2.1 快照；含 images[].ocr_text 与 screening_signals（基础输入，00 §12.0）
   "expected": {
-    "decision": "HUMAN_REVIEW",             // PASS | REJECT | HUMAN_REVIEW（三分类真值；是否含 HUMAN 案见 P-4）
+    "decision": "HUMAN_REVIEW",             // PASS | REJECT（Phase 1 真值只用这两类）| HUMAN_REVIEW（Phase 2 的 SHOULD_ABSTAIN 案，见 P-3/§4.4）
     "risk_level": "HIGH",                   // LOW|MEDIUM|HIGH|NONE（《00》§7.5，独立于 decision）
     "risk_type": ["POTENTIAL_IP_RISK"],     // 受控词表（00 §7.3），供 risk_type 命中类指标
     "evidence": ["image_similarity>=0.85", "merchant_history>=5_removals"],  // 证据类型 + 标注时阈值口径（00 §11.2 注）
@@ -86,9 +91,10 @@ v1 目标 **300–500 Case**，五类分布如下（标注时按此比例分层�
 ```
 
 要点：
+- **每条 eval_case 必须有明确 Ground Truth**：Phase 1 只允许 `expected.decision ∈ {PASS, REJECT}`；Phase 2 才允许 HUMAN_REVIEW（`SHOULD_ABSTAIN` 案，§4.4），不强制占比、不为凑比例塞数据（P-4）。
 - 标签**不只是 PASS/REJECT**：`expected.evidence / risk_type / expected_tools` 使评测能区分"结论对但理由错"（《00》§11.2）。
 - `expected.evidence` 里的阈值（如 `>=0.85`）是**标注时的证据口径**，须与运行时 `EVIDENCE_MIN_SIM/STRONG` 口径一致；阈值经 §5 sweep 校准变更后**同步修订标签**（《00》§11.2 注）。
-- `input.images` 的素材引用（URL vs 本地 asset）与 OCR 文本是否内联，〔细化待定〕：影响 ImageAnalysis/OCR 工具的评测可复现性，建议 eval 专用 asset 目录 + URL 占位，避免外网依赖。
+- `input.images` 的素材引用（URL vs 本地 asset）与 OCR 文本是否内联，〔细化待定：实现者可自行收敛〕：影响 ImageAnalysis/OCR 工具的评测可复现性，建议 eval 专用 asset 目录 + URL 占位，避免外网依赖。
 
 ### 2.3 构造流程（对应《00》§13.2，落到"谁产、什么格式、存哪、版本怎么管"）
 
@@ -101,19 +107,20 @@ v1 目标 **300–500 Case**，五类分布如下（标注时按此比例分层�
 
 版本管理建议：
 - 目录 `eval_data/v<N>/`：`eval_cases_v<N>.jsonl`（全量）+ `manifest.json`（schema_version、五类分布统计、Hard 占比、标注时阈值口径快照 `EVIDENCE_MIN_SIM/STRONG`、生成命令与 git commit、标注一致性）→ 评测报告必须记录所用数据集版本。
-- 合成/变异由**脚本生成**（可复现、diff 友好）；真实脱敏改写以 **JSONL 入库**（可评审）；是否两者分文件（`synthetic/` 与 `handcrafted/`）〔细化待定〕。
-- 〔待拍板 P-4〕是否复用已有 demo case（P_88231 复古运动鞋等）作为首批真实改写种子与冒烟最小集（建议：复用为 smoke 集 ≤10 条，不混入正式分布统计）。
+- 合成/变异由**脚本生成**（可复现、diff 友好）；真实脱敏改写以 **JSONL 入库**（可评审）；是否两者分文件（`synthetic/` 与 `handcrafted/`）〔细化待定：实现者可自行收敛〕。
+- **Smoke 集（已拍板，P-4）**：复用已有 demo case（P_88231 复古运动鞋等）作冒烟最小集 ≤10 条，仅快速验证 loader/harness/EvalRecord 链路，**不混入正式分布统计**；真实改写脱敏种子随 Phase 2 正式集扩充。
 
 ### 2.4 Hard Case 占比与挑选（《00》§13.1）
 
 - 三选一即算 Hard（标注 `hard_case=true` + `hard_reason`）：① Rule 无法判断/易误判（无硬规则命中但真实风险）；② Single-call LLM 证据不足/不稳定（决策依赖输入里**不存在**的信息）；③ Agent 多步调查可获得额外证据（工具调用能显著改变结论）。
 - **验证方法**：①③需在 Rule / Agent 冒烟跑分后回填确认（先粗标、跑分后复核 hard_reason 是否成立），②由标注者按证据缺口判断。
-- 占比建议 ≥15%（`evasion` 10% + `boundary` 中符合三选一者）；〔待拍板 P-4〕终值。
+- 占比终值（已拍板，P-4）：Phase 2 正式集目标 **≥15%**（`evasion` 10% + `boundary` 中符合三选一者）；Phase 1（30–50 条）不设硬性占比，以覆盖五类、跑通框架为准。
 
 ### 2.5 数据集划分（sweep 校准与报告隔离）
 
 - 一次划分成 **report 集（主跑分报告）** 与 **validation 集（§5 sweep 校准 operating point）**，按 scene 分层抽样，比例建议 70/30。
 - 报告必须声明 operating point 取自 validation；report 集只在定稿后跑一次全量，避免"调参调到报告集"。
+- 划分自 **Phase 2（300+）** 起执行；Phase 1（30–50 条）以全集跑通框架与指标口径即可，不在 Phase 1 集上做 sweep 选点（sweep 排在 Phase 1 框架跑通之后，§5/§8）。
 
 ---
 
@@ -131,31 +138,34 @@ v1 目标 **300–500 Case**，五类分布如下（标注时按此比例分层�
 - Agent：允许按证据缺口动态调查——经 Tools 获取基础输入之外的证据。
 - harness 必须**逐 scheme 校验**未越权（如 Single-call LLM 的 prompt 里不注入工具检索结果），防止"看到材料不一样"的作弊质疑。
 
-### 3.2 Rule baseline（[待拍板 P-1]：两种候选语义）
+### 3.2 Rule baseline（P-1 已拍板：选项 (a) 为主，(b) 本期不做）
 
-- **选项 (a)：复用 `pra.screening` 三分流**。PASS/REJECT 为确定性规则**直接终裁**、COMPLEX 进 Agent（已拍板语义）；评测里把 **COMPLEX 等价映射为 HUMAN_REVIEW**（无 Agent 时复杂案只能人工，见 §4.5）。
-  - 优点：评测对象 = 线上真实判定器，结论可直接外推；三分类输出空间天然对齐（§4.5）。
-  - 代价：Rule 行为随 screening 修正集变动（§7）；"COMPLEX→人工"是**评测语义**，与线上"COMPLEX→Agent"不同，报告须写明口径。
-- **选项 (b)：独立二分 rule**（《00》§12.1 原述：命中→REJECT、否则 PASS、无 HUMAN_REVIEW 语义；或仅低置信即转人工），在 evaluation 内新写或薄封装，不碰线上 screening。
-  - 优点：与《00》§12.1 文字一致、实现最小、完全隔离修正集影响。
-  - 代价：输出空间少一档，指标可比性需映射（§4.5）；结论外推线上能力弱。
-- **[建议默认]** 主 baseline 用 **(a)**；**(b)** 作"无转人工选项的纯规则上限"敏感性补充（可选运行、不进主对比表）。P-1 影响 §3.5 的 rule_scheme 装配与 §4.5 映射，是**实现前必拍项**。
+- **主 baseline = 复用线上 `pra.screening` 三分流**：PASS→PASS、REJECT→REJECT、**COMPLEX→HUMAN_REVIEW**（评测语义：无 Agent 时复杂案只能人工，见 §4.5）。
+  - 评测对象 = 线上真实判定器，结论可直接外推；
+  - **口径差异必须注明**：评测里的 "COMPLEX→人工" 与线上 "COMPLEX→Agent" 是**不同口径**——线上复杂案交给 Agent 终裁，Rule baseline 代表"没有 Agent 时复杂案只能转人工"，报告须写明（§4.5/§7.1）；
+  - Rule 行为随 screening 修正集变动：报告记录 screening 行为快照（git commit / 规则语义版本），正式基线结论在修正集合入后重跑（§7.1/§8）。
+- **选项 (b) 独立二分 rule（命中→REJECT、否则 PASS）本期不做**（P-1 拍板）；后续如需作为"纯规则上限"的敏感性补充，再单独加跑，**不进主对比表**。
 
-### 3.3 Single-call LLM（《00》§12.2 + 变体）
+### 3.3 Single-call LLM（Phase 1 必跑中层方案 + 消融变体）
 
-- 一次调用：基础输入全量 + 少量背景 prompt → 结构化决策 JSON（decision/risk_level/risk_type/decision_confidence/evidence 摘要/policy 候选）。
-- 无工具、无多步；输出 schema 复用 ReviewDecision 子集（01 §7.6 形状的子集，`budget_used/overrides` 恒空/不适用）。
-- 变体（可选，二期消融）：2a 仅商品原始数据；2b 政策+案例预塞 prompt（RAG-in-prompt），隔离"缺证据 vs 缺多步推理"（《00》§12.2）。
+- 定位：三方案对照的**中层**（Rule Baseline → Single-call LLM → Multi-step Review Agent，Phase 1 三方案全部进框架），用来回答核心问题：**"Agent 的收益来自 LLM 本身，还是来自多步调查 / Tool / RAG / Evidence Aggregation？"**
+- 执行语义：一次调用，基础输入全量（§3.1）+ 少量背景 prompt → 结构化决策 JSON（decision/risk_level/risk_type/decision_confidence/evidence 摘要/policy 候选）；**不给**商家历史/案例库/政策库（那是 Agent 经工具"调查"得来的，否则作弊，《00》§12.2）。
+- 输出 schema 复用 ReviewDecision 子集（01 §7.6 形状的子集）；`budget_used/overrides` 恒空/不适用；决策 JSON 自带置信度后处理（REJECT 候选 `decision_confidence < CONFIDENCE_ABSTAIN_THRESHOLD` → HUMAN_REVIEW，见 §4.5），即 **Single-call 也有 HUMAN_REVIEW 语义**。
+- Phase 1 实现：scripted/mock LLM + InMemory；三方案统一归一为 `ReviewDecision` 形状的 EvalRecord（§3.6），进**同一 Evaluator / Metrics**，保证可比。
+- **消融变体（后续 Ablation，Phase 2，见 §6）**——回答"给 Single-call 更多上下文能提升多少？Agent 的额外收益是否来自主动调查、而非只是看到更多文本"：
+  - **2a** Single-call + Raw Input（仅商品原始数据，不给任何预塞知识）；
+  - **2b** Single-call + RAG-in-prompt（政策/先例**预塞 prompt**，仍不给工具）；
+  - **2c** Multi-step Agent + 主动调查（标准 Agent，§3.4）。
 
-### 3.4 Agent（真实执行语义 + 两种运行模式）
+### 3.4 Agent（真实执行语义；Phase 1 运行模式已拍板）
 
-- 走 **`build_agent_graph`**（hypothesize→plan→tools→reevaluate→decide，状态 `AgentState`，预算 10/15/40000/30000 Guardrail）；终态以确定性 overlay 后的 `ReviewDecision`（01 §7.6）为判决策略真值。
-- **[待拍板 P-2] 两种运行模式**：
-  - **scripted 模式（[建议默认]，CI 可跑）**：LLM 节点注入 scripted 桩（按 case 预录/规则化的结构化输出），工具数据源为 **InMemory 种子数据**（Case/Policy/Merchant 现状）→ **确定性重放**（同 case 重跑同结果，《00》§11.4）。
-  - **real 模式（二期）**：真实 LLM + 真实工具数据源（RAG 未接前不可用），复核 scripted 结论（尤其 Tool Selection / Evidence Sufficiency 等依赖 LLM 行为的指标）。
-- **结论边界（必标注）**：scripted + InMemory 的结论，报告须标注"**工具为 InMemory 种子数据、LLM 为桩**"——种子里查不到的先例/规避史会**低估** Agent 上限（见 §7.2）。
+- 走 **`build_agent_graph`**（hypothesize→plan→tools→reevaluate→decide，状态 `AgentState`，预算 10/15/40000/30000 Guardrail）；终态以确定性 overlay 后的 `ReviewDecision`（01 §7.6）为判决策略真值；HUMAN_REVIEW 是三个 Decision Gate 之一（abstention 清单语义，03 T-4），即 **Agent 有 HUMAN_REVIEW 语义**。
+- **运行模式（P-2 已拍板）**：
+  - **Phase 1 默认：scripted Agent + InMemory 种子数据**（Case/Policy/Merchant 现状）——确定性、可重复、**CI 可回归**（同 case 重跑同结果，《00》§11.4）；
+  - **Real LLM Evaluation 排后续阶段（Phase 3，§8）**：真实 LLM + 真实工具数据源（RAG 未接前不可用），复核 scripted 结论（尤其 Tool Selection / Evidence Sufficiency 等依赖 LLM 行为的指标）。
+- **结论边界（报告必声明，P-2 口径）**："当前结果主要验证 **Agent Workflow、规则协同与 Evaluation Framework**，不代表真实 LLM 最终能力；**InMemory 种子覆盖有限，可能低估 Agent 上限**。"（另见 §7.2）
 
-### 3.5 Harness 代码落点（src/pra/evaluation/ 建议模块划分）
+### 3.5 Harness 代码落点（src/pra/evaluation/ 模块划分）
 
 ```
 src/pra/evaluation/
@@ -164,21 +174,25 @@ src/pra/evaluation/
 │   └── loader.py          # JSONL 读取、manifest 解析、report/validation 划分、scene 分层统计
 ├── harness/
 │   ├── base.py            # EvalContext（阈值常量/预算/LLM 模式/工具数据源）+ SchemeRunner 抽象
-│   ├── rule_scheme.py     # P-1 (a) 薄封装 pra.screening 入口 | (b) 独立二分 rule（待拍板定）
-│   ├── single_call_scheme.py  # prompt 构造 + 单次调用 + JSON 校验降级（01 §3.0 壳同款：重试 1 次，失败→HUMAN_REVIEW）
+│   ├── rule_scheme.py     # P-1 已拍板：薄封装 pra.screening 三分流（PASS/REJECT/COMPLEX→HUMAN_REVIEW）；(b) 独立二分 rule 本期不做
+│   ├── single_call_scheme.py  # prompt 构造 + 单次调用 + JSON 校验降级（01 §3.0 壳同款：重试 1 次，失败→HUMAN_REVIEW；低置信 REJECT 候选→HUMAN_REVIEW）
 │   ├── agent_scheme.py    # build_agent_graph + scripted/real LLM + 工具数据源注入 + 结果转录
 │   └── record.py          # 统一 EvalRecord（见 3.6），各 scheme 输出归一化落点
 ├── metrics/
-│   ├── business.py        # §4.1：Recall/Precision/FPR/Decision Accuracy/HRR/Automation
+│   ├── business.py        # §4.1/§4.4：Accuracy/Precision/Recall/FPR/FNR + human_review_rate/automation_coverage/abstention 系列（命名以 §4 为准，无 HRR 缩写）
 │   ├── agent.py           # §4.2：Tool Selection Accuracy/Evidence Sufficiency/…/Budget Utilization
 │   └── engineering.py     # §4.3：llm_calls/tool_calls/tokens/latency 均值与分位数
-├── report.py              # 汇总 → markdown/json 报告；含按 scene 分层表 + 《00》§12.4 预期结论对照
-└── sweep.py               # §5：threshold sweep 驱动（只改配置，见 §5）
+├── report.py              # 汇总 → markdown/json 报告；含按 scene 分层表 + 《00》§12.4 预期结论对照 + 结论边界声明
+└── sweep.py               # §5：threshold sweep 驱动（只改配置；Phase 2，见 §5）
 
 scripts/
 ├── eval_dataset_gen.py    # §2.3 程序化变异/合成入口（确定性种子）
 └── run_evaluation.py      # 跑分入口：load → N schemes → metrics → report（子命令 --scheme/--split）
 ```
+
+> **命名注（主 agent 拍板）**：本节的模块划分与标识符（`eval_case` / `SchemeRunner`×3 / `EvalRecord` / `metrics.business`）是**实现唯一依据**。
+> 实现层内部可用 `GoldenCase` / `EvaluationRunner` / `DecisionEvaluator` 等**别名**指代 `eval_case` / `SchemeRunner×N` / `metrics.business`，
+> 但**代码标识符与目录以本节为准**，不得引入与本节平行的新抽象命名。
 
 SchemeRunner 契约（伪代码；实现者照此写，不强求框架）：
 
@@ -199,7 +213,7 @@ class SchemeRunner(ABC):
 ```jsonc
 {
   "eval_case_id": "EC_00042", "scheme": "agent",
-  "decision": "REJECT",            // PASS|REJECT|HUMAN_REVIEW（三分类归一，见 4.5）
+  "decision": "REJECT",            // PASS|REJECT|HUMAN_REVIEW（三分类归一，映射见 4.5）
   "risk_level": "HIGH", "risk_type": ["POTENTIAL_IP_RISK"],
   "decision_confidence": 0.87,
   "evidence": [ { "type": "IMAGE_SIMILARITY", "value": "similarity=0.91…", "extra": {"similarity": 0.91} } ],
@@ -211,8 +225,8 @@ class SchemeRunner(ABC):
 ```
 
 - Agent 的 EvalRecord 由 **AgentState/review_trace/review_result 字段转录**（review_trace(PLAN).output_json → plan_outputs；AgentState.tool_call_history → trace；decision_json.budget_used → cost）；rule/llm 的 EvalRecord 由各自执行结果构造。
-- **DB 落库非必需**：评测以内存 EvalRecord 为主（快、可并行、不污染业务表）；DB 版（走 run_and_persist/SCREENING_DIRECT 真落库）作集成测试可选路径〔细化待定〕。
-- **确定性重放**：scripted 模式要求同 case 重跑产出**逐字节一致**的 EvalRecord（mock/录制工具结果，随机种子固定），作为 M2 验收断言（§8）。
+- **DB 落库非必需**：评测以内存 EvalRecord 为主（快、可并行、不污染业务表）；DB 版（走 run_and_persist/SCREENING_DIRECT 真落库）作集成测试可选路径〔细化待定：实现者可自行收敛〕。
+- **确定性重放**：scripted 模式要求同 case 重跑产出**逐字节一致**的 EvalRecord（mock/录制工具结果，随机种子固定），作为 Phase 1 验收断言（§8）。
 
 ---
 
@@ -221,25 +235,33 @@ class SchemeRunner(ABC):
 > 取数一律以 **EvalRecord** 为准（3.6）；与 DB 字段（review_trace / review_result.decision_json / decision_json.budget_used）
 > 的映射仅用于集成抽查。字段口径见 01 §2.4（tool_call_history）、01 §7.6（ReviewDecision）、《00》§10.3。
 
-### 4.1 业务指标
+### 4.1 业务指标（Phase 1 二分类五指标 + 转人工观测量；abstention 语义见 §4.4）
 
-| 指标 | 计算口径（建议） | 取数字段 | 备注 |
+Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指标是**二分类五指标**，另报转人工观测量：
+
+| 指标 | 计算口径（Phase 1） | 取数字段 | 备注 |
 |---|---|---|---|
-| Risk Recall（违规召回） | 在"可自动判"子集上：预测 REJECT 且 expected=REJECT / expected=REJECT | decision × expected.decision | HUMAN_REVIEW 期望/输出是否入混淆，见 §4.4 口径与 P-3 |
-| Precision（精确率） | 预测 REJECT 中 expected=REJECT 的比例 | 同上 | 误拒直接伤害商家 |
-| False Positive Rate | expected=PASS（正常）中预测 REJECT 的比例 | 同上 | **防误伤红线**（《00》§7.2-2）；sweep 主观察曲线之一 |
-| Decision Accuracy | 三分类正确率：expected∈{PASS,REJECT} 上逐案精确匹配；expected=HUMAN 案单独报 abstention 命中 | decision | 期望含 HUMAN 案时的处理见 P-4 |
-| Human Review Rate | 输出 HUMAN_REVIEW 的 case 占比（细分见 §4.4） | decision | 三方案可比前提见 §4.5 |
-| Automation Rate | 1 − Human Review Rate | decision | |
+| Accuracy（决策准确率） | 自动终裁案（decision∈{PASS,REJECT}）上 decision==expected 的占比 | decision × expected.decision | 混淆口径见下表注 |
+| Precision（精确率） | 预测 REJECT 且 expected=REJECT / 预测 REJECT | 同上 | 误拒直接伤害商家 |
+| Recall（违规召回） | 预测 REJECT 且 expected=REJECT / expected=REJECT | 同上 | 违规漏放伤害平台 |
+| False Positive Rate（FPR，误杀率） | expected=PASS（正常）中自动终裁为 REJECT 的比例 | 同上 | **防误伤红线、Phase 1 重点观察**（《00》§7.2-2）；sweep 主观察曲线之一 |
+| False Negative Rate（FNR，漏放率） | expected=REJECT（违规）中自动终裁为 PASS 的比例 | 同上 | 与 Recall 互补 |
+| human_review_rate | 输出 HUMAN_REVIEW 的 case 占全部 case 的比例 | decision | 转人工占用（人工负担）；Rule 的 COMPLEX 映射与 Agent/Single-call 的 abstention 都计入 |
+| automation_coverage | 1 − human_review_rate（自动终裁占比） | decision | 自动化覆盖率；与 FPR/FNR **必须并读**（§4.4 核心口径） |
+
+> **Phase 1 混淆口径注**：Golden Dataset 无 HUMAN 真值案（P-3/P-4），五指标在**自动终裁子集**（decision∈{PASS,REJECT}）上计算；
+> HUMAN_REVIEW 输出**不计对错**（转人工既不误杀也不漏放，是保守降级，不是安全错误），其代价由 human_review_rate / automation_coverage 呈现——
+> 因此"大量转人工"的方案会在二分类指标上显得准，**必须与 automation_coverage 并读**才能看出它只是没有在自动判。
+> abstention 的**质量**评估（该转人工是否转了、自动决策是否安全）属 Phase 2 语义（AUTO_DECIDABLE / SHOULD_ABSTAIN），见 §4.4。
 
 ### 4.2 Agent 指标（仅 agent scheme 有意义）
 
 | 指标 | 计算口径（建议） | 取数字段 | 备注 |
 |---|---|---|---|
 | Tool Selection Accuracy | 每 case：`expected_tools ⊆ 实际调用集合` 且实际调用尽量少；聚合 = 命中案 / 总案 | expected.expected_tools × tool_calls_actual | 真值来自 eval_case 标签；取数接口见 01 §4.2（PlanOutput + tool_call_history） |
-| Evidence Sufficiency | ① expected.evidence 的**证据类型**被实际 evidence 覆盖比例；② REJECT 案是否满足 REJECT Gate 前置（有可引用依据 `CITABLE_TYPES`、无关键矛盾） | expected.evidence × evidence | 精确公式〔细化待定〕 |
+| Evidence Sufficiency | ① expected.evidence 的**证据类型**被实际 evidence 覆盖比例；② REJECT 案是否满足 REJECT Gate 前置（有可引用依据 `CITABLE_TYPES`、无关键矛盾） | expected.evidence × evidence | 精确公式〔细化待定：实现者可自行收敛〕 |
 | Reasoning Correctness | 结论对但推理错：risk_type 命中率（expected.risk_type ⊆ 输出）+ risk_level 档位一致 + 抽样人工复核结构化理由 | risk_type/risk_level/trace | 自动化近似无法全覆盖 → 抽样人工复核子集（标注） |
-| Marginal Evidence Gain / Investigation Efficiency | 逐 tool_call 记 `after_confidence−before_confidence` 与 `evidence_added` 非空、`decision_changed`；效率 = Σ(新增证据数 + 决策翻转权重) / 有效 Tool Calls | trace.tool_call_history 边际增益 4 字段（01 §2.4/§5.8） | 暴露"为调查而调查"；加权口径〔细化待定〕 |
+| Marginal Evidence Gain / Investigation Efficiency | 逐 tool_call 记 `after_confidence−before_confidence` 与 `evidence_added` 非空、`decision_changed`；效率 = Σ(新增证据数 + 决策翻转权重) / 有效 Tool Calls | trace.tool_call_history 边际增益 4 字段（01 §2.4/§5.8） | 暴露"为调查而调查"；加权口径〔细化待定：实现者可自行收敛〕 |
 | Budget Utilization | 四组占用率：llm_calls/tool_calls/tokens/latency 各 ÷ 上限（10/15/40000/30000），报均值与分布 | cost + decision_json.budget_used | 证明 Budget 是 Guardrail 非目标（《00》§10.3/§11.3） |
 
 ### 4.3 工程指标（成本与效率，三方案同口径）
@@ -247,43 +269,55 @@ class SchemeRunner(ABC):
 - LLM Calls（平均/P95）、Tool Calls（平均/P95）、Token Usage、P50/P95 Latency、单 Case 成本。
 - 一律报**分位数与分布**（不只均值），用于回答"Agent 贵在哪、是否值得"（《00》§11.3）；按 scene 分层报。
 
-### 4.4 Human Review Rate 口径注意（[待拍板 P-3]）
+### 4.4 HUMAN_REVIEW / Abstention 口径（P-3 已拍板；分阶段语义）
 
-- HUMAN_REVIEW 语义在三方案里**不一致**（§4.5），且评测案里"应转人工的真值"（expected=HUMAN_REVIEW）如何构造是开放问题（P-4）。
-- 建议把 HRR 细分为三率，避免一个数字混口径：
-  - `HRR_total` = 输出 HUMAN_REVIEW / 全部；
-  - `HRR_on_auto_decidable` = expected∈{PASS,REJECT} 却输出 HUMAN_REVIEW / 该子集（"本该自动判却转人工"，越高说明方案越保守）；
-  - `abstention_recall` = expected=HUMAN_REVIEW 且输出 HUMAN_REVIEW / 该子集（"该转人工的克制地转了"）。
-- 口径细节（二分类混淆矩阵是否剔除 HUMAN 期望案、PASS 案如何构造"干净但低置信"样本）〔细化待定〕，但**必须先于跑分定稿**，否则三方案 HRR 不可比。
+- **总口径**：三方案统一三分类输出 PASS/REJECT/HUMAN_REVIEW（§4.5），但 **HUMAN_REVIEW 不当普通第三分类**混进 Acc 等混合指标——它表示 **abstention / 转人工能力**，按两阶段评估：
+  - **Phase 1**：真值只有 PASS/REJECT → 只在二分类真值上算 Accuracy / Precision / Recall / FPR / FNR（§4.1，**重点看 FPR（误杀）**）；无 abstention 质量指标（没有 SHOULD_ABSTAIN 真值可评价"转得对不对"）。
+  - **Phase 2**：真值引入两类 abstention 语义——
+    - `AUTO_DECIDABLE`（expected=PASS/REJECT，本可自动判）：评价**正确自动决策**（自动终裁且与真值一致）与 **wrong_auto_decision_rate** = 自动终裁（输出 PASS/REJECT）中与真值不符的比例——回答"自动判断是否准确、安全"；
+    - `SHOULD_ABSTAIN`（expected=HUMAN_REVIEW，应转人工）：评价**正确转人工**与 **abstention_recall** = 输出 HUMAN_REVIEW 的 SHOULD_ABSTAIN 案 / 全部 SHOULD_ABSTAIN 案——"该转人工的克制地转了"；其中被自动终裁的 SHOULD_ABSTAIN 案（漏转人工）即**危险误自动**，是 abstention_recall 的分子缺口。
+- **指标命名（不用 HRR 缩写；代码/文档统一用下列五个名字）**：
+  - `human_review_rate`：输出 HUMAN_REVIEW 占全部 case 的比例（§4.1）——人工占用；
+  - `automation_coverage`：1 − human_review_rate（§4.1）——自动化覆盖面；
+  - `abstention_rate`：AUTO_DECIDABLE 案上输出 HUMAN_REVIEW 的比例——"本该自动判却转人工"的**过度保守 abstention**（越高说明方案越保守）；
+  - `abstention_recall`：见上（SHOULD_ABSTAIN 正确转人工的召回）；
+  - `wrong_auto_decision_rate`：见上（自动终裁中的错误占比，安全/准确侧）。
+- **核心价值口径**：评测**不是为降低转人工而牺牲安全**；真正的目标是——"**在风险可控、自动判断准确（FPR/FNR/wrong_auto_decision_rate 可控）的前提下，Agent 能否识别 Rule 无法判断的复杂案、并经调查把其中一部分安全自动化**"。因此**自动化（转人工降低 / automation_coverage 上升）必须与 FPR/FNR 一起看**：允许方案把复杂案克制地转人工（human_review_rate 高、FPR 低），但只有当它能安全地把其中一部分自动化（automation_coverage 上升且 FPR/FNR/wrong_auto_decision_rate 不恶化）时，才是 Agent 价值的证据。
+- SHOULD_ABSTAIN 案标注原则见 §2.1/§2.2（每个 case 有明确 Ground Truth；不强制占比、不为凑比例塞数据）；Phase 2 按本节语义实现 abstention 指标评测（落 `metrics/business.py`，§8/§3.5；实现层别名见 §3.5 命名注）。
 
-### 4.5 三分类输出空间对齐（Rule 无 HUMAN_REVIEW 的问题）
+### 4.5 三分类输出空间（映射已定稿）
 
-- 方案输出空间：Agent/Single-call LLM（建议）三分类；Rule (a) COMPLEX→HUMAN_REVIEW 映射；Rule (b) 二分无 HUMAN。
-- **[建议]** 三方案统一按 **PASS/REJECT/HUMAN_REVIEW 三分类**对齐后进 metrics：
-  - Rule (a)：COMPLEX 记 HUMAN_REVIEW（评测语义 = "不可自动判"；《00》§12.1 注"或仅低置信即转人工"即此意）；
-  - Rule (b)：二分输出，HUMAN_REVIEW 恒为 0 → HRR 天然 0，其"转人工代价"体现在 FPR/漏放上，需在报告里注明比较基准差异；
-  - Single-call LLM：输出 decision_confidence，`< CONFIDENCE_ABSTAIN_THRESHOLD` 的 REJECT 候选按确定性后处理记 HUMAN_REVIEW（与 Agent 的 REJECT Gate 口径一致）。
-- 对齐映射是 **[待拍板 P-1/P-3]** 的组成部分：不同映射会改变 FPR/HRR trade-off 曲线的形状，报告须写明所用映射。
+三方案统一 **PASS/REJECT/HUMAN_REVIEW 三分类输出**、进同一 EvalRecord（§3.6）与同一 Evaluator——映射是**各方案的执行语义**而非事后补对齐，报告随 EvalRecord 记录每 case 的映射来源：
+
+- **Rule baseline（P-1(a)）**：PASS→PASS、REJECT→REJECT、**COMPLEX→HUMAN_REVIEW**（评测语义 = "不可自动判"：无 Agent 时复杂案只能人工）；报告须注明该 "COMPLEX→人工" 与线上 "COMPLEX→Agent" 是**不同口径**（§3.2/§7.1）。
+- **Single-call LLM**：REJECT 候选 `decision_confidence < CONFIDENCE_ABSTAIN_THRESHOLD(0.7)` 经确定性后处理记 HUMAN_REVIEW（与 Agent 的 REJECT Gate 同源口径，03 T-4；§3.3）。
+- **Agent**：三个 Decision Gate 的终态之一（PASS/REJECT Gate + HUMAN_REVIEW abstention 清单，03 T-4），无额外映射。
+- 映射影响 FPR / human_review_rate trade-off 的形状，报告须写明所用映射；转人工与安全并读（§4.4 核心口径）。
 
 ---
 
-## 5. Threshold Sweep
+## 5. Threshold Sweep（P-5 已拍板：单参数、排在 Phase 1 之后）
+
+> sweep **排在 Phase 1 框架跑通之后**（先有三方案可比指标与 §4 口径，再谈校准；落 Phase 2，§8）。
+> P-5 已拍板：第一轮**只 sweep Evidence 阈值、单参数**，不做多参数联合 Grid Search。
 
 ### 5.1 扫哪些常量（只动配置，不动判定逻辑；《00》§11.5/03 T-11）
 
-| 常量 | 扫描网格（《00》§11.5） | 影响路径 |
+| 常量 | 第一轮口径（P-5） | 影响路径 |
 |---|---|---|
-| `EVIDENCE_MIN_SIM` / `EVIDENCE_STRONG` | 0.60/0.65/0.70/0.75/0.80/0.85/0.90 | 产 IMAGE_SIMILARITY 证据的三档分界 → 影响含图片证据案（agent tools_node quality_filter / Rule 图片相关路径） |
-| `CONFIDENCE_ABSTAIN_THRESHOLD` | 二次扫或先固定 0.7（[建议]先固定，随主扫观察，P-5） | REJECT Gate 安全门槛 → 主要影响 Agent 与 Single-call LLM 的 abstention |
+| `EVIDENCE_MIN_SIM` / `EVIDENCE_STRONG` | **只 sweep Evidence 阈值一维**：0.60/0.65/0.70/0.75/0.80/0.85/0.90；每次只动一个常量、另一个取当前默认（0.70/0.85）固定 | 产 IMAGE_SIMILARITY 证据的三档分界 → 影响含图片证据案（agent tools_node quality_filter / Rule 图片相关路径） |
+| `CONFIDENCE_ABSTAIN_THRESHOLD` | **固定 0.7，第一轮不扫** | REJECT Gate 安全门槛 → 主要影响 Agent 与 Single-call LLM 的 abstention |
 
-- 网格组合量级与是否全组合（EVIDENCE_MIN ≤ EVIDENCE_STRONG 约束下采样）〔细化待定〕，v1 建议先全组合小跑 validation 子集定粗区间再加密。
+- **不做多参数联合 Grid Search**（EVIDENCE×CONFIDENCE 乃至 MIN×STRONG 全组合都不做）——变量过多、无法判断效果来源（P-5）。
+- 第一轮观察 **Accuracy / Precision / Recall / FPR / FNR / human_review_rate / automation_coverage（自动化覆盖率）** 随 Evidence 阈值的变化，判断效果来源后，再决定是否联合校准 Confidence（P-5）。
 - **实现约束**：阈值全部经配置层注入（EvalContext），评测代码与判定逻辑**不得内联阈值常量**；sweep 只是换 EvalContext 重跑 agent/rule scheme，Rule 与 Agent 共用同一份配置快照。
+- sweep 第一轮两个 Evidence 常量各自的扫描次序等细节〔细化待定：实现者可自行收敛〕（其余常量取默认固定值即可）。
 
 ### 5.2 观察哪些曲线、在哪定 operating point
 
-- 主曲线：**Risk Recall / Precision / False Positive Rate / Human Review Rate** 对阈值的 trade-off（每 scheme 一组；重点看 Agent 与 Rule(a)）。
-- 只允许在 **validation 集**（§2.5）上选取 operating point；选点优先级建议：先压 FPR（防误伤商家红线，《00》§7.2-2），再保 Risk Recall，HUMAN Review Rate 作为可接受成本。
-- operating point 定义 = (EVIDENCE_MIN_SIM, EVIDENCE_STRONG[, CONFIDENCE_ABSTAIN_THRESHOLD]) 一组值，记录选点理由与所选点的四条指标值。
+- 主曲线：§5.1 七项指标对 Evidence 阈值的 trade-off（每 scheme 一组；重点看 Agent 与 Rule baseline）；自动化相关（human_review_rate / automation_coverage）须与 FPR/FNR 同图呈现（§4.4 核心口径）。
+- 只允许在 **validation 集**（§2.5）上选取 operating point；选点优先级建议：先压 FPR（防误伤商家红线，《00》§7.2-2），再保 Recall（违规召回），human_review_rate / automation_coverage 作为可接受成本。
+- operating point 定义 = (`EVIDENCE_MIN_SIM`, `EVIDENCE_STRONG`) 一组值（第一轮 `CONFIDENCE_ABSTAIN_THRESHOLD` 固定 0.7），记录选点理由与所选点的观测指标值。
 
 ### 5.3 校准结果回写
 
@@ -293,14 +327,15 @@ class SchemeRunner(ABC):
 
 ---
 
-## 6. Ablation Evaluation（可选，二期；引用《00》§13.4）
+## 6. Ablation Evaluation（Phase 2；引用《00》§13.4）
 
-- 回答"Agent 每个组件是否真的必要"，同一 eval_dataset + 同一图结构逐组件去掉：
-  Full Agent（基线）/ −RAG（无 CaseSearch+PolicySearch）/ −MerchantTool / −CaseTool / −ImageTool。
-- **二期做，不阻塞三方案主对比**（M2 之后、RAG 接入后更可信）。
-- 实现只做"图装配层不给该工具注册 / plan prompt 不注入该工具描述"，不动判定逻辑与评测集（差异唯一归因）；装配裁剪基于 04-graph-design 的注册表。
+- 回答"Agent 每个组件/每层能力是否真的必要"，两类消融跑**同一 eval_dataset**：
+  - **方案级（Single-call 的上下文 vs Agent 的主动调查，§3.3 变体）**：2a（Raw Input）→ 2b（+RAG-in-prompt 预塞政策）→ 2c（Multi-step Agent + 主动调查）——先量化"给 Single-call 更多文本能提升多少"，再看"Agent 额外收益是否来自主动调查而非只是看到更多文本"；
+  - **组件级（同图结构逐组件去掉）**：Full Agent（基线）/ −RAG（无 CaseSearch+PolicySearch）/ −MerchantTool / −CaseTool / −ImageTool。
+- **Phase 2 做，不阻塞 Phase 1 三方案可比跑分**（三方案主对比之后；真实 RAG 接入后组件级消融更可信）。
+- 实现只做装配层裁剪，不动判定逻辑与评测集（差异唯一归因）：方案级只换装配（Single-call prompt 是否预塞政策 / Agent 是否给工具）；组件级只做"图装配层不给该工具注册 / plan prompt 不注入该工具描述"，基于 04-graph-design 的注册表。
 - 判定规则：去掉后指标几乎不变 → 组件必要性存疑；显著变差 → 必要能力（《00》§13.4）。
-- 前置依赖：工具数据源至少达"能区分有/无该工具证据"的种子覆盖（InMemory 种子里查不到先例时，−CaseTool 必然无差异，结论失效——见 §7）。
+- 前置依赖：工具数据源至少达"能区分有/无该工具证据"的种子覆盖（InMemory 种子里查不到先例时，−CaseTool 必然无差异，结论失效——见 §7.2）。
 
 ---
 
@@ -310,38 +345,44 @@ class SchemeRunner(ABC):
 
 - Rule baseline 选项 (a) 复用 `pra.screening`，其行为随**并行修正集**变动（空规则集不得静默 PASS、brand 空缺不得直判 PASS、品牌词加词边界、品牌词命中 REJECT→COMPLEX 等）。
 - **本文档刻意不与具体规则对齐**：harness 不做规则动作断言，只按"运行时当前行为"取数；报告必须记录 **screening 行为快照**（git commit / 规则语义版本）。
-- 修正集未完成前跑 Rule baseline 会失真（漏放/误杀 → "Agent 比 Rule 强"可能是假象）→ **Rule baseline 正式跑分排在修正集合入之后**（与 code-review-backlog"与 02-evaluation 的耦合"一致）。
-- Fix 5（品牌词命中 REJECT vs COMPLEX→Agent 上下文终裁）本身是评测实验点：评测集需含"品牌词命中但可能合法"样本，报告给出两种规则动作下的对比行。
+- 修正集未完成前 Rule baseline 结论会失真（漏放/误杀 → "Agent 比 Rule 强"可能是假象）：Phase 1 的三方案可比跑分照常执行，但把该失真列入**结论边界**（§3.4）；**正式基线结论在修正集合入后重跑并纳入 Regression**（§8 Phase 2），与 code-review-backlog"与 02-evaluation 的耦合"一致。
+- Fix 5（品牌词命中 REJECT vs COMPLEX→Agent 上下文终裁）本身是评测实验点：评测集需含"品牌词命中但可能合法"样本，报告给出两种规则动作下的对比行；其与评测口径 "COMPLEX→人工"（§3.2/§4.5）的差异须一并注明。
 
 ### 7.2 RAG 未接 → Agent 工具数据源的结论边界
 
-- RAG（Policy KB / Case KB 真实检索）尚未接入，Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4）。
+- RAG（Policy KB / Case KB 真实检索）尚未接入，Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）。
+- **报告必带边界声明（P-2 口径）**："当前结果主要验证 **Agent Workflow、规则协同与 Evaluation Framework**，不代表真实 LLM 最终能力；InMemory 种子覆盖有限，**可能低估 Agent 上限**。"（与 §3.4 同文）
 - 局限：种子里缺失的真实先例/完整规避史 Agent 取不到 → 多信号与对抗类案的 Evidence Sufficiency、Marginal Evidence Gain 等指标会**低估上限**。
-- 报告必带边界标注："工具为 InMemory 种子数据时的结论边界"；真实 RAG/Merchant 接入后以 real 模式复核（二期）。
+- 真实 RAG/Merchant 接入后以 real 模式复核（Phase 3，§8）。
 
 ---
 
-## 8. 验收标准与里程碑
+## 8. 验收标准与里程碑（分阶段主线，P-4/P-5 拍板后）
 
-| 里程碑 | 内容 | 验收标准（骨架级） |
+| 阶段 | 内容 | 交付 / 验收 |
 |---|---|---|
-| **M1** | 评测集 v1 可用 | N ≥ 300（P-4 定终值）；五类分布达标（±5pp）；每条含 expected 三字段 + scene + source_type + 标注交叉校验；Hard 标记与 hard_reason 齐；loader/schema 校验通过；生成脚本可复现（同 commit 同产物） |
-| **M2** | 三方案 harness 跑通同一数据集产出 metrics | rule/single_call_llm/agent 三 scheme 在全集（或 validation 子集）产出 EvalRecord 无异常；scripted 模式同 case 重跑**逐字节一致**（确定性重放断言）；metrics 模块有金标准小样本单测；Rule 正式跑分在 screening 修正集合入后执行（§7.1） |
-| **M3** | sweep 曲线与 operating point | validation 上产出四条曲线（Recall/Precision/FPR/HRR）；记录 operating point 与选点理由；回写《00》§7.6 与 03 §5；标签阈值口径同步修订（§5.3） |
-| **M4** | 评测报告 | 指标汇总 + 按 scene 分层 + 与《00》§12.4 预期结论表逐行对照（哪些符合/哪些反例及其解释）；明确回答 Q1–Q4；附结论边界标注（数据集版本 / LLM 模式 / 工具数据源 / 对齐映射） |
+| **Phase 1**（当前） | eval_data schema + **30~50 条 golden cases**（PASS/REJECT 真值，§2.1）→ Rule / Single-call / Agent 三 **SchemeRunner**（§3.2–3.4）→ 决策指标评测（Accuracy/Precision/Recall/FPR/FNR，§4.1）→ Console Report → **确定性重放断言** | **三方案在同一数据集上可比跑分**（含 metrics 金标准小样本单测）；scripted 同 case 重跑**逐字节一致**；报告含结论边界声明（§3.4/§7.2）与 screening 行为快照（§7.1）；FPR 为 Phase 1 重点指标 |
+| **Phase 2** | 300+ 正式集（§2.1 五类分布）；Evidence 侧指标评测（Evidence Sufficiency / Marginal Evidence Gain，§4.2）；**Ablation**（2a/2b/2c + 组件级，§3.3/§6）；**abstention 评测**（AUTO_DECIDABLE / SHOULD_ABSTAIN，§4.4）；**Threshold Sweep**（Evidence 单参数、CONFIDENCE 固定 0.7，§5）；**Regression** | sweep 曲线与 operating point（validation 集）并回写《00》§7.6 / 03 §5（§5.3）；abstention 五指标在正式集出数；修正集合入后重跑 Rule 基线并纳入回归（§7.1） |
+| **Phase 3** | **Real LLM Evaluation**；LLM-as-a-Judge（如必要）；Regression Report | real 模式复核 scripted 结论（§3.4/§7.2）；完整报告逐行对照《00》§12.4 预期结论、明确回答 Q1–Q4（§1.2），附全部结论边界标注 |
 
-> M2 是"能跑"的门槛，M3/M4 才回答 Q1–Q4；M1 与 M2 可并行推进（loader + smoke 集先行）。
+> **最终主线**：**Rule Baseline → Single-call LLM → Multi-step Agent → Ablation → Abstention → Threshold Sweep → Regression**。
+> Smoke 集（≤10 条 demo case）先行验证 loader/harness/EvalRecord 链路，不混入正式统计（§2.3）。
+> Phase 1 是"能跑且可比"的门槛，Phase 2/3 才回答 Q1–Q4；Phase 1 与 Phase 2 数据构造可并行推进。
 
 ---
 
-## 9. 待拍板清单汇总（实现前必拍；[建议] 为推荐默认，正文未按已定稿处理）
+## 9. 拍板记录（P-1~P-5 已拍板，供追溯）
 
-| # | 待拍板项 | 选项 | [建议] 默认 |
-|---|---|---|---|
-| P-1 | Rule baseline 用哪种 | (a) `pra.screening` 三分流，COMPLEX→HUMAN_REVIEW 映射；(b) 独立二分 rule（命中→REJECT 否则 PASS） | **(a) 为主 baseline**（结论可外推线上，输出空间天然对齐）；(b) 作"纯规则上限"敏感性补充。影响 §3.2/§3.5/§4.5 |
-| P-2 | 评测时 Agent 用 scripted 桩还是真实 LLM、工具数据源 | scripted + InMemory（确定性、CI 可跑）vs real LLM + 真实 RAG/Merchant | **scripted + InMemory 为默认**；real 模式二期复核；报告标注结论边界（§3.4/§7.2） |
-| P-3 | HUMAN_REVIEW 语义与对齐口径 | HRR 细分三率（§4.4）；二分类混淆矩阵是否剔除 HUMAN 期望案；Rule/Single-call 的 HUMAN 映射（§4.5） | **三分类统一对齐 + HRR 细分三率**；PASS/REJECT 真值案上算二分类指标，HUMAN 期望案单列 abstention 质量 |
-| P-4 | 评测集规模/来源/HUMAN 期望案 | 规模 300 vs 500；复用 demo case（P_88231 等）与否；是否含 expected=HUMAN_REVIEW 案及其占比 | **规模先取下限 300（质量优先）；demo case 仅作 smoke 集 ≤10 条不混正式分布；含少量 HUMAN 期望案（建议 ≤10%）** 用于 abstention 真值（占比与口径随 P-3 联动） |
-| P-5 | sweep 是否含 `CONFIDENCE_ABSTAIN_THRESHOLD` 联合扫描 | 主扫 EVIDENCE 双阈值网格；CONFIDENCE 二次扫或先固定 0.7 | **EVIDENCE 网格全扫、CONFIDENCE 先固定 0.7 观察**，主扫完成后再决定是否联合校准（§5.1） |
+> 本节把 P-1~P-5 的**最终决策**与**原建议**对照存档；正文已按"最终决策"落实为定稿口径，不再标 [待拍板]。
 
-> 其余〔细化待定〕（不含 P 编号、可由实现者在写码前自行收敛或回主 agent 确认）：evidence 引用素材形态（§2.2）、数据文件分卷方式（§2.3）、Marginal Evidence Gain 加权口径（§4.2）、Evidence Sufficiency 精确公式（§4.2）、sweep 网格组合采样（§5.1）、harness 是否含 DB 真落库集成路径（§3.6）。
+| # | 议题 | 原建议 | 最终决策（权威口径） | 落点 |
+|---|---|---|---|---|
+| P-1 | Rule baseline 语义 | (a) 复用 `pra.screening` 三分流为主；(b) 独立二分 rule 作"纯规则上限"敏感性补充（可选、不进主对比表） | **拍板 (a)**：主 baseline = 线上 `pra.screening` 三分流——PASS→PASS、REJECT→REJECT、**COMPLEX→HUMAN_REVIEW**（评测语义：无 Agent 时复杂案只能人工；报告注明与线上 "COMPLEX→Agent" 是不同口径）；**(b) 本期不做**，后续如需作敏感性补充再单独加、不进主对比表 | §3.2/§3.5/§4.5/§7.1 |
+| P-2 | Agent 评测模式与数据源 | scripted Agent + InMemory 为默认；real 模式二期复核 | **Phase 1 默认 scripted Agent + InMemory 种子数据**（确定性、可重复、CI 可回归）；**Real LLM Evaluation 排后续阶段**；报告必声明结论边界（验证 Agent Workflow/规则协同/Evaluation Framework，不代表真实 LLM 最终能力；InMemory 种子覆盖有限可能低估 Agent 上限） | §3.4/§7.2/§8 |
+| P-3 | HUMAN_REVIEW / Abstention 语义与指标 | 三分类统一 + HRR 细分三率 + HUMAN 期望案单列 abstention 质量 | 三分类统一但 **HUMAN_REVIEW 不当普通第三分类**（评估 Agent 的 abstention/转人工能力）；指标命名**去 HRR 缩写**，统一 `human_review_rate` / `abstention_rate` / `automation_coverage` / `abstention_recall` / `wrong_auto_decision_rate`；**Phase 1 只有 PASS/REJECT 真值案**，指标 = Accuracy/Precision/Recall/FPR/FNR（重点 FPR）；**Phase 2 引入 AUTO_DECIDABLE / SHOULD_ABSTAIN** 两类语义；核心口径：**不是为降转人工牺牲安全——自动化必须与 FPR/FNR 并读** | §4.1/§4.4/§4.5 |
+| P-4 | 数据集规模/来源/阶段 | 规模 300 起步；demo case 作 smoke ≤10 条不混正式分布；含少量 HUMAN 期望案（≤10%） | **推翻"300 起步"**：Phase 1 **30~50 条**（跑通 Golden Dataset → Rule → Single-call LLM → Agent → Evaluator → Metrics → Console Report 全链路）；Phase 2 **300+ 条**正式集（normal 20% / violation 20% / boundary 30% / multi-signal 20% / evasion 10%）；Smoke ≤10 条（P_88231 等）仅快速验证、不混正式统计；HUMAN 期望案不强制占比；**每个 case 必须有明确 Ground Truth，不为凑比例塞数据** | §2.1–§2.4/§8 |
+| P-5 | sweep 范围与顺序 | EVIDENCE 双阈值网格全扫、CONFIDENCE 先固定 0.7 观察 | **第一轮只 sweep Evidence 阈值**（0.60/0.65/0.70/0.75/0.80/0.85/0.90 单参数），`CONFIDENCE_ABSTAIN_THRESHOLD` **固定 0.7**；**不做多参数联合 Grid Search**（变量过多无法判断效果来源）；观察 Accuracy/Precision/Recall/FPR/FNR/human_review_rate/自动化覆盖率后再决定是否联合校准 Confidence；**sweep 排在 Phase 1 框架跑通之后** | §5/§8 |
+
+> 其余〔细化待定〕（不含 P 编号，均为**实现者可自行收敛**的落地细节；如与实现冲突可回主 agent 确认）：
+> evidence 引用素材形态（§2.2）、数据文件分卷方式（§2.3）、Marginal Evidence Gain 加权口径（§4.2）、Evidence Sufficiency 精确公式（§4.2）、
+> sweep 第一轮两个 Evidence 常量的扫描次序与其余常量取值（§5.1）、harness 是否含 DB 真落库集成路径（§3.6）。
