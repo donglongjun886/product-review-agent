@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS review_case (
   event_type   VARCHAR(32)  NOT NULL COMMENT '触发事件：NEW_LISTING/UPDATE_TITLE/UPDATE_IMAGE...',
   status       VARCHAR(16)  NOT NULL DEFAULT 'PENDING' COMMENT '案件状态机：PENDING/INVESTIGATING/DECIDED',
   version      INT          NOT NULL COMMENT '商品乐观锁版本（同内容同版本幂等语义留待 API 层，不固化为唯一键）',
+  triage_result VARCHAR(16) NULL     COMMENT 'Screening 分流结果：PASS/REJECT/COMPLEX（COMPLEX 时记录、直判时也记录 —— 回答 case 为何直接结束/为何进 Agent）',
   case_json    JSON         NOT NULL COMMENT 'ProductReviewCase 全量输入快照（防上游漂移；重放/eval 锚点）',
   created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
@@ -34,14 +35,14 @@ CREATE TABLE IF NOT EXISTS review_case (
 CREATE TABLE IF NOT EXISTS review_run (
   run_id       VARCHAR(64)  NOT NULL COMMENT 'LangGraph thread_id（O-6：thread_id=run_id），恢复/审计键',
   case_id      VARCHAR(64)  NOT NULL COMMENT '归属案件（case 1:N run）',
-  status       VARCHAR(16)  NOT NULL DEFAULT 'RUNNING' COMMENT 'Run 运行态：RUNNING/DECIDED（03 T-8 运行终态；非裁决值，裁决只在 review_result）',
-  trigger_type VARCHAR(32)  NOT NULL DEFAULT 'INITIAL' COMMENT 'Run 目的：INITIAL/RE_REVIEW/HUMAN_REVIEW_RE_RUN...（支撑多 Run 溯源）',
+  status       VARCHAR(16)  NOT NULL DEFAULT 'RUNNING' COMMENT 'Run 运行态：RUNNING/DECIDED（03 T-8 运行终态；非裁决值，裁决只在 review_result；直判 run 建行即 DECIDED）',
+  trigger_type VARCHAR(32)  NOT NULL DEFAULT 'INITIAL' COMMENT 'Run 目的：Agent 调查 INITIAL/RE_REVIEW/HUMAN_REVIEW_RE_RUN... 或规则直判 SCREENING_DIRECT（支撑多 Run 溯源）',
   started_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  ended_at     DATETIME(3)  NULL COMMENT 'DECIDED 时刻（时长审计）',
+  ended_at     DATETIME(3)  NULL COMMENT 'DECIDED 时刻（时长审计；直判 run started≈ended）',
   PRIMARY KEY (run_id),
   KEY idx_case_started (case_id, started_at),
   CONSTRAINT fk_run_case FOREIGN KEY (case_id) REFERENCES review_case (case_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次 Agent 执行（一次调查一个 run；裁决不在本表）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一次审核判定活动（Agent 调查 INITIAL/RE_REVIEW 或规则直判 SCREENING_DIRECT；裁决不在本表）';
 
 CREATE TABLE IF NOT EXISTS review_trace (
   trace_id    BIGINT       NOT NULL AUTO_INCREMENT COMMENT 'DB 行号',

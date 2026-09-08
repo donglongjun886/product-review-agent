@@ -6,7 +6,7 @@
 
 生产主线：商品上架/变更 → 传统规则 + 模型初筛（同步、快、便宜）→ 三分流（明确正常 / 明确违规 / 复杂低置信）→ 复杂低置信案件投递 **Agent**（LangGraph 编排）→ `PASS / REJECT / HUMAN_REVIEW` → 人工裁决回流案例库 / 策略库 / 评测集。
 
-**当前进度**（2026-09）：graph MVP 已合入 —— 调查子图 5 节点端到端可跑（无 API key）；HTTP 接入面（`POST /api/v1/reviews`）与 MySQL 五表落库闭环已通；screening 三分流、evaluation、RAG、MQ worker 为规划（见下文目录与「下一步」）。
+**当前进度**（2026-09）：graph MVP 已合入 —— 调查子图 5 节点端到端可跑（无 API key）；HTTP 接入面（`POST /api/v1/reviews`）与 MySQL 五表落库闭环已通；**Screening 三分流已实现**（rule_engine 规则引擎 + triage：PASS/REJECT 规则直判落库、COMPLEX 走 Agent 调查）；evaluation、RAG、MQ worker 为规划（见下文目录与「下一步」）。
 
 ## 系统总链路
 
@@ -57,13 +57,15 @@ src/pra/
 │                 Evidence / Hypothesis / ReviewDecision / Decision 三分类
 ├── tools/        6 个调查工具（默认注入 InMemory 数据源，开箱可跑）：
 │                 product / image_analysis / ocr / merchant / case_search / policy_search
-├── screening/    机审初筛 + 三分流（rule_engine / triage）——规划中（骨架占位）
+├── screening/    机审初筛 + 三分流（rule_engine / triage）：terms（规则词表单一来源，
+│                 Screening 与 Agent R1 硬规则共用）/ rules（R-101/102 REJECT、
+│                 R-301/302 COMPLEX）/ engine（triage 纯函数 + RULE_HIT 证据）
 ├── evaluation/   评测 harness：Rule / Single-call LLM / Agent 三方案对比——规划中（占位）
 ├── rag/          政策库 + 案例库向量检索——规划中（占位）
 └── common/       通用工具——规划中（占位）
 
 docs/         设计文档（见「文档索引」）
-migrations/   MySQL 核心表 DDL：001_review_core_tables.sql（5 表）
+migrations/   MySQL 核心表 DDL：001_review_core_tables.sql（5 表）/ 002_review_case_triage.sql（增量：review_case.triage_result）
 scripts/      demo_walkthrough.py（端到端走查）/ demo_api.py（执行器演示）
 tests/        pytest 用例（待评测/单测实施者落盘）
 ```
@@ -134,8 +136,11 @@ curl -X POST http://127.0.0.1:8000/api/v1/reviews \
 # 响应信封：{"run_id": "<uuid4 hex>", "review_decision": {decision/risk_level/risk_type/...}}
 ```
 
-注意：`POST /api/v1/reviews` 同步执行调查图**并落库**（`persist_service.run_and_persist`），
-需要本机 MySQL 可达且已建表（见下节）；图执行/落库异常统一返回 500（detail 为人类可读
+注意：`POST /api/v1/reviews` **受理即 Screening 三分流**（`persist_service.process_review`）：
+verdict=COMPLEX 的案件同步执行调查图**并落库**（Agent run，`run_and_persist`）；
+PASS/REJECT 的案件由规则**直判落库**（`run_screening_direct`，trigger_type=SCREENING_DIRECT，
+无 trace、终裁即 DECIDED），需要本机 MySQL 可达且已建表（含 002 的 review_case.
+triage_result 列，见下节）；triage/图执行/落库异常统一返回 500（detail 为人类可读
 信息，不暴露堆栈）。
 
 ### 数据库（可选，落库闭环需要）
@@ -202,7 +207,9 @@ uv run pytest tests/ -q   # 测试见 tests/
 
 ## 下一步（规划，非已实现）
 
-- **screening 三分流**：rule_engine / triage 落地，接 Agent 入口（当前 case 由脚本/API 直接投递）
+- **Screening 三分流已实现**（terms/rules/engine + 直判落库 + POST 受理即分流；单测见
+  tests/test_screening.py）—— 遗留：真实品牌黑名单经规则层注入/二期策略库、R2/R3 归因
+  观察与规则词表调优
 - **单测与评测集**：tests/ 落盘；evaluation 实现 Rule / Single-call LLM / Agent 三方案对比
   与 Hard Case Benchmark，用评测证明 Agent 必要性
 - **RAG 真实检索**：政策库 + 案例库向量化（Qdrant）替换工具默认 InMemory 数据源

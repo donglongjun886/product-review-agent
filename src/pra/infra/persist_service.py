@@ -1,24 +1,34 @@
 """落库编排（持久化服务）—— 「接入 → 落库闭环」worker 侧主入口（总链路 ② case 落库 + ⑪ 持久化）。
 
-职责：把一次复杂风险调查（LangGraph 子图执行）的**业务真相**显式落 MySQL 五表
+职责：把一次**审核判定活动**的**业务真相**显式落 MySQL 五表
 （review_case / review_run / review_trace / review_evidence / review_result）。
-与线程 Checkpointer 的分工（选型 A，docs/04-graph-design.md §7.2/§7.4）：线程状态
-checkpoint（InMemorySaver）只服务断点续跑/eval 重放；本模块负责把 agent_step
-（review_trace）、evidence（review_evidence）、最终裁决（review_result）与运行/案件
-状态机（review_run / review_case）落业务表 —— 业务真相在 MySQL，不在内存。
+判定活动有两种执行方式（拍板 D：review_run 语义重定义为"一次审核判定活动"）：
+- **Agent 调查**：``run_and_persist`` —— LangGraph 子图执行（trigger_type=
+  INITIAL/RE_REVIEW），逐节点落 review_trace；
+- **规则直判**：``run_screening_direct`` —— Screening 三分流 PASS/REJECT 确定性
+  直接终裁（trigger_type="SCREENING_DIRECT"），无 trace 行、started_at≈ended_at、
+  status 直接 DECIDED；规则命中证据（RULE_HIT）挂直判 run 的 review_evidence，
+  终裁写 review_result（source_run_id=直判 run）—— 保证 ``result → run → evidence``
+  审计链对两类裁决统一成立。
 
-``run_and_persist`` 是**未来 MQ worker 复用的主入口**（总链路 A·1 演进：
-HTTP 路由 → service.run_review；MQ/worker 化 → 消费 product_review_request 后调本函数）。
+``process_review`` 是 **POST /api/v1/reviews 主入口（受理即分流）**：对 case 先做
+Screening 三分流（``pra.screening.engine.triage``）—— COMPLEX → 走 run_and_persist
+（Agent 调查，case.triage_result='COMPLEX'）；PASS/REJECT → 走 run_screening_direct
+（规则直判终裁）。``run_and_persist`` 亦为**未来 MQ worker 复用的 Agent 调查主入口**
+（总链路 A·1 演进：HTTP 路由 → process_review；MQ/worker 化 → 消费
+product_review_request 后对投递 case 先 triage 再按 verdict 分支调本模块）。
 演进指引（对后续 worker 实施者）：
-1. 幂等键策略：本函数用 ``run_id``（缺省 uuid4().hex）作 review_run 主键 —— worker
+1. 幂等键策略：本模块用 ``run_id``（缺省 uuid4().hex）作 review_run 主键 —— worker
    若需消费幂等，可用消息/业务键派生确定性 run_id（如 f"{case_id}:{attempt}"），
    run_id PK 天然去重；case 维度幂等键（product_id+version）按 DDL 注记留待 API/
-   worker 请求语义定，本函数按 case_id 复用 review_case 行（不重复建 case）。
-2. 断点语义：run 行先于 stream 落库（status=RUNNING）；stream 每步 trace 即写即
-   commit —— 中途崩溃（进程/DB/图异常）时已落 trace 可查、run 停留 RUNNING 可续跑；
-   后续接自研 MySQL Checkpointer + Redis 幂等去重时可在此补"续跑探测"。
-3. 状态机：run/case 收尾置 DECIDED；review_result 用 ``INSERT ... ON DUPLICATE KEY
-   UPDATE`` 覆盖该 case 最新裁决（last-writer-wins；历史裁决/多 run 对比留待回流需求）。
+   worker 请求语义定，本模块按 case_id 复用 review_case 行（不重复建 case）。
+2. 断点语义（Agent 路径）：run 行先于 stream 落库（status=RUNNING）；stream 每步
+   trace 即写即 commit —— 中途崩溃（进程/DB/图异常）时已落 trace 可查、run 停留
+   RUNNING 可续跑；后续接自研 MySQL Checkpointer + Redis 幂等去重时可在此补"续跑
+   探测"。规则直判路径无 stream，单 commit 原子落库即可。
+3. 状态机：run/case 收尾置 DECIDED（直判 run 建行即 DECIDED）；review_result 用
+   ``INSERT ... ON DUPLICATE KEY UPDATE`` 覆盖该 case 最新裁决（last-writer-wins；
+   历史裁决/多 run 对比留待回流需求）。
 4. 时间口径：所有时间列写 **naive UTC**（``_utcnow``，见 infra/db.py docstring），
    MySQL DATETIME(3) 存 naive；读取方按 UTC 解释 —— 勿混入本地时区。
 5. 观测：review_trace 每行 = 一步（LLM 节点行 / 工具 TOOL_CALL 行，seq 连续唯一）；
@@ -27,7 +37,7 @@ HTTP 路由 → service.run_review；MQ/worker 化 → 消费 product_review_req
    这些列即自洽，无需改表结构。
 
 错误语义：图执行/落库中途异常向上抛出（HTTP 层转 500；未来 worker 转失败重试/死信）。
-已 commit 的 run/trace 行保留（RUNNING/INVESTIGATING），供观测与续跑 —— 不在本函数
+已 commit 的 run/trace 行保留（RUNNING/INVESTIGATING），供观测与续跑 —— 不在本模块
 内吞异常或做部分回滚（crash 可查优先于 all-or-nothing）。
 """
 
@@ -45,7 +55,14 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 
 from pra.agent.checkpointer import make_memory_checkpointer
 from pra.agent.state import build_initial_state
-from pra.domain.models import Evidence, ProductReviewCase, ReviewDecision
+from pra.domain.models import (
+    Budget,
+    Decision,
+    Evidence,
+    ProductReviewCase,
+    ReviewDecision,
+    RiskLevel,
+)
 from pra.infra.db import get_sessionmaker
 from pra.infra.rdb_models import (
     ReviewCaseORM,
@@ -54,13 +71,17 @@ from pra.infra.rdb_models import (
     ReviewRunORM,
     ReviewTraceORM,
 )
+from pra.screening.engine import TriageResult, rule_evidence, triage
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["run_and_persist"]
+__all__ = ["process_review", "run_and_persist", "run_screening_direct"]
 
 # 单行 JSON 上限（防工具/LLM 巨行撑爆 review_trace.output_json / input_json 可读性）。
 _JSON_CAP = 64 * 1024
+
+# 规则直判 run 的 trigger_type（拍板 D：规则直判 = review_run 的一种执行方式）。
+_TRIGGER_SCREENING_DIRECT = "SCREENING_DIRECT"
 
 # 节点名 → review_trace.step_type 词汇表（DDL 注释：HYPOTHESIZE/PLAN/TOOL_CALL/
 # REEVALUATE/DECIDE）。图内 tools 节点不落 "TOOLS" 行 —— 其 update 内每条
@@ -250,14 +271,21 @@ async def run_and_persist(
     *,
     run_id: str | None = None,
     trigger_type: str = "INITIAL",
+    triage_result: str | None = None,
 ) -> dict:
-    """执行一次完整复杂风险调查并把业务真相落 MySQL 五表 —— **MQ worker 复用主入口**。
+    """执行一次完整复杂风险调查（**Agent 调查路径**）并把业务真相落 MySQL 五表。
+
+    ``process_review`` 分流后 verdict=COMPLEX 时调用本函数（triage_result="COMPLEX"）；
+    本函数保持 Agent 调查路径语义不变（图执行 + trace/evidence/result 落库），只新增
+    case 行写 ``triage_result``（拍板：COMPLEX 时记录 —— 回答"case 为什么进 Agent"）。
 
     :param case: 审核案件（domain 输入 DTO）。case_id 即 review_case 主键；
         case_json 落 ``case.model_dump(mode="json")`` 全量快照。
     :param run_id: 本次运行 ID（= LangGraph thread_id，O-6）。None → 自动
         ``uuid4().hex``；worker 幂等场景可传确定性 run_id（见模块 docstring 演进指引）。
     :param trigger_type: run 目的（INITIAL/RE_REVIEW/...），落 review_run.trigger_type。
+    :param triage_result: Screening 分流结果（COMPLEX/PASS/REJECT），非 None 时写
+        review_case.triage_result（创建与复用 case 行均写）。
     :return: 摘要 dict：::
 
             {
@@ -269,8 +297,9 @@ async def run_and_persist(
 
     流程（单 session 多 commit，里程碑保证断点可查）：
     a. case 行：按 case_id SELECT；不存在 INSERT（status=INVESTIGATING、case_json=全量
-       快照、product_id/merchant_id/event_type/version 照填）；已存在则**复用不覆盖
-       case_json**（快照=首投内容，防上游漂移），仅刷新 status=INVESTIGATING。
+       快照、product_id/merchant_id/event_type/version 照填，triage_result=参数值）；
+       已存在则**复用不覆盖 case_json**（快照=首投内容，防上游漂移），仅刷新
+       status=INVESTIGATING（与 triage_result，参数非 None 时）。
     b. run 行：INSERT（RUNNING + trigger_type + started_at）后 commit —— run 先落库，
        保证 stream 途中崩溃可查到 run 与已落 trace。
     c. ``astream(..., stream_mode="updates")`` 逐步执行：每节点按 seq（1 起连续自增）
@@ -300,6 +329,7 @@ async def run_and_persist(
                 event_type=case.event_type,
                 status="INVESTIGATING",
                 version=case.product.version,
+                triage_result=triage_result,
                 case_json=case.model_dump(mode="json"),
                 created_at=now,
                 updated_at=now,
@@ -307,6 +337,8 @@ async def run_and_persist(
             session.add(case_row)
         else:
             case_row.status = "INVESTIGATING"  # 复用：刷新为调查中（不覆盖 case_json）
+            if triage_result is not None:  # 分流结果随本次判定刷新
+                case_row.triage_result = triage_result
             case_row.updated_at = now
 
         # ---- b. run 行先落库并 commit（断点可查的锚点）----
@@ -458,4 +490,223 @@ async def run_and_persist(
         "run_id": resolved_run_id,
         "decision": decision,
         "counts": {"trace": trace_rows, "evidence": evidence_rows},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Screening 规则直判（trigger_type=SCREENING_DIRECT）与 POST 受理入口
+# ---------------------------------------------------------------------------
+
+
+def _direct_decision(verdict: str, evidence: list[Evidence]) -> ReviewDecision:
+    """构造规则直判的同构 ReviewDecision（确定性直判：confidence=1.0）。
+
+    PASS → decision=PASS / risk_level=NONE；REJECT → decision=REJECT / risk_level=HIGH。
+    risk_type/policy/hypothesis_trace/overrides 一律空（v1 直判不产出政策引用与假设
+    轨迹）；evidence=命中规则证据（RULE_HIT）全量。与 review_result 的
+    decision_json 快照同构（decision_json=本对象 model_dump(mode="json")）。
+    """
+    return ReviewDecision(
+        decision=Decision.PASS if verdict == "PASS" else Decision.REJECT,
+        risk_level=RiskLevel.NONE if verdict == "PASS" else RiskLevel.HIGH,
+        risk_type=[],
+        decision_confidence=1.0,  # 确定性直判：置信 1.0（非模型概率语义）
+        evidence=list(evidence),
+        policy=[],
+        hypothesis_trace=[],
+        budget_used=Budget(),  # 直判无调查预算：默认空快照（含限额）
+        overrides=[],
+    )
+
+
+async def run_screening_direct(
+    case: ProductReviewCase,
+    triage: TriageResult,
+    *,
+    run_id: str | None = None,
+) -> dict:
+    """Screening 规则直判（PASS/REJECT 确定性直接终裁）落库 —— **Agent 路径之外
+    的第二类判定活动**（trigger_type=SCREENING_DIRECT）。
+
+    :param case: 审核案件（同 run_and_persist：case_id 即主键；case_json 全量快照）。
+    :param triage: ``pra.screening.engine.triage`` 产物，verdict ∈ {PASS, REJECT}
+        （调用方须先分流确认非 COMPLEX —— COMPLEX 应走 run_and_persist Agent 路径；
+        传 COMPLEX 在此抛 ValueError，防直判误入）。
+    :param run_id: 本次判定运行 ID；None → ``uuid4().hex``。
+    :return: 摘要 dict：::
+
+            {
+                "case_id": str,
+                "run_id": str,
+                "verdict": "PASS" | "REJECT",
+                "counts": {"evidence": int},   # RULE_HIT 行数（PASS 零命中则 0）
+            }
+
+    落库（单 session 单 commit，无 stream 断点语义）：
+    a. case 行：不存在 INSERT（status=DECIDED —— 直判无调查中间态、triage_result=
+       verdict、case_json 全量快照）；已存在则复用（status=DECIDED、triage_result=
+       verdict 刷新，不覆盖 case_json）。
+    b. run 行：INSERT（status=DECIDED、trigger_type=SCREENING_DIRECT、started_at≈
+       ended_at=now）—— **无 review_trace 行**。
+    c. hits 逐条写 review_evidence（type=RULE_HIT、source_tool=ScreeningRuleEngine、
+       value=f"{rule_id} {name}: {detail}"、weight=1.0、extra_json={"rule_id"}）。
+    d. review_result upsert（decision=PASS/REJECT、risk_level=NONE/HIGH、
+       risk_type_json=[]、decision_confidence=1.0、policy_refs_json=[]、
+       decision_json=同构 ReviewDecision 快照、source_run_id=本 run）。
+    e. commit。返回 case/run/verdict/counts。
+    """
+    if triage.verdict not in ("PASS", "REJECT"):
+        raise ValueError(
+            f"run_screening_direct 只接受 PASS/REJECT 直判，收到 verdict="
+            f"{triage.verdict!r} —— COMPLEX 应走 run_and_persist（Agent 调查路径）"
+        )
+    resolved_run_id = run_id or uuid4().hex
+    case_id = case.case_id
+    now = _utcnow()
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        # ---- a. case 行（直判建行即终裁；复用不覆盖 case_json）----
+        case_row = await session.get(ReviewCaseORM, case_id)
+        if case_row is None:
+            case_row = ReviewCaseORM(
+                case_id=case_id,
+                product_id=case.product.product_id,
+                merchant_id=case.merchant_id,
+                event_type=case.event_type,
+                status="DECIDED",
+                version=case.product.version,
+                triage_result=triage.verdict,
+                case_json=case.model_dump(mode="json"),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(case_row)
+        else:
+            case_row.status = "DECIDED"
+            case_row.triage_result = triage.verdict
+            case_row.updated_at = now
+
+        # ---- b. run 行（status 直接 DECIDED、无 trace）----
+        run_row = ReviewRunORM(
+            run_id=resolved_run_id,
+            case_id=case_id,
+            status="DECIDED",
+            trigger_type=_TRIGGER_SCREENING_DIRECT,
+            started_at=now,
+            ended_at=now,  # started ≈ ended：直判无持续调查时段
+        )
+        session.add(run_row)
+
+        # ---- c. hits → review_evidence（PASS 零命中则 0 行）----
+        evidence_rows = 0
+        evidence_list: list[Evidence] = []
+        for hit in triage.hits:
+            ev = rule_evidence(case, hit)
+            evidence_list.append(ev)
+            session.add(
+                ReviewEvidenceORM(
+                    run_id=resolved_run_id,
+                    type=ev.type,
+                    source_tool=ev.source,
+                    value=ev.value,
+                    weight=ev.weight,
+                    ref_id=ev.ref_id,
+                    extra_json=_json_cap(ev.extra) if ev.extra else None,
+                    created_at=_utcnow(),
+                )
+            )
+            evidence_rows += 1
+
+        # ---- d. review_result（source_run_id=直判 run；decision_json 同构快照）----
+        decision = _direct_decision(triage.verdict, evidence_list)
+        result_payload = {
+            "case_id": case_id,
+            "source_run_id": resolved_run_id,
+            "decision": decision.decision.value,
+            "risk_level": decision.risk_level.value,
+            "risk_type_json": [_enum_value(t) for t in decision.risk_type],
+            "decision_confidence": decision.decision_confidence,
+            "policy_refs_json": list(decision.policy),
+            "decision_json": decision.model_dump(mode="json"),  # ReviewDecision 全量快照
+            "created_at": _utcnow(),
+            "updated_at": _utcnow(),
+        }
+        stmt = (
+            mysql_insert(ReviewResultORM)
+            .values(**result_payload)
+            .on_duplicate_key_update(
+                source_run_id=result_payload["source_run_id"],
+                decision=result_payload["decision"],
+                risk_level=result_payload["risk_level"],
+                risk_type_json=result_payload["risk_type_json"],
+                decision_confidence=result_payload["decision_confidence"],
+                policy_refs_json=result_payload["policy_refs_json"],
+                decision_json=result_payload["decision_json"],
+                updated_at=result_payload["updated_at"],
+            )
+        )
+        await session.execute(stmt)
+
+        # ---- e. commit ----
+        await session.commit()
+
+    logger.info(
+        "run_screening_direct 直判落库 case_id=%s run_id=%s verdict=%s evidence=%d",
+        case_id, resolved_run_id, triage.verdict, evidence_rows,
+    )
+    return {
+        "case_id": case_id,
+        "run_id": resolved_run_id,
+        "verdict": triage.verdict,
+        "counts": {"evidence": evidence_rows},
+    }
+
+
+async def process_review(
+    case: ProductReviewCase,
+    *,
+    run_id: str | None = None,
+) -> dict:
+    """POST /api/v1/reviews 主入口 —— **受理即分流**（Screening 三分流先行再分支）。
+
+    :param case: 审核案件（domain 输入 DTO）。
+    :param run_id: 运行 ID；None → 各分支自动 ``uuid4().hex``。
+    :return: 归一化摘要 dict：::
+
+            {
+                "case_id": str,
+                "run_id": str,
+                "verdict": "PASS" | "REJECT" | "COMPLEX",
+                "decision": ReviewDecision,   # 图终态或直判同构裁决（供 API 包装返回）
+                "counts": {...},              # COMPLEX: {trace, evidence}；直判: {evidence}
+            }
+
+    分流语义（拍板：三分流不是分流建议，PASS/REJECT 即终裁）：
+    - ``triage(case).verdict == COMPLEX`` → ``run_and_persist(case, run_id=...,
+      triage_result="COMPLEX")`` —— Agent 调查（case.triage_result='COMPLEX'、
+      run trigger_type=INITIAL/RE_REVIEW）；
+    - 否则（PASS/REJECT）→ ``run_screening_direct(case, t, run_id=...)`` —— 确定性
+      规则直判终裁（无 trace、status 直接 DECIDED、result.source_run_id=直判 run）。
+    """
+    t = triage(case)
+    if t.verdict == "COMPLEX":
+        summary = await run_and_persist(case, run_id=run_id, triage_result="COMPLEX")
+        return {
+            "case_id": summary["case_id"],
+            "run_id": summary["run_id"],
+            "verdict": t.verdict,
+            "decision": summary["decision"],  # 图终态 ReviewDecision（如 HUMAN_REVIEW）
+            "counts": dict(summary.get("counts") or {}),
+        }
+
+    summary = await run_screening_direct(case, t, run_id=run_id)
+    return {
+        "case_id": summary["case_id"],
+        "run_id": summary["run_id"],
+        "verdict": t.verdict,
+        "decision": _direct_decision(
+            t.verdict, [rule_evidence(case, hit) for hit in t.hits]
+        ),
+        "counts": dict(summary.get("counts") or {}),
     }

@@ -6,8 +6,11 @@ MVP 最小黑名单（04 §8 MVP 裁剪）：只实现"确定性来源"扫描，
 3. 机审信号带"硬违禁"语义（``name`` 前缀 HARD_ 且 ``result != PASS`` —— 正常
    分流层不会把硬违规投进来，但防御性保留）。
 
-默认黑名单为空集（词表来自规则引擎复用 / 二期接入），故走查场景恒不命中 ——
-本模块保证 overlay 的 R1 分支存在且可测（单测注入黑名单即可覆盖）。
+默认黑名单为空集（词表单一来源：见 ``pra.screening.rule_engine.terms`` 的
+``BLACKLISTED_BRANDS`` —— Screening 规则层与 R1 硬规则共同引用同一份，杜绝双处手抄
+漂移；真实词表经规则层注入/二期策略库接入），故走查场景恒不命中 —— 本模块保证 overlay
+的 R1 分支存在且可测（单测注入黑名单即可覆盖，注入位点仍是本模块的
+``BLACKLISTED_BRANDS`` 引用，见 tests/test_gate.py / test_metrics.py 用法）。
 """
 
 from __future__ import annotations
@@ -16,10 +19,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pra.domain.models import RiskType
+from pra.screening.rule_engine.terms import BLACKLISTED_BRANDS
 
-# 品牌黑名单（v1 空 —— 词表来自规则引擎复用；二期由 screening/rule_engine 注入）。
-# 单测/策略库接入时替换此模块级常量（或后续改为构建期注入）。
-BLACKLISTED_BRANDS: frozenset[str] = frozenset()
+# 品牌黑名单（v1 空 —— **词表单一来源**：本名引用 pra.screening.rule_engine.terms 的
+# BLACKLISTED_BRANDS，与 Screening 规则 R-101 共享；真实数据经规则层注入/二期策略库，
+# 不要在本文件另建词表）。单测/策略库接入时替换 terms 侧常量（或 monkeypatch 本名，
+# 见模块 docstring）。
 
 # 机审信号中带"硬违禁"语义的 name 前缀（防御性兜底）。
 _HARD_SIGNAL_PREFIX = "HARD_"

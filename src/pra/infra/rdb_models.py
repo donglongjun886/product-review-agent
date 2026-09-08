@@ -37,7 +37,13 @@ class Base(DeclarativeBase):
 
 
 class ReviewCaseORM(Base):
-    """审核案件 —— 一次上架/修改事件 = 一个案件（1 行 = 1 次审核事件）。"""
+    """审核案件 —— 一次上架/修改事件 = 一个案件（1 行 = 1 次审核事件）。
+
+    ``triage_result``：Screening 三分流结果（PASS/REJECT/COMPLEX）—— COMPLEX 时记录
+    （case 走 Agent 调查）、直判时也记录（case 为什么直接终裁），用于回答「case 为什么
+    直接结束 / 为什么进 Agent」。直判 case 收尾 status=DECIDED；Agent 调查 case 先
+    INVESTIGATING 后 DECIDED。
+    """
 
     __tablename__ = "review_case"
     __table_args__ = (
@@ -53,6 +59,9 @@ class ReviewCaseORM(Base):
         String(16), nullable=False, default="PENDING"
     )  # PENDING/INVESTIGATING/DECIDED
     version: Mapped[int] = mapped_column(nullable=False)
+    triage_result: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True
+    )  # PASS/REJECT/COMPLEX（Screening 三分流结果，NULL=分流前）
     case_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # 输入全量快照
     created_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
     updated_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
@@ -64,21 +73,32 @@ class ReviewCaseORM(Base):
 
 
 class ReviewRunORM(Base):
-    """一次 Agent 执行（case 1:N run）。只存运行侧事实，不存裁决（裁决唯一在 review_result）。"""
+    """一次审核判定活动（case 1:N run）—— Agent 调查或规则直判均各占一行。
+
+    语义重定义（拍板 D）：review_run 不再只描述「一次 Agent 执行」，而是「一次审核判定
+    活动」的两种执行方式之一：
+    - Agent 调查：trigger_type=INITIAL/RE_REVIEW，逐节点落 review_trace；
+    - 规则直判：trigger_type="SCREENING_DIRECT"（Screening 三分流 PASS/REJECT 直接
+      终裁），**无 trace 行**、started_at≈ended_at、status 直接 DECIDED；
+      规则命中证据挂本 run 的 review_evidence，终裁写 review_result
+      （source_run_id=本 run）—— 保证 ``result → run → evidence`` 审计链对两类裁决
+      统一成立。
+    本表只存运行侧事实，不存裁决（裁决唯一在 review_result）。
+    """
 
     __tablename__ = "review_run"
     __table_args__ = (Index("idx_case_started", "case_id", "started_at"),)  # case 下 run 列表
 
-    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # LangGraph thread_id
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # Agent 路径 = LangGraph thread_id；直判路径 = uuid4 hex
     case_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("review_case.case_id"), nullable=False
     )
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="RUNNING"
-    )  # RUNNING/DECIDED（运行态，非裁决值）
+    )  # RUNNING/DECIDED（运行态，非裁决值；直判 run 建行即 DECIDED）
     trigger_type: Mapped[str] = mapped_column(
         String(32), nullable=False, default="INITIAL"
-    )  # INITIAL/RE_REVIEW/...
+    )  # Agent 调查 INITIAL/RE_REVIEW/... 或规则直判 SCREENING_DIRECT
     started_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
     ended_at: Mapped[Optional[object]] = mapped_column(DATETIME(fsp=3), nullable=True)
 

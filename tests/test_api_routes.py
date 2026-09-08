@@ -1,7 +1,8 @@
 """API 路由层（pra/api/routes.py）轻量单测 —— 不碰真库/真图。
 
-POST /api/v1/reviews 用 **monkeypatch run_and_persist**（避免连 MySQL/执行完整图），
-断言 200 与响应信封 {run_id, review_decision}；extra 字段 → 422；GET /health → 200。
+POST /api/v1/reviews 用 **monkeypatch process_review**（避免连 MySQL/执行完整图/triage
+分支），断言 200 与响应信封 {run_id, review_decision}；extra 字段 → 422；
+GET /health → 200。
 """
 
 from __future__ import annotations
@@ -35,14 +36,14 @@ def test_health_ok():
 
 
 def test_create_review_returns_envelope(monkeypatch):
-    """POST /api/v1/reviews：monkeypatch run_and_persist → 200，形状 {run_id,
+    """POST /api/v1/reviews：monkeypatch process_review → 200，形状 {run_id,
     review_decision}（HTTP 响应形状与切换前一致）。"""
 
-    async def fake_run_and_persist(case):
+    async def fake_process_review(case):
         assert case.case_id == _CASE.case_id  # 路由把解析后的 ProductReviewCase 传入
         return {"run_id": "RUN_API_001", "decision": _fake_decision()}
 
-    monkeypatch.setattr("pra.api.routes.run_and_persist", fake_run_and_persist)
+    monkeypatch.setattr("pra.api.routes.process_review", fake_process_review)
     payload = _CASE.model_dump(mode="json")
     with TestClient(create_app()) as client:
         resp = client.post("/api/v1/reviews", json=payload)
@@ -76,13 +77,13 @@ def test_create_review_missing_required_field_422():
     assert resp.status_code == 422
 
 
-def test_run_and_persist_exception_maps_to_500(monkeypatch):
-    """run_and_persist 抛异常 → HTTP 500，detail 含人读信息（异常类型+消息）。"""
+def test_process_review_exception_maps_to_500(monkeypatch):
+    """process_review 抛异常 → HTTP 500，detail 含人读信息（异常类型+消息）。"""
 
-    async def broken_run_and_persist(case):
+    async def broken_process_review(case):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr("pra.api.routes.run_and_persist", broken_run_and_persist)
+    monkeypatch.setattr("pra.api.routes.process_review", broken_process_review)
     payload = _CASE.model_dump(mode="json")
     with TestClient(create_app()) as client:
         resp = client.post("/api/v1/reviews", json=payload)
