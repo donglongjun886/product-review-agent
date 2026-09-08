@@ -6,7 +6,7 @@
 
 生产主线：商品上架/变更 → 传统规则 + 模型初筛（同步、快、便宜）→ 三分流（明确正常 / 明确违规 / 复杂低置信）→ 复杂低置信案件投递 **Agent**（LangGraph 编排）→ `PASS / REJECT / HUMAN_REVIEW` → 人工裁决回流案例库 / 策略库 / 评测集。
 
-**当前进度**（2026-09）：graph MVP 已合入 —— 调查子图 5 节点端到端可跑（无 API key）；HTTP 接入面（`POST /api/v1/reviews`）与 MySQL 五表落库闭环已通；**Screening 三分流已实现**（rule_engine 规则引擎 + triage：PASS/REJECT 规则直判落库、COMPLEX 走 Agent 调查）；evaluation、RAG、MQ worker 为规划（见下文目录与「下一步」）。
+**当前进度**（2026-09）：主链端到端 ✅ —— HTTP 接入 `POST /api/v1/reviews` → **Screening 三分流**（rule_engine + triage：PASS/REJECT 规则直判落库、COMPLEX 走 Agent 调查）→ Agent 调查子图 → MySQL 五表落库；无 API key 可跑（默认确定性 scripted LLM 桩 + InMemory 数据源）。**Evaluation Phase 1+2 ✅**：Rule / Single-call / Agent 三方案对比 + v2 正式集（320 案）+ Ablation / Abstention / Sweep / Regression（见「评测与结论」）。**RAG MVP ✅**：Policy KB（24 条款）+ Case KB（67 案例）真实检索，BM25 / Vector / Hybrid 三模式。Real LLM 评测（Phase 3）与 RAG 向量库化（Qdrant + 本地 embedding）= 后续（同列「后续增强」）。
 
 ## 系统总链路
 
@@ -60,15 +60,49 @@ src/pra/
 ├── screening/    机审初筛 + 三分流（rule_engine / triage）：terms（规则词表单一来源，
 │                 Screening 与 Agent R1 硬规则共用）/ rules（R-101 REJECT、
 │                 R-102/301/302 COMPLEX —— R-102 品牌词交 Agent 调查，Q-1 拍板 B）/ engine（triage 纯函数 + RULE_HIT 证据）
-├── evaluation/   评测 harness：Rule / Single-call LLM / Agent 三方案对比——规划中（占位）
-├── rag/          政策库 + 案例库向量检索——规划中（占位）
-└── common/       通用工具——规划中（占位）
+├── evaluation/   评测 harness（确定性、不落 DB）：runner 编排 + 三 scheme（Rule 复用 screening
+│                 三分流 / Single-call LLM / Agent 图执行）、business + abstention 指标、
+│                 ablation（方案级 2a/2b/2c + 组件级）、sweep（Evidence 阈值单参数）、
+│                 regression（三方案决策序列 hash 比对基线）
+├── rag/          Policy KB（24 条款）+ Case KB（67 案例，RAG_CASE_ 前缀、与评测 GT 隔离）：
+│                 BM25 / Vector / Hybrid 三模式检索；实现 tools 层 PolicyIndex / CaseIndex
+│                 Protocol（Tool 层零改动，工厂注入点即 RAG Phase 2 替换位）
+└── common/       通用工具：雪花 ID / JSON 工具 / 错误码
 
 docs/         设计文档（见「文档索引」）
 migrations/   MySQL 核心表 DDL：001_review_core_tables.sql（5 表）/ 002_review_case_triage.sql（增量：review_case.triage_result）
-scripts/      demo_walkthrough.py（端到端走查）/ demo_api.py（执行器演示）
-tests/        pytest 用例（待评测/单测实施者落盘）
+scripts/      demo_walkthrough.py（端到端走查）/ demo_api.py（执行器演示）/
+              run_evaluation.py（Phase 1 三方案）/ run_ablation.py / run_sweep.py /
+              run_regression.py（回归）/ run_rag_demo.py（RAG 检索演示）/ eval_dataset_gen.py
+tests/        pytest 用例（228 passed：screening / evaluation Phase 1+2 / rag / agent / api / infra）
 ```
+
+## 评测与结论
+
+评测方法与口径见 [docs/02-evaluation.md](docs/02-evaluation.md)（三方案定义 / 指标口径 / Ablation / Sweep /
+里程碑）。Phase 1+2 已实现：三方案对比 + v2 正式集（320 案）+ Ablation / Abstention / Threshold Sweep /
+Regression。全链路**确定性**（scripted LLM + InMemory/RAG 种子数据，无真实 LLM、无网络、可重放）。
+
+### 三方案决策对比（v2 正式集 · 320 案）
+
+| 方案 | Decision Accuracy | 说明 |
+|---|---|---|
+| Rule（screening 三分流直判，COMPLEX→HUMAN_REVIEW） | **0.380** | 只覆盖确定性异常；复杂/边界案基本只能转人工 |
+| Single-call LLM（一次性全文分类） | **0.518** | 与 Agent 看到相同的输入文本，但无主动取证 |
+| Agent（多步调查子图 + 确定性决策 Gate） | **0.964** | Precision 1.0 / Recall 1.0 / FPR 0 / human_review_rate 0.036 |
+
+解读：
+
+- **Ablation（320 案）定位增益来源**：Single-call + RAG-in-prompt 预塞政策（2b）相对 Raw 输入（2a）
+  **无决策变化**；Multi-step Agent（2c）相对 2b 有 **142 案决策变化**（HUMAN_REVIEW → PASS/REJECT）——
+  即 Agent 的价值来自「**主动调查取证**」而非「看到更多文本」。
+- **Regression**：eval_data/v1（35 案）三方案决策序列 sha256 digest 与基线一致（PASS），防后续改动
+  （screening 修正 / RAG 接入 / LLM 换真）造成静默行为漂移。
+
+> **结论边界**：以上跑分使用**确定性 scripted LLM + InMemory/RAG 种子数据**（无真实 LLM / 网络），
+> Agent 高分存在「标注口径与审查员同口径」的设计耦合；它验证的是 **Agent Workflow、规则协同与
+> Evaluation Framework** 本身，**不代表真实 LLM 的最终能力**。Real LLM Evaluation（Phase 3）与
+> RAG Phase 2（Qdrant + 本地 embedding）为后续事项，见「后续增强」。
 
 ## 快速开始
 
@@ -78,7 +112,7 @@ tests/        pytest 用例（待评测/单测实施者落盘）
 # 1. 安装依赖（uv 自动创建 .venv 并同步默认 + dev 组：pytest/ruff/httpx）
 uv sync
 
-#   按需启用可选组（RAG 向量库 / 可观测性；均为规划依赖）
+#   可选组为后续依赖（RAG Phase 2 向量库 / 可观测性）；评测与 RAG MVP 均不需要额外组
 uv sync --extra rag --extra observability
 ```
 
@@ -94,6 +128,25 @@ uv run python scripts/demo_walkthrough.py
 走查案件为「P_88231 复古运动鞋 / 商家 M_5512 / NEW_LISTING」：打印每个节点关键内容后
 输出决策摘要，预期（确定性、可复现）：`HUMAN_REVIEW` / `HIGH` /
 `[POTENTIAL_IP_RISK, EVASION_PATTERN]` / `decision_confidence=0.87` / `overrides=[]`。
+
+### 评测 / RAG / 回归（确定性，无需外部依赖）
+
+与走查同构的确定性链路（scripted LLM + 种子数据，无真实 LLM / 网络），CI 可直接复用：
+
+```bash
+# Phase 1 三方案对比（默认 eval_data/v1，35 案）：按 scheme 逐行打印决策指标
+#（Accuracy/Precision/Recall/FPR/FNR/human_review_rate + 成本），末尾附口径注记
+uv run python scripts/run_evaluation.py
+
+# v2 正式集：切 eval_data/v2（320 案，五类 scene 分布），即「评测与结论」表格的数据来源
+uv run python scripts/run_evaluation.py --data eval_data/v2/cases_v2.jsonl
+
+# RAG 检索演示：固定 query × Policy/Case KB × BM25/Vector/Hybrid 三模式 → Top-K 命中与证据引用
+uv run python scripts/run_rag_demo.py
+
+# 回归：三方案决策序列 sha256 与基线快照比对（基线缺失时首次自动记录；此后一致输出 PASS）
+uv run python scripts/run_regression.py
+```
 
 ### API 演示
 
@@ -167,10 +220,11 @@ cp .env.example .env   # 编辑 DATABASE_URL=mysql+aiomysql://<user>:<pass>@127.
 ### 测试
 
 ```bash
-uv run pytest tests/ -q   # 测试见 tests/
+uv run pytest tests/ -q   # 当前 = 228 passed
 ```
 
-注：`tests/` 当前仅有 `.gitkeep` 占位，pytest 用例由评测/单测实施者落盘后，本命令即可收集运行。
+覆盖：screening 三分流、evaluation Phase 1/2（三方案 / 指标 / 数据集 schema / ablation）、rag 检索、
+agent guardrails（budget/converge/errors/gate/llm_shell/scripted_llm）、api routes、persist 落库等。
 
 ## 关键设计决策速查
 
@@ -196,25 +250,36 @@ uv run pytest tests/ -q   # 测试见 tests/
 - **Checkpoint 与业务表分离**：LangGraph 线程 checkpoint（InMemorySaver）只服务断点续跑 /
   eval 重放；业务真相（五表）由 `persist_service.run_and_persist` 落 MySQL——内存不是
   真相源。（docs/04 §7.2/§7.4；MySQL Checkpointer 为规划）
+- **评测确定性重放**：evaluation 全链路 scripted（无真实 LLM / 网络 / 随机），同 case 决策
+  序列 sha256 可回归；方案可比基于同一输入快照（docs/02 §3.1），Agent 高分须以「标注-审查员
+  同口径」的耦合 + InMemory 种子数据为边界解读（docs/02 §3.4/§7.2），不以「真实 LLM 能力」
+  外推。
+- **RAG MVP 三模式并排 + 数据隔离**：BM25 / Vector / Hybrid 同一 corpus 并排输出、不预设
+  Hybrid 最优；Case KB（RAG_CASE_ 前缀）与评测 GT 数据集物理隔离，互不污染；MVP 的
+  embedding 为确定性 mock，只验证检索链路与可重放性，不包装成语义检索。（docs/02 §7.2）
 
 ## 文档索引
 
 - [docs/00-system-design.md](docs/00-system-design.md) —— 系统设计总览（业务价值 → 决策难点 → 系统设计 → 验证结果；§15 src 布局）
 - [docs/01-agent-loop.md](docs/01-agent-loop.md) —— Agent Loop 细化：节点 / 边 / 状态契约（实现层契约）
+- [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测方案：三方案定义（公平性前提）/ 指标口径（含 abstention）/ Ablation / Threshold Sweep / 里程碑（Phase 1→2→3）
 - [docs/03-decisions.md](docs/03-decisions.md) —— T-1~T-12 参数与语义拍板表（Decision Gate 口径等）
 - [docs/04-graph-design.md](docs/04-graph-design.md) —— LangGraph StateGraph 正式设计（graph.py 实现前的最后设计）
-- `docs/02`（评测方案）——规划中，尚未生成
 
-## 下一步（规划，非已实现）
+## 后续增强（规划，非已实现）
 
-- **Screening 三分流已实现**（terms/rules/engine + 直判落库 + POST 受理即分流；单测见
-  tests/test_screening.py）—— 遗留：真实品牌黑名单经规则层注入/二期策略库、R2/R3 归因
-  观察与规则词表调优
-- **单测与评测集**：tests/ 落盘；evaluation 实现 Rule / Single-call LLM / Agent 三方案对比
-  与 Hard Case Benchmark，用评测证明 Agent 必要性
-- **RAG 真实检索**：政策库 + 案例库向量化（Qdrant）替换工具默认 InMemory 数据源
-- **MQ 异步 worker**：`product_review_request` 消费 + MySQL Checkpointer + Redis 幂等
-- **观测**：Langfuse + OpenTelemetry 接入（预算/token/延迟列已在落库层预留）
+以下均为后续事项，尚未实现；已实现范围见「当前进度」/「评测与结论」。
+
+- **Real LLM Evaluation（Phase 3）**：完整 prompt + litellm 后端，以 real 模式复核 scripted
+  结论（LLM-as-a-Judge 按需），逐行对照 docs/02 §1.2 的 Q1–Q4 预期结论
+- **RAG Phase 2**：Qdrant 向量库 + 本地 BGE embedding 替换确定性 mock embedding（装配替换位
+  已留：`pra.rag.factory` 注入点 + pyproject `rag` extra 已声明）
+- **MQ 异步 worker + 人工审核队列**：`product_review_request` 消费 + MySQL Checkpointer +
+  Redis 幂等
+- **可观测性**：Langfuse / OpenTelemetry 二选一接入（预算 / token / 延迟列已在落库层预留）
+- **Threshold Sweep 定稿回写**：operating point 定稿后回写 docs/00 §7.6 / docs/03 §5 文档口径
+- **Screening 遗留优化**（三分流本体已实现）：真实品牌黑名单经规则层注入 / 二期策略库、
+  R2/R3 归因观察与规则词表调优
 
 ## 技术栈
 
@@ -225,5 +290,7 @@ uv run pytest tests/ -q   # 测试见 tests/
 | 复杂调查编排 | LangGraph StateGraph（5 节点 7 边单回环 + InMemory Checkpointer） | 已用 |
 | 领域/校验 | Pydantic v2（契约 DTO，`extra="forbid"`） | 已用 |
 | LLM | `LLMBackend` 抽象：默认确定性 scripted 桩（无 key 可跑）；litellm 真实后端待接线 | 部分（桩已用） |
+| 评测 | `pra.evaluation`：三方案 harness + business/abstention 指标 + ablation + sweep + regression（确定性重放） | 已用 |
+| RAG | `pra.rag`：Policy KB + Case KB，BM25 / Vector / Hybrid（numpy + mock embedding，无外部依赖） | MVP 已用 |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL 五表（migrations/001…）；Alembic 依赖就绪 | 已用（迁移未启用） |
-| 规划 extras | Redis 幂等 / MQ worker；RAG：Qdrant；可观测：Langfuse + OpenTelemetry | 规划（pyproject optional groups 已声明） |
+| 规划 extras | Redis 幂等 / MQ worker；RAG Phase 2：Qdrant + 本地 embedding；可观测：Langfuse + OpenTelemetry | 规划（pyproject optional groups 已声明） |
