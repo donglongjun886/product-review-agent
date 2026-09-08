@@ -140,7 +140,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 
 ### 2.8 T-8 — 运行终态语义 + decision.overrides
 
-- **最终取值（运行状态机，落 DB `agent_run.status`，由 worker 层维护，不进图 State）**：
+- **最终取值（运行状态机，落 DB `review_run.status`，由 worker 层维护，不进图 State）**：
 
 | 状态 | 含义 | 何时置位 |
 |---|---|---|
@@ -148,8 +148,8 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 | `INVESTIGATING` | 执行中 / 中断可恢复（checkpointer 断点续跑） | worker 开始 invoke 时 |
 | `DECIDED` | 已产出 `ReviewDecision`（**含 PASS/REJECT/HUMAN_REVIEW 三种结果**；预算/降级导致的 HUMAN_REVIEW 也落 DECIDED） | invoke 返回且 decision 非空 |
 | `FAILED` | 未产出决策的异常终止（不可自动恢复） | invoke 抛未捕获异常 |
-| `ESCALATED` | **不作为 agent_run 主终态**：语义=HUMAN_REVIEW 已被投递人工裁决队列，属下游人工流程状态（review 维度维护） | 人工工作台侧 |
-| `BUDGET_EXCEEDED` | **不作为 agent_run 主终态**：超限归因记 `decision.overrides=["R3_BUDGET_EXHAUSTED"]` + `agent_run.budget` 快照；供"超时/超限转人工率"指标（《00》§10.3）统计 | —— |
+| `ESCALATED` | **不作为 review_run 主终态**：语义=HUMAN_REVIEW 已被投递人工裁决队列，属下游人工流程状态（review 维度维护） | 人工工作台侧 |
+| `BUDGET_EXCEEDED` | **不作为 review_run 主终态**：超限归因记 `decision.overrides=["R3_BUDGET_EXHAUSTED"]`，budget 快照随 `review_result.decision_json`（budget_used）落库；供"超时/超限转人工率"指标（《00》§10.3）统计 | —— |
 
 - **`decision.overrides`**：`ReviewDecision` 增加可选字段 `overrides: list[str] = Field(default_factory=list)`，存放确定性 overlay 的改判/归因原因码（v2 词汇：R1_HARD_RULE / R2_REJECT_GATE_FAIL / R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT / R3_KEY_TOOL_FAILED / R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；空=overlay 未改判（LLM 提案即终值）。这是"谁把 PASS/REJECT 改成了 HUMAN_REVIEW"的可审计落点（《00》§8.2-4），且不破坏既有 decision 字段（新增默认空列表，向后兼容）。
 - **理由**：图内每轮运行必然以 decide 产出一个 decision 收尾，因此"DECIDED"是唯一的图终态；把 ESCALATED/BUDGET_EXCEEDED 从主状态机剥出为归因/下游状态，避免状态机出现"决策已出但状态未决"的二义；overrides 可选字段保证 00 §2.2 输出形状兼容。
@@ -209,7 +209,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 - **Budget 是 Guardrail，不是目标调用次数**：正常案件实际调用应明显低于上限（主链路 8/5 次）；
   上限余量留给 schema 重试、工具失败恢复、防无限循环。
 - **Trace 记录四组占用率**：`llm_calls/max_llm_calls`、`tool_calls/max_tool_calls`、
-  `tokens/max_tokens`、`latency/max_latency`（budget 快照 / agent_step）。
+  `tokens/max_tokens`、`latency/max_latency`（review_trace 逐步 tokens/latency / decision_json.budget_used）。
 - **Evaluation 增 Budget Utilization 指标**（《00》§11.3）：观察占用率分布，证明 Agent 不是为耗完预算而调工具；
   若某类案件占用率普遍贴顶，应视为 plan 选择策略或上限设置的问题信号。
 
@@ -268,7 +268,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 | 3 | `Evidence` 字段 | `evidence_id / type(枚举) / source_tool / value / weight / ref_id / extra` | `type: str / source / value / weight / ref_id`（无 evidence_id、无 extra） | ①字段名 source_tool→source（代码与《00》§2.2 一致）；②缺 evidence_id/extra；③type 为开放 str | **字段名 `source` 为准**（对齐《00》§2.2）；`evidence_id` 不进 DTO（ToolNode 运行时按 `E_nn` 分配用于引用与 result_ref，DB `evidence` 主键承载持久化身份）；`type` 保持开放 str、运行时收敛到 7 个受控值（`guardrails` 常量集 + 单测，**不升级为 Pydantic Enum**——避免 contract 卡死未来新证据类型）；**增 `extra: dict`** 承载 similarity/removals 等数值（T-4(b)/T-11 的确定性读取依赖） | 🔧 models.py：Evidence 增 `extra: dict = Field(default_factory=dict)`（extra="forbid" 下必须显式声明）；dedup key = `(type, source, ref_id)`（**O-1 拍板修订**：ref 优先稳定业务标识 image_url/product_id/merchant_id/case_id/clause_id，ref_id=None 时回退 value，见 01 §2.5） |
 | 4 | `ReviewDecision.overrides` | 01 建议可选（T-8） | 无该字段 | T-8 扩展 | 增加 `overrides: list[str] = []`（overlay 原因码 R1..R5） | 🔧 models.py 增字段 |
 | 5 | `AgentState` 身份字段 run_id/case_id | 在 State 内（01 §2.2 #1/#2） | 迁出为 LangGraph thread 维度 | **有意分歧**（代码 docstring 已说明） | **以代码为准**：身份归 thread_id，State 不冗余 | 无（graph.py 接线时映射） |
-| 6 | `AgentState.status` | 在 State 内（01 §2.2 #4） | 不在 State（DB `agent_run.status`） | T-8 落地分歧 | **以 DB 承载**：worker 层维护 PENDING/INVESTIGATING/DECIDED/FAILED（见 §2.8），不进图 State | 无（worker/DB 实现时照 §2.8） |
+| 6 | `AgentState.status` | 在 State 内（01 §2.2 #4） | 不在 State（DB `review_run.status`） | T-8 落地分歧 | **以 DB 承载**：worker 层维护 PENDING/INVESTIGATING/DECIDED/FAILED（见 §2.8），不进图 State | 无（worker/DB 实现时照 §2.8） |
 | 7 | `AgentState` 图内通道 pending_tool_calls / degraded / failures | 建议新增 | 无（graph 阶段 TODO） | T-9 | **保留并补进 AgentState**（见 §2.7） | 🔧 state.py 增 3 通道 |
 | 8 | `investigation_queue` / `tool_call_history` 元素形态 | 01 §2.4 子模型（InvestigationItem/ToolCallRecord） | `list[dict]`（与《00》§3 JSON 一致） | 形态差异 | **保持 dict**（对齐《00》§4.2 草图与现有 state.py）；字段约束由写入方遵守 + 单测保证，不引入子模型 | 无需改代码 |
 | 9 | `RiskLevel` 词表 | T-10 建议 LOW/MEDIUM/HIGH | `NONE/LOW/MEDIUM/HIGH` | 代码多 NONE | **以代码为准**（PASS→NONE，见 §2.9） | 无需改代码 |

@@ -84,7 +84,7 @@ class AgentState(TypedDict):
 ```
 
 > **与落地代码/拍板的一致性（本版修订）**：`run_id / case_id` **不在 State**——映射为 LangGraph **thread_id**
-> （Checkpointer 线程键，调用方携带）；`status` **不在 State**——由 DB `agent_run.status` 承载，**DECIDED 是图内唯一终态**
+> （Checkpointer 线程键，调用方携带）；`status` **不在 State**——由 DB `review_run.status` 承载，**DECIDED 是图内唯一终态**
 > （PASS/REJECT/HUMAN_REVIEW 是 `ReviewDecision.decision` 取值；预算耗尽/工具失败/降级通过 `decision.overrides` 记录，
 > 见第 7 章）。字段清单与 `src/pra/agent/state.py` 一致（10 字段）。〔细化新增〕通道
 > `pending_tool_calls / degraded / failures` 为让第 3~7 章契约可落地的图内部通道，语义与《00》§3 的
@@ -108,7 +108,7 @@ class AgentState(TypedDict):
 | 10 | `failures` | `list[dict]` | 步骤失败审计 `{step_type, reason, ts}`，一次一追加，供 decide overlay（T-8 涉及）与人工/运维追溯 | 各 LLM 节点 / tools_node（工具执行失败） | decide overlay / 审计 |
 
 **身份/状态字段不在 State（拍板 03 T-8/T-9）**：`run_id / case_id` → LangGraph thread_id（Checkpointer 线程键）；
-`status` → DB `agent_run.status`（worker 层维护，DECIDED 为图唯一终态）。**只读约定**：入口写入后 `case / budget.start_time / budget.limits` 一律只读；任何节点不得修改 `case`。
+`status` → DB `review_run.status`（worker 层维护，DECIDED 为图唯一终态）。**只读约定**：入口写入后 `case / budget.start_time / budget.limits` 一律只读；任何节点不得修改 `case`。
 
 ### 2.3 初始化（入口 worker 负责，非任何节点）
 
@@ -121,7 +121,7 @@ AgentState = {
            limits: <来自配置/代码默认 10/15/40000/30000，运行时可由配置覆盖>},
   decision: None, degraded: False, failures: []
 }
-# run_id/case_id 由 worker 以 thread_id 携带；agent_run.status 由 worker/DB 维护（03 T-8）
+# run_id/case_id 由 worker 以 thread_id 携带；review_run.status 由 worker/DB 维护（03 T-8）
 ```
 
 ### 2.4 子模型字段契约（与落地代码 `domain/models.py` / `agent/state.py` 对齐）
@@ -189,7 +189,7 @@ UNRESOLVED 证据不足、未能证实也未证伪（reevaluate 置位，→ 导
 | `hypotheses` | **无 reducer（覆盖写）** | 单条执行路径上每个时点只有一个合法写入方（hypothesize 或 reevaluate），它返回**计算后的全集**即可；用覆盖写避免合并歧义。注意：写入方必须返回完整假设列表（含未被本次更新的假设），否则丢假设 |
 | `investigation_queue` | 无 reducer（覆盖写） | 同上，写入方返回完整队列 |
 | `budget` | 无 reducer（覆盖写） | 每次只有一个节点记账，返回整对象 |
-| `decision / degraded / pending_tool_calls / hypotheses / investigation_queue / budget / case` | 无 reducer（覆盖写） | 单写方字段（`run_id/case_id→thread`、`status→DB agent_run`，均不在 State） |
+| `decision / degraded / pending_tool_calls / hypotheses / investigation_queue / budget / case` | 无 reducer（覆盖写） | 单写方字段（`run_id/case_id→thread`、`status→DB review_run`，均不在 State） |
 
 > 并发提示：本图是**单路径线性链**，不存在两个节点同轮写同一字段，因此除 3 个 append/merge 字段外都用覆盖写，最简单且无歧义。若未来引入并行子调查（当前明确不做，见《00》§14.3 Multi-Agent），再为 `evidence` 设计更细的并发合并。
 
@@ -197,7 +197,7 @@ UNRESOLVED 证据不足、未能证实也未证伪（reevaluate 置位，→ 导
 
 - 《00》§3 明确定义"状态必须是显式、可序列化、可持久化、可恢复的，而不是藏在 LLM 的上下文里"。
 - 因此四个 LLM 节点**每次调用都重新构造 prompt**（把 state 相关字段序列化成上下文注入，见 3.2 上下文组装器），**不累积** message 历史：可序列化、可审计、token 可预算、重放确定。
-- 由此 `MessagesState`（message 累积 + `add_messages` reducer）与本设计冲突，明确不使用。LLM 调用级对话（含"重试 1 次"时的修正信息）只存在于**单次节点调用内部**，随 agent_step trace 落库（《00》§9.2 `agent_step`），不进 AgentState。
+- 由此 `MessagesState`（message 累积 + `add_messages` reducer）与本设计冲突，明确不使用。LLM 调用级对话（含"重试 1 次"时的修正信息）只存在于**单次节点调用内部**，随 review_trace 落库（《00》§9.2 `review_trace`），不进 AgentState。
 - 若未来需要让 LLM 引用上轮完整输出，走结构化字段（如 `pending_tool_calls.reason`、`hypotheses.evidence_for`），而不是把 message 堆进 state。
 
 ---
@@ -403,7 +403,7 @@ class DecisionProposal(BaseModel):
 RiskType = Literal["POTENTIAL_IP_RISK", "EVASION_PATTERN", "FALSE_CLAIM", "FIELD_CONFLICT"]  # 《00》§7.3
 ```
 
-**写入 state**：`decision`（overlay 后的最终 ReviewDecision，字段见第 7 章 7.6）；`degraded`（消费后置 False）；`failures`（若本次因预算/降级没跑 LLM，也可记 note）。**终态不在 State 写**：worker 在 invoke 返回且 `decision` 非空后置 DB `agent_run.status=DECIDED`（PASS/REJECT/HUMAN_REVIEW 都是 decision 取值；03 T-8）。
+**写入 state**：`decision`（overlay 后的最终 ReviewDecision，字段见第 7 章 7.6）；`degraded`（消费后置 False）；`failures`（若本次因预算/降级没跑 LLM，也可记 note）。**终态不在 State 写**：worker 在 invoke 返回且 `decision` 非空后置 DB `review_run.status=DECIDED`（PASS/REJECT/HUMAN_REVIEW 都是 decision 取值；03 T-8）。
 
 **降级结果（decide 自身 LLM 失败）**：无提案 → overlay 以空提案执行：无硬规则 → `HUMAN_REVIEW`（原因：决策推理失败）。
 
@@ -441,7 +441,7 @@ decide_node(state):
 
 - **动态性的载体**：plan（LLM，语义判断"当前最值得验证的假设需要哪条证据"）+ 确定性 ToolNode（执行）+ 条件边（是否真的去调）。不是固定 `A→B→C` 流水线：**默认不调任何工具**，只有当 plan 判定存在证据缺口才产生 `call_tools`。
 - **每轮工具集合由当轮 state 决定**：同样商品，若 OCR 已显示"100% Polyester"而标题写"真丝"，plan 应优先 ProductTool 做字段交叉而非 ImageAnalysis（《00》§4.5 例）。
-- **评测接口**：`PlanOutput` 与执行记录（`agent_step(PLAN)` 的 output_json + `tool_call_history`）就是《00》§11.3 `Tool Selection Accuracy` 的取数来源——预期工具集合来自 eval_case 标签，实际来自 plan 输出。
+- **评测接口**：`PlanOutput` 与执行记录（`review_trace(PLAN)` 的 output_json + `tool_call_history`）就是《00》§11.3 `Tool Selection Accuracy` 的取数来源——预期工具集合来自 eval_case 标签，实际来自 plan 输出。
 - **prompt 内工具 Schema 的来源**：ToolRegistry 为每个工具维护 `name/description/args_json_schema`（5.8），plan 的 prompt 注入这些 Schema，保证 `args` 字段合法；合法性的最终裁决在 ToolNode 的确定性 args 校验（5.8），不信任 LLM。
 
 ### 4.3 确定性 dedup guardrail（`guardrails/dedup.py`）
@@ -719,7 +719,7 @@ overlay 是普通确定性 Python（`guardrails/decision_guardrail.py`），实�
 **PASS Gate / REJECT Gate 与 HUMAN_REVIEW abstention 清单**；规则顺序固定、全部可单测。
 
 **图终态（D 项拍板）**：decide 产出 `decision` 后图即结束——**DECIDED 是图内唯一终态**（worker 落 DB
-`agent_run.status=DECIDED`）；PASS/REJECT/HUMAN_REVIEW 是 `ReviewDecision.decision` 的取值而非图终态；
+`review_run.status=DECIDED`）；PASS/REJECT/HUMAN_REVIEW 是 `ReviewDecision.decision` 的取值而非图终态；
 预算耗尽 / 工具失败 / 降级 / Gate 改判一律通过 `decision.overrides` 记录，本图不存在
 ESCALATED / BUDGET_EXCEEDED 终结点（03 T-8）。
 
@@ -883,7 +883,7 @@ def finalize_decision_confidence(state) -> float:
 | 3 | `plan` | "需要先例 + 政策支撑才能判" → `call_tools, tools=[{CaseSearchTool, priority:1}, {PolicySearchTool, priority:2}]` | plan→tools |
 | 3 | `tools` | CaseSearchTool → CASE_1832 高度相似 → REJECT（**E_04** CASE_PRECEDENT, ref_id=CASE_1832）；PolicySearchTool → POLICY_3.2"外观高度模仿高风险转人工"（**E_05** POLICY_REF, ref_id=clause）；tool_calls=5 | tools→reevaluate |
 | 3 | `reevaluate` | 证据链补全：无未定论假设，且已存在可引用依据（E_04/E_05） | route_after_reevaluate：`is_converged=true` → **decide** |
-| 4 | `decide` | LLM 提案：`HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / decision_confidence 0.91 / evidence E_01..E_05 / policy [POLICY_3.2]`；overlay：R1 硬规则未命中 → abstention 清单（预算/关键冲突/工具失败/政策不确定/多假设不可分/降级）均不成立 → 提案即 HUMAN_REVIEW，PASS/REJECT Gate 不适用 → 采纳；`decision.decision_confidence`（确定性重算）=0.87（0.91 只是 LLM 提案 confidence 参考值，终值=确定性重算 0.87，demo 断言 ≥0.7）、`overrides=[]`；worker 置 DB `agent_run.status=DECIDED`（图唯一终态） | 终结点（无出边） |
+| 4 | `decide` | LLM 提案：`HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / decision_confidence 0.91 / evidence E_01..E_05 / policy [POLICY_3.2]`；overlay：R1 硬规则未命中 → abstention 清单（预算/关键冲突/工具失败/政策不确定/多假设不可分/降级）均不成立 → 提案即 HUMAN_REVIEW，PASS/REJECT Gate 不适用 → 采纳；`decision.decision_confidence`（确定性重算）=0.87（0.91 只是 LLM 提案 confidence 参考值，终值=确定性重算 0.87，demo 断言 ≥0.7）、`overrides=[]`；worker 置 DB `review_run.status=DECIDED`（图唯一终态） | 终结点（无出边） |
 
 **"为什么第 4 步是 HUMAN_REVIEW 而不是 REJECT"的契约解释**：overlay 的 REJECT Gate 其实已可满足（H2/H3 SUPPORTED + 证据充分 + E_04/E_05 可引用依据 + decision_confidence 0.87≥0.7 + 无矛盾），但 LLM 提案为 HUMAN_REVIEW 且 POLICY_3.2 指引是"高风险转人工"（仿冒属主观判定）——overlay 只做**下限守卫**（防止不安全自动判），**不把 HUMAN 提案强行升为 REJECT**。这体现 Agent"知道什么时候该人介入"（《00》§4.4 注意行）。若未来该案改为可自动判，只动政策指引与提案，Gate 结构不变。
 

@@ -4,7 +4,7 @@ AgentState 即 LangGraph 的 State（§3.1 设计要点 2 / §4.2 草图）：�
 调查主线的**显式、可序列化、可持久化、可恢复**记忆 —— 而不是藏在 LLM 上下文里。
 LangGraph 的**线程 State Checkpointer**（MVP 用 InMemorySaver；Sqlite/Postgres/自研
 见 docs/04-graph-design.md §7 选型 A）每步保存线程中间状态用于断点续跑/eval 重放；
-业务真相（agent_step / evidence / decision 等）由 worker 层显式落 MySQL（非 checkpointer
+业务真相（review_trace / review_evidence / review_result 等）由 worker 层显式落 MySQL（非 checkpointer
 职责，04 §7.4 口径）。**reducer 已按 docs/04-graph-design.md §2.3 接线**（evidence
 去重合并 / tool_call_history、failures append），初始状态由 ``build_initial_state``
 构造 —— 每次 invoke 一律 ``await app.ainvoke(build_initial_state(case), {...})`` 保证

@@ -2,8 +2,8 @@
 
 **线程 checkpoint 与业务 MySQL 表分离（选型 A，docs/04-graph-design.md §7.2）**：
 LangGraph 的线程 Checkpointer 只保存"线程中间状态"（``AgentState`` 每步快照），
-服务于断点续跑 / eval 重放 / super-step 恢复；**业务真相**（agent_step / evidence /
-decision 等）由 worker 层显式落 MySQL，**不是本模块职责**（04 §7.4 口径）——
+服务于断点续跑 / eval 重放 / super-step 恢复；**业务真相**（review_trace / review_evidence /
+review_result 等）由 worker 层显式落 MySQL，**不是本模块职责**（04 §7.4 口径）——
 本模块不写任何业务表，只提供线程状态 (de)serialize 与保存介质工厂。
 
 MVP 只落 **InMemorySaver 工厂**（进程内内存，联调/单测/走查脚本用）：

@@ -209,7 +209,7 @@ Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的�
 ```
 
 > 实现映射说明（拍板见 03-decisions.md T-8/T-9）：LangGraph 的实际 `AgentState`（01-agent-loop.md §2）**只装调查记忆**——
-> `run_id/case_id` 映射为 LangGraph **thread_id**（Checkpointer 线程键，调用方携带）；`status` 由 DB `agent_run.status` 承载，
+> `run_id/case_id` 映射为 LangGraph **thread_id**（Checkpointer 线程键，调用方携带）；`status` 由 DB `review_run.status` 承载，
 > **DECIDED 是图内唯一终态**（PASS/REJECT/HUMAN_REVIEW 都是 `ReviewDecision.decision` 取值，不是图终态；预算耗尽/工具失败/降级
 > 通过 `decision.overrides` 记录，见 §7/§8）。本节 JSON 是设计视角的全量形态。
 
@@ -219,7 +219,7 @@ Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的�
 2. **状态持久化到 MySQL**：`AgentState` 即 LangGraph 的 State（`TypedDict`/Pydantic），由 LangGraph **Checkpointer** 每步后落库，worker 崩溃可恢复、可断点续跑、可复现（eval 重放）。
 3. **`budget` 是状态的硬字段**：条件边路由函数在每轮进入节点前检查预算，超限即路由到转人工止损。
 4. **`evidence` 与 `tool_call_history` 分离**：前者是"结论依据"，后者是"过程审计"，两者都进 trace。
-5. **实现映射（拍板 03 T-8/T-9）**：`run_id/case_id` → LangGraph thread_id；`status` 落 DB `agent_run.status`（DECIDED 为图唯一终态）；图内另有 `pending_tool_calls / degraded / failures` 三个内部通道（01 §2.1）。
+5. **实现映射（拍板 03 T-8/T-9）**：`run_id/case_id` → LangGraph thread_id；`status` 落 DB `review_run.status`（DECIDED 为图唯一终态）；图内另有 `pending_tool_calls / degraded / failures` 三个内部通道（01 §2.1）。
 
 ---
 
@@ -557,8 +557,8 @@ FIELD_CONFLICT        商品字段信息冲突
 | `merchant_event` | 商家行为事件 | event_id, merchant_id, event_type(违规/下架/改标题重上架), product_id, ts |
 | `review_case` | 审核案件（一次事件一个） | case_id, product_id, event_type, triage_result, status, version |
 | `review_signal` | 传统机审信号 | signal_id, case_id, signal_name, result, score |
-| `agent_run` | Agent 运行 | run_id, case_id, status, budget_json, agent_state_json, final_decision |
-| `agent_step` | Agent 步骤 trace | step_id, run_id, seq, step_type, input_json, output_json, tokens, latency_ms |
+| `review_run` | Agent 运行 | run_id, case_id, status, trigger_type, started_at, ended_at |
+| `review_trace` | Agent 步骤 trace | trace_id, run_id, seq, step_type, tool_name, input_json, output_json, tokens, latency_ms |
 | `evidence` | 收集的证据 | evidence_id, run_id, type, source_tool, value, weight, ref_id |
 | `decision` | 最终裁决 | decision_id, case_id, decision, risk_level, risk_type, decision_confidence, policy_refs, evidence_json |
 | `policy` / `policy_clause` | 政策库 | policy_id, version, category, risk_type, status, effective_date / clause_id, policy_id, text |
@@ -584,18 +584,19 @@ CREATE TABLE review_case (
   KEY idx_product_version (product_id, version)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE agent_step (
-  step_id    BIGINT PRIMARY KEY,
-  run_id     BIGINT NOT NULL,
-  seq        INT NOT NULL,
-  step_type  VARCHAR(24) NOT NULL,             -- HYPOTHESIZE/PLAN/TOOL_CALL/REEVALUATE/DECIDE
-  tool_name  VARCHAR(64) NULL,
-  input_json JSON NULL,
-  output_json JSON NULL,
-  tokens     INT NOT NULL DEFAULT 0,
-  latency_ms INT NOT NULL DEFAULT 0,
-  created_at DATETIME(3) NOT NULL,
-  KEY idx_run (run_id, seq)
+CREATE TABLE review_trace (
+  trace_id    BIGINT NOT NULL AUTO_INCREMENT,   -- DB 行号（自增）
+  run_id      VARCHAR(64) NOT NULL,             -- 归属 run（thread_id）
+  seq         INT NOT NULL,                     -- run 内步骤序号（轨迹还原顺序）
+  step_type   VARCHAR(24) NOT NULL,             -- HYPOTHESIZE/PLAN/TOOL_CALL/REEVALUATE/DECIDE
+  tool_name   VARCHAR(64) NULL,                 -- TOOL_CALL 行的工具名
+  input_json  JSON NULL,                        -- 步骤输入摘要
+  output_json JSON NULL,                        -- 步骤输出
+  tokens      INT NOT NULL DEFAULT 0,           -- 本步 token（预算/评测统计）
+  latency_ms  INT NOT NULL DEFAULT 0,           -- 本步耗时（预算/评测统计）
+  created_at  DATETIME(3) NOT NULL,
+  PRIMARY KEY (trace_id),
+  UNIQUE KEY uq_run_seq (run_id, seq)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
@@ -613,7 +614,7 @@ CREATE TABLE agent_step (
 | 层 | 内容 | 载体 |
 |---|---|---|
 | **链路 Trace** | 全审核链路（接入→机审→分流→Agent→决策）一个 traceId 贯穿 | OpenTelemetry（Jaeger/自建） |
-| **Agent 内部 Trace** | Agent 每一步（Observe/Hypothesize/Plan/Tool/Re-evaluate/Decide）作为一个 span，记录 tool 名、args、结果、tokens、latency | 落 `agent_step` 表（JSON） + OTel span |
+| **Agent 内部 Trace** | Agent 每一步（Observe/Hypothesize/Plan/Tool/Re-evaluate/Decide）作为一个 span，记录 tool 名、args、结果、tokens、latency | 落 `review_trace` 表（JSON） + OTel span |
 | **LLM 调用级 Trace** | 每次 LLM 调用的 prompt/输出/tokens/成本 | Langfuse（Python 生态 LLM 追踪事实标准） |
 | **业务指标** | 决策分布、转人工率、自动化率、各风险类型占比 | Prometheus + 指标表 |
 
@@ -629,7 +630,7 @@ CREATE TABLE agent_step (
 
 成本侧：P50/P95 latency、平均/P95 LLM 调用次数、Tool 调用次数、Token、单 case 成本。
 预算侧：**Budget Utilization**（四组占用率 `llm_calls/max_llm_calls`、`tool_calls/max_tool_calls`、
-`tokens/max_tokens`、`latency/max_latency`，来自 agent_step/budget 快照）——正常案件占用率应明显低于 1，
+`tokens/max_tokens`、`latency/max_latency`，来自 review_trace（逐步 tokens/latency）与 decision_json.budget_used）——正常案件占用率应明显低于 1，
 用于证明"Budget 是 Guardrail 而非目标"（§8.1）。
 可靠侧：失败率、重试率、超时/超限转人工率。
 

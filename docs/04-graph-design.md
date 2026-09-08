@@ -378,7 +378,7 @@ def build_decision(...) -> ReviewDecision: ...          # 组装 decision + over
 ### 3.3 DECIDED 唯一终态与 decision 语义
 
 - 图结构上 decide 后只有 `END`（§2.2）；**DECIDED 不是图里的节点/值**，而是 worker 在 `ainvoke` 返回后、
-  读到 `decision` 非空时置 DB `agent_run.status=DECIDED` 的运行态（03 T-8）。PASS/REJECT/HUMAN_REVIEW 全部
+  读到 `decision` 非空时置 DB `review_run.status=DECIDED` 的运行态（03 T-8）。PASS/REJECT/HUMAN_REVIEW 全部
   写入 `ReviewDecision.decision`；预算耗尽/工具失败/降级/Gate 改判原因写入 `ReviewDecision.overrides`。
 - `review_case.status` 等下游状态机由 worker/人工流程维护，不在子图内。
 
@@ -386,7 +386,7 @@ def build_decision(...) -> ReviewDecision: ...          # 组装 decision + over
 
 ```
 decide 产出 decision=HUMAN_REVIEW
-   → worker: agent_run.status=DECIDED; decision/evidence/tool_call_history 落 MySQL（decision/agent_step/evidence 表）
+   → worker: review_run.status=DECIDED; decision/evidence/tool_call_history 落 MySQL（review_result/review_trace/review_evidence 表）
    → 投 MQ human_review（审核工作台队列）→ 人工裁决 → 回流（review_feedback → 案例库/策略库/评测集，00 §6.5/§9.3）
 ```
 
@@ -413,7 +413,7 @@ decide 产出 decision=HUMAN_REVIEW
 | `decision_changed` | 同上（`gate_probe(before) != gate_probe(after)`） | tools_node |
 
 > **O-10 已拍板**：边际增益 4 字段（before_confidence / after_confidence / evidence_added / decision_changed）
-> 仅以 JSON 承载于 `tool_call_history` / `agent_step.output_json`，**DB `agent_step` 不加列**；二期如需 SQL 分析再加列。
+> 仅以 JSON 承载于 `tool_call_history` / `review_trace.output_json`，**DB `review_trace` 不加列**；二期如需 SQL 分析再加列。
 
 ### 4.2 代码级位置（tools_node 主循环）
 
@@ -594,11 +594,11 @@ Tool 调用 ≤ 15、墙钟 ≤ 30s（Guardrail 上界）。
 
 | 选项 | 做法 | 优点 | 缺点 | 结论 |
 |---|---|---|---|---|
-| **A（推荐）** | **业务状态自建表落 MySQL**（`agent_run`/`agent_step`/`evidence`/`decision` 已是设计表）；**线程状态（checkpoint）用 InMemorySaver（MVP）/ AsyncSqliteSaver（本地与集成）/ 未来 PostgresSaver 或自研** | ① trace/eval/审计/申诉依据是 MySQL 业务表（agent_step 逐 token/latency，`state_json` 全量快照）——checkpointer 只服务"断点续跑/重放"；② 线程 checkpoint 与业务 schema 解耦，langgraph-checkpoint 升级不阻塞业务表；③ 契合团队"MySQL + SQLAlchemy async"栈，不引入第二数据库 | 崩溃恢复粒度=checkpoint 线程；若线程 checkpoint 在内存则断点仅对当次进程有效——生产需把线程 checkpoint 落到 Sqlite/Postgres（或自研） | **采纳** |
+| **A（推荐）** | **业务状态自建表落 MySQL**（`review_run`/`review_trace`/`review_evidence`/`review_result`，已落地 migration 001）；**线程状态（checkpoint）用 InMemorySaver（MVP）/ AsyncSqliteSaver（本地与集成）/ 未来 PostgresSaver 或自研** | ① trace/eval/审计/申诉依据是 MySQL 业务表（review_trace 逐 step 记 tokens/latency 与步骤 input/output 摘要；线程中间 state 全量快照由 checkpointer 承担）——checkpointer 只服务"断点续跑/重放"；② 线程 checkpoint 与业务 schema 解耦，langgraph-checkpoint 升级不阻塞业务表；③ 契合团队"MySQL + SQLAlchemy async"栈，不引入第二数据库 | 崩溃恢复粒度=checkpoint 线程；若线程 checkpoint 在内存则断点仅对当次进程有效——生产需把线程 checkpoint 落到 Sqlite/Postgres（或自研） | **采纳** |
 | B | 自研 MySQL saver（继承 `BaseCheckpointSaver`） | 单库单技术栈 | 需维护 checkpoint 内部格式/版本/并发写入，随 langgraph-checkpoint 升级持续跟进；成本高、收益低（业务表已在 A 承担） | 不推荐 v1；作为二期可选（把 checkpoint 表并进 MySQL） |
 | C | 业务状态也换 Postgres（`PostgresSaver` + SQLAlchemy/PG） | 官方生产级 saver 开箱 | 推翻 MySQL 选型（00 §9/§15、pyproject `aiomysql`），改动面大 | 不采用 |
 
-**推荐 A + 理由（写入实现注释）**：`agent_run/agent_step/evidence/decision` 才是 trace/eval/审计的真相，
+**推荐 A + 理由（写入实现注释）**：`review_run/review_trace/review_evidence/review_result` 才是 trace/eval/审计的真相，
 checkpointer 的职责仅是"把 LangGraph 线程（thread_id=run）的中间 state 可恢复"，二者分离让"业务持久化稳定"
 与"框架持久化自由演进"互不拖累。MVP/联调用 `InMemorySaver`；本地/集成测试升级 `AsyncSqliteSaver`（需装
 `langgraph-checkpoint-sqlite`）；生产评估 `PostgresSaver` 或自研 MySQL saver（B）后再定。
@@ -635,8 +635,7 @@ def make_memory_checkpointer():
 
 - 00 §3.1"由 LangGraph Checkpointer（MySQL）每步后落库"、00 §4.2 草图 `compile(checkpointer=mysql_checkpointer)`、
   01 §1.2/§6.1 `checkpointer=mysql_checkpointer`、01 §9 与 03 §4.2 关于 "MySQL Checkpointer" 的表述，
-  **最终口径**：`compile(checkpointer=<线程状态 saver，见 §7.2 选型 A>)`，MySQL 承载业务 trace 表与
-  `agent_run.agent_state_json` 快照（worker 层显式落库，不依赖 langgraph checkpoint 写 MySQL）。
+  **最终口径**：`compile(checkpointer=<线程状态 saver，见 §7.2 选型 A>)`；MySQL 承载业务表 review_run/review_trace/review_evidence/review_result——逐步 token·latency（run 级汇总）由 review_trace 承载、终局 budget_used/overrides 随 `review_result.decision_json` 落库（worker 层显式落库，不依赖 langgraph checkpoint 写 MySQL）；线程中间 state 的恢复靠 checkpointer。
   建议 00/01 后续修订为同一口径（列于 03 §7 遗留/待办）。
 
 ---
@@ -655,7 +654,7 @@ budget 超限各走向 decide）。
 | 路由/Guardrails | 只实现：budget 4 维 + is_converged + dedup + 三 Gate overlay + hard_rules 最小黑名单 | 更多硬规则、矛盾启发式扩充 |
 | 边际增益 | tools_node 内实现 4 字段（§4）；**先行单测**（探针是纯函数） | 聚合指标仪表（00 §11.3） |
 | 人审流转 | 不实现：decide 后由 worker 打印/记录 decision 即可 | MQ human_review + 工作台 + 回流 |
-| 持久化 | 不实现 DB 落库（用 checkpointer + 日志观察 state） | agent_run/agent_step/evidence/decision 落 MySQL |
+| 持久化 | 不实现 DB 落库（用 checkpointer + 日志观察 state） | review_run/review_trace/review_evidence/review_result 落 MySQL |
 | 观测 | 预留 trace hook 点（tools_node/LLM 壳内注释位），不接线 | Langfuse / OTel |
 | screening 接入 | 子图外（输入即为 case），先不接 | 机审 → 分流 → worker 消费接线 |
 
@@ -702,7 +701,7 @@ budget 超限各走向 decide）。
 | O-7 | **decision_confidence 字段名** | 语义=decision_confidence，但 DTO/代码字段名是 `ReviewDecision.confidence` | 已拍板：`ReviewDecision.confidence` → `decision_confidence`（models.py 已改名；00 §2.2/§7/§9.1、01 §7.5/§7.6/§8、03 T-4 已同步；DB `decision` 列同口径） |
 | O-8 | **Evidence.extra 填充时机** | 落地 `image_analysis/tool.py::to_evidence` 未填 extra（任务边界：工具不裁决）；矛盾检测（03 T-4(e)）读 `extra.similarity` | 已拍板：Evidence.extra 派生数值（similarity / version_drift 等）由 tools_node `backfill_extra` 回填，工具只给原始事实 —— 工具代码不含 extra（已如此，§4/§9 evidence.py 实现时落位） |
 | O-9 | **Checkpointer 严格序列化** | 默认 JsonPlus 对 pydantic 状态会告警（未来阻塞）；已实测 allowlist 消除 | 已拍板：保留 §7.3 allowlist serde 方案（MVP InMemorySaver + JsonPlusSerializer allowlist；升级 langgraph 后回归一次含 STRICT_MSGPACK 预检） |
-| O-10 | **agent_step/DB 无边际增益列** | 边际增益 4 字段在 tool_call_history/agent_step.output_json（JSON），DB 无专列 | 已拍板：边际增益 4 字段仅 JSON 承载（tool_call_history / agent_step.output_json），DB 不加列（§4.1 注记） |
+| O-10 | **review_trace/DB 无边际增益列** | 边际增益 4 字段在 tool_call_history/review_trace.output_json（JSON），DB 无专列 | 已拍板：边际增益 4 字段仅 JSON 承载（tool_call_history / review_trace.output_json），DB 不加列（§4.1 注记） |
 
 ---
 
