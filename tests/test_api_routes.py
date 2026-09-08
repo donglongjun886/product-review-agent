@@ -78,7 +78,8 @@ def test_create_review_missing_required_field_422():
 
 
 def test_process_review_exception_maps_to_500(monkeypatch):
-    """process_review 抛异常 → HTTP 500，detail 含人读信息（异常类型+消息）。"""
+    """process_review 抛异常 → HTTP 500，detail 为固定人读文案（仅附异常类型短名），
+    绝不泄漏内部异常消息（P1-3：异常 str 可能含 SQL/表列名等内部细节）。"""
 
     async def broken_process_review(case):
         raise RuntimeError("db down")
@@ -88,5 +89,7 @@ def test_process_review_exception_maps_to_500(monkeypatch):
     with TestClient(create_app()) as client:
         resp = client.post("/api/v1/reviews", json=payload)
     assert resp.status_code == 500
-    assert "RuntimeError" in resp.json()["detail"]
-    assert "db down" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "请稍后重试或联系管理员" in detail  # 固定人读文案
+    assert "RuntimeError" in detail  # 异常类型短名保留，供排障
+    assert "db down" not in detail  # 内部异常消息绝不外泄

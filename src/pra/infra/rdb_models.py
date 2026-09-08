@@ -9,7 +9,7 @@
 - 本模块是**审核业务表的 ORM 映射**（DB 真相），与 `pra.domain.models`（业务 DTO，
   不落库）解耦 —— worker 层负责 domain → ORM 的转换与落库（infra 阶段接线）。
 - 只含核心 5 表；RAG/Evaluation/上游数据源表不在本文件（MVP 收敛，勿扩展）。
-- 类型刻意用 MySQL 方言类型（DATETIME(fsp=3)/DOUBLE/JSON），与手写 DDL 逐字一致；
+- 类型刻意用 MySQL 方言类型（BIGINT/DATETIME(fsp=3)/DOUBLE/JSON），与手写 DDL 逐字一致；
   engine/session（async SQLAlchemy）工厂在 infra 接线阶段补，本文件不持有连接。
 - SQLAlchemy 2.0 declarative（Mapped/mapped_column）；注释里标明 MySQL 实际类型。
 """
@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Optional
 
 from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
-from sqlalchemy.dialects.mysql import DATETIME, DOUBLE, JSON
+from sqlalchemy.dialects.mysql import BIGINT, DATETIME, DOUBLE, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 __all__ = [
@@ -120,7 +120,9 @@ class ReviewTraceORM(Base):
         Index("idx_run_type", "run_id", "step_type"),          # 按类型统计耗时/token
     )
 
-    trace_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    trace_id: Mapped[int] = mapped_column(
+        BIGINT, primary_key=True, autoincrement=True
+    )  # MySQL BIGINT（对齐 DDL 001：INTEGER 21 亿行会溢出 / create_all 与手写 DDL 漂移）
     run_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("review_run.run_id"), nullable=False
     )
@@ -142,7 +144,9 @@ class ReviewEvidenceORM(Base):
     __tablename__ = "review_evidence"
     __table_args__ = (Index("idx_run_type", "run_id", "type"),)  # 按 run+类型取证据链
 
-    evidence_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    evidence_id: Mapped[int] = mapped_column(
+        BIGINT, primary_key=True, autoincrement=True
+    )  # MySQL BIGINT（对齐 DDL 001：见 ReviewTraceORM.trace_id 注）
     run_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("review_run.run_id"), nullable=False
     )

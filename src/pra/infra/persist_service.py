@@ -33,7 +33,8 @@ product_review_request 后对投递 case 先 triage 再按 verdict 分支调本�
 4. 时间口径：所有时间列写 **naive UTC**（``_utcnow``，见 infra/db.py docstring），
    MySQL DATETIME(3) 存 naive；读取方按 UTC 解释 —— 勿混入本地时区。
 5. 观测：review_trace 每行 = 一步（LLM 节点行 / 工具 TOOL_CALL 行，seq 连续唯一）；
-   tokens 由相邻 budget 快照差分（首步用其值）、工具行取 record 自带 tokens；
+   tokens 由相邻 budget 快照差分（首步用其值；节点 update 无 budget 键的短路步记 0
+   且**不推进基线**，防 0 重置致后续全量重复计）、工具行取 record 自带 tokens；
    latency_ms 工具行走 record、LLM 行用节点到达墙钟差（近似）。真实 LLM/耗时接入后
    这些列即自洽，无需改表结构。
 
@@ -262,6 +263,26 @@ def _node_output_summary(node_name: str, update: dict, case_id: str) -> dict:
     }
 
 
+def _node_input_summary(node_name: str, update: dict, case_id: str) -> dict:
+    """LLM 行 input_json —— 该步的**轻量状态摘要**（MVP 口径，对齐 DDL 001 注释
+    "LLM 步=状态摘要"；替代恒 ``{"case_id": ...}`` 占位，输入侧才有审计价值）。
+
+    ``stream_mode="updates"`` 下本处只有节点写入的 state 片段（update dict；覆盖写
+    channel 的节点其结果≈该步处理后的状态），故摘要只取片段内**可见的关键计数 +
+    budget 占用**（假设 / 调查队列 / 待执行工具数 / tokens 占用），不引入 state
+    全量、不为摘要加新逻辑。输出侧明细（假设列表/裁决等）由 output_json 承载；
+    真实完整 prompt 输入审计随真实 LLM 接入后补。
+    """
+    return {
+        "node": node_name,
+        "case_id": case_id,
+        "hypotheses_count": len(list(update.get("hypotheses") or [])),
+        "investigation_queue_count": len(list(update.get("investigation_queue") or [])),
+        "pending_tool_calls_count": len(list(update.get("pending_tool_calls") or [])),
+        "budget_tokens": _token_count(update.get("budget")),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 主入口：执行并落库
 # ---------------------------------------------------------------------------
@@ -317,9 +338,11 @@ async def run_and_persist(
     c. ``astream(..., stream_mode="updates")`` 逐步执行：每节点按 seq（1 起连续自增）
        落 review_trace；tools 节点内 update["tool_call_history"] 每条 record 各一行
        step_type=TOOL_CALL（tool_name=record["tool"]、output_json=record 本身含边际
-       增益 4 字段、input_json=args）；其余节点一行 step_type=节点名大写、output_json=
-       紧凑摘要。tokens：相邻 budget 快照差分（首步用其值）；latency_ms：工具行走
-       record、LLM 行用节点到达墙钟差（近似）。每个 update 后 commit。
+       增益 4 字段、input_json=args）；其余节点一行 step_type=节点名大写、
+       input_json=轻量状态摘要（``_node_input_summary``：update 可见计数 + budget
+       占用）、output_json=紧凑摘要。tokens：相邻 budget 快照差分（首步用其值；
+       update 无 budget 键的短路步记 0 且不推进基线）；latency_ms：工具行走 record、
+       LLM 行用节点到达墙钟差（近似）。每个 update 后 commit。
     d. stream 结束后 ``aget_state(config)`` 取终态；st["decision"] 落 review_result
        （INSERT ... ON DUPLICATE KEY UPDATE 覆盖该 case 最新裁决）；decision.evidence
        全量落 review_evidence（挂本 run_id，多 run 证据隔离）。
@@ -403,9 +426,15 @@ async def run_and_persist(
                 wall_prev = wall_now
 
                 budget = update.get("budget")
-                new_tokens = _token_count(budget)
-                step_tokens = max(new_tokens - prev_budget_tokens, 0)  # 首步用其值
-                prev_budget_tokens = new_tokens
+                if budget is None:
+                    # update 无 budget 键（plan/reevaluate 短路只返回 pending_tool_calls/
+                    # {} 等）：tokens 记 0，但**不推进差分基线** —— 否则基线被重置为 0，
+                    # 后续带真实 budget 的节点会把全量当差值重复计（差分口径失真）。
+                    step_tokens = 0
+                else:
+                    new_tokens = _token_count(budget)
+                    step_tokens = max(new_tokens - prev_budget_tokens, 0)  # 差分：首步用其值
+                    prev_budget_tokens = new_tokens  # 只对带 budget 的 update 更新基线
 
                 if node_name == "tools":
                     # tools 节点：每条 audit record 一行 TOOL_CALL（含边际增益 4 字段）
@@ -435,7 +464,9 @@ async def run_and_persist(
                             seq=seq,
                             step_type=_NODE_STEP_TYPE.get(node_name, node_name.upper()),
                             tool_name=None,
-                            input_json={"case_id": case_id},
+                            input_json=_json_cap(
+                                _node_input_summary(node_name, update, case_id)
+                            ),
                             output_json=_json_cap(
                                 _node_output_summary(node_name, update, case_id)
                             ),

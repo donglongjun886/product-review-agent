@@ -6,9 +6,11 @@
   （本模块不 import 它，保持"工厂-模型"解耦，避免初始化顺序耦合）。
 - **仅 MySQL**（dialect ``aiomysql``，异步驱动）：``Settings.database_url`` 默认开发
   DSN ``mysql+aiomysql://root:root@127.0.0.1:3306/product_review`` —— 该默认值**仅供
-  本地开发**（root/root 明文仅指向本地容器 mysql-dev）；生产/其他环境一律通过
-  ``.env`` 的 ``DATABASE_URL`` 覆盖（``SettingsConfigDict(env_file=".env")`` 允许），
-  .env 已被仓库 .gitignore 忽略；可提交的模板见仓库根 ``.env.example``。
+  本地开发**（root/root 明文仅指向本地容器 mysql-dev）；生产/其他环境一律通过仓库根
+  ``.env`` 的 ``DATABASE_URL`` 覆盖（env_file=仓库根 .env 的**绝对路径**，见
+  ``_ENV_FILE``/Settings —— 从任何 cwd 启动都读同一 .env，不会因 cwd 不同而静默
+  漏读并回落开发 DSN），.env 已被仓库 .gitignore 忽略；可提交的模板见仓库根
+  ``.env.example``。
 - 时间口径：MySQL ``DATETIME(fsp=3)`` 存 naive（无时区）时间；业务层统一写
   **naive UTC**（``datetime.now(timezone.utc).replace(tzinfo=None)``，见
   ``pra.infra.persist_service._utcnow``），读取后一律按 UTC 解释 —— 单一约定，
@@ -29,6 +31,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,15 +41,35 @@ from sqlalchemy.pool import NullPool
 __all__ = ["Settings", "get_engine", "get_sessionmaker"]
 
 
-class Settings(BaseSettings):
-    """应用配置（pydantic-settings）：``.env`` 可覆盖全部字段。
+def _repo_root_env_file() -> str:
+    """仓库根 ``.env`` 的绝对路径 —— env_file 不能按 cwd 相对解析（静默漏读回落
+    默认开发 DSN，连错库无报错）。
 
-    ``model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")``：
-    实例化时读取进程 cwd 的 ``.env``（不存在则忽略），真实环境变量优先级高于 .env。
-    字段名大小写不敏感映射环境键（``DATABASE_URL`` ↔ ``database_url``）。
+    从本文件（``src/pra/infra/db.py``）逐级上溯，取第一个含 ``pyproject.toml`` 的
+    目录视为仓库根（.env / .env.example 均在其下）；找不到（如脱离仓库安装）退回
+    相对 cwd 的 ``".env"``（与历史行为一致）。
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").is_file():
+            return str(parent / ".env")
+    return ".env"
+
+
+# 仓库根 .env 的绝对路径（模块加载时定位一次；Settings 实例化直接使用）。
+_ENV_FILE = _repo_root_env_file()
+
+
+class Settings(BaseSettings):
+    """应用配置（pydantic-settings）：仓库根 ``.env`` 可覆盖全部字段。
+
+    ``model_config = SettingsConfigDict(env_file=_ENV_FILE, ...)``：env_file 为本
+    文件上溯定位的**仓库根 .env 绝对路径** —— 从任何 cwd 启动都读同一文件；该路径
+    不存在时 pydantic-settings 静默忽略（与旧行为一致）。真实环境变量优先级高于
+    .env。字段名大小写不敏感映射环境键（``DATABASE_URL`` ↔ ``database_url``）。
     """
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8")
 
     # 仅本地开发的默认值（root/root@127.0.0.1:3306 的 Docker mysql-dev 容器）；
     # 生产/测试必须经 .env 的 DATABASE_URL 覆盖 —— 见模块 docstring。

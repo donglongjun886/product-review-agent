@@ -11,8 +11,9 @@
   （HTTP 200）——**HTTP 响应形状与切换前一致**（run_id + review_decision），现有
   TestClient 断言不受影响。错误语义：
   - 请求体不合法（缺字段/未知字段/类型错）→ FastAPI 校验层自动 422（不进本路由）；
-  - triage/图执行/落库异常 → 统一捕获转 ``HTTPException 500``：detail 为**人读信息**
-    （异常类型 + 消息），**不暴露堆栈**（堆栈仅打日志，防内部细节泄漏给调用方）。
+  - triage/图执行/落库异常 → 统一捕获转 ``HTTPException 500``：detail 为**固定人读
+    文案**（仅附异常类型短名，供排障），**绝不拼 str(exc)/堆栈** —— 防 SQLAlchemy
+    等内部异常把 SQL/表列名/绑定值片段外泄；完整异常与堆栈只进 ``logger.exception``。
 - ``GET /api/v1/health``：存活探针，返回 ``{"status": "ok"}``（负载均衡/容器健康检查用）。
 
 演进路径（2026-09 接线说明）：原 ``service.run_review``（纯执行、不落库）**保留**，
@@ -64,11 +65,12 @@ async def create_review(case: ProductReviewCase) -> ReviewRunResult:
             run_id=summary["run_id"],
             review_decision=summary["decision"],
         )
-    except Exception as exc:  # triage/图执行/落库期异常：人读信息转 500，堆栈留日志不外泄
+    except Exception as exc:  # triage/图执行/落库期异常：固定文案转 500，异常消息/堆栈留日志不外泄
         logger.exception("process_review 执行失败 case_id=%s", case.case_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"案件审核执行失败（{type(exc).__name__}）：{exc}",
+            # 只附异常类型短名（供排障）；绝不拼 str(exc) —— 防内部异常细节外泄。
+            detail=f"案件审核执行失败（{type(exc).__name__}），请稍后重试或联系管理员",
         ) from exc
 
 
