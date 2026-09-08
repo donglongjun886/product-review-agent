@@ -490,8 +490,8 @@ async def run_and_persist(
         except TypeError:
             final_state = snapshot.values  # type: ignore[attr-defined]
 
-        decision: ReviewDecision | None = final_state.get("decision")
-        if decision is None:
+        decision = final_state.get("decision")
+        if not isinstance(decision, ReviewDecision):
             raise RuntimeError(
                 f"调查图执行完成但终态缺少 decision（run_id={resolved_run_id}, "
                 f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
@@ -500,7 +500,7 @@ async def run_and_persist(
         # evidence 全量（state 全量与 decision.evidence 同型，以裁决链为准；
         # 基数含前置 extra_evidence 分流命中行）
         evidence_rows = extra_rows
-        for ev in decision.evidence:  # type: Evidence
+        for ev in decision.evidence:
             session.add(
                 ReviewEvidenceORM(
                     run_id=resolved_run_id,
