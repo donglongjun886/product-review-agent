@@ -9,7 +9,7 @@
 
 > 传统机审负责**确定性异常**（黑名单/关键词/Logo/类目/OCR/分类模型），Agent 负责**开放性、上下文依赖强、需要多源交叉验证的复杂风险案件**，产出 `PASS / REJECT / HUMAN_REVIEW`，并在证据不足时主动**克制地转人工**。
 
-整个系统的核心叙事（面试主线）：
+整个系统的核心叙事：
 
 ```
 商品上架/变更
@@ -145,7 +145,7 @@ Case 是系统的核心数据对象，**输入是商品事实，输出是结构�
 
 ### 2.3 Case 模型的设计要点
 
-1. **输入 = 事实，输出 = 裁决 + 证据链**。证据链是核心，面试官问"为什么这么判"时，答案在 `evidence[]` 和 `hypothesis_trace[]` 里。
+1. **输入 = 事实，输出 = 裁决 + 证据链**。证据链是核心，需要解释"为什么这么判"时，答案在 `evidence[]` 和 `hypothesis_trace[]` 里。
 2. `screening_signals` 记录传统机审已做过什么、结果是什么，作为 Agent 的**起点信息**（避免 Agent 重复劳动）。
 3. 结构化的 `risk_type` 使用**受控词表**（见 §7），保证可统计、可评测。
 
@@ -281,7 +281,7 @@ app = graph.compile(checkpointer=mysql_checkpointer)  # State 持久化、可恢
 
 ### 4.3 关键分工：LangGraph 只做"编排骨架"，其余是确定性代码 + LLM 节点
 
-这是本项目最重要的工程决策，面试必问。
+这是本项目最重要的工程决策。
 
 | 步骤 | 谁来做 | 理由 |
 |---|---|---|
@@ -406,7 +406,7 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 ### 6.5 知识回流（闭环）
 
-人工裁决结果 → 沉淀为新 CasePrecedent → 重新 embedding → 入 Case KB；政策更新 → 版本化 → 生效后替换检索范围。**这是系统"越用越准"的机制**，也是面试里能讲的"闭环设计"。
+人工裁决结果 → 沉淀为新 CasePrecedent → 重新 embedding → 入 Case KB；政策更新 → 版本化 → 生效后替换检索范围。**这是系统"越用越准"的机制**，形成系统的知识闭环。
 
 ---
 
@@ -454,7 +454,7 @@ FIELD_CONFLICT        商品字段信息冲突
 confidence = f(最高假设 posterior, 证据链完整性, 是否存在可引用依据, 证据是否矛盾)
 ```
 
-面试时可以讲：confidence 低 → 转人工，这就是"不确定性 / Abstention"能力的落地。
+confidence 低 → 转人工，这就是"不确定性 / Abstention"能力的落地。
 
 ---
 
@@ -563,7 +563,7 @@ CREATE TABLE agent_step (
 
 - **可复现**：eval 重放、回归测试、申诉调查（"这个商品为什么被拒"）。
 - **成本核算**：每 case 的 llm_calls / tokens / latency 精确到步。
-- **面试亮点**：这是"工程化 Agent"和"调 API 的 Demo"的本质区别。
+- **意义**：这是"工程化 Agent"和"调 API 的 Demo"的本质区别。
 
 ### 10.3 核心指标（见 §11 完整列表）
 
@@ -704,7 +704,7 @@ CREATE TABLE agent_step (
 - 虚假/无依据宣传（Claim 提取 + 证据推理）。
 - 字段信息冲突（多源交叉验证）。
 
-### 14.3 明确不做（反炫技，面试可主动讲"为什么不做"）
+### 14.3 明确不做（避免过度设计）
 
 | 不做 | 为什么 |
 |---|---|
@@ -763,16 +763,6 @@ content-governance/
 - **domain** 独立：Case/AgentState/Evidence 是核心领域模型（Pydantic），被 screening/agent/evaluation 三处复用。
 - **agent / tools / rag 分层**：StateGraph 依赖 Tool 接口，不依赖具体实现（依赖倒置，便于 pytest mock 工具、未来替换）。
 - **evaluation 独立**：评测是独立关注点，不污染业务代码。
-
----
-
-## 16. 面试答辩备忘（把设计讲成故事）
-
-1. **为什么需要 Agent**：传统机审解决确定性异常；复杂案件的风险证据**分散在商品/图片/商家历史/案例/政策多处**，必须"调查取证"才能决策，规则覆盖不了、单次 LLM 拿不到证据。
-2. **Agent 是什么**：不是全量审核系统，是机审链路里的"复杂案件调查节点"，产出三分类 + 证据链。
-3. **工程化体现在哪**：LangGraph StateGraph 编排 + 显式 Agent State（Checkpointer 持久化/可恢复）、条件边路由 + 预算护栏、LLM 只做语义推理、硬规则兜底、全链路 Trace 落库、评测集三方案对比。
-4. **工程能力落在哪（语言换 Python，架构思维不变）**：MQ 异步解耦、Redis 幂等/限流/锁、MySQL 状态机 + 乐观锁、DDD 模块划分、asyncio 并发、可观测性——12 年 Java 架构沉淀的并发/分布式/状态机思维，在 Python 里直接复用。
-5. **最得意/最难的点**：如何让 Agent "知道什么时候证据不足该转人工"（Abstention），以及如何用 Hard Case Benchmark 证明 Agent 的必要性。
 
 ---
 
