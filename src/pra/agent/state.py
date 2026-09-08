@@ -18,17 +18,25 @@ LangGraph 的 **Checkpointer** 在每步执行后把整个 State 落库（MySQL�
 - ``tool_call_history``:   过程审计（谁、何时、调了哪个工具、tokens/latency）
 - ``budget``:          成本/延迟硬字段 —— 条件边路由函数每轮进入节点前检查，超限转人工（§3.1 要点 3 / §8.1）
 - ``decision``:        收敛后写入的 ReviewDecision（调查中为 None）
+- 图内通道（T-9 拍板保留，docs/03-decisions.md §2.7；01 §2.1 标〔细化新增〕）：
+  ``pending_tool_calls`` 承载 plan→tools 的"本轮待执行工具调用"传递（覆盖写）；
+  ``degraded`` 承载"上一 LLM 步 schema 校验失败"的降级信号（覆盖写）；
+  ``failures`` 为步骤失败审计（append reducer）——三者是让第 3~7 章契约可落地的
+  图内部通道，不进最终决策输出；``run_id/case_id`` 按代码方案迁出为 thread 维度。
 
 reducer 说明：LangGraph 中 list 类字段跨步**追加**（而非覆盖）需在装配阶段用
-``Annotated[list[...], reducer]`` 声明；本文件先保留与 §4.2 草图一致的纯 TypedDict
-形态，待 graph.py 落地时再按各节点语义挂 reducer，避免过早耦合框架细节。
+``Annotated[list[...], reducer]`` 声明；本文件先保留纯 TypedDict 形态（字段级
+reducer 语义见 03-decisions §2.7 与 01 §2.5：``evidence``=自定义去重合并、
+``tool_call_history``/``failures``=append、``pending_tool_calls``/``hypotheses``/
+``investigation_queue``/``budget``/``degraded``/``decision``=覆盖写），待 graph.py
+落地时再挂 reducer，避免过早耦合框架细节。
 """
 
 from __future__ import annotations
 
 from typing import TypedDict
 
-from cg.domain import (
+from pra.domain import (
     Budget,
     Evidence,
     Hypothesis,
@@ -51,5 +59,10 @@ class AgentState(TypedDict):
     budget: Budget  # 已用 + 限额（§8.1）；条件边路由的确定性检查对象
     decision: ReviewDecision | None  # 收敛后的裁决；调查中为 None
 
-    # 待实现（graph.py / checkpointer.py 阶段）：reducer 接线（追加式更新 hypothesis /
-    # evidence / queue / tool_call_history）、run_id/case_id → thread_id 映射、State 序列化落库。
+    # ---- 图内通道（T-9 拍板保留；reducer 接线在 graph 阶段落地）----
+    pending_tool_calls: list[dict]  # plan 写、tools 消费后置 []；覆盖写；元素 {tool, args, reason, priority}
+    degraded: bool  # 上一 LLM 步 schema 校验失败降级标记；覆盖写（True 后不再调 LLM，透传 decide）
+    failures: list[dict]  # 步骤失败审计 {step_type, reason, ts}；append reducer（追加不合并）
+
+    # 待实现（graph.py / checkpointer.py 阶段）：reducer 接线（append/merge 语义见模块
+    # docstring）、run_id/case_id → thread_id 映射、State 序列化落库。

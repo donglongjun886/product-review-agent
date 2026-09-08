@@ -77,17 +77,22 @@ class RiskType(str, Enum):
 
 
 class HypothesisStatus(str, Enum):
-    """假设生命周期状态（§3 示例使用 SUPPORTED/REFUTED）。
+    """假设生命周期状态（§3 示例使用 SUPPORTED/REFUTED；词表拍板见 docs/03-decisions.md T-3）。
 
     解决"这条假设当前处于什么验证阶段"的问题：
-    PENDING=生成待验证；SUPPORTED=被证据支持；REFUTED=被证据证伪；
-    UNVERIFIED=已核查但证据不足以证实/证伪（显式区分"证明无风险"与"没查到风险"，§7.2-4）。
+    PENDING=生成后**尚未调查验证**（还没查）；
+    SUPPORTED=被证据支持；REFUTED=被证据证伪；
+    UNRESOLVED=**已核查但证据不足、无定论**（查了没结论，悬而未决）。
+
+    UNRESOLVED 与 PENDING 的区分：PENDING 是"没查"，UNRESOLVED 是"查过但未能证实
+    也未证伪"—— 显式对应《00》§7.2-4"区分证明无风险与没查到风险"：高优先假设处于
+    UNRESOLVED → 不可 PASS → 导向 HUMAN_REVIEW（不能把"没查到"当"证明无"）。
     """
 
     PENDING = "PENDING"
     SUPPORTED = "SUPPORTED"
     REFUTED = "REFUTED"
-    UNVERIFIED = "UNVERIFIED"
+    UNRESOLVED = "UNRESOLVED"
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +181,10 @@ class Evidence(_StrictModel):
     解决"为什么这么判"的最小可引用单元 —— 结论依据（区别于过程审计
     ``tool_call_history``，§3.1 设计要点 4）。``source`` 记工具名，``ref_id`` 指向
     证据的源对象（图片 URL / 商家 ID / 先例 case_id / 政策条款 ID 等），保证可回溯。
+    ``extra`` 承载结构化附加数值（如 similarity / removals / violations_total /
+    conflict 信号），供确定性函数（矛盾检测、字段冲突判定等）机器读取 ——
+    人读摘要只进 ``value``，数值进 ``extra``，避免把可计算信息塞进人读文本
+    （对齐 docs/01-agent-loop.md §2.4 / docs/03-decisions.md §4.2 漂移项 3）。
     """
 
     type: str = Field(description="证据类型（开放性文本），如 IMAGE_SIMILARITY / MERCHANT_HISTORY / CASE_PRECEDENT")
@@ -183,6 +192,7 @@ class Evidence(_StrictModel):
     value: str = Field(description="证据内容（人读摘要），如 similarity=0.91, match=某品牌经典鞋款")
     weight: float = Field(ge=0.0, le=1.0, description="证据强度（0~1，供证据综合加权）")
     ref_id: str | None = Field(default=None, description="引用的源对象 ID（用于去重/回溯，可空）")
+    extra: dict = Field(default_factory=dict, description="结构化附加数值（similarity/removals 等），供确定性函数读取，不进人读 value")
 
 
 class Hypothesis(_StrictModel):
@@ -193,26 +203,34 @@ class Hypothesis(_StrictModel):
     注意 ``evidence_for / evidence_against`` 依设计 §3 JSON 为**证据引用/摘要字符串**
     （如 ``"image_similarity=0.91"``、``"brand=null"``），结构化证据本体统一存
     ``AgentState.evidence[]``，避免同一事实双份存。
+    ``prior`` / ``posterior`` 均为可选（缺省 None）：正式路径里 ``prior`` 由
+    hypothesize 显式给出（docs/03-decisions.md T-1）、``posterior`` 由 reevaluate
+    更新；None 表示"尚未赋值/未评估"，确定性公式对 None 按 0 处理（与 §4.2 漂移项
+    2 的后验口径一致）。
     """
 
     id: str = Field(description="假设 ID，如 H1 / H2")
     statement: str = Field(description="假设陈述，如 '刻意规避品牌识别'")
-    prior: float = Field(ge=0.0, le=1.0, description="先验概率（假设生成时给定）")
+    prior: float | None = Field(default=None, ge=0.0, le=1.0, description="先验概率（hypothesize 显式给出；未赋值前为 None，公式按 0 处理）")
     posterior: float | None = Field(default=None, ge=0.0, le=1.0, description="后验概率；生成后尚未经 reevaluate 更新前为 None")
-    status: HypothesisStatus = Field(default=HypothesisStatus.PENDING, description="验证阶段（PENDING→SUPPORTED/REFUTED/UNVERIFIED）")
+    status: HypothesisStatus = Field(default=HypothesisStatus.PENDING, description="验证阶段（PENDING→SUPPORTED/REFUTED/UNRESOLVED）")
     evidence_for: list[str] = Field(default_factory=list, description="支持本假设的证据引用/摘要字符串")
     evidence_against: list[str] = Field(default_factory=list, description="反对本假设的证据引用/摘要字符串")
 
 
 class BudgetLimits(_StrictModel):
-    """预算限额（§8.1 阈值；§3 ``budget.limits``）。
+    """预算限额（§8.1 Guardrail 上限；§3 ``budget.limits``）。
 
-    解决"一次调查允许花多少"的问题 —— 默认值与设计一致（8 次 LLM / 12 次 Tool /
-    40000 token / 30s），超限语义为"带部分证据转人工止损"而非失败（§8.1）。
+    解决"一次调查最多允许花多少"的问题 —— 默认值与拍板一致（03-decisions T-7：
+    10 次 LLM / 15 次 Tool / 40000 token / 30s）。**语义是 Guardrail 上界而非目标**：
+    正常案件实际调用应明显低于上限（主链路常态 8 次 LLM / 5 次 Tool），余量用于
+    "schema 校验失败→重试 1 次"、工具失败恢复与防无限循环（§8.1）；运行时可由配置
+    覆盖（``limits`` 经 worker/guardrails 常量层注入）。超限语义为"带部分证据转人工
+    止损"而非失败（§8.1）。
     """
 
-    max_llm_calls: int = Field(default=8, gt=0, description="最大 LLM 调用次数")
-    max_tool_calls: int = Field(default=12, gt=0, description="最大 Tool 调用次数")
+    max_llm_calls: int = Field(default=10, gt=0, description="最大 LLM 调用次数（Guardrail 上界，可配置覆盖）")
+    max_tool_calls: int = Field(default=15, gt=0, description="最大 Tool 调用次数（Guardrail 上界，可配置覆盖）")
     max_tokens: int = Field(default=40000, gt=0, description="最大 Token 用量")
     max_latency_ms: int = Field(default=30000, gt=0, description="最大执行时长（毫秒）")
 
@@ -246,6 +264,11 @@ class ReviewDecision(_StrictModel):
     解决"怎么判 + 凭什么判"的输出问题：三分类 + 风险等级/类型 + 置信度 + 证据链 +
     政策引用 + 假设轨迹 + 预算快照，全部可回溯到"哪个工具提供的哪条证据导致该结论"
     （§8.2-4 决策审计）。``risk_type`` 语义上必填（PASS 时为 ``[]``）。
+    ``overrides`` 记录确定性 overlay 的改判/归因原因码（R1_HARD_RULE / R2_* / R3_* /
+    R4_* / R5_*，如 R3_BUDGET_EXHAUSTED）—— 空=overlay 未改判（LLM 提案即终值）；
+    这是"谁把 PASS 改成了 HUMAN_REVIEW"的可审计落点（拍板见 docs/03-decisions.md
+    T-8 §2.8）。图内运行唯一终态为 DECIDED（含三种决策结果），ESCALATED /
+    BUDGET_EXCEEDED 不再作为主终态，超限归因只记在 overrides 与预算快照。
     """
 
     decision: Decision = Field(description="三分类裁决：PASS / REJECT / HUMAN_REVIEW")
@@ -256,3 +279,4 @@ class ReviewDecision(_StrictModel):
     policy: list[str] = Field(default_factory=list, description="引用的政策条款 ID，如 POLICY_3.2（REJECT 必须有可引用依据，§7.2-2）")
     hypothesis_trace: list[Hypothesis] = Field(default_factory=list, description="关键假设的演变轨迹（prior→posterior→status），供解释与 eval 重放")
     budget_used: Budget = Field(default_factory=Budget, description="裁决时的预算快照（引用运行期 Budget 实例，含限额与启动时间）")
+    overrides: list[str] = Field(default_factory=list, description="overlay 改判/归因原因码（R1_HARD_RULE / R2_* / R3_* / R4_* / R5_*）；空=overlay 未改判")
