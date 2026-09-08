@@ -15,9 +15,10 @@
 本模块**不含业务判定**：只取事实并结构化为 Evidence 原料（§5.1 → Evidence 列），
 "是否违规 / 阈值 / 版本漂移是否构成风险"归 reevaluate/decide/guardrails 层。
 注意：§5.1 的 ``version_drift``（库中 version vs ``case.product.version``）需比对
-案件快照，而 ``ToolContext`` 只带 ``case_id`` 不带 ``case`` 对象 —— 该判定放
-tools_node（持有 state）或未来给 ToolContext 增加 case 引用（契约微调，需拍板），
-本工具在 value 里只陈述库中事实版本。
+案件快照，而 ``ToolContext`` 只带 ``case_id`` 不带 ``case`` 对象 —— O-4 已拍板：
+该比对放 tools_node 的 evidence processing 层（其持有 case 快照），不扩 ToolContext；
+本工具在 value 里只陈述库中事实版本。ref_id 填 ``product_id``（O-1：稳定业务标识，
+非 RAG 工具也可填以支持去重/回溯）。
 """
 
 from __future__ import annotations
@@ -153,6 +154,7 @@ class ProductTool:
 
     name = "ProductTool"
     description = "读取商品在库最新事实快照（标题/描述/属性/品牌/SKU/图片/版本），用于确认 brand 真空缺、字段冲突、版本漂移"
+    args_model = ProductArgs
 
     def __init__(self, repo: ProductRepository | None = None) -> None:
         self._repo: ProductRepository = repo or InMemoryProductRepository()
@@ -166,9 +168,10 @@ class ProductTool:
     def to_evidence(self, result: ProductResult) -> list[Evidence]:
         """结果 → Evidence（§5.1 → Evidence 列）：每商品 1 条 PRODUCT_FACT。
 
-        ``source`` = 工具名；``ref_id`` 留空（ProductTool 非 RAG，§5.0 规定 RAG
-        才必填 ref_id）。value 只陈述库中事实（brand/version/status），
+        ``source`` = 工具名；``ref_id=product_id``（O-1 拍板：稳定业务标识，供去重/回溯，
+        不再一律留 None）。value 只陈述库中事实（brand/version/status），
         "标题/描述是否含品牌词"的措辞需规则引擎词表支撑，真实实现再补 —— 本工具不臆断。
+        ``version_drift`` 判定归 tools_node（O-4，需 case 快照比对），本工具不产。
         """
         if not result.ok or result.product is None:
             return []
@@ -184,6 +187,6 @@ class ProductTool:
                 source=self.name,
                 value=value,
                 weight=PRODUCT_FACT_WEIGHT,
-                ref_id=None,
+                ref_id=p.product_id,
             )
         ]

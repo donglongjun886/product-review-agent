@@ -132,6 +132,7 @@ class CaseSearchTool:
 
     name = "CaseSearchTool"
     description = "检索历史人工裁决的相似案件（先例），返回 Top-K 相似案例及其决策/风险类型/关键证据/适用政策"
+    args_model = CaseSearchArgs
 
     def __init__(self, index: CaseIndex | None = None) -> None:
         self._index: CaseIndex = index or InMemoryCaseIndex()

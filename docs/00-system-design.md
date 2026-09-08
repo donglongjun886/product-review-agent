@@ -134,7 +134,7 @@ Case 是系统的核心数据对象，**输入是商品事实，输出是结构�
   "decision": "HUMAN_REVIEW",
   "risk_level": "HIGH",
   "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
-  "confidence": 0.91,
+  "decision_confidence": 0.91,
   "evidence": [
     { "type": "IMAGE_SIMILARITY", "source": "ImageAnalysisTool", "value": "similarity=0.91, match=某品牌经典鞋款", "weight": 0.9 },
     { "type": "MERCHANT_HISTORY", "source": "MerchantTool", "value": "23 similar / 5 removals / 3 relisting", "weight": 0.85 },
@@ -148,7 +148,7 @@ Case 是系统的核心数据对象，**输入是商品事实，输出是结构�
 }
 ```
 
-> 字段语义修订（v1.1，见 §7）：输出里的 `confidence` 字段即 **`decision_confidence`（自动决策的安全门槛，非模型真实概率）**，
+> 字段语义修订（v1.1，见 §7）：输出字段即 **`decision_confidence`（自动决策的安全门槛，非模型真实概率）**（O-7 已拍板：DTO 字段由 `confidence` 改名 `decision_confidence`），
 > 与 `risk_level`（风险本身高低）**相互独立** —— HIGH risk + 证据不足仍应 HUMAN_REVIEW，不能仅因 risk_level=HIGH 就 REJECT（§7.5）。
 
 ### 2.3 Case 模型的设计要点
@@ -433,7 +433,7 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 | 概念 | 一句话定义 | 说明 |
 |---|---|---|
-| **decision_confidence** | 对"自动决策（不放人工）"的安全性把握 —— **安全门槛量，不是模型判"是否违规"的真实概率** | 输出 `ReviewDecision.confidence` 即此值；只回答"如果自动判，判错风险够不够低"，不回答"风险有多高" |
+| **decision_confidence** | 对"自动决策（不放人工）"的安全性把握 —— **安全门槛量，不是模型判"是否违规"的真实概率** | 输出 `ReviewDecision.decision_confidence` 即此值；只回答"如果自动判，判错风险够不够低"，不回答"风险有多高" |
 | **risk_level / risk confidence** | 风险本身的高低（LOW/MEDIUM/HIGH）与风险强度（如最高支持假设的 posterior） | **独立于决策结论**：HIGH risk + 证据不足 = HUMAN_REVIEW，不是 REJECT（见 §7.5） |
 
 | 决策 | 语义 | 触发条件（概要，完整 Gate 见 §7.2） |
@@ -486,7 +486,7 @@ FIELD_CONFLICT        商品字段信息冲突
 
 ### 7.4 decision_confidence 的含义（与 risk confidence 分离）
 
-- **`decision_confidence`**（输出 `ReviewDecision.confidence`，即安全门槛）不是 LLM 拍脑袋的数字，也不是"违规概率"，而是**确定性函数**（可解释、可单测），可作为自动决策是否安全的一个计算来源：
+- **`decision_confidence`**（输出 `ReviewDecision.decision_confidence`，即安全门槛）不是 LLM 拍脑袋的数字，也不是"违规概率"，而是**确定性函数**（可解释、可单测），可作为自动决策是否安全的一个计算来源：
 
   ```
   decision_confidence = f(最高支持假设 posterior, 证据链完整性, 是否存在可引用依据, 证据是否矛盾)
@@ -560,7 +560,7 @@ FIELD_CONFLICT        商品字段信息冲突
 | `agent_run` | Agent 运行 | run_id, case_id, status, budget_json, agent_state_json, final_decision |
 | `agent_step` | Agent 步骤 trace | step_id, run_id, seq, step_type, input_json, output_json, tokens, latency_ms |
 | `evidence` | 收集的证据 | evidence_id, run_id, type, source_tool, value, weight, ref_id |
-| `decision` | 最终裁决 | decision_id, case_id, decision, risk_level, risk_type, confidence, policy_refs, evidence_json |
+| `decision` | 最终裁决 | decision_id, case_id, decision, risk_level, risk_type, decision_confidence, policy_refs, evidence_json |
 | `policy` / `policy_clause` | 政策库 | policy_id, version, category, risk_type, status, effective_date / clause_id, policy_id, text |
 | `policy_chunk` / `policy_embedding` | 政策分块+向量 | chunk_id, clause_id, chunk_text, embedding |
 | `case_precedent` | 历史案例库 | case_id, summary, decision, risk_type, risk_level, policy_refs |

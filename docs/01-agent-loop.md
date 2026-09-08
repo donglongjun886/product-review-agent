@@ -142,7 +142,7 @@ class Evidence(BaseModel):                   # 字段与代码一致：无 evide
     source: str                              # 来源工具名（如 ImageAnalysisTool）—— 字段名以《00》§2.2/代码为准
     value: str                               # 人类可读证据值，如 "similarity=0.91, match=某品牌经典鞋款"
     weight: float = 0.5                      # 证据强度 [0,1]，默认按工具类型表（5.7），T-5
-    ref_id: str | None = None                # 可追溯引用：policy clause_id / case_id（RAG 必填）
+    ref_id: str | None = None                # 可追溯引用：稳定业务标识优先（image_url/product_id/merchant_id/case_id/clause_id，O-1）；无稳定 ref 时 None（去重 key 回退 value，见 §2.5）
     extra: dict = {}                         # 结构化附加数值（similarity/removals 等），供确定性函数读取（代码已落地）
     # evidence_id 不进 DTO：由 ToolNode 按 E_<nn> 运行序号分配，用于 result_ref / evidence_for 引用与 DB evidence 主键
 
@@ -150,6 +150,8 @@ class Evidence(BaseModel):                   # 字段与代码一致：无 evide
 # investigation_queue[] 元素:  {"q": str, "priority": int(1..5), "status": "OPEN"|"DONE"}
 # pending_tool_calls[] 元素:  {"tool": ToolName, "args": dict, "reason": str, "priority": int(1..5)}
 # failures[] 元素:            {"step_type": "HYPOTHESIZE"|"PLAN"|"TOOL_CALL"|"REEVALUATE"|"DECIDE",
+#                               "tool": ToolName?,           # O-3：TOOL_CALL 类失败必填，其余缺省
+#                               "severity": "warn"|"critical", # O-3：warn=仅审计；critical=LLM 步失败/关键取证失败
 #                               "reason": str, "ts": ISO8601}
 
 # tool_call_history[] 元素（每次工具调用一条，含边际增益 4 字段，见 §5.8；G 项拍板）
@@ -180,7 +182,7 @@ UNRESOLVED 证据不足、未能证实也未证伪（reevaluate 置位，→ 导
 
 | 字段 | reducer | 语义与理由 |
 |---|---|---|
-| `evidence` | **自定义 `merge_evidence`** | 按 `evidence_key = (type, source, ref_id)` 去重合并：已存在则**丢弃重复项**（不覆盖——证据一旦收集不可篡改）；新增项 append。实现：`sorted(list, key)` 或 dict 归并均可，保证可序列化、幂等（图重放不产生重复证据，对齐《00》§8.2.5 幂等语义的 agent 内版本） |
+| `evidence` | **自定义 `merge_evidence`** | 按 `evidence_key` 去重合并（**O-1 已拍板口径**）：`evidence_key = (type, source, ref_id)` —— `ref_id` 优先填**稳定业务标识**（image_url / product_id / merchant_id / case_id / clause_id，能产的工具转换器都填，不再一律 None）；**`ref_id` 为 None 时 key 回退用 value**：`(type, source, value)`（value 人读可辨，防"同 type/source 的多条无 ref 证据"互相吞并，如多图多品牌命中）。同 key 已存在 → **丢弃新增**（证据一旦收集不可篡改）；新 key → append。实现 `sorted(list, key)` 或 dict 归并均可，保证可序列化、幂等（图重放不产生重复证据，对齐《00》§8.2.5） |
 | `tool_call_history` | `operator.add`（append） | 只追加不合并，审计日志语义 |
 | `failures` | `operator.add`（append） | 只追加 |
 | `hypotheses` | **无 reducer（覆盖写）** | 单条执行路径上每个时点只有一个合法写入方（hypothesize 或 reevaluate），它返回**计算后的全集**即可；用覆盖写避免合并歧义。注意：写入方必须返回完整假设列表（含未被本次更新的假设），否则丢假设 |
@@ -471,13 +473,16 @@ dedup_pending(state, planned) -> list[PlannedToolCall]:
 class Tool(Protocol):
     name: ToolName                 # 6 个受控名之一
     description: str               # 给 LLM 的一句话说明（进 plan prompt）
-    async def call(self, args: dict, ctx: ToolContext) -> ToolResult: ...
+    args_model: type[ToolArgs]     # 本工具入参模型（O-5 拍板，代码已落地 tools/base.py）
+    async def call(self, args: ToolArgs, ctx: ToolContext) -> ToolResult: ...
 ```
 
 - `ToolResult`：`{ok: bool, data: dict | None, error: str | None}`。**确定性错误**（业务无结果）返回 `ok=False + error`，不抛异常；基础设施级瞬态错误（超时/连接）允许 infra 层重试 1 次。
 - 每个工具实现**结果→Evidence 转换器**（`to_evidence(result) -> list[Evidence]`），由 ToolNode 在工具返回后调用并入 `state.evidence`（《00》§4.3：转换与去重合并是确定性 Python，不进 LLM）。
 - Evidence 的 `source` = 工具名（字段名以代码/《00》§2.2 为准）；`evidence_id` 不进 DTO，由 ToolNode 按 `E_<nn>` 运行序号分配，用于 `result_ref` / `evidence_for` 引用与 DB evidence 主键。
 - **证据质量过滤在确定性层**：相似度下限等过滤在 tools_node/guardrails 层执行（工具本身只返回原始结果，与已落地代码一致，见 5.2/5.8），过滤依据 `EVIDENCE_MIN_SIM / EVIDENCE_STRONG`（T-11 拍板，0.70/0.85）。
+- **Evidence.extra 回填（O-8 已拍板）**：工具 `to_evidence` 只产原始事实（type/source/value/weight/ref_id），`extra` 派生数值（similarity / version_drift / conflict 等）统一由 tools_node 的 `backfill_extra` 依据工具 raw result 回填（对齐 04 §4/§9）；下方 5.x 各表 "extra={…}" 是回填的目标内容，非工具转换器产出。
+- **ref_id 规则（O-1 已拍板）**：能产稳定业务 ref 的转换器一律填 `ref_id`（image_url / product_id / merchant_id；RAG 工具 case_id / clause_id 必填），不再留 None；去重 key 见 §2.5（ref_id=None 时回退 value）。
 - **脱敏**（《00》§8.2.3）：工具返回给 LLM 前（即进 state/进 prompt 前）由 ToolNode 统一过 PII 脱敏过滤器（商家联系方式等字段打码）；脱敏逻辑单测覆盖。
 - args 校验失败（LLM 给错参）：工具不执行，记 `tool_call_history{status:"error", error=args 校验错误}`；当轮继续执行其余合法调用；不单独为坏 args 重试 LLM（证据缺口会在下一轮 plan 自然暴露）。
 - 本表「→ Evidence」列给出转换规则与 `weight` 默认值（T-5 校准）。
@@ -491,7 +496,7 @@ class Tool(Protocol):
 | args Schema | `{ "product_id": str required, "version": int optional(默认取库中最新) }` |
 | result data | `{ product_id, merchant_id, title, description, category, brand: str|null, attributes: dict[str,str], sku_list: [{sku_id,color,size,price}], images: [{url, source}], version: int, listing_time: str, status: str }` |
 | 确定性说明 | 读 MySQL `product/product_sku/product_image`；返回库中最新 version；`images` 不含 ocr_text（OCR 归 OCRTool），避免重复劳动 |
-| → Evidence | 每商品 1 条：`Evidence{type="PRODUCT_FACT", source="ProductTool", value="brand=null, 标题/描述无品牌词, version=3（与 case 快照一致）", weight=0.6, extra={...关键字段}}`。**版本比对**：库中 version ≠ `case.product.version` 时在 extra 标注 `version_drift=true`（提示决策时案件基于旧快照） |
+| → Evidence | 每商品 1 条：`Evidence{type="PRODUCT_FACT", source="ProductTool", value="brand=null, version=3（库中最新）, status=ON_SALE", weight=0.6, ref_id=product_id}`（ref_id 规则见 §5.0，O-1）。**版本漂移（O-4/O-8 已拍板）**：库中 version ≠ `case.product.version` 的比对放 tools_node evidence processing 层（其持有 case 快照），由 `backfill_extra` 在 extra 标注 `version_drift=true`（提示决策时案件基于旧快照）；工具转换器只产原始事实 |
 | 回答的业务问题 | 判断"规避品牌"前先确认 brand 是否真空缺（《00》§5.1） |
 
 ### 5.2 ImageAnalysisTool —— 多模态核心（混合：图片向量检索 + 视觉 LLM）
@@ -503,7 +508,7 @@ class Tool(Protocol):
 | args Schema | `{ "image_urls": [str] required(1..5), "top_k": int optional(默认 5, 1..10), "detect_logo": bool optional(默认 true) }` |
 | result data | `{ items: [ { image_url, top_similar: [{brand_ref: str, similarity: float 0..1}], logos: [{brand: str, confidence: float}], visual_risk: str, } ] }`（top_similar 按相似度降序；`brand_ref` 指向图片品牌向量库条目，保留引用） |
 | 混合实现说明 | 图片向量库召回（《00》§6.4 图片向量单独存）粗召回 Top-K → 视觉 LLM 复核输出结构化结果 |
-| → Evidence | 转换器（已落地 `image_analysis/tool.py`）对**每个返回命中**（不做阈值过滤）产 1 条原始 Evidence：`type="IMAGE_SIMILARITY"`，`value="similarity=0.91, match=某品牌经典鞋款"`，`weight=similarity 数值`；Logo 命中每条产 `type="IMAGE_LOGO"`，`value="logo=某品牌, conf=0.93"`，`weight=confidence`。**阈值裁决在确定性层（tools_node/guardrails）**：`similarity < 0.70`（EVIDENCE_MIN_SIM）不入证据链 / `0.70 ≤ similarity < 0.85` 普通证据 / `≥ 0.85`（EVIDENCE_STRONG，即 03 的 SIM_HIGH_CONTRADICT，同值同义）**Strong Evidence** 档（矛盾启发式的"高相似"判据也用它）；入链时确定性层把 `extra.similarity` 等数值补进 Evidence（供矛盾检测机器读取）。无命中产 0 条证据（"没查到"与"证明无"的区分见 §7.2 PASS/REJECT Gate） |
+| → Evidence | 转换器（已落地 `image_analysis/tool.py`）对**每个返回命中**（不做阈值过滤）产 1 条原始 Evidence：`type="IMAGE_SIMILARITY"`，`value="similarity=0.91, match=某品牌经典鞋款"`，`weight=similarity 数值`；Logo 命中每条产 `type="IMAGE_LOGO"`，`value="logo=某品牌, conf=0.93"`，`weight=confidence`，两条均 `ref_id=image_url`（O-1：源图片稳定业务标识）。**阈值裁决在确定性层（tools_node/guardrails）**：`similarity < 0.70`（EVIDENCE_MIN_SIM）不入证据链 / `0.70 ≤ similarity < 0.85` 普通证据 / `≥ 0.85`（EVIDENCE_STRONG，即 03 的 SIM_HIGH_CONTRADICT，同值同义）**Strong Evidence** 档（矛盾启发式的"高相似"判据也用它）；入链时确定性层把 `extra.similarity` 等数值补进 Evidence（供矛盾检测机器读取）。无命中产 0 条证据（"没查到"与"证明无"的区分见 §7.2 PASS/REJECT Gate） |
 | 回答的业务问题 | 外观相似是本案最大、规则无法覆盖的证据缺口（《00》§5.1） |
 
 ### 5.3 OCRTool —— 交叉验证（确定性 OCR 服务）
@@ -514,7 +519,7 @@ class Tool(Protocol):
 | description | "识别图片中的文字内容（含坐标与置信度），用于标题/描述与图片实际内容的交叉验证" |
 | args Schema | `{ "image": str required(图片 url 或 base64 data-url) }` |
 | result data | `{ full_text: str, blocks: [ { text, bbox:{x,y,w,h}, lang, confidence } ] }` |
-| → Evidence | 1 条聚合：`type="OCR_TEXT"`，`value=full_text（截断 ≤500 字，完整进 extra.blocks）`，`weight=0.5`；若识别到与商品描述冲突的关键词（如 "Polyester" vs "真丝"），`extra.conflict_hint=true`（字段冲突判定归 reevaluate/确定性检测，T-12） |
+| → Evidence | 1 条聚合：`type="OCR_TEXT"`，`value=full_text（截断 ≤500 字；完整文本与 blocks 留在 result/tool_call_history 审计）`，`weight=0.5`，`ref_id=image`（O-1，调用侧回填）；冲突关键词判定（conflict_hint，T-12）归 reevaluate/确定性检测，v1 由 LLM 证据综合发现，extra 派生字段如需由 tools_node backfill（O-8） |
 | 回答的业务问题 | 交叉验证：发现"标题/描述"与"图片实际内容"冲突（《00》§5.1） |
 
 ### 5.4 MerchantTool —— 行为模式（确定性：聚合 + 向量扫描）
@@ -525,7 +530,7 @@ class Tool(Protocol):
 | description | "查询商家的系统性行为画像：在架商品数、相似商品数、历史违规/下架/改标题重上架次数、信用分" |
 | args Schema | `{ "merchant_id": str required, "window_days": int optional(默认 90, 1..365) }` |
 | result data | `{ merchant_id, product_total, similar_product_count, removals, title_relisting_count, violations: {total, by_type: dict}, credit_score, recent_events: [ {event_type, ts} 最多 20 条 ] }`（《00》§5 输出列："商品总数、相似商品数、历史违规/下架/改标题重上架数、信用分"） |
-| → Evidence | 1 条聚合：`type="MERCHANT_HISTORY"`，`value="23 similar / 5 removals / 3 title-relisting, credit=62"`，`weight=0.85`（多信号聚合型证据默认高权重，T-5），`extra={...上述字段}`；`extra.signals` 供确定性"规避行为"判定（违规+下架+改标题重上架组合） |
+| → Evidence | 1 条聚合：`type="MERCHANT_HISTORY"`，`value="23 similar / 5 removals / 3 title-relisting, credit=62"`，`weight=0.85`（多信号聚合型证据默认高权重，T-5），`ref_id=merchant_id`（O-1）；数值字段由 tools_node backfill 进 extra（O-8），供确定性"规避行为"判定（违规+下架+改标题重上架组合） |
 | 回答的业务问题 | 单商品看不出问题，商家历史行为才是"规避"的关键信号（《00》§5.1） |
 
 ### 5.5 CaseSearchTool —— 先例（RAG · Case KB）
@@ -569,8 +574,8 @@ EvidenceType = PRODUCT_FACT | IMAGE_SIMILARITY | IMAGE_LOGO | OCR_TEXT
 ```python
 class ToolRegistry:
     register(tool); get(name) -> Tool
-    list_descriptions() -> [{name, description, args_json_schema}]   # 供 plan prompt
-    validate_args(tool_name, args) -> None | str(错误信息)            # JSON Schema 校验
+    parse_args(tool_name, raw: dict) -> ToolArgs                      # O-5：按名取该工具 args_model 校验/解析（抛 ValidationError，tools_node 捕获记 status="error"）
+    list_descriptions() -> [{name, description, args_json_schema}]   # 供 plan prompt（schema 来自 args_model.model_json_schema()）
 
 async def tools_node(state):
     """执行 pending_tool_calls：按 priority 升序，逐个：预算→校验→脱敏→执行→证据质量过滤→转证据→记账→记边际增益。
@@ -581,10 +586,12 @@ async def tools_node(state):
     updates = {pending_tool_calls: [], budget: copy(state.budget)}
     for call in sorted(state["pending_tool_calls"], key=lambda c: c.priority):
         if updates.budget.tool_calls >= limits.max_tool_calls: break    # 预算截断（Guardrail 上界），剩余不执行
-        if err := registry.validate_args(call.tool, call.args):         # args 校验
-            record(seq, status="error", error=err); continue
+        try:
+            parsed = registry.parse_args(call.tool, desensitize(call.args))   # O-5：args_model 校验/解析（坏参抛 ValidationError）
+        except ValidationError:
+            record(seq, status="error", error="args 校验失败"); continue   # 坏参不执行，当轮继续
         before = decision_conf_probe(updates)                           # ① 调用前 decision_confidence 代理
-        result = await tool.call(desensitize(call.args), ctx)           # 瞬态错误 infra 重试 1 次
+        result = await tool.call(parsed, ctx)                           # 传强类型 Args；瞬态错误 infra 重试 1 次
         updates.budget.tool_calls += 1
         if not result.ok: record(seq, status="error", error=result.error); continue
         raw = tool.to_evidence(result)                                  # 工具原始结果（5.x 表，不过滤）
@@ -747,7 +754,11 @@ def run_decision_overlay(state, proposal) -> ReviewDecision:
     if key_tool_failure(state, failures):    overrides.append("R3_KEY_TOOL_FAILED")     # 关键 Tool 失败致证据缺失
     if policy_indeterminate(evidence):       overrides.append("R3_POLICY_UNCERTAIN")    # 政策无法确定/无适用条款
     if indistinguishable_hypotheses(state):  overrides.append("R3_HYPOTHESES_INDISTINGUISHABLE")  # 多假设无法区分
-    if state["degraded"] or failures:        overrides.append("R5_DEGRADED_OR_FAILED_STEP")
+    # R5（O-2 已拍板，对齐 04 §5.2）：failures 非空**不再一律** HUMAN_REVIEW ——
+    # 仅 LLM 步失败（state["degraded"]，severity=critical）在此补 R5；未解决的 critical Tool
+    # 失败已由上面 key_tool_failure 以 R3_KEY_TOOL_FAILED 计；severity="warn" 的失败只进
+    # 审计/trace，不触发转人工（避免任何一次非关键工具抖动推高 Human Review Rate）。
+    if state["degraded"]:                      overrides.append("R5_DEGRADED_OR_FAILED_STEP")
     if overrides:
         return build_decision("HUMAN_REVIEW", risk_level=finalize_risk_level(proposal),
                               risk_type=finalize_risk_type(proposal), decision_confidence=dc,
@@ -785,8 +796,9 @@ def reject_gate(state, dc) -> bool:
 ### 7.3 预算/降级分支（decide 入口，7.0 的第一步）
 
 ```
-若 budget_exceeded(budget) 或 state["degraded"] 或 failures 非空（且本轮尚未消费）：
+若 budget_exceeded(budget) 或 state["degraded"]（LLM 步失败）或存在未解决 critical Tool 失败（04 §5.2）：
     → proposal = None（不调用 LLM，不再烧 token）
+（O-2 已拍板：仅 severity=warn 的 Tool 失败**不**跳 LLM —— 它只审计，不构成 abstention。）
 否则正常调 LLM（proposal）
 两种情况都必须进入 run_decision_overlay —— 因为 R1 硬规则可能把结果改成 REJECT。
 预算耗尽/降级最终由 overlay 的 abstention 清单产出 HUMAN_REVIEW（overrides=R3_BUDGET_EXHAUSTED/R5_*）。
@@ -801,7 +813,7 @@ def reject_gate(state, dc) -> bool:
 
 ### 7.5 decision_confidence 与 risk 的分离（确定性重算，T-4）
 
-- **`decision_confidence`（安全门槛）**：落库 `ReviewDecision.confidence` 的值由确定性函数重算——
+- **`decision_confidence`（安全门槛）**：落库 `ReviewDecision.decision_confidence`（O-7 已改名）的值由确定性函数重算——
   LLM 提案的 confidence 只作参考，不作为最终值（保证可解释、可单测）：
 
 ```python
@@ -830,7 +842,7 @@ def finalize_decision_confidence(state) -> float:
   "decision": "HUMAN_REVIEW",
   "risk_level": "HIGH",
   "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
-  "confidence": 0.91,
+  "decision_confidence": 0.91,
   "evidence": [ { "type": "IMAGE_SIMILARITY", "source": "ImageAnalysisTool",
                   "value": "similarity=0.91, match=某品牌经典鞋款", "weight": 0.91,
                   "ref_id": null, "extra": {"similarity": 0.91} } ],
@@ -842,7 +854,7 @@ def finalize_decision_confidence(state) -> float:
 }
 ```
 
-> `confidence` = **decision_confidence**（§7.5，确定性重算）。伪代码里 `build_decision(..., decision_confidence=dc)` 的形参即 DTO 字段 `confidence`。
+> `decision_confidence` = 自动决策安全门槛（§7.5，确定性重算）。伪代码里 `build_decision(..., decision_confidence=dc)` 的形参即 DTO 字段 `decision_confidence`（O-7 已拍板改名，与代码一致）。
 > `overrides` 记录确定性 overlay 的改判/归因原因码
 > （R1_HARD_RULE / R2_REJECT_GATE_FAIL / R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT / R3_KEY_TOOL_FAILED /
 > R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；
@@ -868,7 +880,7 @@ def finalize_decision_confidence(state) -> float:
 | 3 | `plan` | "需要先例 + 政策支撑才能判" → `call_tools, tools=[{CaseSearchTool, priority:1}, {PolicySearchTool, priority:2}]` | plan→tools |
 | 3 | `tools` | CaseSearchTool → CASE_1832 高度相似 → REJECT（**E_04** CASE_PRECEDENT, ref_id=CASE_1832）；PolicySearchTool → POLICY_3.2"外观高度模仿高风险转人工"（**E_05** POLICY_REF, ref_id=clause）；tool_calls=5 | tools→reevaluate |
 | 3 | `reevaluate` | 证据链补全：无未定论假设，且已存在可引用依据（E_04/E_05） | route_after_reevaluate：`is_converged=true` → **decide** |
-| 4 | `decide` | LLM 提案：`HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / decision_confidence 0.91 / evidence E_01..E_05 / policy [POLICY_3.2]`；overlay：R1 硬规则未命中 → abstention 清单（预算/关键冲突/工具失败/政策不确定/多假设不可分/降级）均不成立 → 提案即 HUMAN_REVIEW，PASS/REJECT Gate 不适用 → 采纳；`decision.confidence`（确定性）=0.91、`overrides=[]`；worker 置 DB `agent_run.status=DECIDED`（图唯一终态） | 终结点（无出边） |
+| 4 | `decide` | LLM 提案：`HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / decision_confidence 0.91 / evidence E_01..E_05 / policy [POLICY_3.2]`；overlay：R1 硬规则未命中 → abstention 清单（预算/关键冲突/工具失败/政策不确定/多假设不可分/降级）均不成立 → 提案即 HUMAN_REVIEW，PASS/REJECT Gate 不适用 → 采纳；`decision.decision_confidence`（确定性）=0.91、`overrides=[]`；worker 置 DB `agent_run.status=DECIDED`（图唯一终态） | 终结点（无出边） |
 
 **"为什么第 4 步是 HUMAN_REVIEW 而不是 REJECT"的契约解释**：overlay 的 REJECT Gate 其实已可满足（H2/H3 SUPPORTED + 证据充分 + E_04/E_05 可引用依据 + decision_confidence 0.91≥0.7 + 无矛盾），但 LLM 提案为 HUMAN_REVIEW 且 POLICY_3.2 指引是"高风险转人工"（仿冒属主观判定）——overlay 只做**下限守卫**（防止不安全自动判），**不把 HUMAN 提案强行升为 REJECT**。这体现 Agent"知道什么时候该人介入"（《00》§4.4 注意行）。若未来该案改为可自动判，只动政策指引与提案，Gate 结构不变。
 

@@ -29,7 +29,7 @@
 | T-1 | prior 初始值来源 + 高优先阈值 | [A] | hypothesize LLM 输出 prior（0..1，不归一化）；确定性钳制；必须含 ≥1 条低风险假设；`HIGH_PRIOR_THRESHOLD=0.3`（仅用于 PASS 门控与 prompt 强调，**不用于收敛判定**，见 T-4 修正） |
 | T-2 | 假设/队列/每轮工具数量上限 | [A] | `MAX_HYPOTHESES=5`、`MAX_QUEUE=8`、`MAX_TOOLS_PER_PLAN=3`，全部配置化 |
 | T-3 | HypothesisStatus 词表 | [A]（含一致性冲突，见 §4.1） | `PENDING / SUPPORTED / REFUTED / UNRESOLVED`；🔧 代码 `UNVERIFIED` → 改 `UNRESOLVED` |
-| T-4 | confidence（→ decision_confidence 口径）+ 矛盾/收敛确定性定义 | [A]（v2 按 review 修订，见 §2.4） | 区分 **decision_confidence**（自动决策安全门槛）与 **risk_level/risk confidence**；三个 **Decision Gate**（PASS/REJECT/HUMAN_REVIEW，§2.4）；确定性公式产出 decision_confidence（落库 `ReviewDecision.confidence`）；abstention 阈值 0.7 **仅约束 REJECT Gate**；PASS 走 Gate 判定 |
+| T-4 | confidence（→ decision_confidence 口径）+ 矛盾/收敛确定性定义 | [A]（v2 按 review 修订，见 §2.4） | 区分 **decision_confidence**（自动决策安全门槛）与 **risk_level/risk confidence**；三个 **Decision Gate**（PASS/REJECT/HUMAN_REVIEW，§2.4）；确定性公式产出 decision_confidence（落库 `ReviewDecision.decision_confidence`，O-7 已改名）；abstention 阈值 0.7 **仅约束 REJECT Gate**；PASS 走 Gate 判定 |
 | T-5 | Evidence.weight 来源 | [A] | 工具转换器写默认权重（5.1~5.6 各工具列），reevaluate 不改 weight；weight 仅供审计/展示，不参与 v1 任何公式 |
 | T-6 | hypothesize 是否可重跑 | [A] | 只入口执行 1 次；运行中新假设走 `reevaluate.new_hypotheses`（追加，PENDING）；不加 `decide→hypothesize` 边 |
 | T-7 | 预算阈值与走查余量 | [已拍板] | **B：10 / 15 / 40000 / 30000** —— Guardrail 上界非目标，正常案件明显低于上限；v2 补：Trace 记录四组占用率、Evaluation 增 **Budget Utilization** 指标（见 §3.1 拍板结果） |
@@ -74,7 +74,7 @@
 
 | 量 | 一句话定义 | 落点 |
 |---|---|---|
-| **decision_confidence** | 对"自动决策（不放人工）"的安全性把握 —— **安全门槛量，非模型判"违规"的真实概率** | `ReviewDecision.confidence` 字段（字段名沿用代码，语义=decision_confidence） |
+| **decision_confidence** | 对"自动决策（不放人工）"的安全性把握 —— **安全门槛量，非模型判"违规"的真实概率** | `ReviewDecision.decision_confidence` 字段（O-7 已拍板改名；语义=自动决策安全门槛） |
 | **risk_level / risk confidence** | 风险本身的高低（NONE/LOW/MEDIUM/HIGH）与强度（最高 SUPPORTED 假设 posterior） | `risk_level` + `hypothesis_trace[].posterior`；**不参与 Gate/路由**（T-10） |
 
 **(b) 三个 Decision Gate（写进《00》§7.1/§7.2 与 01 §7.2 overlay）**：
@@ -114,8 +114,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 
 - **理由**：abstention 的落点是"证据是否足以支撑自动决策"，而不是一个孤立的置信数字；
   decision_confidence 是 Gate 的输入之一（仅约束 REJECT 侧），risk 高低与能否自动判解耦（HIGH risk + 证据不足 = HUMAN_REVIEW）。
-- **落地动作**：🔧 无新代码改动（语义修订）；`ReviewDecision.confidence` 字段名保持代码现状、语义=decision_confidence
-  （如需改名 `decision_confidence` 属 schema 决策，暂不做，见遗留清单）；01 §6.3/§7 已随本表同步修订。
+- **落地动作**：✅ 已按 O-7 拍板将 DTO 字段改名 `decision_confidence`（`domain/models.py` 已落地；00 §2.2/§7、01 §7.5/§7.6/§8 已同步，DB `decision` 列同口径）。
 
 ### 2.5 T-5 — Evidence.weight 来源
 
@@ -134,7 +133,8 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 - **最终取值**：三个〔细化新增〕通道**全部保留**并补进 `AgentState`（`agent/state.py`，graph 实现阶段）：
   - `pending_tool_calls: list[dict]`（plan 写、tools 消费后置 `[]`，覆盖写）；元素字段 `{tool, args, reason, priority}`；
   - `degraded: bool`（LLM 节点失败置 True / 成功置 False，覆盖写）；
-  - `failures: list[dict]`（append reducer，元素 `{step_type, reason, ts}`）。
+  - `failures: list[dict]`（append reducer，元素 `{step_type, tool?, severity: "warn"|"critical", reason, ts}`，O-3 拍板）。
+  - **O-2/O-3 拍板（对齐 04 §5.2）**：failures 分级 —— LLM 步失败记 `severity:"critical"`；Tool 失败按是否为 plan 标记的关键取证记 `critical` / 默认 `warn`（含 `tool` 字段）。overlay 仅对 `degraded`（LLM 步失败）与**未解决的 critical Tool 失败**触发 HUMAN_REVIEW（R3_KEY_TOOL_FAILED / R5），`warn` 只进审计/trace —— failures 非空不再一律转人工（R5 语义见 01 §7.2）。
 - **同时采纳现有代码的既有方案**：`run_id / case_id` **不进 State**（`state.py` 已按 LangGraph thread 维度处理：thread_id = run/案件身份，由 Checkpointer 与调用方携带）——与 01 §2.2 的 13 字段清单不同，但代码方案更符合 LangGraph 惯用法且避免双份冗余，**以代码为准**（01 后续修订）。
 - **落地动作**：🔧 `agent/state.py` 增加 3 通道；reducer 语义见 01 §2.5（overwrite / append）。`case` 之外的身份信息不重复入 State。
 
@@ -264,7 +264,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 |---|---|---|---|---|---|---|
 | 1 | `HypothesisStatus` 词表 | UNRESOLVED | UNVERIFIED | **命名冲突（T-3，§4.1）** | UNRESOLVED | 🔧 models.py 重命名 |
 | 2 | `Hypothesis.posterior` | 默认 `0.0`（01 §2.4） | `float \| None = None`（未 reevaluate 前为 None） | 形态差异 | **以代码为准**：初始 None、reevaluate 后数值；聚合公式对 None 按 0 处理（T-4(a) 已内置） | 无需改代码；01 后续修订 |
-| 3 | `Evidence` 字段 | `evidence_id / type(枚举) / source_tool / value / weight / ref_id / extra` | `type: str / source / value / weight / ref_id`（无 evidence_id、无 extra） | ①字段名 source_tool→source（代码与《00》§2.2 一致）；②缺 evidence_id/extra；③type 为开放 str | **字段名 `source` 为准**（对齐《00》§2.2）；`evidence_id` 不进 DTO（ToolNode 运行时按 `E_nn` 分配用于引用与 result_ref，DB `evidence` 主键承载持久化身份）；`type` 保持开放 str、运行时收敛到 7 个受控值（`guardrails` 常量集 + 单测，**不升级为 Pydantic Enum**——避免 contract 卡死未来新证据类型）；**增 `extra: dict`** 承载 similarity/removals 等数值（T-4(b)/T-11 的确定性读取依赖） | 🔧 models.py：Evidence 增 `extra: dict = Field(default_factory=dict)`（extra="forbid" 下必须显式声明）；dedup key = `(type, source, ref_id)` |
+| 3 | `Evidence` 字段 | `evidence_id / type(枚举) / source_tool / value / weight / ref_id / extra` | `type: str / source / value / weight / ref_id`（无 evidence_id、无 extra） | ①字段名 source_tool→source（代码与《00》§2.2 一致）；②缺 evidence_id/extra；③type 为开放 str | **字段名 `source` 为准**（对齐《00》§2.2）；`evidence_id` 不进 DTO（ToolNode 运行时按 `E_nn` 分配用于引用与 result_ref，DB `evidence` 主键承载持久化身份）；`type` 保持开放 str、运行时收敛到 7 个受控值（`guardrails` 常量集 + 单测，**不升级为 Pydantic Enum**——避免 contract 卡死未来新证据类型）；**增 `extra: dict`** 承载 similarity/removals 等数值（T-4(b)/T-11 的确定性读取依赖） | 🔧 models.py：Evidence 增 `extra: dict = Field(default_factory=dict)`（extra="forbid" 下必须显式声明）；dedup key = `(type, source, ref_id)`（**O-1 拍板修订**：ref 优先稳定业务标识 image_url/product_id/merchant_id/case_id/clause_id，ref_id=None 时回退 value，见 01 §2.5） |
 | 4 | `ReviewDecision.overrides` | 01 建议可选（T-8） | 无该字段 | T-8 扩展 | 增加 `overrides: list[str] = []`（overlay 原因码 R1..R5） | 🔧 models.py 增字段 |
 | 5 | `AgentState` 身份字段 run_id/case_id | 在 State 内（01 §2.2 #1/#2） | 迁出为 LangGraph thread 维度 | **有意分歧**（代码 docstring 已说明） | **以代码为准**：身份归 thread_id，State 不冗余 | 无（graph.py 接线时映射） |
 | 6 | `AgentState.status` | 在 State 内（01 §2.2 #4） | 不在 State（DB `agent_run.status`） | T-8 落地分歧 | **以 DB 承载**：worker 层维护 PENDING/INVESTIGATING/DECIDED/FAILED（见 §2.8），不进图 State | 无（worker/DB 实现时照 §2.8） |
@@ -328,4 +328,5 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 - [已拍板] T-7 → **B（10 / 15 / 40000 / 30000，Guardrail 语义 + Budget Utilization）**、T-11 → **B（EVIDENCE_MIN_SIM=0.70 / EVIDENCE_STRONG=0.85，三档语义 + threshold sweep）**（§3.1 / §3.2；Claude review 已复核）。
 - v2（本轮 review）修订落点：① decision_confidence 与 risk 分离 + 三个 Decision Gate（T-4/《00》§7/01 §7）；② Budget Guardrail 语义 + 四组占用率 + Budget Utilization 指标（T-7/《00》§8/§10.3/§11.3）；③ 相似度三档 + 工程初始值 + threshold sweep（T-11/《00》§7.6/§11.5）；④ DECIDED 图唯一终态复核（T-8）；⑤ risk_level ≠ decision 示例（T-10/《00》§7.5）；⑥ 评测公平性（《00》§12.0）、成本/调查效率指标含 **Marginal Evidence Gain / Investigation Efficiency**（《00》§11.3，契约落 01 §2.4/§5.8 tool_call_history）、**Ablation Evaluation**（《00》§13.4）；⑦ 命名统一 EVIDENCE_STRONG、01 §2 与代码对齐、`BudgetLimits` 默认 10/15。
 - 一致性冲突 1 处（T-3）已通过代码改名解决；代码落地动作 §4.4 已执行（含本轮 BudgetLimits 默认值修订）。
-- 遗留/待办：见收尾报告的"遗留不一致/待办"（decision_confidence 字段是否改名、tool 转换器 extra 填充时机等，属 graph 阶段实现决策，不阻塞文档定稿）。
+- [O 拍板] **O-1~O-10 已拍板并落地**（去重 key 稳定 ref / failures severity 分级与 R5 口径 / `args_model`+`parse_args` / `decision_confidence` 改名 / extra 由 tools_node backfill 等）：每条 O 的拍板结果与落地记录见 **docs/04-graph-design.md §10**；代码同步见 models.py / state.py / tools/base.py / tools 各 tool.py。
+- 遗留/待办（graph 阶段实现决策，不阻塞本文档）：guardrails 常量层与 tools_node 的 `backfill_extra`/`quality_filter` 接线（§4.4 行 5）、01-agent-loop.md 若有与 O 表冲突的旧表述以 04 §10 为准。

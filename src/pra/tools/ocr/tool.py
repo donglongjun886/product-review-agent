@@ -117,8 +117,11 @@ class OcrResult(ToolResult):
     """OCRTool 出参信封 + 负载（§5.3 result.data 原样平铺）。
 
     ``ok=False``（无法识别）时 ``full_text`` 为空串、``blocks`` 为空。
+    ``image`` 为调用侧回填的入参（URL/base64 data-url），供 to_evidence 作
+    ``ref_id`` 稳定业务标识（O-1）与审计追溯。
     """
 
+    image: str = Field(default="", description="被识别图片（URL 或 base64 data-url，调用侧回填）")
     full_text: str = Field(default="", description="识别全文")
     blocks: list[OcrBlock] = Field(default_factory=list, description="带坐标/置信度的文字块")
 
@@ -128,6 +131,7 @@ class OCRTool:
 
     name = "OCRTool"
     description = "识别图片中的文字内容（含坐标与置信度），用于标题/描述与图片实际内容的交叉验证"
+    args_model = OcrArgs
 
     def __init__(self, provider: OcrProvider | None = None) -> None:
         self._provider: OcrProvider = provider or MockOcrProvider()
@@ -135,14 +139,15 @@ class OCRTool:
     async def call(self, args: OcrArgs, ctx: ToolContext) -> OcrResult:
         ocr = await self._provider.recognize(args.image)
         if ocr is None:
-            return OcrResult(ok=False, error=f"OCR 无法识别该图片: {args.image}")
-        return OcrResult(full_text=ocr.full_text, blocks=ocr.blocks)
+            return OcrResult(ok=False, error=f"OCR 无法识别该图片: {args.image}", image=args.image)
+        return OcrResult(image=args.image, full_text=ocr.full_text, blocks=ocr.blocks)
 
     def to_evidence(self, result: OcrResult) -> list[Evidence]:
         """结果 → Evidence（§5.3 → Evidence 列）：1 条聚合 OCR_TEXT。
 
         value 内嵌 full_text（截断 ≤500 字，OCR_VALUE_MAX_CHARS）；blocks 完整
         留在 Result 负载与 tool_call_history（审计），证据链只取人读摘要。
+        ``ref_id=result.image``（O-1：多图 OCR 以图 URL 区分，避免同 type/source 互相吞并）。
         冲突关键词判定（conflict_hint，T-12）属确定性检测器，不在本工具。
         """
         if not result.ok:
@@ -154,6 +159,6 @@ class OCRTool:
                 source=self.name,
                 value=truncated,
                 weight=OCR_TEXT_WEIGHT,
-                ref_id=None,
+                ref_id=result.image or None,
             )
         ]

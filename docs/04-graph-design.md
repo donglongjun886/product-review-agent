@@ -48,7 +48,7 @@
   tool_call_history / budget / decision / pending_tool_calls / degraded / failures`（后三者 + status 口径见 01 §2）。
 - `pra.tools.base`：`ToolArgs / ToolResult / ToolContext{run_id,case_id,budget} / Tool(Protocol) / ToolRegistry`；
   `pra.tools.build_tools()` 返回 6 个带 InMemory 数据源的 Tool。
-- 决策语义（00 §7 / 01 §7 / 03 T-4）：decision_confidence（安全门槛，落 `ReviewDecision.confidence`）与
+- 决策语义（00 §7 / 01 §7 / 03 T-4）：decision_confidence（安全门槛，落 `ReviewDecision.decision_confidence`，O-7 已改名）与
   risk 分离；PASS/REJECT Gate + HUMAN_REVIEW abstention 清单；`DECIDED` 是图唯一终态。
 
 ### 1.3 子图边界
@@ -180,8 +180,10 @@ from pra.domain.models import Budget, Evidence, Hypothesis, ProductReviewCase, R
 
 
 def _evidence_key(e: Evidence) -> tuple:
-    """证据去重指纹。默认 (type, source, ref_id)，冲突与放宽见 §10 开放问题 O-1。"""
-    return (e.type, e.source, e.ref_id)
+    """证据去重指纹（O-1 已拍板）：ref_id 优先稳定业务标识（image_url / product_id /
+    merchant_id / case_id / clause_id）；ref_id 为 None 时回退 value —— 防同 (type, source)
+    的多条无 ref 证据（如多图多品牌命中）互相吞并。"""
+    return (e.type, e.source, e.ref_id if e.ref_id is not None else e.value)
 
 
 def merge_evidence(left: list[Evidence], right: list[Evidence]) -> list[Evidence]:
@@ -406,6 +408,9 @@ decide 产出 decision=HUMAN_REVIEW
 | `evidence_added` | 该次调用产出并经 `quality_filter/merge_evidence` 后实际新增的 evidence `E_nn` 列表 | tools_node |
 | `decision_changed` | 同上（`gate_probe(before) != gate_probe(after)`） | tools_node |
 
+> **O-10 已拍板**：边际增益 4 字段（before_confidence / after_confidence / evidence_added / decision_changed）
+> 仅以 JSON 承载于 `tool_call_history` / `agent_step.output_json`，**DB `agent_step` 不加列**；二期如需 SQL 分析再加列。
+
 ### 4.2 代码级位置（tools_node 主循环）
 
 ```python
@@ -521,10 +526,10 @@ def key_tool_failure(state, failures) -> bool:
     return False
 ```
 
-> **与 01 §7.2 的差异（登记，不擅自改 01）**：01 §7.2 overlay 伪代码把"`failures` 非空"一律记
-> `R5_DEGRADED_OR_FAILED_STEP`；本设计细化：**仅 LLM 步失败（critical）与未解决的 critical Tool 失败才触发
-> HUMAN**；`severity:"warn"` 的 Tool 失败只进审计与 trace，不强制转人工（否则任何一次非关键工具抖动都会
-> 人为推高 Human Review Rate）。见 §10 开放问题 O-2。
+> **与 01 §7.2 的差异（O-2/O-3 已拍板，01 §7.2 R5 已同步）**：01 旧版把"`failures` 非空"一律记
+> `R5_DEGRADED_OR_FAILED_STEP`；本文口径 —— **仅 LLM 步失败（critical，degraded）与未解决的 critical Tool 失败才触发
+> HUMAN**（前者 R5、后者 R3_KEY_TOOL_FAILED）；`severity:"warn"` 的 Tool 失败只进审计与 trace，不强制转人工
+> （否则任何一次非关键工具抖动都会人为推高 Human Review Rate）。
 
 ### 5.3 降级短路（plan/reevaluate）
 
@@ -673,27 +678,27 @@ budget 超限各走向 decide）。
 | `pra/agent/guardrails/llm_shell.py` | LLM 结构化调用壳（重试 1 次/记账/降级短路） | `call_structured_llm(*, OutputModel, state, config)`；`_llm_node_guarded(...)` |
 | `pra/agent/guardrails/evidence.py` | 证据质量过滤与 extra 回填 | `quality_filter(raw, EVIDENCE_MIN_SIM=0.70, EVIDENCE_STRONG=0.85)`；`backfill_extra(evs)` |
 | `pra/agent/checkpointer.py` | saver/serde 工厂 | `make_serde()`；`make_memory_checkpointer()`；（未来 `make_sqlite/postgres`） |
-| `pra/tools/base.py`（扩展项，见 O-5） | Tool 暴露 args schema 供 tools_node 解析 | 建议加 `args_model: type[ToolArgs]` 或 registry 维护 name→Args 映射 |
+| `pra/tools/base.py`（O-5 已拍板落地） | Tool 暴露 args schema 供 tools_node 解析 | ✅ `Tool.args_model: type[ToolArgs]` + `ToolRegistry.parse_args(name, raw)`（tools_node 校验/解析入口，见 §5/§10 O-5） |
 
 > 依赖注入提示：tools 与 registry 通过 `build_agent_graph(tools=...)` 注入 tools_node 可访问的 provider
 > （闭包工厂或 `graph.py` 内构造 ToolNode 闭包），避免模块级单例，便于 pytest mock（00 §15.1 依赖倒置）。
 
 ---
 
-## 10. 开放问题（契约矛盾/待办，实现前需拍板；不擅自绕开）
+## 10. 开放问题（O-1~O-10 —— 均已拍板，本表为决策记录；实现按"拍板结果"列执行）
 
-| ID | 问题 | 现状矛盾/出处 | 建议 |
+| ID | 问题 | 现状矛盾/出处 | 拍板结果（O-1~O-10 已拍板，2025 用户决策） |
 |---|---|---|---|
-| O-1 | **evidence 去重 key** | 01 §2.5 / 03 §4.2 漂移 3 写 `(type, source, ref_id)`；但 ImageAnalysis 对同一品牌、不同图片会产出多条 `ref_id=None` 且 value 不同的证据——纯 `(type,source,ref_id)` 会把第二条丢弃（信息丢失）。落地代码 DTO 无 `evidence_id`，无法在 key 里用稳定业务 id | 本设计 §2.3 `_evidence_key` 暂用 `(type, source, ref_id)` 并置顶登记该风险；建议改 key=`(type, source, ref_id, value)`（value 已人读可辨）或转换时给每条 evidence 生成稳定 ref（image_url）。需要与 01/03 对齐口径后定稿 |
-| O-2 | **failures 触发 HUMAN 的口径** | 01 §7.2 overlay 写"`failures` 非空一律 R5→HUMAN"；本设计 §5.2 细化：仅 LLM 步失败(critical)与未解决 critical Tool 失败触发，warn 只审计 | 建议 01 §7.2 R5 同步细化（failures 元素含 severity/tool），先按本文实现 |
-| O-3 | **failures 元素字段扩展** | 01 §2.4 定义 `{step_type, reason, ts}`；本设计需 `{step_type, tool?, severity: warn/critical, reason, ts}`（dedup/tools_node 要写 severity 与 tool） | 建议 01 §2.4 补充 tool/severity 字段；本文已按扩展口径写 |
-| O-4 | **ToolContext 缺 case/版本** | 落地 `product/tool.py` 注释已提出：`version_drift`（库中 version vs case.product.version）需在工具内比对，但 `ToolContext` 只有 run_id/case_id/budget、不带 case | 建议后续给 `ToolContext` 加 `case` 引用（契约微调）或把版本比对放 tools_node 证据加工层；MVP 场景 version 一致，不阻塞 |
-| O-5 | **Tool args 解析模型缺失** | `ToolRegistry` 只注册 name→Tool，无 `args_model`；plan 给的是 dict，`tool.call` 期望 `ToolArgs` 子类实例 | 建议给 `Tool` 协议/工具类补 `args_model: type[ToolArgs]`（或 registry 维护 name→Args 映射），tools_node 用其 `model_validate(args)`；属 tools/base.py 扩展，另开小改动单 |
-| O-6 | **run_id 来源** | 落地 state.py 已把 run_id/case_id 迁出为 thread_id；节点/工具需要 run_id（ToolContext 必填） | tools_node 等从 `config["configurable"]["thread_id"]` 读取（节点第二参 config）；graph 层约定 thread_id=run 标识，写进实现注释 |
-| O-7 | **decision_confidence 字段名** | 语义=decision_confidence，但 DTO/代码字段名是 `ReviewDecision.confidence` | 保持字段名（避免大改），文档/注释标注语义；是否改名属 schema 决策，见 03 §7 遗留 |
-| O-8 | **Evidence.extra 填充时机** | 落地 `image_analysis/tool.py::to_evidence` 未填 extra（任务边界：工具不裁决）；矛盾检测（03 T-4(e)）读 `extra.similarity` | 本设计定在 tools_node 的 `backfill_extra`（§4/§9）；tools_node 落地时补，否则矛盾检测不可用 |
-| O-9 | **Checkpointer 严格序列化** | 默认 JsonPlus 对 pydantic 状态会告警（未来阻塞）；已实测 allowlist 消除 | 采用 §7.3 allowlist serde；升级 langgraph 后回归一次（含 STRICT_MSGPACK 预检） |
-| O-10 | **agent_step/DB 无边际增益列** | 边际增益 4 字段在 tool_call_history/agent_step.output_json（JSON），DB 无专列 | 保持 JSON 承载；若需 SQL 分析再加列（二期） |
+| O-1 | **evidence 去重 key** | 01 §2.5 / 03 §4.2 漂移 3 写 `(type, source, ref_id)`；但 ImageAnalysis 对同一品牌、不同图片会产出多条 `ref_id=None` 且 value 不同的证据——纯 `(type,source,ref_id)` 会把第二条丢弃（信息丢失）。落地代码 DTO 无 `evidence_id`，无法在 key 里用稳定业务 id | 已拍板：evidence 去重防丢 —— ref 优先稳定业务标识（image_url / product_id / merchant_id；RAG 工具 case_id / clause_id），无稳定 ref 时去重 key 回退 value。落地：6 个工具 to_evidence 已填稳定 ref_id（工具层不写 extra，见 O-8）；去重口径已同步 01 §2.5 / 03 §4.2 / 本文 §2.3（`_evidence_key` 见 §2.3） |
+| O-2 | **failures 触发 HUMAN 的口径** | 01 §7.2 overlay 写"`failures` 非空一律 R5→HUMAN"；本设计 §5.2 细化：仅 LLM 步失败(critical)与未解决 critical Tool 失败触发，warn 只审计 | 已拍板：failures 非空不一律 HUMAN_REVIEW —— 仅 LLM 步失败（degraded，critical）与未解决的 critical Tool 失败（R3_KEY_TOOL_FAILED）触发；`severity:"warn"` 只审计。01 §7.2 R5 / §7.3 已同步 |
+| O-3 | **failures 元素字段扩展** | 01 §2.4 定义 `{step_type, reason, ts}`；本设计需 `{step_type, tool?, severity: warn/critical, reason, ts}`（dedup/tools_node 要写 severity 与 tool） | 已拍板：failures 元素 = `{step_type, tool?, severity: "warn"|"critical", reason, ts}`（01 §2.4 / 03 §2.7 / state.py 注释已同步） |
+| O-4 | **ToolContext 缺 case/版本** | 落地 `product/tool.py` 注释已提出：`version_drift`（库中 version vs case.product.version）需在工具内比对，但 `ToolContext` 只有 run_id/case_id/budget、不带 case | 已拍板：version_drift 比对放 tools_node evidence processing 层（其持有 case 快照），**不扩 ToolContext**（tools_node 的 backfill_extra 实现时落位） |
+| O-5 | **Tool args 解析模型缺失** | `ToolRegistry` 只注册 name→Tool，无 `args_model`；plan 给的是 dict，`tool.call` 期望 `ToolArgs` 子类实例 | 已拍板：Tool 增 `args_model: type[ToolArgs]`，6 个工具声明各自 Args 子类；`ToolRegistry.parse_args(tool_name, raw)` 校验/解析（tools/base.py 已落地，01 §5.8 已同步） |
+| O-6 | **run_id 来源** | 落地 state.py 已把 run_id/case_id 迁出为 thread_id；节点/工具需要 run_id（ToolContext 必填） | 已拍板：graph 层 `thread_id = run_id`；节点从 `config["configurable"]["thread_id"]` 读 run_id（见 §2.3 invoke 约定与 §9 节点签名注释） |
+| O-7 | **decision_confidence 字段名** | 语义=decision_confidence，但 DTO/代码字段名是 `ReviewDecision.confidence` | 已拍板：`ReviewDecision.confidence` → `decision_confidence`（models.py 已改名；00 §2.2/§7/§9.1、01 §7.5/§7.6/§8、03 T-4 已同步；DB `decision` 列同口径） |
+| O-8 | **Evidence.extra 填充时机** | 落地 `image_analysis/tool.py::to_evidence` 未填 extra（任务边界：工具不裁决）；矛盾检测（03 T-4(e)）读 `extra.similarity` | 已拍板：Evidence.extra 派生数值（similarity / version_drift 等）由 tools_node `backfill_extra` 回填，工具只给原始事实 —— 工具代码不含 extra（已如此，§4/§9 evidence.py 实现时落位） |
+| O-9 | **Checkpointer 严格序列化** | 默认 JsonPlus 对 pydantic 状态会告警（未来阻塞）；已实测 allowlist 消除 | 已拍板：保留 §7.3 allowlist serde 方案（MVP InMemorySaver + JsonPlusSerializer allowlist；升级 langgraph 后回归一次含 STRICT_MSGPACK 预检） |
+| O-10 | **agent_step/DB 无边际增益列** | 边际增益 4 字段在 tool_call_history/agent_step.output_json（JSON），DB 无专列 | 已拍板：边际增益 4 字段仅 JSON 承载（tool_call_history / agent_step.output_json），DB 不加列（§4.1 注记） |
 
 ---
 

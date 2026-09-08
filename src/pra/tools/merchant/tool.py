@@ -130,6 +130,7 @@ class MerchantTool:
 
     name = "MerchantTool"
     description = "查询商家的系统性行为画像：在架商品数、相似商品数、历史违规/下架/改标题重上架次数、信用分"
+    args_model = MerchantArgs
 
     def __init__(self, repo: MerchantRepository | None = None) -> None:
         self._repo: MerchantRepository = repo or InMemoryMerchantRepository()
@@ -144,8 +145,9 @@ class MerchantTool:
         """结果 → Evidence（§5.4 → Evidence 列）：1 条聚合 MERCHANT_HISTORY。
 
         value 按 §5.4 示例形态拼装（"23 similar / 5 removals / 3 title-relisting,
-        credit=62"）；ref_id 留空（非 RAG）；"规避行为模式"的判定（§5.4
-        extra.signals）归确定性 guardrails，本工具只交付画像事实。
+        credit=62"）；``ref_id=merchant_id``（O-1：稳定业务标识）；"规避行为模式"的
+        判定（§5.4 extra.signals）由 guardrails 确定性层基于 backfill_extra 后的
+        extra 数据完成（O-8），本工具只交付画像事实。
         """
         if not result.ok or result.profile is None:
             return []
@@ -160,6 +162,6 @@ class MerchantTool:
                 source=self.name,
                 value=value,
                 weight=MERCHANT_HISTORY_WEIGHT,
-                ref_id=None,
+                ref_id=p.merchant_id,
             )
         ]

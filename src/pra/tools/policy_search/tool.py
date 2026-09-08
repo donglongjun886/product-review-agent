@@ -153,6 +153,7 @@ class PolicySearchTool:
 
     name = "PolicySearchTool"
     description = "检索当前有效平台政策条款（按类目/风险类型过滤），返回条款原文与版本引用"
+    args_model = PolicySearchArgs
 
     def __init__(self, index: PolicyIndex | None = None) -> None:
         self._index: PolicyIndex = index or InMemoryPolicyIndex()

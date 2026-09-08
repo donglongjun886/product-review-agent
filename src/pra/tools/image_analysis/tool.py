@@ -148,6 +148,7 @@ class ImageAnalysisTool:
 
     name = "ImageAnalysisTool"
     description = "分析商品图片外观是否与知名品牌款/违禁视觉高度相似；返回相似度 Top-K、Logo 检测、视觉风险描述"
+    args_model = ImageAnalysisArgs
 
     def __init__(self, provider: ImageAnalysisProvider | None = None) -> None:
         self._provider: ImageAnalysisProvider = provider or MockImageAnalysisProvider()
@@ -164,8 +165,10 @@ class ImageAnalysisTool:
 
         每个品牌命中 → IMAGE_SIMILARITY（weight=similarity）；每个 Logo 命中 →
         IMAGE_LOGO（weight=confidence）。按任务边界不套 EVIDENCE_MIN_SIM 下限，
-        下游按 T-11 常量做证据质量过滤（见模块 docstring）。ref_id 留空
-        （ImageAnalysisTool 非 RAG；brand_ref 已在 value 中保留引用文本）。
+        下游按 T-11 常量做证据质量过滤（见模块 docstring）。
+        ``ref_id=item.image_url``（O-1 拍板：源图片为稳定业务标识，去重 key 以它为
+        准 —— 同一品牌多图命中不再因 ref=None 互相吞并）；``extra.similarity`` 等
+        派生数值由 tools_node backfill_extra 回填（O-8），本工具不写。
         """
         evidences: list[Evidence] = []
         for item in result.items:
@@ -176,7 +179,7 @@ class ImageAnalysisTool:
                         source=self.name,
                         value=f"similarity={m.similarity:.2f}, match={m.brand_ref}",
                         weight=m.similarity,
-                        ref_id=None,
+                        ref_id=item.image_url,
                     )
                 )
             for logo in item.logos:
@@ -186,7 +189,7 @@ class ImageAnalysisTool:
                         source=self.name,
                         value=f"logo={logo.brand}, conf={logo.confidence:.2f}",
                         weight=logo.confidence,
-                        ref_id=None,
+                        ref_id=item.image_url,
                     )
                 )
         return evidences
