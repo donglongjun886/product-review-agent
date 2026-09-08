@@ -16,7 +16,9 @@ from __future__ import annotations
 # 不要改写 hard_rules 侧的引用（那会破坏两层的单一来源同步）。
 BLACKLISTED_BRANDS: frozenset[str] = frozenset()
 
-# 明确品牌词/商标词：标题/描述命中即 R-102 REJECT 依据候选（大小写不敏感）。
+# 明确品牌词/商标词：标题/描述命中即 R-102 依据候选（大小写不敏感；**Q-1 拍板 B**：
+# R-102 为 COMPLEX —— 品牌词命中交 Agent 上下文调查后终裁，不再直接 REJECT，防官方店/
+# 适配词/授权产品被误杀；黑名单品牌走 R-101 才是确定性 REJECT）。
 BRAND_TERMS: frozenset[str] = frozenset(
     {"NIKE", "ADIDAS", "GUCCI", "LOUIS VUITTON", "LV"}
 )
@@ -26,8 +28,10 @@ EVASION_TERMS: frozenset[str] = frozenset(
     {"同款", "复刻", "高仿", "1:1", "原单"}
 )
 
-# 品牌空缺高危类目前缀（R-301：brand=None + 类目命中此前缀 → COMPLEX）。
-# 注意顺序无匹配优先级（任意前缀命中即高危），元组仅为可读确定性。
+# 品牌空缺高危类目前缀（R-301：brand/类目空缺一律 COMPLEX 进 Agent；类目命中此前缀时
+# 在命中 detail 中标注高危前缀 —— 前缀只增强 detail 的人读信息，不再作为 COMPLEX 的
+# 触发门槛，见 rules.py _match_r301）。注意顺序无匹配优先级（任意前缀命中即高危），
+# 元组仅为可读确定性。
 HIGH_RISK_PREFIXES: tuple[str, ...] = ("女鞋", "男鞋", "运动鞋", "箱包", "鞋")
 
 __all__ = [

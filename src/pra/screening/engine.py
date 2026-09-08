@@ -8,7 +8,11 @@
 - 判定原则：**能确定才直判，不能确定一律 COMPLEX** —— 只允许确定性规则直判。
 
 规则命中顺序：任一 REJECT 命中即终裁 REJECT（REJECT 优先于 COMPLEX）；无 REJECT 但
-任一 COMPLEX 命中 → COMPLEX；都无 → PASS（brand 明确且干净 = 确定性放行）。
+任一 COMPLEX 命中 → COMPLEX；都无命中 → PASS —— PASS 只在**能确定性放行**时给出
+（brand/类目明确；空缺场景由 R-301 兜成 COMPLEX，不会零命中直放）。**规则集为空时抛
+ValueError**：无规则 = "什么都不能确定"，绝不静默全量 PASS（配置加载失败/策略库为空的
+最危险失败模式）。
+
 同轮多命中**都收集**（hits 按传入规则序）。
 
 证据：``rule_evidence`` 只**构造** Evidence 对象（type=RULE_HIT /
@@ -59,10 +63,18 @@ def triage(
 
     :param case: 审核案件（只读 ``product.brand/title/description/category`` 等）。
     :param rules: 规则集；None → ``rules.DEFAULT_RULES``（R-101/102/301/302）。
+        **空规则集（[]/()）抛 ValueError** —— 无规则 = 什么都无法确定，绝不静默
+        全量 PASS（配置加载失败/策略库为空的显式失败）。
     :return: TriageResult{verdict, hits}。verdict 收敛：REJECT（任一 REJECT 命中）>
-        COMPLEX（无 REJECT 但任一命中）> PASS（零命中）；hits 按规则序全收集。
+        COMPLEX（无 REJECT 但任一命中）> PASS（零命中；brand/类目空缺已由 R-301
+        兜成 COMPLEX，故零命中 PASS 即确定性放行）；hits 按规则序全收集。
     """
     active: tuple[Rule, ...] = tuple(rules) if rules is not None else DEFAULT_RULES
+    if not active:
+        raise ValueError(
+            "规则集为空：三分流无法确定任何裁决（什么都不能确定），拒绝静默全量放行"
+            "—— 请检查策略库/规则配置加载"
+        )
 
     hits: list[RuleHit] = []
     has_reject = False

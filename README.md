@@ -58,8 +58,8 @@ src/pra/
 ├── tools/        6 个调查工具（默认注入 InMemory 数据源，开箱可跑）：
 │                 product / image_analysis / ocr / merchant / case_search / policy_search
 ├── screening/    机审初筛 + 三分流（rule_engine / triage）：terms（规则词表单一来源，
-│                 Screening 与 Agent R1 硬规则共用）/ rules（R-101/102 REJECT、
-│                 R-301/302 COMPLEX）/ engine（triage 纯函数 + RULE_HIT 证据）
+│                 Screening 与 Agent R1 硬规则共用）/ rules（R-101 REJECT、
+│                 R-102/301/302 COMPLEX —— R-102 品牌词交 Agent 调查，Q-1 拍板 B）/ engine（triage 纯函数 + RULE_HIT 证据）
 ├── evaluation/   评测 harness：Rule / Single-call LLM / Agent 三方案对比——规划中（占位）
 ├── rag/          政策库 + 案例库向量检索——规划中（占位）
 └── common/       通用工具——规划中（占位）

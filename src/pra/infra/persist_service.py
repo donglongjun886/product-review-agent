@@ -13,7 +13,8 @@
 
 ``process_review`` 是 **POST /api/v1/reviews 主入口（受理即分流）**：对 case 先做
 Screening 三分流（``pra.screening.engine.triage``）—— COMPLEX → 走 run_and_persist
-（Agent 调查，case.triage_result='COMPLEX'）；PASS/REJECT → 走 run_screening_direct
+（Agent 调查，case.triage_result='COMPLEX'；触发进 Agent 的规则命中 RULE_HIT 证据随
+agent run 挂 review_evidence —— 审计对称）；PASS/REJECT → 走 run_screening_direct
 （规则直判终裁）。``run_and_persist`` 亦为**未来 MQ worker 复用的 Agent 调查主入口**
 （总链路 A·1 演进：HTTP 路由 → process_review；MQ/worker 化 → 消费
 product_review_request 后对投递 case 先 triage 再按 verdict 分支调本模块）。
@@ -272,12 +273,16 @@ async def run_and_persist(
     run_id: str | None = None,
     trigger_type: str = "INITIAL",
     triage_result: str | None = None,
+    extra_evidence: list[Evidence] | None = None,
 ) -> dict:
     """执行一次完整复杂风险调查（**Agent 调查路径**）并把业务真相落 MySQL 五表。
 
     ``process_review`` 分流后 verdict=COMPLEX 时调用本函数（triage_result="COMPLEX"）；
-    本函数保持 Agent 调查路径语义不变（图执行 + trace/evidence/result 落库），只新增
-    case 行写 ``triage_result``（拍板：COMPLEX 时记录 —— 回答"case 为什么进 Agent"）。
+    本函数保持 Agent 调查路径语义不变（图执行 + trace/evidence/result 落库），并新增：
+    - case 行写 ``triage_result``（拍板：COMPLEX 时记录 —— 回答"case 为什么进 Agent"）；
+    - ``extra_evidence``（分流命中 RULE_HIT）在 run 行建立后即以本 run 的 run_id 落
+      review_evidence —— 回答"**哪条规则**把 case 送进 Agent"，与直判路径的
+      RULE_HIT 证据链同构（审计对称，见 Fix 4）。
 
     :param case: 审核案件（domain 输入 DTO）。case_id 即 review_case 主键；
         case_json 落 ``case.model_dump(mode="json")`` 全量快照。
@@ -286,13 +291,18 @@ async def run_and_persist(
     :param trigger_type: run 目的（INITIAL/RE_REVIEW/...），落 review_run.trigger_type。
     :param triage_result: Screening 分流结果（COMPLEX/PASS/REJECT），非 None 时写
         review_case.triage_result（创建与复用 case 行均写）。
+    :param extra_evidence: 前置分流命中证据（RULE_HIT Evidence 列表，由
+        ``process_review`` 按 ``triage().hits`` 经 ``rule_evidence`` 构造，与直判路径
+        同构）；run 行创建后、以本 run 的 run_id 落 review_evidence（type=RULE_HIT /
+        source_tool=ScreeningRuleEngine / weight=1.0 / extra_json={"rule_id"}）。
+        None 或空列表 = 不写。默认 None。
     :return: 摘要 dict：::
 
             {
                 "case_id": str,
                 "run_id": str,
                 "decision": ReviewDecision,          # 图终态裁决对象（供 API 包装返回）
-                "counts": {"trace": int, "evidence": int},  # 本 run 落库行数
+                "counts": {"trace": int, "evidence": int},  # 本 run 落库行数（含 extra_evidence）
             }
 
     流程（单 session 多 commit，里程碑保证断点可查）：
@@ -302,6 +312,8 @@ async def run_and_persist(
        status=INVESTIGATING（与 triage_result，参数非 None 时）。
     b. run 行：INSERT（RUNNING + trigger_type + started_at）后 commit —— run 先落库，
        保证 stream 途中崩溃可查到 run 与已落 trace。
+    b'. extra_evidence：run 行 commit 后即以本 run 的 run_id 逐条落 review_evidence
+       （RULE_HIT 分流命中证据），并 commit —— "为何进 Agent" 与 run 行同批里程碑可查。
     c. ``astream(..., stream_mode="updates")`` 逐步执行：每节点按 seq（1 起连续自增）
        落 review_trace；tools 节点内 update["tool_call_history"] 每条 record 各一行
        step_type=TOOL_CALL（tool_name=record["tool"]、output_json=record 本身含边际
@@ -352,6 +364,28 @@ async def run_and_persist(
         )
         session.add(run_row)
         await session.commit()
+
+        # ---- b'. 分流命中证据（RULE_HIT）挂本 run：run 行建立后即落库并 commit ----
+        # 审计对称（Fix 4）：COMPLEX 进 Agent 前由哪条规则命中（t.hits）也留档 ——
+        # 与直判路径逐条挂 RULE_HIT 到 review_evidence 同构；run_id 归属 = 本 run
+        # （resolved_run_id，含 process_review 未传 run_id 时内部生成的情形）。
+        extra_rows = 0
+        for ev in extra_evidence or []:
+            session.add(
+                ReviewEvidenceORM(
+                    run_id=resolved_run_id,
+                    type=ev.type,
+                    source_tool=ev.source,
+                    value=ev.value,
+                    weight=ev.weight,
+                    ref_id=ev.ref_id,
+                    extra_json=_json_cap(ev.extra) if ev.extra else None,
+                    created_at=_utcnow(),
+                )
+            )
+            extra_rows += 1
+        if extra_rows:
+            await session.commit()  # 与 run 行同批里程碑：run 存在即可查到命中证据
 
         # ---- c. stream 逐步执行并落 review_trace ----
         app = _get_graph()
@@ -432,8 +466,9 @@ async def run_and_persist(
                 f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
             )
 
-        # evidence 全量（state 全量与 decision.evidence 同型，以裁决链为准）
-        evidence_rows = 0
+        # evidence 全量（state 全量与 decision.evidence 同型，以裁决链为准；
+        # 基数含前置 extra_evidence 分流命中行）
+        evidence_rows = extra_rows
         for ev in decision.evidence:  # type: Evidence
             session.add(
                 ReviewEvidenceORM(
@@ -684,14 +719,22 @@ async def process_review(
 
     分流语义（拍板：三分流不是分流建议，PASS/REJECT 即终裁）：
     - ``triage(case).verdict == COMPLEX`` → ``run_and_persist(case, run_id=...,
-      triage_result="COMPLEX")`` —— Agent 调查（case.triage_result='COMPLEX'、
-      run trigger_type=INITIAL/RE_REVIEW）；
+      triage_result="COMPLEX", extra_evidence=t.hits 的 RULE_HIT evidence)`` —— Agent
+      调查（case.triage_result='COMPLEX'、run trigger_type=INITIAL/RE_REVIEW；触发进
+      Agent 的规则命中证据随 agent run 挂 review_evidence，审计对称，见 Fix 4）；
     - 否则（PASS/REJECT）→ ``run_screening_direct(case, t, run_id=...)`` —— 确定性
       规则直判终裁（无 trace、status 直接 DECIDED、result.source_run_id=直判 run）。
     """
     t = triage(case)
     if t.verdict == "COMPLEX":
-        summary = await run_and_persist(case, run_id=run_id, triage_result="COMPLEX")
+        summary = await run_and_persist(
+            case,
+            run_id=run_id,
+            triage_result="COMPLEX",
+            # t.hits → RULE_HIT evidence：与直判路径（run_screening_direct 逐条挂
+            # review_evidence）同构，run_id 归属由 run_and_persist 内部解析后落库。
+            extra_evidence=[rule_evidence(case, hit) for hit in t.hits],
+        )
         return {
             "case_id": summary["case_id"],
             "run_id": summary["run_id"],
