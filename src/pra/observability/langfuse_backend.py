@@ -99,12 +99,61 @@ class LangfuseTracer:
 
     # -- Tracer 协议 -------------------------------------------------------------------
 
+    # -- 内部：安全进入/退出 SDK 观测 ------------------------------------------------
+
+    @contextlib.contextmanager
+    def _guarded(self, *cms: Any) -> Iterator[Observation]:
+        """按序进入若干 SDK 上下文管理器，并保证**业务异常原样传播**。
+
+        **关键（S2 首版真实缺陷，S4 review 发现）**：`@contextmanager` 生成器里
+        **绝不能**用 ``try: yield ... except Exception: yield ...`` 吞掉业务异常 ——
+        业务体抛异常时 Python 走 ``gen.throw(exc)``，若生成器又执行到 ``yield``，
+        会抛 ``RuntimeError: generator didn't stop after throw()``，**原始异常被替换**
+        （违反 tracing.py 不变式 2「观测失败不得影响业务」）。
+
+        正确做法：进入失败 → 本次观测 no-op；业务体异常 → 由 ``finally`` 只负责关闭
+        栈、且关闭时的异常被 suppress，**不掩盖原异常**。
+        """
+        stack = contextlib.ExitStack()
+        obs: Any = None
+        for cm in cms:
+            if cm is None:
+                continue
+            try:
+                entered = stack.enter_context(cm)
+            except Exception:  # noqa: BLE001 - 观测旁路：SDK 进入失败不改业务语义
+                with contextlib.suppress(Exception):
+                    stack.close()
+                yield _LfObservation(None)
+                return
+            # 只取**第一个**成功进入的上下文对象作为观测节点（后续如
+            # ``propagate_attributes`` 只提供 trace 级属性副作用，其 __enter__ 返回 None，
+            # 不能覆盖观测节点）。
+            if obs is None:
+                obs = entered
+        try:
+            yield _LfObservation(obs)
+        finally:
+            with contextlib.suppress(Exception):
+                stack.close()
+
+    def _propagate_cm(self, attrs: dict[str, Any]) -> Any:
+        """构造 ``propagate_attributes`` 上下文管理器（构造失败 → None，观测降级）。"""
+        try:
+            return self._propagate(**attrs)
+        except Exception:  # noqa: BLE001 - 观测旁路
+            return None
+
+    # -- Tracer 协议 -------------------------------------------------------------------
+
     @contextlib.contextmanager
     def trace_root(self, ctx: TraceContext) -> Iterator[Observation]:
         """开 root observation（显式 trace_id + trace 级属性下发）。
 
         未采样（``should_sample(ctx.trace_id, sample)`` 为假）→ 整棵子树 no-op
         （置 contextvar 抑制，子 span 不再创建）。
+
+        业务体异常**原样抛出**（见 `_guarded` 的缺陷说明）。
         """
         if not should_sample(ctx.trace_id, self._sample):
             token = _SUPPRESSED.set(True)
@@ -114,33 +163,28 @@ class LangfuseTracer:
                 _SUPPRESSED.reset(token)
             return
 
-        cm = self._start(
-            as_type="span",
-            name=ctx.name,
-            trace_context={"trace_id": ctx.trace_id},
-            input=ctx.input,
-        )
-        if cm is None:
-            yield _LfObservation(None)
-            return
-        try:
-            with cm as obs:
-                attrs: dict[str, Any] = {}
-                if ctx.session_id:
-                    attrs["session_id"] = ctx.session_id
-                if ctx.metadata:
-                    attrs["metadata"] = ctx.metadata
-                if ctx.tags:
-                    attrs["tags"] = ctx.tags
-                if ctx.version:
-                    attrs["version"] = ctx.version
-                if attrs:
-                    with self._propagate(**attrs):
-                        yield _LfObservation(obs)
-                else:
-                    yield _LfObservation(obs)
-        except Exception:  # noqa: BLE001 - 观测旁路：上下文管理器内部异常不改变业务语义
-            yield _LfObservation(None)
+        attrs: dict[str, Any] = {}
+        if ctx.session_id:
+            attrs["session_id"] = ctx.session_id
+        if ctx.metadata:
+            attrs["metadata"] = ctx.metadata
+        if ctx.tags:
+            attrs["tags"] = ctx.tags
+        if ctx.version:
+            attrs["version"] = ctx.version
+
+        cms: list[Any] = [
+            self._start(
+                as_type="span",
+                name=ctx.name,
+                trace_context={"trace_id": ctx.trace_id},
+                input=ctx.input,
+            )
+        ]
+        if attrs:
+            cms.append(self._propagate_cm(attrs))
+        with self._guarded(*cms) as obs:
+            yield obs
 
     @contextlib.contextmanager
     def node_span(
@@ -155,12 +199,8 @@ class LangfuseTracer:
             kwargs["input"] = input
         if metadata:
             kwargs["metadata"] = metadata
-        cm = self._start(as_type="span", name=name, **kwargs)
-        if cm is None:
-            yield _LfObservation(None)
-            return
-        with cm as obs:
-            yield _LfObservation(obs)
+        with self._guarded(self._start(as_type="span", name=name, **kwargs)) as obs:
+            yield obs
 
     @contextlib.contextmanager
     def llm_generation(
@@ -181,12 +221,10 @@ class LangfuseTracer:
             kwargs["model_parameters"] = model_parameters
         if metadata:
             kwargs["metadata"] = metadata
-        cm = self._start(as_type="generation", name=name, **kwargs)
-        if cm is None:
-            yield _LfObservation(None)
-            return
-        with cm as obs:
-            yield _LfObservation(obs)
+        with self._guarded(
+            self._start(as_type="generation", name=name, **kwargs)
+        ) as obs:
+            yield obs
 
     @contextlib.contextmanager
     def tool_span(
@@ -205,12 +243,8 @@ class LangfuseTracer:
             kwargs["input"] = input
         if metadata:
             kwargs["metadata"] = metadata
-        cm = self._start(as_type="tool", name=name, **kwargs)
-        if cm is None:
-            yield _LfObservation(None)
-            return
-        with cm as obs:
-            yield _LfObservation(obs)
+        with self._guarded(self._start(as_type="tool", name=name, **kwargs)) as obs:
+            yield obs
 
     def flush(self) -> None:
         """刷出缓冲（CLI 脚本/短生命周期进程退出前必须调用）；失败静默。"""

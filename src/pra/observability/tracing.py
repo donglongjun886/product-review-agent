@@ -23,19 +23,26 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Protocol, runtime_checkable
+from uuid import NAMESPACE_URL, uuid5
 
 __all__ = [
     "NullTracer",
     "Observation",
     "TraceContext",
     "Tracer",
+    "experiment_name",
+    "flush_tracer",
     "get_tracer",
     "make_tracer",
+    "session_id",
     "set_tracer",
     "should_sample",
+    "trace_id_from_run_id",
 ]
 
 
@@ -189,6 +196,84 @@ def should_sample(key: str, sample: float) -> bool:
 
 
 # --------------------------------------------------------------------------------------
+# trace_id / 实验版本 / 会话（docs/09 §4.1 / §5；纯函数，绝不抛）
+# --------------------------------------------------------------------------------------
+
+#: W3C trace id 形状（32 位小写 hex）—— 只有这种 run_id 才原样当 trace_id。
+_TRACE_ID_HEX = re.compile(r"\A[0-9a-f]{32}\Z")
+
+#: 未设 ``PRA_LANGFUSE_EXPERIMENT`` 时的缺省实验名。
+_DEFAULT_EXPERIMENT = "baseline"
+
+
+def trace_id_from_run_id(run_id: str) -> str:
+    """把 ``run_id`` 映射为 32-hex ``trace_id``（**确定性**，绝不抛；docs/09 §4.1）。
+
+    - ``run_id`` 已是 32 位小写 hex（HTTP 路径的 ``uuid4().hex``）→ **原样返回**：
+      Langfuse trace 与 MySQL ``review_run.run_id`` 一一对应，可直接反查审计链；
+    - 其余形态（demo 脚本 ``RUN_CASE_1``、评测 ``eval-agent-EC_0123`` …）→
+      ``uuid5(NAMESPACE_URL, run_id).hex``：同一 run_id **恒同** trace_id（可重放）；
+    - 非法输入（``None`` / 空串 / 非字符串）→ 同样走 uuid5 兜底（观测旁路，不抛）。
+    """
+    text = run_id if isinstance(run_id, str) else str(run_id or "")
+    if _TRACE_ID_HEX.match(text):
+        return text
+    return uuid5(NAMESPACE_URL, text).hex
+
+
+def _env_or_settings(env_key: str, settings_attr: str) -> str | None:
+    """取配置：**真实环境变量优先**，其次 ``pra.infra.db.Settings``（它读仓库根 `.env`）。
+
+    为什么必须有第二来源：pydantic-settings 读 `.env` 时**不会**写进 ``os.environ``，
+    而本模块只读 ``os.environ`` —— 若凭据只写在 `.env`（本项目推荐做法），适配层将
+    **永远看不到**、静默走 NullTracer（"配了 key 却没有 trace"，且不报错，极难排查）。
+
+    ``Settings`` 的优先级语义本身就是「环境变量 > .env」，因此两条路径都生效且一致。
+    任何异常（Settings 未装/校验失败/属性缺失）→ 视为无配置，绝不抛。
+    """
+    value = os.environ.get(env_key)
+    if value:
+        return value
+    try:
+        from pra.infra.db import Settings
+
+        got = getattr(Settings(), settings_attr, None)
+    except Exception:  # noqa: BLE001 - 观测旁路：配置来源失败不得抛
+        return None
+    return got if isinstance(got, str) and got else None
+
+
+def experiment_name() -> str:
+    """实验版本名（``PRA_LANGFUSE_EXPERIMENT``，缺省 ``baseline``；docs/09 §5）。
+
+    同时作为 root trace 的 ``version`` 与 tag ``experiment:<name>``，用于多实验对比。
+    """
+    return (_env_or_settings("PRA_LANGFUSE_EXPERIMENT", "pra_langfuse_experiment") or "").strip() or _DEFAULT_EXPERIMENT
+
+
+def session_id() -> str | None:
+    """一次 evaluation run 的会话 ID（``PRA_LANGFUSE_SESSION``，缺省 ``None``）。
+
+    评测入口（S5 CLI）为整轮评测设同一个值 → 320 条 trace 聚成一个 session，
+    UI 按 session 过滤即"这一轮评测的全部案件"；HTTP 路径留空（None）。
+    """
+    return (_env_or_settings("PRA_LANGFUSE_SESSION", "pra_langfuse_session") or "").strip() or None
+
+
+def flush_tracer() -> None:
+    """刷出 tracer 缓冲（CLI / 短生命周期进程退出前调用）；NullTracer 下 no-op，绝不抛。
+
+    **签名与名字已冻结**（S5b 评测 CLI 直接 ``from pra.observability import flush_tracer``，
+    在整轮评测结束后调一次）—— 实现只取当前单例的 ``flush()`` 并吞异常：不新建 client、
+    不改单例。**不要 per-case 调用**（320 次 flush 太慢）。
+    """
+    try:
+        get_tracer().flush()
+    except Exception:  # noqa: BLE001 - 观测旁路：flush 失败不得影响业务
+        return
+
+
+# --------------------------------------------------------------------------------------
 # 进程级单例（默认从环境变量装配）
 # --------------------------------------------------------------------------------------
 
@@ -219,22 +304,26 @@ def make_tracer(
 ) -> Tracer:
     """按配置装配 tracer：凭据齐全且启用 → Langfuse；否则 `NullTracer`。
 
-    显式参数优先，其次读环境变量（``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` /
-    ``LANGFUSE_HOST`` / ``PRA_LANGFUSE_ENABLED`` / ``PRA_LANGFUSE_SAMPLE``）。
+    显式参数优先，其次「真实环境变量 > ``pra.infra.db.Settings``（即仓库根 `.env`）」
+    （``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` / ``LANGFUSE_HOST`` /
+    ``PRA_LANGFUSE_ENABLED`` / ``PRA_LANGFUSE_SAMPLE``）。
     **真 SDK 只在 `langfuse_backend` 内惰性 import** —— 未启用路径不会拉起 SDK。
     """
-    import os
-
-    public_key = public_key if public_key is not None else os.environ.get("LANGFUSE_PUBLIC_KEY")
-    secret_key = secret_key if secret_key is not None else os.environ.get("LANGFUSE_SECRET_KEY")
-    host = host or os.environ.get("LANGFUSE_HOST") or "http://localhost:3000"
+    public_key = public_key if public_key is not None else _env_or_settings(
+        "LANGFUSE_PUBLIC_KEY", "langfuse_public_key"
+    )
+    secret_key = secret_key if secret_key is not None else _env_or_settings(
+        "LANGFUSE_SECRET_KEY", "langfuse_secret_key"
+    )
+    host = host or _env_or_settings("LANGFUSE_HOST", "langfuse_host") or "http://localhost:3000"
     if enabled is None:
-        raw = (os.environ.get("PRA_LANGFUSE_ENABLED") or "").strip().lower()
+        raw = (_env_or_settings("PRA_LANGFUSE_ENABLED", "pra_langfuse_enabled") or "").strip().lower()
         enabled = raw not in {"0", "false", "no", "off"}
     if sample is None:
+        raw_sample = _env_or_settings("PRA_LANGFUSE_SAMPLE", "pra_langfuse_sample")
         try:
-            sample = float(os.environ.get("PRA_LANGFUSE_SAMPLE") or 1.0)
-        except ValueError:
+            sample = float(raw_sample) if raw_sample else 1.0
+        except (TypeError, ValueError):
             sample = 1.0
 
     if not enabled:

@@ -91,7 +91,7 @@ prompt/response/usage/重试次数。自动埋点在本项目会得到「节点�
 | # | 文件 | 调用点 | trace_id 口径 | source tag |
 |---|---|---|---|---|
 | 1 | `src/pra/api/service.py` | `await app.ainvoke(build_initial_state(case), config)` | **`run_id`** | `source:http` |
-| 2 | `src/pra/infra/persist_service.py` | `app.astream(..., stream_mode="updates")` | **`run_id`** | `source:persist` |
+| 2 | `src/pra/infra/persist_service.py` | `app.astream(..., stream_mode="updates")` | **`run_id`** | `source:http` |
 | 3 | `src/pra/evaluation/harness/agent_scheme.py` | `await graph.ainvoke(initial_state, {"configurable": {"thread_id": f"eval-agent-{case.eval_case_id}"}})` | **uuid5（确定性）** | `source:evaluation` |
 
 - HTTP / 落库路径：`trace_id = run_id`。`run_id` 由 `run_review()` 里 `uuid4().hex`
@@ -163,7 +163,7 @@ Gate **不是 Graph Node**：`run_decision_overlay`（`src/pra/agent/guardrails/
 | `experiment` | 实验名（如 `baseline` / `prompt-v2`），同时下发为 trace `version` | 调用方注入 |
 | `tool_world` | `eval` / `rag` 世界 | `EvalContext.tool_world` |
 | `rag_mode` | 检索模式（bm25 / vector / hybrid） | RAG 侧 |
-| `source` | `http` / `persist` / `evaluation` | 三个 root 埋点 |
+| `source` | `http` / `evaluation` | 三个 root 埋点（`persist_service` 即 HTTP 落库路径，与 `api/service` 同为 `http`） |
 | `dataset` | 数据集标识（`v1` / `v2`） | 数据路径 |
 | budget limits | 预算上限快照（`max_llm_calls` / `max_tool_calls` / `max_tokens` / `max_latency_ms`） | `BudgetLimits` |
 

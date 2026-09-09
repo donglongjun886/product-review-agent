@@ -73,6 +73,12 @@ from pra.infra.rdb_models import (
     ReviewRunORM,
     ReviewTraceORM,
 )
+from pra.observability.tracing import (
+    TraceContext,
+    experiment_name,
+    get_tracer,
+    trace_id_from_run_id,
+)
 from pra.screening.engine import TriageResult, rule_evidence, triage
 
 logger = logging.getLogger(__name__)
@@ -475,80 +481,107 @@ async def run_and_persist(
         trace_rows = 0
         prev_budget_tokens = 0  # 初始 state Budget().tokens == 0
         wall_prev = time.perf_counter()  # 节点到达墙钟基线（LLM 行 latency 近似）
-        async for chunk in app.astream(
-            build_initial_state(case), config, stream_mode="updates"
-        ):
-            for node_name, update in chunk.items():
-                wall_now = time.perf_counter()
-                node_latency_ms = max(int((wall_now - wall_prev) * 1000), 0)
-                wall_prev = wall_now
+        # Root trace（docs/09 §4.1 落点 2）：trace_id = run_id 映射（32-hex 原样，
+        # 否则确定性 uuid5）→ Langfuse trace 与 MySQL review_run.run_id 硬对齐。
+        # root 覆盖整个 astream 直到终态可读（output 在终态写回）；常驻服务不
+        # per-request flush（缓冲由 SDK 后台批量上报）。
+        root_ctx = TraceContext(
+            trace_id=trace_id_from_run_id(resolved_run_id),
+            name="review",
+            session_id=None,
+            version=experiment_name(),
+            metadata={
+                "case_id": case_id,
+                "run_id": resolved_run_id,
+                "event_type": case.event_type,
+                "source": "http",
+            },
+            tags=["env:local", "source:http"],
+            input={"case_id": case_id},
+        )
+        with get_tracer().trace_root(root_ctx) as root:
+            async for chunk in app.astream(
+                build_initial_state(case), config, stream_mode="updates"
+            ):
+                for node_name, update in chunk.items():
+                    wall_now = time.perf_counter()
+                    node_latency_ms = max(int((wall_now - wall_prev) * 1000), 0)
+                    wall_prev = wall_now
 
-                budget = update.get("budget")
-                if budget is None:
-                    # update 无 budget 键（plan/reevaluate 短路只返回 pending_tool_calls/
-                    # {} 等）：tokens 记 0，但**不推进差分基线** —— 否则基线被重置为 0，
-                    # 后续带真实 budget 的节点会把全量当差值重复计（差分口径失真）。
-                    step_tokens = 0
-                else:
-                    new_tokens = _token_count(budget)
-                    step_tokens = max(new_tokens - prev_budget_tokens, 0)  # 差分：首步用其值
-                    prev_budget_tokens = new_tokens  # 只对带 budget 的 update 更新基线
+                    budget = update.get("budget")
+                    if budget is None:
+                        # update 无 budget 键（plan/reevaluate 短路只返回 pending_tool_calls/
+                        # {} 等）：tokens 记 0，但**不推进差分基线** —— 否则基线被重置为 0，
+                        # 后续带真实 budget 的节点会把全量当差值重复计（差分口径失真）。
+                        step_tokens = 0
+                    else:
+                        new_tokens = _token_count(budget)
+                        step_tokens = max(new_tokens - prev_budget_tokens, 0)  # 差分：首步用其值
+                        prev_budget_tokens = new_tokens  # 只对带 budget 的 update 更新基线
 
-                if node_name == "tools":
-                    # tools 节点：每条 audit record 一行 TOOL_CALL（含边际增益 4 字段）
-                    records = list(update.get("tool_call_history") or [])
-                    for rec in records:
+                    if node_name == "tools":
+                        # tools 节点：每条 audit record 一行 TOOL_CALL（含边际增益 4 字段）
+                        records = list(update.get("tool_call_history") or [])
+                        for rec in records:
+                            seq += 1
+                            session.add(
+                                ReviewTraceORM(
+                                    run_id=resolved_run_id,
+                                    seq=seq,
+                                    step_type="TOOL_CALL",
+                                    tool_name=rec.get("tool"),
+                                    input_json=_json_cap(rec.get("args")) if rec.get("args") else None,
+                                    output_json=_json_cap(rec),
+                                    tokens=int(rec.get("tokens") or 0),
+                                    latency_ms=int(rec.get("latency_ms") or 0),
+                                    created_at=_utcnow(),
+                                )
+                            )
+                            trace_rows += 1
+                        # 无 record 的 tools 访问（预算截断空批等）：不落行，seq 不推进
+                    else:
                         seq += 1
                         session.add(
                             ReviewTraceORM(
                                 run_id=resolved_run_id,
                                 seq=seq,
-                                step_type="TOOL_CALL",
-                                tool_name=rec.get("tool"),
-                                input_json=_json_cap(rec.get("args")) if rec.get("args") else None,
-                                output_json=_json_cap(rec),
-                                tokens=int(rec.get("tokens") or 0),
-                                latency_ms=int(rec.get("latency_ms") or 0),
+                                step_type=_NODE_STEP_TYPE.get(node_name, node_name.upper()),
+                                tool_name=None,
+                                input_json=_json_cap(
+                                    _node_input_summary(node_name, update, case_id)
+                                ),
+                                output_json=_json_cap(
+                                    _node_output_summary(node_name, update)
+                                ),
+                                tokens=step_tokens,
+                                latency_ms=node_latency_ms,
                                 created_at=_utcnow(),
                             )
                         )
                         trace_rows += 1
-                    # 无 record 的 tools 访问（预算截断空批等）：不落行，seq 不推进
-                else:
-                    seq += 1
-                    session.add(
-                        ReviewTraceORM(
-                            run_id=resolved_run_id,
-                            seq=seq,
-                            step_type=_NODE_STEP_TYPE.get(node_name, node_name.upper()),
-                            tool_name=None,
-                            input_json=_json_cap(
-                                _node_input_summary(node_name, update, case_id)
-                            ),
-                            output_json=_json_cap(
-                                _node_output_summary(node_name, update)
-                            ),
-                            tokens=step_tokens,
-                            latency_ms=node_latency_ms,
-                            created_at=_utcnow(),
-                        )
-                    )
-                    trace_rows += 1
-                await session.commit()  # 每 update 后 commit：中途崩溃可查已落 trace
+                    await session.commit()  # 每 update 后 commit：中途崩溃可查已落 trace
 
-        logger.info(
-            "run_and_persist 图执行完成 case_id=%s run_id=%s trace_rows=%d",
-            case_id, resolved_run_id, trace_rows,
-        )
+            logger.info(
+                "run_and_persist 图执行完成 case_id=%s run_id=%s trace_rows=%d",
+                case_id, resolved_run_id, trace_rows,
+            )
 
-        # ---- d. 终态：review_result upsert + review_evidence 落库 ----
-        snapshot = await app.aget_state(config)
-        try:  # langgraph 1.2.11 StateSnapshot 为 NamedTuple（不可下标）
-            final_state = snapshot["values"]  # type: ignore[index]
-        except TypeError:
-            final_state = snapshot.values  # type: ignore[attr-defined]
+            # ---- d. 终态：review_result upsert + review_evidence 落库 ----
+            snapshot = await app.aget_state(config)
+            try:  # langgraph 1.2.11 StateSnapshot 为 NamedTuple（不可下标）
+                final_state = snapshot["values"]  # type: ignore[index]
+            except TypeError:
+                final_state = snapshot.values  # type: ignore[attr-defined]
 
-        decision = final_state.get("decision")
+            decision = final_state.get("decision")
+            if isinstance(decision, ReviewDecision):
+                root.update(
+                    output={
+                        "decision": decision.decision.value,
+                        "risk_level": decision.risk_level.value,
+                    }
+                )
+
         if not isinstance(decision, ReviewDecision):
             raise RuntimeError(
                 f"调查图执行完成但终态缺少 decision（run_id={resolved_run_id}, "

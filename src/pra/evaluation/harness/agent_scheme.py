@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from langgraph.graph.state import CompiledStateGraph
 
@@ -82,6 +83,12 @@ from pra.agent.state import build_initial_state
 from pra.domain.models import ReviewDecision
 from pra.evaluation.dataset.schema import EvalCase
 from pra.evaluation.harness.base import EvalContext, EvalRecord, SchemeRunner
+from pra.observability.tracing import (
+    TraceContext,
+    experiment_name,
+    get_tracer,
+    session_id,
+)
 from pra.screening.rule_engine.terms import BRAND_TERMS, EVASION_TERMS
 
 __all__ = [
@@ -1178,6 +1185,50 @@ def _budget_hit_dim_from_snapshot(budget) -> str | None:
     return None
 
 
+def _root_trace_context(
+    case: EvalCase, ctx: EvalContext, initial_state: dict
+) -> TraceContext:
+    """评测路径 root trace 的关联信息（docs/09 §4.1 落点 3 / §5）。
+
+    ``trace_id = uuid5(NAMESPACE_URL, f"{experiment}:{eval_case_id}:agent")`` ——
+    **确定性**：同 experiment + 同案 + 同方案重跑落同一条 trace（可覆盖、可对比，
+    不产生重复）；``session_id`` 取 ``PRA_LANGFUSE_SESSION``（一次评测 run 一个值，
+    把整轮 320 条 trace 聚成一个会话；缺省 None）；``version`` = experiment 名。
+    只读：不写 state、不参与任何判定。
+    """
+    experiment = experiment_name()
+    metadata: dict[str, Any] = {
+        "case_id": case.input.case_id,
+        "eval_case_id": case.eval_case_id,
+        "scene": case.scene,
+        "scheme": "agent",
+        "experiment": experiment,
+        "tool_world": ctx.tool_world,
+        "rag_mode": ctx.rag_mode,
+        "source": "evaluation",
+    }
+    limits = getattr(initial_state.get("budget"), "limits", None)
+    if limits is not None and hasattr(limits, "model_dump"):
+        metadata["budget_limits"] = limits.model_dump()
+    tags = [
+        "env:local",
+        "scheme:agent",
+        f"experiment:{experiment}",
+        "source:evaluation",
+    ]
+    if ctx.tool_world:
+        tags.append(f"tool_world:{ctx.tool_world}")
+    return TraceContext(
+        trace_id=uuid5(NAMESPACE_URL, f"{experiment}:{case.eval_case_id}:agent").hex,
+        name="review",
+        session_id=session_id(),
+        version=experiment,
+        metadata=metadata,
+        tags=tags,
+        input={"case_id": case.input.case_id, "eval_case_id": case.eval_case_id},
+    )
+
+
 class AgentScheme(SchemeRunner):
     """System 3 —— 完整调查 Agent（scripted 模式：eval 世界 + eval 审查员桩）。
 
@@ -1306,10 +1357,23 @@ class AgentScheme(SchemeRunner):
                 # 评测侧预算覆盖（real 放宽 max_latency_ms / 调 max_llm_calls 档用；
                 # 键 = BudgetLimits 字段名；None 分支原样返回）
                 initial_state = self._apply_budget_limits(initial_state, self._budget_limits)
-            final_state = await graph.ainvoke(
-                initial_state,
-                {"configurable": {"thread_id": f"eval-agent-{case.eval_case_id}"}},
-            )
+            # Root trace（docs/09 §4.1 落点 3）：每案一条，trace_id 确定性 uuid5；
+            # **不 per-case flush**（320 次太慢）—— 由评测入口整轮结束后
+            # ``tracing.flush_tracer()`` 统一刷出（S5 CLI 收尾调用）。
+            root_ctx = _root_trace_context(case, ctx, initial_state)
+            with get_tracer().trace_root(root_ctx) as root:
+                final_state = await graph.ainvoke(
+                    initial_state,
+                    {"configurable": {"thread_id": f"eval-agent-{case.eval_case_id}"}},
+                )
+                _decision = final_state.get("decision")
+                if _decision is not None:
+                    root.update(
+                        output={
+                            "decision": _decision.decision.value,
+                            "risk_level": _decision.risk_level.value,
+                        }
+                    )
         finally:
             llm_shell.set_llm_backend(None)  # 恢复默认桩（本后端仅评测期生效）
 

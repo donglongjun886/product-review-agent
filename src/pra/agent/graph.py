@@ -25,7 +25,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+import functools
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 
@@ -38,6 +40,7 @@ from pra.agent.nodes.plan import plan_node
 from pra.agent.nodes.reevaluate import reevaluate_node
 from pra.agent.state import AgentState
 from pra.agent.tools_node import make_tools_node
+from pra.observability.tracing import get_tracer
 from pra.tools import build_tools
 
 if TYPE_CHECKING:  # 仅类型（from __future__ import annotations：注解惰性求值，无需运行时）
@@ -60,6 +63,62 @@ __all__ = [
     "route_after_reevaluate",
     "build_agent_graph",
 ]
+
+
+# --------------------------------------------------------------------------------------
+# Node span 包装（docs/09 §4.2）—— 只包节点外层，不改节点实现 / 不改拓扑
+# --------------------------------------------------------------------------------------
+
+
+def _enum_value(value: Any) -> Any:
+    """Enum → ``.value``（普通值原样返回）；仅用于 span 摘要的 JSON 标量化。"""
+    return getattr(value, "value", value)
+
+
+def _node_input_summary(state: dict) -> dict:
+    """节点入参**轻量**摘要（绝不把整个 state 序列化进 span）。
+
+    对齐 ``persist_service._node_input_summary`` 的口径思路（计数 + 关键标识）。
+    """
+    case = state.get("case")
+    return {
+        "case_id": getattr(case, "case_id", None),
+        "hypotheses": len(state.get("hypotheses") or []),
+        "evidence": len(state.get("evidence") or []),
+        "pending_tool_calls": len(state.get("pending_tool_calls") or []),
+        "degraded": bool(state.get("degraded")),
+    }
+
+
+def _node_output_summary(update: dict) -> dict:
+    """节点产物轻量摘要（计数 / 终裁标量；不塞全量对象）。"""
+    summary: dict[str, Any] = {"keys": sorted(update.keys())}
+    for key in ("hypotheses", "evidence", "pending_tool_calls", "tool_call_history"):
+        if key in update:
+            summary[key] = len(update.get(key) or [])
+    decision = update.get("decision")
+    if decision is not None:
+        summary["decision"] = _enum_value(decision.decision)
+        summary["risk_level"] = _enum_value(decision.risk_level)
+    return summary
+
+
+def _wrap_node(name: str, action: Callable) -> Callable:
+    """把节点 action 包进 ``node_span(name=...)``（闭包工厂，保持 graph.py 简洁）。
+
+    契约：**不改节点内部实现、不改拓扑/边/路由、不改返回值** —— 只多一层旁路观测；
+    ``functools.wraps`` 保留原签名（LangGraph 依签名判定是否传 config）。
+    tools 节点同样包装，其内部 tool span 自然成为本 span 的子观测。
+    """
+
+    @functools.wraps(action)
+    async def _node_with_span(state: dict, config) -> dict:
+        with get_tracer().node_span(name=name, input=_node_input_summary(state)) as span:
+            update = await action(state, config)
+            span.update(output=_node_output_summary(update))
+        return update
+
+    return _node_with_span
 
 
 def route_after_plan(state: AgentState) -> Literal["tools", "decide"]:
@@ -123,6 +182,10 @@ def build_agent_graph(*, tools: list | None = None, checkpointer=None, llm=None)
     map {tools: tools, decide: decide}）；tools→reevaluate；reevaluate 条件边
     （route_after_reevaluate，map {continue: plan, decide: decide}）；decide→END。
     返回 ``builder.compile(checkpointer=checkpointer)``。
+
+    **观测（docs/09 §4.2）**：5 个 add_node 一律经 ``_wrap_node`` 包一层 node span
+    （name = 节点名常量，input = 轻量状态摘要）—— 只多一层旁路观测，节点内部实现 /
+    拓扑 / 边 / 路由 / 返回值全部不变（图编译产物与 ``ainvoke`` / ``astream`` 语义不变）。
     """
     if tools is None:
         tools = build_tools()
@@ -132,11 +195,11 @@ def build_agent_graph(*, tools: list | None = None, checkpointer=None, llm=None)
     tools_action = make_tools_node(tools)
 
     builder = StateGraph(AgentState)
-    builder.add_node(N_HYPOTHESIZE, hypothesize_node)
-    builder.add_node(N_PLAN, plan_node)
-    builder.add_node(N_TOOLS, tools_action)
-    builder.add_node(N_REEVALUATE, reevaluate_node)
-    builder.add_node(N_DECIDE, decide_node)
+    builder.add_node(N_HYPOTHESIZE, _wrap_node(N_HYPOTHESIZE, hypothesize_node))
+    builder.add_node(N_PLAN, _wrap_node(N_PLAN, plan_node))
+    builder.add_node(N_TOOLS, _wrap_node(N_TOOLS, tools_action))
+    builder.add_node(N_REEVALUATE, _wrap_node(N_REEVALUATE, reevaluate_node))
+    builder.add_node(N_DECIDE, _wrap_node(N_DECIDE, decide_node))
 
     # 静态边：START→hypothesize→plan；tools→reevaluate；decide→END（唯一终态出口）
     builder.add_edge(START, N_HYPOTHESIZE)

@@ -330,3 +330,121 @@ def test_get_tracer_caches_and_set_tracer_resets(monkeypatch) -> None:
     assert T.get_tracer() is fake
 
     T.set_tracer(None)  # 复原，避免影响其他测试
+
+
+# --------------------------------------------------------------------------------------
+# 6. 回归护栏：业务异常必须原样传播（S2 首版真实缺陷 —— 生成器内 `except: yield`）
+# --------------------------------------------------------------------------------------
+
+
+class _BadExitCM:
+    """假 CM：进入正常、退出抛异常（模拟 SDK flush/export 失败）。"""
+
+    def __init__(self, obs: _FakeObs) -> None:
+        self.obs = obs
+
+    def __enter__(self) -> _FakeObs:
+        return self.obs
+
+    def __exit__(self, *exc: object) -> bool:
+        raise RuntimeError("sdk exit failed")
+
+
+class _BadExitClient:
+    """假 client：所有观测都用会抛异常的 CM。"""
+
+    def start_as_current_observation(self, **kwargs: Any) -> _BadExitCM:
+        return _BadExitCM(_FakeObs())
+
+    def flush(self) -> None:
+        return None
+
+
+def test_trace_root_propagates_business_exception_unchanged() -> None:
+    """业务体异常必须原样抛出（不得被替换成 `generator didn't stop after throw()`）。"""
+    tracer = _tracer(_FakeClient())
+
+    with pytest.raises(ValueError, match="boom"), tracer.trace_root(
+        T.TraceContext(trace_id="e" * 32)
+    ):
+        raise ValueError("boom")
+
+
+def test_trace_root_business_exception_wins_over_sdk_exit_failure() -> None:
+    """SDK 退出失败不得掩盖业务异常（观测旁路的核心不变式）。"""
+    tracer = LangfuseTracer(
+        client=_BadExitClient(), propagate_attributes=_FakePropagate([]), sample=1.0
+    )
+
+    with pytest.raises(ValueError, match="business"), tracer.trace_root(
+        T.TraceContext(trace_id="f" * 32)
+    ):
+        raise ValueError("business")
+
+
+def test_node_span_and_generation_propagate_business_exception() -> None:
+    """node span / generation / tool span 同样不得吞业务异常。"""
+    tracer = _tracer(_FakeClient())
+
+    with pytest.raises(KeyError), tracer.node_span("plan"):
+        raise KeyError("x")
+
+    with pytest.raises(TimeoutError), tracer.llm_generation(
+        name="llm.plan", model="m", input="i"
+    ):
+        raise TimeoutError("y")
+
+    with pytest.raises(RuntimeError, match="tool failed"), tracer.tool_span(
+        name="ProductTool"
+    ):
+        raise RuntimeError("tool failed")
+
+
+# --------------------------------------------------------------------------------------
+# 7. 配置来源：真实环境变量 > Settings（仓库根 .env）
+# --------------------------------------------------------------------------------------
+
+
+class _FakeSettings:
+    """假 Settings：只提供可观测性相关字段。"""
+
+    pra_langfuse_experiment = "prompt-v2"
+    pra_langfuse_session = "eval-run-1"
+    langfuse_public_key = "pk-lf-from-env-file"
+    langfuse_secret_key = "sk-lf-from-env-file"
+    langfuse_host = "http://localhost:3000"
+    pra_langfuse_enabled = None
+    pra_langfuse_sample = "0.5"
+
+
+def test_config_falls_back_to_settings_env_file(monkeypatch) -> None:
+    """`.env`（经 Settings）也能生效 —— pydantic-settings 不会把 .env 写进 os.environ。"""
+    for key in ("PRA_LANGFUSE_EXPERIMENT", "PRA_LANGFUSE_SESSION", "LANGFUSE_PUBLIC_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr("pra.infra.db.Settings", lambda *a, **k: _FakeSettings())
+
+    assert T._env_or_settings("PRA_LANGFUSE_EXPERIMENT", "pra_langfuse_experiment") == "prompt-v2"
+    assert T.experiment_name() == "prompt-v2"
+    assert T.session_id() == "eval-run-1"
+
+
+def test_real_env_var_beats_settings(monkeypatch) -> None:
+    """真实环境变量优先级高于 .env（与 pydantic-settings 语义一致）。"""
+    monkeypatch.setenv("PRA_LANGFUSE_EXPERIMENT", "rag-v1")
+    monkeypatch.setattr("pra.infra.db.Settings", lambda *a, **k: _FakeSettings())
+
+    assert T.experiment_name() == "rag-v1"
+
+
+def test_settings_failure_is_silent(monkeypatch) -> None:
+    """Settings 不可用（未装/校验失败）→ 视为无配置，绝不抛。"""
+    monkeypatch.delenv("PRA_LANGFUSE_EXPERIMENT", raising=False)
+
+    def _boom(*a, **k):
+        raise RuntimeError("settings boom")
+
+    monkeypatch.setattr("pra.infra.db.Settings", _boom)
+
+    assert T._env_or_settings("PRA_LANGFUSE_EXPERIMENT", "pra_langfuse_experiment") is None
+    assert T.experiment_name() == "baseline"  # 回落缺省
+    assert T.session_id() is None

@@ -36,6 +36,12 @@ from pra.agent.checkpointer import make_memory_checkpointer
 from pra.agent.state import build_initial_state
 from pra.api.schemas import ReviewRunResult
 from pra.domain.models import ProductReviewCase, ReviewDecision
+from pra.observability.tracing import (
+    TraceContext,
+    experiment_name,
+    get_tracer,
+    trace_id_from_run_id,
+)
 
 if TYPE_CHECKING:  # 仅类型：运行时不需要 CompiledStateGraph（future annotations 惰性求值）
     from langgraph.graph.state import CompiledStateGraph
@@ -88,8 +94,33 @@ async def run_review(
     config = {"configurable": {"thread_id": resolved_run_id}}
     app = get_graph()
 
-    final_state = await app.ainvoke(build_initial_state(case), config)
-    decision: ReviewDecision | None = final_state.get("decision")
+    # Root trace（docs/09 §4.1 落点 1）：trace_id = run_id 映射（32-hex 原样，否则
+    # 确定性 uuid5）→ Langfuse trace 可与 MySQL review_run.run_id 硬对齐。
+    # HTTP 常驻服务不 per-request flush（缓冲由 SDK 后台批量上报）。
+    root_ctx = TraceContext(
+        trace_id=trace_id_from_run_id(resolved_run_id),
+        name="review",
+        session_id=None,
+        version=experiment_name(),
+        metadata={
+            "case_id": case.case_id,
+            "run_id": resolved_run_id,
+            "event_type": case.event_type,
+            "source": "http",
+        },
+        tags=["env:local", "source:http"],
+        input={"case_id": case.case_id},
+    )
+    with get_tracer().trace_root(root_ctx) as root:
+        final_state = await app.ainvoke(build_initial_state(case), config)
+        decision: ReviewDecision | None = final_state.get("decision")
+        if decision is not None:
+            root.update(
+                output={
+                    "decision": decision.decision.value,
+                    "risk_level": decision.risk_level.value,
+                }
+            )
     if decision is None:
         raise RuntimeError(
             f"调查图执行完成但终态缺少 decision（run_id={resolved_run_id}, "

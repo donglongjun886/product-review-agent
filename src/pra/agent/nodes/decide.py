@@ -40,6 +40,7 @@ from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, key_tool_fail
 from pra.agent.guardrails.gate import run_decision_overlay
 from pra.agent.guardrails.llm_shell import call_structured_llm
 from pra.agent.guardrails.schemas import DecisionProposal
+from pra.observability.tracing import get_tracer
 
 __all__ = ["decide_node"]
 
@@ -102,6 +103,33 @@ def _build_messages(state: dict) -> list[dict]:
     ]
 
 
+def _gate_input_summary(proposal: DecisionProposal | None) -> dict:
+    """Gate 子 span 的入参摘要（LLM 提案：decision / risk_level / confidence）。
+
+    只读摘要，不参与任何判定；``proposal is None``（预算/降级/关键工具失败）如实记 None。
+    """
+    if proposal is None:
+        return {"proposal": None}
+    return {
+        "proposal": {
+            "decision": proposal.decision,
+            "risk_level": proposal.risk_level,
+            "confidence": proposal.confidence,
+            "risk_type": [getattr(t, "value", t) for t in proposal.risk_type],
+        }
+    }
+
+
+def _gate_output_summary(final) -> dict:
+    """Gate 子 span 的出参摘要（overlay 后的终裁 + overrides 原因码，只读）。"""
+    return {
+        "decision": getattr(final.decision, "value", final.decision),
+        "risk_level": getattr(final.risk_level, "value", final.risk_level),
+        "decision_confidence": final.decision_confidence,
+        "overrides": list(final.overrides),
+    }
+
+
 async def decide_node(state: dict, config) -> dict:
     """decide 图节点 action（模块级导出名，graph.py 按 ``pra.agent.nodes.decide``
     import，契约 §9.1）。
@@ -150,7 +178,11 @@ async def decide_node(state: dict, config) -> dict:
         overlay_state["degraded"] = True
         overlay_state["failures"] = [*state["failures"], failure]
 
-    final = run_decision_overlay(overlay_state, proposal)
+    # Gate 子 span（docs/09 §4.5）：Gate 不是图节点，这里只给它一层**只读**子观测 ——
+    # 不新增 Graph Node、不改路由、不改 gate.py 的判定顺序与结果。
+    with get_tracer().node_span("gate", input=_gate_input_summary(proposal)) as gate_span:
+        final = run_decision_overlay(overlay_state, proposal)
+        gate_span.update(output=_gate_output_summary(final))
     return {
         "decision": final,
         "degraded": False,
