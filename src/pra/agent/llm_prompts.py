@@ -12,7 +12,8 @@ JSON Schema 的关键字段 / 枚举 / 必填说明 —— 供 :mod:`pra.agent.l
 
 各节点 state 键（与 nodes/*.py ``_build_messages`` 一致，字段均为 pydantic
 ``model_dump(mode="json")`` 的可序列化 dict / list 形状）：
-- hypothesize: ``{"case": 全量, "screening_signals": [...]}``；
+- hypothesize: ``{"case": 全量, "screening_signals": [...]}``；若续跑/复审场景额外带
+  ``hypotheses``（既有假设清单），渲染为"四、既有假设清单"供去重参考；
 - plan: ``{"hypotheses", "evidence", "case"(子集: case_id/merchant_id/event_type/
   product{product_id,title,description,category,brand,version,attributes,sku_list,
   images,listing_time})}``；
@@ -119,7 +120,16 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "数值/来源**；\n"
         "5. investigation_queue 1~8 条、每条一句话，priority 1~5（1 最优先），只放值得"
         "调查、可被工具取证的问题；\n"
-        "6. 只输出**单个 JSON 对象**，字段/类型/枚举/必填严格符合 user 上下文末尾的 "
+        "6. **禁止重复提出假设**：user 上下文若给出「既有假设清单」（含 UNRESOLVED / "
+        "REFUTED / 此前轮次已新增的假设），只提出清单之外的**新风险维度**；与清单内"
+        "既有假设同维度或同表述（语义重复即重复，不要求逐字一致）的假设必须跳过 —— "
+        "重复提出既有假设只会空转调查轮次、浪费预算；\n"
+        "7. **假设必须可取证、允许少提**：每条假设都要能被后续调查计划的取证工具检验"
+        "（图片比对 / 商品事实核验 / 商家历史 / 先例 / 政策检索中至少一条可取证路径"
+        "），禁止提出工具无法取证的纯脑补维度；对照既有清单后没有新的可取证风险维度"
+        "时允许**少提**，在满足第 1 条下限（hypotheses ≥1 条且含低风险假设）的前提下"
+        "宁精勿凑；\n"
+        "8. 只输出**单个 JSON 对象**，字段/类型/枚举/必填严格符合 user 上下文末尾的 "
         "JSON Schema 要点；除 JSON 外不要输出任何解释文字。"
     ),
     "plan": (
@@ -129,7 +139,11 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "决策约束（硬性约束）：\n"
         "1. **只计划能带来「新证据」的工具调用**：对照证据缺口（IMAGE_SIMILARITY / "
         "PRODUCT_FACT / MERCHANT_HISTORY / CASE_PRECEDENT / POLICY_REF 等尚未收集或仍"
-        "存疑的类型）与仍待验证（PENDING/UNRESOLVED）的假设选择工具；\n"
+        "存疑的类型）与仍待验证（PENDING/UNRESOLVED）的假设选择工具；对已收集并被引用"
+        "的政策条款/先例（POLICY_REF / CASE_PRECEDENT）做**一次性适用性判定**：一旦被"
+        "引用支撑假设，即视为该条款/先例的适用性已判定、该路调查目标已达成，后续轮次"
+        "**不要仅为复核同一条款/先例是否适用而重复安排同类检索**（不会带来新证据）；"
+        "只有出现需要另一类条款/先例的新假设或新疑点，才值得再查；\n"
         "2. **不要重复已经执行成功过的调用**（同 tool + 同 args）；可从已收集证据的 "
         "source/type 判断该调查是否已有结果 —— 已有结果即无新证据价值；\n"
         "3. 若所有仍存疑的假设都已覆盖、或没有能带来新证据的工具可调 → 输出 "
@@ -161,7 +175,22 @@ SYSTEM_PROMPTS: dict[str, str] = {
         " 塞进 hypothesis_updates；\n"
         "7. evidence_sufficiency 表示本轮证据是否足以对高优先假设下结论（SUFFICIENT / "
         "INSUFFICIENT，语义参考量）；已被证据解答的队列问题经 queue_updates 置 DONE；\n"
-        "8. 只输出符合 ReevaluateOutput JSON Schema 的 JSON，不要输出解释文字。"
+        "8. **外观/视觉类假设的证据门槛**：凡假设落在视觉比对维度（表述含「外观相似」"
+        "「高度相似」「同款外观」「视觉仿冒」「复刻外观」「版型一致」「长得像」等）——"
+        " 只有在上下文存在**图像类证据**（IMAGE_SIMILARITY 等由图像分析工具产出、基于"
+        "图片比对的证据）时才可判 SUPPORTED；CASE_PRECEDENT / POLICY_REF 只能作佐证，"
+        "**不能单独支撑外观类 SUPPORTED**；无视觉证据时该类假设判 UNRESOLVED，并把对应"
+        "的外观查证队列问题保留 OPEN（留给 plan 安排图像取证），**禁止仅凭标题文字或"
+        "先例脑补外观相似结论**；\n"
+        "9. **政策/先例引用一次判定**：已被引用支撑/佐证假设的政策条款（POLICY_REF）"
+        "与人工先例（CASE_PRECEDENT）视为**适用性已判定**，不要在同一假设上反复纠结"
+        "条款是否适用、也不要为复核已引用条款而重复要求补查同类条款；注意条款/先例"
+        "本身不是视觉、事实或商家行为证据，不能替代对应维度的真实取证；\n"
+        "10. **new_hypotheses 禁重复、允许为空**：只放**新的风险维度**，与假设仪表盘"
+        "既有假设同维度或同表述（语义重复即重复）不得再次提出；本轮没有新的可取证风险"
+        "维度时 new_hypotheses **允许为空**，不要为制造「进展」而把既有假设换个说法"
+        "重提 —— 重复假设只会空转轮次、烧掉预算；\n"
+        "11. 只输出符合 ReevaluateOutput JSON Schema 的 JSON，不要输出解释文字。"
     ),
     "decide": (
         "你是商品审核 Agent 的「最终决策提案器」（decide）。基于 user 上下文中的假设"
@@ -328,6 +357,18 @@ def _hypothesis_lines(hypotheses: Any) -> list[str]:
         lines.append(f"  支持证据引用：{_join(h.get('evidence_for'))}")
         lines.append(f"  反驳证据引用：{_join(h.get('evidence_against'))}")
     return lines or ["（无假设）"]
+
+
+def _hypothesis_short_lines(hypotheses: Any) -> list[str]:
+    """既有假设清单精简行（hypothesize 上下文去重参考：id/status/statement 一行一条）。"""
+    lines: list[str] = []
+    for h in hypotheses or []:
+        if not isinstance(h, dict):
+            continue
+        hid = h.get("id") or "?"
+        status = h.get("status") or "PENDING"
+        lines.append(f"- {hid} | status={status}：{_text(h.get('statement'))}")
+    return lines or ["（无既有假设）"]
 
 
 def _evidence_lines(evidence: Any, *, full_value: bool = True, limit: int = 200) -> list[str]:
@@ -665,6 +706,17 @@ def build_user_prompt(
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
         parts.append(_section("二、商品图片（含机审 OCR 结果）", "\n".join(_image_lines(_images_from_state(state)))))
         parts.append(_section("三、机审信号", "\n".join(_signal_lines(state))))
+        # 续跑/复审场景下若 __STATE__ 带了既有假设（UNRESOLVED/REFUTED/已新增），
+        # 渲染成精简清单供去重 —— 禁止重复提出同维度/同表述假设（无则整节省略，
+        # 首轮初始生成不必声明"无"）。
+        existing = state.get("hypotheses")
+        if isinstance(existing, list) and existing:
+            parts.append(
+                _section(
+                    "四、既有假设清单（去重参考 —— 禁止重复提出同维度/同表述的假设）",
+                    "\n".join(_hypothesis_short_lines(existing)),
+                )
+            )
     elif node == "plan":
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
         parts.append(_section("二、商品图片（取证素材）", "\n".join(_image_lines(_images_from_state(state)))))

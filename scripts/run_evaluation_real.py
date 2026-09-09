@@ -16,6 +16,7 @@
 
     uv run python scripts/run_evaluation_real.py                        # v1 全量 35 条（会真实调用 LLM！）
     uv run python scripts/run_evaluation_real.py --limit 10             # 冒烟：只跑前 10 条（确定性取法）
+    uv run python scripts/run_evaluation_real.py --ids "EC_0007,EC_0101"  # 定向 real smoke：只跑这两个 case
     uv run python scripts/run_evaluation_real.py --data eval_data/v2 --limit 5 --out /tmp/real_v2.json
     uv run python scripts/run_evaluation_real.py --world rag --limit 10  # RAG 世界（真实 KB 检索）
     uv run python scripts/run_evaluation_real.py --model deepseek/deepseek-chat --api-key sk-xxx
@@ -486,6 +487,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="只跑数据集前 N 条（loader smoke_subset 确定性取法；默认 None = 全量）",
     )
     parser.add_argument(
+        "--ids",
+        default=None,
+        help=(
+            "只跑指定 eval_case_id（逗号分隔，如 \"EC_0007,EC_0101\"；定向 real smoke 用；"
+            "默认 None = 不按 id 过滤）。加载后按 eval_case_id 过滤，可与 --limit 叠加"
+            "（先按 --ids 过滤、再按 --limit 截断）；id 不在数据集中会报错提示"
+        ),
+    )
+    parser.add_argument(
         "--world",
         default="eval",
         choices=list(WORLDS),
@@ -515,10 +525,20 @@ async def _main(argv: list[str] | None = None) -> int:
     _load_dotenv()  # 仓库根 .env 的 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL 注入（setdefault）
     data_path = _resolve_data_path(args.data)
     cases = load_dataset(data_path)
+    # --ids 定向过滤（加载后按 eval_case_id；缺省 None 零变化；id 拼错宁可快速报错，
+    # 避免带着空/错集去烧 API 费用）
+    if args.ids:
+        wanted = {s.strip() for s in args.ids.split(",") if s.strip()}
+        if not wanted:
+            raise ValueError('--ids 为空：请用逗号分隔的 eval_case_id，如 --ids "EC_0007,EC_0101"')
+        missing = wanted - {c.eval_case_id for c in cases}
+        if missing:
+            raise ValueError(f"--ids 有 {len(missing)} 个不在当前数据集中: {sorted(missing)}")
+        cases = [c for c in cases if c.eval_case_id in wanted]
     if args.limit is not None and args.limit > 0:
         cases = smoke_subset(cases, args.limit)  # 确定性取前 N 条（与 loader 语义一致）
     if not cases:
-        raise ValueError("评测运行无有效 case（数据集为空或 --limit 截成空）")
+        raise ValueError("评测运行无有效 case（数据集为空或 --limit/--ids 截成空）")
 
     api_key = _resolve_api_key(args.api_key)
     base_url = args.base_url or os.environ.get(ENV_BASE_URL, "") or None
