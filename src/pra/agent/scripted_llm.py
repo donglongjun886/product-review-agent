@@ -224,7 +224,11 @@ class ScriptedLLMBackend:
             payload = self._decide(state)
         else:
             raise LLMBackendError("unknown node: {}".format(node))
-        return LLMResponse(content=json.dumps(payload, ensure_ascii=False), tokens=0)
+        # 桩没有真实 token（无 provider 响应）：tokens=0 照旧、usage=None ——
+        # **绝不伪造** token 拆分（S3 观测口径：拿不到就不传 usage_details）。
+        return LLMResponse(
+            content=json.dumps(payload, ensure_ascii=False), tokens=0, usage=None
+        )
 
     # -- hypothesize：固定 4 假设 + 2 队列（§4.3），与案件事实无关 --------------
 

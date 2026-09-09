@@ -70,6 +70,16 @@ __all__ = ["LiteLLMBackend"]
 _API_KEY_ENV = "DEEPSEEK_API_KEY"
 
 
+def _int_or_none(value: Any) -> int | None:
+    """把 usage 字段转 int；缺失/None/非法 → ``None``（**不填 0 冒充**，S3 口径）。"""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class LiteLLMBackend(LLMBackend):
     """真实 litellm 后端（Phase 3 real LLM）：解析 __STATE__ → 渲染完整 prompt → 调 API。
 
@@ -290,15 +300,29 @@ class LiteLLMBackend(LLMBackend):
             content = ""
         # 7) token 记账（无 usage → 0；口径 = usage.total_tokens：input+output 合计、
         #    含 provider 缓存命中 token —— P2-16 注记）
+        #    S3 观测：额外透出拆分 usage（input/output/total，键名对齐 Langfuse
+        #    usage_details）—— 取不到的键**不放**（不填 0 冒充）；整个 usage 拿不到 → None。
         tokens = 0
+        usage_details: dict[str, int] | None = None
         usage = getattr(resp, "usage", None)
         if usage is not None:
-            try:
-                tokens = int(getattr(usage, "total_tokens", 0) or 0)
-            except (TypeError, ValueError):
-                tokens = 0
+            total_tokens = _int_or_none(getattr(usage, "total_tokens", None))
+            tokens = total_tokens or 0
+            parts: dict[str, int] = {}
+            prompt_tokens = _int_or_none(getattr(usage, "prompt_tokens", None))
+            completion_tokens = _int_or_none(getattr(usage, "completion_tokens", None))
+            if prompt_tokens is not None:
+                parts["input"] = prompt_tokens
+            if completion_tokens is not None:
+                parts["output"] = completion_tokens
+            if total_tokens is not None:
+                parts["total"] = total_tokens
+            usage_details = parts or None
         return LLMResponse(
-            content=self._clean_json_text(content), tokens=tokens, truncated=truncated
+            content=self._clean_json_text(content),
+            tokens=tokens,
+            truncated=truncated,
+            usage=usage_details,
         )
 
     # -- content 清理（best-effort，任何失败不抛，原样返回） ----------------------

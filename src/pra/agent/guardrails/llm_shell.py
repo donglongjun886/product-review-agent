@@ -41,8 +41,11 @@ token 口径（P2-16 注记）：``LLMResponse.tokens`` / ``LLMCallOutcome.token
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, runtime_checkable
+
+from pra.observability.tracing import Observation, get_tracer
 
 
 class LLMBackendError(RuntimeError):
@@ -62,6 +65,11 @@ class LLMResponse:
                  # 含 provider 缓存命中 token —— P2-16 注记；MVP 桩可给 0）
     truncated: bool = False  # finish_reason=="length"（输出被截断、内容可能不完整，
                              # P2-15：llm_shell 按 transport 类处理，见模块 docstring）
+    usage: dict | None = None  # 可选 token 拆分（S3 观测）：形状
+                               # ``{"input": int, "output": int, "total": int}``
+                               # —— 键名对齐 Langfuse ``usage_details``；取不到的键
+                               # **不放**（不填 0 冒充）、整个 usage 拿不到 → None；
+                               # 确定性桩无真实 token → None（**绝不伪造**）。
 
 
 @runtime_checkable
@@ -97,6 +105,9 @@ class LLMCallOutcome:
                  # 含缓存命中；**schema 校验失败的尝试也全额计入**、transport 失败
                  # 无响应不计 —— P2-16 注记；成功响应之和，全失败可能为 0）
     error: Optional[str]  # 最后一次失败原因（供节点写 failure.reason）；成功为 None
+    usage: dict | None = None  # 可选 token 拆分（S3 观测）：多次尝试**按键累加**
+                               # （与 tokens 同口径：schema 校验失败的尝试也计入、
+                               # transport 失败无响应不计）；全部为 None → None。
 
 
 # 模块级注入位点（MVP）：
@@ -164,6 +175,63 @@ def _correction_message(content: str, error: Exception) -> dict:
     }
 
 
+# --------------------------------------------------------------------------------------
+# 观测（S3，旁路）—— 只读、只写观测，绝不改变控制流（docs/09 §3）
+# --------------------------------------------------------------------------------------
+
+
+def _elapsed_ms(t0: float) -> int:
+    """距 ``t0`` 的墙钟耗时（毫秒，int）—— 本壳原先**没有任何 latency 记录**。"""
+    return int((time.perf_counter() - t0) * 1000)
+
+
+def _observe_update(obs: Observation, **kwargs: Any) -> None:
+    """观测旁路：``update`` 绝不抛（适配层已吞异常，此处双保险）。"""
+    try:
+        obs.update(**kwargs)
+    except Exception:  # noqa: BLE001 - 观测失败不得影响业务
+        return
+
+
+def _observe_record_error(obs: Observation, exc: BaseException) -> None:
+    """观测旁路：``record_error`` 绝不抛。"""
+    try:
+        obs.record_error(exc)
+    except Exception:  # noqa: BLE001 - 观测失败不得影响业务
+        return
+
+
+def _merge_usage(total: dict | None, usage: dict | None) -> dict | None:
+    """按键累加 token usage（``input``/``output``/``total``）；皆空 → None。
+
+    形状约定对齐 Langfuse ``usage_details``（S3）：取不到的键不放（不填 0 冒充），
+    非 int 值跳过（防御畸形后端），两者皆无 → None。
+    """
+    if not isinstance(usage, dict):
+        return total
+    merged: dict = dict(total or {})
+    for key, value in usage.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        merged[key] = merged.get(key, 0) + value
+    return merged or None
+
+
+def _generation_update(resp: LLMResponse, *, attempt: int, latency_ms: int) -> dict:
+    """一次成功响应的 generation 字段（``usage`` 为 None 时**不传** usage_details 键）。"""
+    kwargs: dict = {
+        "output": resp.content,
+        "metadata": {
+            "latency_ms": latency_ms,
+            "attempt": attempt,
+            "truncated": resp.truncated,
+        },
+    }
+    if resp.usage is not None:
+        kwargs["usage_details"] = resp.usage
+    return kwargs
+
+
 async def call_structured_llm(
     *,
     OutputModel: Any,
@@ -205,23 +273,50 @@ async def call_structured_llm(
         )
 
     backend = get_llm_backend()
+    tracer = get_tracer()  # 进程级单例；无凭据 = NullTracer（全 no-op，零开销）
     work_messages: list[dict] = list(messages)  # 修正提示追加在工作副本，不污染调用方
     total_tokens = 0
+    total_usage: dict | None = None  # 按键累加的 usage（全 None → None，不伪造 0）
     last_error: Optional[str] = None
 
     for attempt in (1, 2):
+        # 观测（S3）：**每次真实 backend.complete() 一条 generation** —— 埋点在内层
+        # 循环而非外壳：一次 call_structured_llm 最多 2 次真实调用（schema 修正重试 /
+        # transport 重试），Langfuse 必须逐次记录。模型名取后端自报（不伪造）。
+        t0 = time.perf_counter()
+        resp: LLMResponse | None = None
         try:
-            resp = await backend.complete(
-                node=node, messages=work_messages, json_schema=json_schema
-            )
-        except Exception as exc:  # transport/后端失败（LLMBackendError/网络/任何异常）
-            last_error = str(exc)
-            if attempt == 1:
-                # transport 类：没有可"修正"的输出 —— 不追加 schema 修正文案
-                # （旧版对超时/HTTP 也按"schema 修正"重试是误导）；退避后原样重试。
-                await _transport_backoff(failure_index=attempt)
-            continue
+            with tracer.llm_generation(
+                name=f"llm.{node}",
+                model=getattr(backend, "name", "unknown"),
+                input=work_messages,
+                metadata={"node": node, "attempt": attempt},
+            ) as obs:
+                try:
+                    resp = await backend.complete(
+                        node=node, messages=work_messages, json_schema=json_schema
+                    )
+                except Exception as exc:  # 后端失败（LLMBackendError/网络/任何异常）
+                    # 观测：本次真实调用失败（随后照旧走既有 transport 重试逻辑）
+                    _observe_record_error(obs, exc)
+                    raise
+                # 观测：成功调用 —— output + usage + latency/attempt/truncated
+                _observe_update(
+                    obs,
+                    **_generation_update(resp, attempt=attempt, latency_ms=_elapsed_ms(t0)),
+                )
+        except Exception as exc:  # transport/后端失败（行为与埋点前完全一致）
+            if resp is None:
+                last_error = str(exc)
+                if attempt == 1:
+                    # transport 类：没有可"修正"的输出 —— 不追加 schema 修正文案
+                    # （旧版对超时/HTTP 也按"schema 修正"重试是误导）；退避后原样重试。
+                    await _transport_backoff(failure_index=attempt)
+                continue
+            # 响应已拿到 → 异常只可能来自观测层退出（适配层契约：绝不抛）。
+            # 忽略它、业务继续按"成功响应"走 —— 埋点不得改变控制流。
         total_tokens += resp.tokens
+        total_usage = _merge_usage(total_usage, resp.usage)
         try:
             model = OutputModel.model_validate_json(resp.content)
         except Exception as exc:  # 校验失败（pydantic.ValidationError 等）
@@ -235,12 +330,15 @@ async def call_structured_llm(
                         attempts=1,
                         tokens=total_tokens,
                         error=f"模型输出被截断（finish_reason=length）且校验失败: {exc}",
+                        usage=total_usage,
                     )
                 # schema 修正类：回喂第 1 次非法输出原文 + 校验错误（P2-15）
                 work_messages.append(_correction_message(resp.content, exc))
             continue
         # 成功：第 1 次校验通过 attempts=1；重试后通过 attempts=2
-        return LLMCallOutcome(model=model, attempts=attempt, tokens=total_tokens, error=None)
+        return LLMCallOutcome(
+            model=model, attempts=attempt, tokens=total_tokens, error=None, usage=total_usage
+        )
 
     # 两次尝试均失败 → 降级返回（不抛异常）；节点据此置 degraded / 写 failure
     return LLMCallOutcome(
@@ -248,6 +346,7 @@ async def call_structured_llm(
         attempts=2,
         tokens=total_tokens,
         error=last_error or "LLM 调用失败（无错误信息）",
+        usage=total_usage,
     )
 
 
