@@ -1,14 +1,22 @@
 # 视觉相似类假设的证据存在性 Gate 约束 —— 设计提案（docs/05-visual-similarity-gate-proposal.md v1）
 
-> **状态声明（重要）**：本文是**纯设计提案**，供后续拍板落地参考——**全文未实施 / 待拍板**，
-> 不写实现代码、不 touch 任何既有代码 / 测试 / 文档。所有代码位置仅作「锚点」引用，指向
-> 当前 main 的真实行号（`src/pra/domain/models.py` / `src/pra/agent/guardrails/gate.py` /
-> `src/pra/agent/scripted_llm.py` 等）。背景：Phase 3 real LLM 首次跑分（v1 35 案）暴露唯一
+> **状态声明（重要）**：本文为设计提案，**V-1 ~ V-11 已拍板并实施落地**（见下方「实施状态注记」；
+> 落地前全文未实施 / 待拍板）。本文为纯设计文档（不含实现代码），保留作拍板依据与设计
+> rationale；实现代码位于 `src/pra/agent/guardrails/gate.py` 等。背景：Phase 3 real
+> LLM 首次跑分（v1 35 案）暴露唯一
 > 误杀 EC_0007（truth=PASS 被判 REJECT，见 docs/02-evaluation.md §8「Phase 3 实现状态」块）；
 > 并行已做 prompt 层缓解，本提案 = **Gate 侧确定性兜底的准备设计**：R3 abstention 扩展 ——
 > 「外观/视觉相似类假设被判 SUPPORTED 但证据集不含视觉证据 → 确定性拦截」。与
 > docs/03-decisions.md 的 T-* / docs/02-evaluation.md 的 P-* 编号惯例对齐，本文待拍板项编为
 > **V-1 ~ V-11**（见 §5）。
+
+> **实施状态注记**：V-1 ~ V-11 已全部拍板并落地（与 §5 各行推荐结论一致）：Gate 侧新增
+> `R3_VISUAL_CLAIM_UNSUPPORTED` abstention（gate.py —— 关键词谓词
+> `visual_claim_unsupported` / 存在性谓词 `visual_evidence_present` / 本地关键词表
+> `VISUAL_CLAIM_MARKERS`，V-5 与 llm_prompts 同步维护）+ 确定性单测
+> （tests/test_gate_visual.py）+ v1 回归基线重录 + docs 00/01/03 定向同步。
+> 实现 commit：`feat(agent/gate): ②b Gate 视觉兜底 —— R3_VISUAL_CLAIM_UNSUPPORTED`（2026-09-09，
+> 与 B-1 收敛 prompt、B-2 评测 --llm-budget 同轮落地；SHA 见 job-tracker content-governance/project-status.md §13.6）。
 
 ---
 

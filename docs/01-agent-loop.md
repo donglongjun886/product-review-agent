@@ -756,6 +756,7 @@ def run_decision_overlay(state, proposal) -> ReviewDecision:
     if key_tool_failure(state, failures):    overrides.append("R3_KEY_TOOL_FAILED")     # 关键 Tool 失败致证据缺失
     if policy_indeterminate(evidence):       overrides.append("R3_POLICY_UNCERTAIN")    # 政策无法确定/无适用条款
     if indistinguishable_hypotheses(state):  overrides.append("R3_HYPOTHESES_INDISTINGUISHABLE")  # 多假设无法区分
+    if visual_claim_unsupported(state):      overrides.append("R3_VISUAL_CLAIM_UNSUPPORTED")  # 视觉声称无视觉证据（05 V-7：声称维度与证据错配）
     # R5（O-2 已拍板，对齐 04 §5.2）：failures 非空**不再一律** HUMAN_REVIEW ——
     # 仅 LLM 步失败（state["degraded"]，severity=critical）在此补 R5；未解决的 critical Tool
     # 失败已由上面 key_tool_failure 以 R3_KEY_TOOL_FAILED 计；severity="warn" 的失败只进
@@ -860,7 +861,7 @@ def finalize_decision_confidence(state) -> float:
 > 示例 0.87 = §7.5 确定性重算终值（0.91 只是 LLM 提案 confidence 参考值，demo 断言 ≥0.7）。
 > `overrides` 记录确定性 overlay 的改判/归因原因码
 > （R1_HARD_RULE / R2_REJECT_GATE_FAIL / R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT / R3_KEY_TOOL_FAILED /
-> R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；
+> R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R3_VISUAL_CLAIM_UNSUPPORTED / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；
 > 空 = overlay 未改判（LLM 提案即终值）。`evidence[]` 元素为代码 `Evidence` 形状（无 evidence_id/source_tool，运行序号在 trace）。
 
 ---

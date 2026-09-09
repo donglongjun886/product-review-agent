@@ -8,7 +8,9 @@ overrides 全量写入）：
 2. ``dc = finalize_decision_confidence(state)`` 确定性重算 decision_confidence；
 3. HUMAN_REVIEW abstention 清单（R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT /
    R3_KEY_TOOL_FAILED / R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE /
-   R5_DEGRADED_OR_FAILED_STEP）—— 任一命中即 HUMAN_REVIEW；
+   R3_VISUAL_CLAIM_UNSUPPORTED / R5_DEGRADED_OR_FAILED_STEP）—— 任一命中即
+   HUMAN_REVIEW（R3_VISUAL_CLAIM_UNSUPPORTED = 外观/视觉声称被判 SUPPORTED 但证据
+   链无视觉证据 → 声称维度与证据维度错配，见 ``visual_claim_unsupported``，docs/05）；
 4. proposal 为 None（预算/降级/decide 自身 LLM 失败）的兜底 HUMAN_REVIEW；
 5. PASS/REJECT Gate 校验 LLM 提案（不满足 → HUMAN_REVIEW + R4_PASS_GATE_FAIL /
    R2_REJECT_GATE_FAIL）；
@@ -28,7 +30,10 @@ PASS 改成了 HUMAN_REVIEW”的可审计落点；overrides 为空 = overlay �
 本模块全部谓词为纯函数、确定性、可单测；state 里 hypotheses/evidence 缺失或为空时
 安全返回（False/[] 等，不抛 KeyError —— ``AgentState`` 是 total=False 的 TypedDict）。
 state 元素为 ``pra.domain.models`` 的 Pydantic 实例（Evidence/Hypothesis），直接属性
-访问；确定性逻辑只读 extra/weight/ref_id，不解析人读 value 字符串（O-8）。常量在
+访问；确定性逻辑只读 extra/weight/ref_id，不解析人读 value 字符串（O-8）。唯一
+例外（docs/05 V-1 拍板放行）：``visual_claim_unsupported`` 读假设 ``statement`` 自由
+文本做**维度归类**（外观/视觉），不做数值/结论解析 —— 命中只影响 abstention 方向
+（HUMAN_REVIEW），不据此直接 REJECT。常量在
 本模块本地声明（CITABLE_TYPES 与 converge 同义，本地重声明避免模块间隐式耦合）。
 
 走查锚点（契约 §2.3/§5.2）：5 条证据 + H2 SUPPORTED posterior=0.91 时
@@ -69,6 +74,7 @@ R3_CRITICAL_CONFLICT = "R3_CRITICAL_CONFLICT"
 R3_KEY_TOOL_FAILED = "R3_KEY_TOOL_FAILED"
 R3_POLICY_UNCERTAIN = "R3_POLICY_UNCERTAIN"
 R3_HYPOTHESES_INDISTINGUISHABLE = "R3_HYPOTHESES_INDISTINGUISHABLE"
+R3_VISUAL_CLAIM_UNSUPPORTED = "R3_VISUAL_CLAIM_UNSUPPORTED"  # 视觉声称无视觉证据（docs/05 V-7 甲案）
 R4_PASS_GATE_FAIL = "R4_PASS_GATE_FAIL"
 R5_DEGRADED_OR_FAILED_STEP = "R5_DEGRADED_OR_FAILED_STEP"
 
@@ -76,6 +82,49 @@ R5_DEGRADED_OR_FAILED_STEP = "R5_DEGRADED_OR_FAILED_STEP"
 # gate 不 import tools 包（metrics 的 import 约束是 gate/budget/errors/hard_rules；
 # gate 自身也保持与工具层解耦 —— 只依赖数值口径），故本地私有声明。
 _SIM_STRONG = 0.85
+
+# 视觉证据存在性阈值（docs/05 §2.4 / V-3 拍板：存在性用 0.70 普通档 —— 有任一普通
+# 视觉证据即算"存在"，不代表最终相似结论，0.85 强档语义不动）。镜像
+# pra.tools.image_analysis.tool.EVIDENCE_MIN_SIM=0.70；本地私有声明（同 _SIM_STRONG）。
+_SIM_PRESENT = 0.70
+
+# ---------------------------------------------------------------------------
+# 外观/视觉维度声称关键词表（docs/05 §2.2-B / V-1 拍板：B 关键词谓词为主判据、
+# C 分层预留二期结构化维度）。
+# 来源与同步维护责任（V-5）：与 llm_prompts.py reevaluate prompt 第 8 条的外观
+# 表述清单（「外观相似」「高度相似」「同款外观」「视觉仿冒」「复刻外观」「版型
+# 一致」「长得像」等）同源 —— prompt 负责减少命中率、Gate 兜底为准入边界，
+# **两处措辞须同步维护**（改 llm_prompts 例句时应同步本表）。
+# 外延只覆盖「外观/造型/相似」语义，不含「字样/标题/复刻字样」类文本声称
+# （V-2：OCR_TEXT 可支撑的文本声称不在本约束拦截面）。
+# 关键词命中仅做"维度归类"，不做数值/结论解析（V-1）；归类过宽只把案型多转人工
+# （安全侧），过窄退回现状 —— 宁宽勿窄（V-8 误伤容忍度：只作用于 SUPPORTED
+# 高优先假设，PASS 侧天然不受影响，见 visual_claim_unsupported docstring）。
+# ---------------------------------------------------------------------------
+VISUAL_CLAIM_MARKERS: tuple[str, ...] = (
+    # llm_prompts reevaluate 例句逐字镜像（V-5 同步维护）
+    "外观相似",
+    "高度相似",
+    "同款外观",
+    "视觉仿冒",
+    "复刻外观",
+    "版型一致",
+    "长得像",
+    # 外观/造型维度词（docs/05 §2.2-B：外观/造型/鞋型/版型/廓形/配色/图案/印花）
+    "外观",
+    "造型",
+    "鞋型",
+    "版型",
+    "廓形",
+    "配色",
+    "图案",
+    "印花",
+    # 含模仿/雷同语义的断言词（覆盖措辞漂移；安全侧从宽，V-8）
+    "同款",
+    "仿冒",
+    "复刻",
+    "模仿",
+)
 
 
 def _has_citable(evidence) -> bool:
@@ -176,6 +225,68 @@ def indistinguishable_hypotheses(state) -> bool:
         return False
     distinct_sets = {tuple(sorted(set(h.evidence_for))) for h in supported}
     return len(distinct_sets) < len(supported)
+
+
+def _looks_visual_claim(statement) -> bool:
+    """statement 是否落在「外观/视觉维度」（docs/05 §2.2-B 关键词谓词）。
+
+    纯维度归类：命中任一 ``VISUAL_CLAIM_MARKERS`` 子串即 True；不解析数值/结论
+    （V-1：statement 自由文本解析仅限维度判定，不做强度判定）。None/空 → False。
+    """
+    text = statement or ""
+    return any(marker in text for marker in VISUAL_CLAIM_MARKERS)
+
+
+def visual_evidence_present(evidence) -> bool:
+    """证据链是否存在「视觉相似证据」（docs/05 §2.3 权威清单 / V-2/V-3/V-9 口径）。
+
+    - 任一 ``IMAGE_LOGO`` → True（logo 类：检出即视觉证据，单独满足存在性，V-9，
+      不等于直接证明侵权）；
+    - 任一 ``IMAGE_SIMILARITY`` 且 weight>=_SIM_PRESENT(0.70) → True（V-3 存在性
+      阈值 = Evidence Presence Threshold：普通档即算"存在视觉证据"，不代表最终
+      相似结论，0.85 强档语义不动）；weight<0.70 **不算**存在 —— 只读 weight、
+      不依赖 extra.strong（防御注入：与 quality_filter 的 EVIDENCE_MIN_SIM=0.70
+      同口径，见 docs/05 §4.3 测试点 3）。
+    - OCR_TEXT / POLICY_REF / CASE_PRECEDENT / PRODUCT_FACT / MERCHANT_HISTORY
+      一律不算（V-2 / §2.3：OCR 是图像来源**文本**证据，证明不了鞋型/配色/版型
+      相似；先例/政策/事实/商家史均替代不了视觉直接测量）。
+    空/缺失 → False。
+    """
+    evs = evidence or []
+    if any(e.type == "IMAGE_LOGO" for e in evs):
+        return True
+    return any(
+        e.type == "IMAGE_SIMILARITY" and (e.weight or 0.0) >= _SIM_PRESENT
+        for e in evs
+    )
+
+
+def visual_claim_unsupported(state) -> bool:
+    """视觉声称无视觉证据（docs/05 §3.1 伪码语义 / V-1~V-11 拍板）—— 确定性兜底。
+
+    = 存在 高优先(prior>=HIGH_PRIOR_THRESHOLD 0.3) ∧ status=SUPPORTED ∧ statement
+      落外观/视觉维度关键词 的假设，且证据链无任何视觉证据 → True。
+
+    EC_0007 归因（docs/05 §1.1）：先例只证明「同类曾被拒」的历史事实，替代不了
+    「本商品与某品牌款外观相似」的直接测量 —— 决策 6 / V-6：**先例只能佐证相同
+    证据维度，不能把历史案例事实迁移为当前案件事实**；该假设被判 SUPPORTED 属
+    「声称维度与证据维度错配」，应转人工而非自动 REJECT。
+
+    只挑 SUPPORTED 高优先假设 → PASS 案（全 REFUTED）与低优先假设永不命中
+    （V-10 / §3.3：只约束 REJECT 风险侧、不扩张 PASS 侧、减少误伤）。
+    命中只导向 abstention（overlay 步骤 3 → HUMAN_REVIEW，码与既有 R3 并列全量
+    收集），**不直接 REJECT**（V-7 甲案）；纯函数只读 state，不改写
+    hypotheses/evidence（审计双视角 = hypothesis_trace 保留 LLM 原判 + overrides
+    记拦截原因）。hypotheses/evidence 空/缺失 → False（纯函数空安全）。
+    """
+    visual_supported = [
+        h
+        for h in high_priority(state.get("hypotheses") or [])
+        if h.status == HypothesisStatus.SUPPORTED and _looks_visual_claim(h.statement)
+    ]
+    if not visual_supported:
+        return False
+    return not visual_evidence_present(state.get("evidence") or [])
 
 
 def key_evidence_complete(state) -> bool:
@@ -377,6 +488,9 @@ def _abstention_codes(state) -> list:
         codes.append(R3_POLICY_UNCERTAIN)
     if indistinguishable_hypotheses(state):
         codes.append(R3_HYPOTHESES_INDISTINGUISHABLE)
+    if visual_claim_unsupported(state):
+        # docs/05 V-7 甲案：视觉声称 SUPPORTED 但无视觉证据 → 声称维度错配，转人工
+        codes.append(R3_VISUAL_CLAIM_UNSUPPORTED)
     if state.get("degraded"):
         codes.append(R5_DEGRADED_OR_FAILED_STEP)
     return codes

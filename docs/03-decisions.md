@@ -151,7 +151,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 | `ESCALATED` | **不作为 review_run 主终态**：语义=HUMAN_REVIEW 已被投递人工裁决队列，属下游人工流程状态（review 维度维护） | 人工工作台侧 |
 | `BUDGET_EXCEEDED` | **不作为 review_run 主终态**：超限归因记 `decision.overrides=["R3_BUDGET_EXHAUSTED"]`，budget 快照随 `review_result.decision_json`（budget_used）落库；供"超时/超限转人工率"指标（《00》§10.3）统计 | —— |
 
-- **`decision.overrides`**：`ReviewDecision` 增加可选字段 `overrides: list[str] = Field(default_factory=list)`，存放确定性 overlay 的改判/归因原因码（v2 词汇：R1_HARD_RULE / R2_REJECT_GATE_FAIL / R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT / R3_KEY_TOOL_FAILED / R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；空=overlay 未改判（LLM 提案即终值）。这是"谁把 PASS/REJECT 改成了 HUMAN_REVIEW"的可审计落点（《00》§8.2-4），且不破坏既有 decision 字段（新增默认空列表，向后兼容）。
+- **`decision.overrides`**：`ReviewDecision` 增加可选字段 `overrides: list[str] = Field(default_factory=list)`，存放确定性 overlay 的改判/归因原因码（v2 词汇：R1_HARD_RULE / R2_REJECT_GATE_FAIL / R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT / R3_KEY_TOOL_FAILED / R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R3_VISUAL_CLAIM_UNSUPPORTED / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；空=overlay 未改判（LLM 提案即终值）。这是"谁把 PASS/REJECT 改成了 HUMAN_REVIEW"的可审计落点（《00》§8.2-4），且不破坏既有 decision 字段（新增默认空列表，向后兼容）。
 - **理由**：图内每轮运行必然以 decide 产出一个 decision 收尾，因此"DECIDED"是唯一的图终态；把 ESCALATED/BUDGET_EXCEEDED 从主状态机剥出为归因/下游状态，避免状态机出现"决策已出但状态未决"的二义；overrides 可选字段保证 00 §2.2 输出形状兼容。
 - **v2 复核（review D）**：再次确认 **DECIDED 是 Graph 唯一终态**——PASS/REJECT/HUMAN_REVIEW 只是
   `ReviewDecision.decision` 的取值，不是图终态；预算耗尽 / 关键 Tool 失败 / 降级 / Gate 改判全部通过
