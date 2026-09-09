@@ -10,7 +10,9 @@
   ``.env`` 的 ``DATABASE_URL`` 覆盖（env_file=仓库根 .env 的**绝对路径**，见
   ``_ENV_FILE``/Settings —— 从任何 cwd 启动都读同一 .env，不会因 cwd 不同而静默
   漏读并回落开发 DSN），.env 已被仓库 .gitignore 忽略；可提交的模板见仓库根
-  ``.env.example``。
+  ``.env.example``。``.env`` 亦可同时含 real LLM 评测凭据（``DEEPSEEK_API_KEY`` /
+  ``DEEPSEEK_BASE_URL``）—— Settings 已将其声明为可选字段，两类配置共存于同一
+  .env（见 Settings 字段注释；不声明会因 extra="forbid" 让配置层整体抛错）。
 - 时间口径：MySQL ``DATETIME(fsp=3)`` 存 naive（无时区）时间；业务层统一写
   **naive UTC**（``datetime.now(timezone.utc).replace(tzinfo=None)``，见
   ``pra.infra.persist_service._utcnow``），读取后一律按 UTC 解释 —— 单一约定，
@@ -67,6 +69,10 @@ class Settings(BaseSettings):
     文件上溯定位的**仓库根 .env 绝对路径** —— 从任何 cwd 启动都读同一文件；该路径
     不存在时 pydantic-settings 静默忽略（与旧行为一致）。真实环境变量优先级高于
     .env。字段名大小写不敏感映射环境键（``DATABASE_URL`` ↔ ``database_url``）。
+
+    字段：``database_url``（DSN）+ ``deepseek_api_key`` / ``deepseek_base_url``
+    （可选，real LLM 评测凭据 —— 声明为字段的理由见下方字段注释）。``extra`` 保持
+    pydantic-settings 默认的 **forbid**：未知键一律报错，不静默忽略。
     """
 
     model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8")
@@ -74,6 +80,16 @@ class Settings(BaseSettings):
     # 仅本地开发的默认值（root/root@127.0.0.1:3306 的 Docker mysql-dev 容器）；
     # 生产/测试必须经 .env 的 DATABASE_URL 覆盖 —— 见模块 docstring。
     database_url: str = "mysql+aiomysql://root:root@127.0.0.1:3306/product_review"
+
+    # 可选：真实 LLM 评测脚本（scripts/run_evaluation_real.py）的网关凭据。
+    # 为什么声明为字段而不是让 Settings 忽略未知键：pydantic-settings 默认
+    # extra="forbid"，而 .env 同时承载 DB 配置与这两项评测凭据 —— 不声明就会让
+    # Settings() 直接抛 ValidationError，沿 get_sessionmaker → process_review 一路
+    # 炸到 HTTP 500（2026-09-09 实测缺陷）。声明为可选字段后，`.env` 单文件承载
+    # 两类配置，且 extra="forbid" 的严格性不变（DB 键名拼错仍报错，防静默回落
+    # 开发 DSN 连错库）。infra 自身不消费这两个值（默认 None，无副作用）。
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str | None = None
 
 
 # 模块级懒加载缓存（进程内单例）：首次 get_engine/get_sessionmaker 时创建，之后复用
