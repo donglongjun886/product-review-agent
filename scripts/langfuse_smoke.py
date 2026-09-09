@@ -8,8 +8,40 @@
    并用 ``asyncio.create_task`` 跑一个子 span（验证 OTel contextvar 传播，
    docs/09 §6 实测结论第 4 条 —— LangGraph 节点在独立 task 里跑，这点必须成立）；
 3. ``flush`` 后用**标准库 urllib**（Basic Auth = ``base64(public_key:secret_key)``）轮询
-   ``GET {host}/api/public/traces/{trace_id}``（ingestion 有延迟），逐条断言并打印缩进的
-   observation 树（按 ``parentObservationId`` 组装，root 无 parent）。
+   ``GET {host}/api/public/v2/observations?traceId=<hex32>&limit=50&fields=...``
+   （ingestion 有延迟），逐条断言并打印缩进的 observation 树。
+
+**v3 → v4 回读接口（以下全部为实测结论，2026-09-09 对 localhost:3000）**：
+
+- 本机 Langfuse 服务端是 **v4**，且以 **``events_only`` 模式**运行（``deploy/langfuse``）。
+  该模式下 **v3 的 trace 回读接口已被移除**：``GET /api/public/traces/{id}`` → 404、
+  ``GET /api/public/traces`` → 404、``GET /api/public/observations``（v1）→ 404。
+  这就是本脚本此前一直 404 的原因。
+- 可用的读法是 **v4 观测列表**：``GET /api/public/v2/observations?traceId=<hex32>&limit=50``
+  → 200，响应体形状为 ``{"data": [<observation>, ...], "meta": {}}``（**不是** v3 的
+  ``{"observations": [...]}``，也不是单条 trace 对象）。
+- **``fields=`` 语义（实测）**：不传 ``fields=`` 时服务端只回 ``core,basic`` 分组 →
+  ``model`` / ``usageDetails`` / ``tags`` **字段根本不存在**（不是 ``null``），
+  于是 model/usage 断言会静默失败。必须显式传
+  ``fields=core,basic,model,usage,trace_context`` 才拿得到
+  ``model`` / ``usageDetails`` / ``tags`` / ``version`` / ``sessionId``。
+- **v4 没有单条 by-id 回读**：``/api/public/v2/observations/{id}`` → 404、
+  ``/api/public/observations/{id}`` → 404（events_only 提示）。只能按 ``traceId`` 过滤列表。
+  （``/api/public/projects`` 仍 200，故服务本身是活的。）
+- **root 的幽灵父 id（实测）**：root observation 的 ``isRootObservation`` 为 ``true``，
+  但它的 ``parentObservationId`` 指向一个**不存在于本 trace 的幽灵 id**。因此组装树时
+  **必须以 ``isRootObservation`` 为准**，不能拿 ``parentObservationId`` 当父子关系唯一依据。
+- 实测字段形状（单条 observation）::
+
+      {"id": "fff60661269d867e", "traceId": "c5ad91…", "parentObservationId": "787f670a…",
+       "isRootObservation": false, "type": "GENERATION", "name": "llm.hypothesize",
+       "startTime": "…", "endTime": "…", "latency": 0, "level": "DEFAULT",
+       "statusMessage": "", "environment": "default", "version": "smoke",
+       "sessionId": "langfuse-smoke", "tags": ["env:local", "source:smoke"],
+       "model": "scripted", "usageDetails": {"input": 12, "output": 34, "total": 46}}
+
+  非 generation 的 ``usageDetails`` 是 ``{}``、``model`` 是空串 ``""``。
+  （注：任务说明里 ``statusMessage`` 写的是 ``null``，实测为 ``""``；本脚本不依赖该字段。）
 
 **退出码约定（CI 友好）**：
 
@@ -43,6 +75,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 from uuid import uuid4
@@ -60,11 +93,27 @@ POLL_INTERVAL_S = 5.0
 #: 轮询最大次数（即使 --timeout 很大也不无限等）。
 POLL_MAX_ATTEMPTS = 12
 
+#: 回读用的 v4 观测列表端点（**v3 的 /api/public/traces 在 events_only 下已 404**）。
+OBSERVATIONS_PATH = "/api/public/v2/observations"
+#: ``fields=`` 分组（**必须显式传**：不传时 v4 只回 core,basic，
+#: ``model`` / ``usageDetails`` / ``tags`` 字段直接不存在 —— 实测）。
+OBSERVATION_FIELDS = "core,basic,model,usage,trace_context"
+#: 单次回读的 limit（远大于合成 trace 的观测数，留余量）。
+OBSERVATION_LIMIT = 50
+#: 合成 trace 的观测条数下限（实测 7 条：root + 3 node + generation + tool + 异步子 span）。
+MIN_OBSERVATIONS = 7
+
 #: 合成 trace 的固定关联字段（断言用，脚本与测试共享）。
 TRACE_NAME = "smoke"
+#: root observation 名（``trace_root(ctx)`` 用 ``ctx.name``，即 ``TRACE_NAME``）。
+ROOT_NAME = TRACE_NAME
 SESSION_ID = "langfuse-smoke"
 SOURCE_TAG = "source:smoke"
 CASE_ID = "SMOKE_001"
+#: 合成 trace 的 version（``TraceContext(version=...)``）。
+EXPECTED_VERSION = "smoke"
+#: 合成 generation 的模型名。
+EXPECTED_MODEL = "scripted"
 #: 合成 generation 的 token 用量 —— **故意用非零值**：既验证 usage 真的过管道落库
 #: （全 0 可能被服务端当作"无用量"丢弃），也便于回读时做逐键比对。这是**管道自检
 #: 的合成数据**，与业务口径无关（真实 Agent 走 scripted 桩时 token 恒 0，docs/09 §7）。
@@ -72,10 +121,25 @@ EXPECTED_USAGE = {"input": 12, "output": 34, "total": 46}
 #: 异步嵌套验证用的子 span 名（docs/09 §6 实测第 4 条）。
 ASYNC_CHILD_SPAN = "plan.async_child"
 
-#: 断言目标：必须存在的 observation 名（root / node / generation / tool）。
-REQUIRED_SPANS = ("smoke", "hypothesize", "plan", "tools")
+#: 断言目标：必须存在的 observation 名与类型（root / node / generation / tool）。
+REQUIRED_SPANS = ("hypothesize", "plan", "tools")
 REQUIRED_GENERATIONS = ("llm.hypothesize",)
 REQUIRED_TOOLS = ("ProductTool",)
+#: 名字 → 期望 type（v4 的 ``type`` 大写；非 generation 的 model/usage 为空）。
+EXPECTED_TYPES: dict[str, str] = {
+    **dict.fromkeys(REQUIRED_SPANS, "SPAN"),
+    **dict.fromkeys(REQUIRED_GENERATIONS, "GENERATION"),
+    **dict.fromkeys(REQUIRED_TOOLS, "TOOL"),
+}
+#: 期望的父子关系：``子名 -> 父名``（父为 ``None`` 表示 root）。
+EXPECTED_PARENTS: dict[str, str | None] = {
+    "hypothesize": None,
+    "plan": None,
+    "tools": None,
+    "llm.hypothesize": "hypothesize",
+    "ProductTool": "tools",
+    ASYNC_CHILD_SPAN: "plan",
+}
 
 #: W3C trace id 形状（32 位小写 hex）。
 _HEX32 = re.compile(r"\A[0-9a-f]{32}\Z")
@@ -89,9 +153,23 @@ _HTTP_TIMEOUT_S = 10.0
 # --------------------------------------------------------------------------------------
 
 
-def _trace_api_url(host: str, trace_id: str) -> str:
-    """回读用公开 API URL（``{host}/api/public/traces/{trace_id}``，尾斜杠归一）。"""
-    return f"{host.rstrip('/')}/api/public/traces/{trace_id}"
+def _observations_api_url(
+    host: str,
+    trace_id: str,
+    *,
+    limit: int = OBSERVATION_LIMIT,
+    fields: str = OBSERVATION_FIELDS,
+) -> str:
+    """回读用 v4 观测列表 URL（尾斜杠归一，``fields=`` 默认带上）。
+
+    ``{host}/api/public/v2/observations?traceId=<hex32>&limit=50&fields=core,basic,model,usage,trace_context``
+    —— v4 ``events_only`` 下 v3 的 ``/api/public/traces`` 已 404，只能按 traceId 过滤列表；
+    ``fields=`` 不传会导致 ``model`` / ``usageDetails`` / ``tags`` 字段缺失（实测）。
+    """
+    query = urllib.parse.urlencode(
+        {"traceId": trace_id, "limit": int(limit), "fields": fields}
+    )
+    return f"{host.rstrip('/')}{OBSERVATIONS_PATH}?{query}"
 
 
 def _ui_url(host: str, trace_id: str) -> str:
@@ -114,6 +192,21 @@ def _json_or_none(body: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _observations_from_payload(payload: Any) -> list[dict[str, Any]] | None:
+    """从 v4 响应体取观测列表：``{"data": [...]}`` → ``list``；否则 ``None``。
+
+    v3 的 ``{"observations": [...]}`` 形状在 v4 ``events_only`` 下已不再返回；
+    这里只认 ``data``，避免"看起来拿到了却全空"的静默误判。
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return None
+    # 外部服务返回的 payload 不做信任假设：只保留 dict 元素
+    return [obs for obs in data if isinstance(obs, dict)]
+
+
 def _api_get(
     host: str,
     trace_id: str,
@@ -122,13 +215,13 @@ def _api_get(
     secret_key: str,
     timeout: float = _HTTP_TIMEOUT_S,
 ) -> tuple[int | None, dict[str, Any] | None, str | None]:
-    """单次 ``GET {host}/api/public/traces/{trace_id}``。
+    """单次 ``GET {host}/api/public/v2/observations?traceId=…&fields=…``。
 
-    :return: ``(status, payload, error)`` —— 成功 ``(200, {...}, None)``；
+    :return: ``(status, payload, error)`` —— 成功 ``(200, {"data": [...]}, None)``；
         404 等 HTTP 错误 ``(code, None, "HTTP ...")``；网络错误 ``(None, None, "TypeError: ...")``。
         **绝不抛异常**（未就绪/服务端未起是预期状态，由轮询处理）。
     """
-    url = _trace_api_url(host, trace_id)
+    url = _observations_api_url(host, trace_id)
     request = urllib.request.Request(
         url, headers={"Authorization": _auth_header(public_key, secret_key)}, method="GET"
     )
@@ -221,15 +314,20 @@ def _fetch_trace(
     public_key: str,
     secret_key: str,
     timeout: float,
-) -> tuple[dict[str, Any] | None, list[str]]:
-    """轮询回读 trace：最多 ``POLL_MAX_ATTEMPTS`` 次、间隔 ``POLL_INTERVAL_S`` 秒，
-    总时长受 ``timeout`` 约束。
+) -> tuple[list[dict[str, Any]] | None, list[str]]:
+    """轮询回读该 trace 的观测列表：最多 ``POLL_MAX_ATTEMPTS`` 次、间隔
+    ``POLL_INTERVAL_S`` 秒，总时长受 ``timeout`` 约束。
 
-    :return: ``(payload, notes)`` —— 拿到即返回；超时返回 ``(None, 每次尝试的说明)``。
+    一旦观测数达到 ``MIN_OBSERVATIONS`` 立即返回；若只拿到部分观测（ingestion 未完成），
+    继续轮询并保留"最全"的一份，超时后返回它 —— 这样断言能打印出**具体差异**
+    而不是笼统的"回读不到"。
+
+    :return: ``(observations, notes)``；一条都没拿到时返回 ``(None, 每次尝试的说明)``。
     """
     attempts = min(POLL_MAX_ATTEMPTS, max(1, int(timeout // POLL_INTERVAL_S)))
     deadline = time.monotonic() + timeout
     notes: list[str] = []
+    best: list[dict[str, Any]] | None = None
     for attempt in range(1, attempts + 1):
         remaining = deadline - time.monotonic()
         per_request = max(1.0, min(remaining, _HTTP_TIMEOUT_S)) if remaining > 0 else 1.0
@@ -240,29 +338,42 @@ def _fetch_trace(
             secret_key=secret_key,
             timeout=per_request,
         )
-        if payload is not None:
-            print(f"  read back on attempt {attempt}/{attempts} (status={status})")
-            return payload, notes
-        note = f"attempt {attempt}/{attempts}: status={status} error={error}"
+        observations = _observations_from_payload(payload)
+        count = None if observations is None else len(observations)
+        if observations is not None and count >= MIN_OBSERVATIONS:
+            print(f"  read back on attempt {attempt}/{attempts} (status={status}, observations={count})")
+            return observations, notes
+        if observations and (best is None or count > len(best)):
+            best = observations
+        note = f"attempt {attempt}/{attempts}: status={status} observations={count} error={error}"
         notes.append(note)
         print(f"  not visible yet — {note}")
         if attempt < attempts:
             sleep_for = min(POLL_INTERVAL_S, max(0.0, deadline - time.monotonic()))
             if sleep_for > 0:
                 time.sleep(sleep_for)
-    return None, notes
+    return best, notes
 
 
 def _observation_tree(observations: list[dict[str, Any]]) -> list[str]:
-    """按 ``parentObservationId`` 组装缩进树（root 无 parent；父缺失按 root 处理）。
+    """按 ``parentObservationId`` 组装缩进树（父缺失按 root 处理）。
+
+    **root 判定以 ``isRootObservation`` 为准**：v4 实测里 root 的
+    ``parentObservationId`` 是一个幽灵 id（不在本 trace 的 id 集合内），
+    若同时存在同名/同 id 巧合就会挂错位置，故显式置为顶层。
 
     :return: 每行一条 observation 的字符串（深度即缩进层级），供直接打印。
     """
     known_ids = {str(obs.get("id")) for obs in observations if obs.get("id")}
+    root_ids = {
+        str(obs.get("id")) for obs in observations if obs.get("id") and obs.get("isRootObservation")
+    }
     children: dict[str | None, list[dict[str, Any]]] = {}
     for obs in observations:
         parent = obs.get("parentObservationId")
         parent_key = str(parent) if parent and str(parent) in known_ids else None
+        if obs.get("id") and str(obs.get("id")) in root_ids:
+            parent_key = None
         children.setdefault(parent_key, []).append(obs)
 
     lines: list[str] = []
@@ -291,60 +402,79 @@ def _observation_tree(observations: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _verify_trace(trace: Any, trace_id: str) -> list[str]:
-    """回读断言清单（对应脚本要求的 1~4 条）；返回失败说明列表（空 = 全通过）。
+def _verify_trace(observations: Any, trace_id: str) -> list[str]:
+    """回读断言清单（v4 观测列表口径）；返回失败说明列表（空 = 全通过）。
 
-    1. trace 存在且 ``id == trace_id``；
-    2. ``sessionId == "langfuse-smoke"`` 且 ``tags`` 含 ``source:smoke``；
-    3. observations 含 ``smoke`` / ``hypothesize`` / ``plan`` / ``tools`` /
-       ``llm.hypothesize``(GENERATION) / ``ProductTool``(TOOL)；
-    4. ``llm.hypothesize`` 的 ``usageDetails`` 非空、``model`` 非空。
+    1. 观测数 ≥ ``MIN_OBSERVATIONS``，且**每条** ``traceId == trace_id``；
+    2. 存在名为 ``smoke`` 且 ``isRootObservation is True`` 的 root；
+    3. 必须存在 ``hypothesize`` / ``plan`` / ``tools``(SPAN)、
+       ``llm.hypothesize``(GENERATION)、``ProductTool``(TOOL)；
+    4. ``llm.hypothesize`` 的 ``model == "scripted"`` 且 ``usageDetails`` 逐键等于
+       ``EXPECTED_USAGE``（验证 usage 真的过管道；字段缺失多为漏了 ``fields=``）；
+    5. 每条观测 ``sessionId == "langfuse-smoke"``、``tags`` 含 ``source:smoke``、
+       ``version == "smoke"``；
+    6. 树结构：``hypothesize`` / ``plan`` / ``tools`` 的 parent 是 root id；
+       ``llm.hypothesize`` → ``hypothesize``、``ProductTool`` → ``tools``、
+       ``plan.async_child`` → ``plan``。
     """
     problems: list[str] = []
-    if not isinstance(trace, dict):
-        return [f"trace payload is not a JSON object: {type(trace).__name__}"]
-
-    # 1) trace 存在（能走到这里即回读成功）且 id 一致
-    if trace.get("id") != trace_id:
-        problems.append(f"trace id mismatch: got {trace.get('id')!r}, want {trace_id!r}")
-
-    # 2) 会话与标签
-    if trace.get("sessionId") != SESSION_ID:
-        problems.append(
-            f"sessionId mismatch: got {trace.get('sessionId')!r}, want {SESSION_ID!r}"
-        )
-    tags = trace.get("tags")
-    tags_list = tags if isinstance(tags, list) else []
-    if SOURCE_TAG not in tags_list:
-        problems.append(f"tags missing {SOURCE_TAG!r}: got {tags!r}")
-
-    # 3) observation 名与类型
-    observations = trace.get("observations")
-    if not isinstance(observations, list) or not observations:
-        problems.append(f"observations empty/missing: {observations!r}")
-        return problems
+    if not isinstance(observations, list):
+        return [f"observation payload is not a JSON list: {type(observations).__name__}"]
+    items = [obs for obs in observations if isinstance(obs, dict)]
+    if len(items) != len(observations):
+        problems.append(f"{len(observations) - len(items)} non-object observation(s) in payload")
     by_name: dict[str, list[dict[str, Any]]] = {}
-    for obs in observations:
-        if isinstance(obs, dict):
-            by_name.setdefault(str(obs.get("name")), []).append(obs)
+    for obs in items:
+        by_name.setdefault(str(obs.get("name")), []).append(obs)
+
+    # 1) 数量 + traceId 归属
+    if len(items) < MIN_OBSERVATIONS:
+        problems.append(
+            f"observation count {len(items)} < {MIN_OBSERVATIONS} "
+            f"(names: {sorted(by_name)}; 回读端点={OBSERVATIONS_PATH}?traceId=…&fields=…)"
+        )
+    mismatched = [obs for obs in items if obs.get("traceId") != trace_id]
+    if mismatched:
+        detail = ", ".join(
+            f"{obs.get('name')!r}={obs.get('traceId')!r}" for obs in mismatched[:3]
+        )
+        more = "" if len(mismatched) <= 3 else f" (+{len(mismatched) - 3} more)"
+        problems.append(
+            f"{len(mismatched)} observation(s) traceId mismatch, want {trace_id!r}: {detail}{more}"
+        )
+
+    # 2) root
+    root = next((obs for obs in items if str(obs.get("name")) == ROOT_NAME), None)
+    if root is None:
+        problems.append(f"missing root observation {ROOT_NAME!r} (present: {sorted(by_name)})")
+    elif root.get("isRootObservation") is not True:
+        problems.append(
+            f"root {ROOT_NAME!r} isRootObservation = {root.get('isRootObservation')!r}, want True"
+        )
+
+    # 3) 名字与类型
     for name in (*REQUIRED_SPANS, *REQUIRED_GENERATIONS, *REQUIRED_TOOLS):
         if name not in by_name:
-            problems.append(
-                f"missing observation {name!r} (present: {sorted(by_name)})"
-            )
-    for name in REQUIRED_GENERATIONS:
+            problems.append(f"missing observation {name!r} (present: {sorted(by_name)})")
+    for name, want_type in EXPECTED_TYPES.items():
         for obs in by_name.get(name, []):
             obs_type = str(obs.get("type") or "").upper()
-            if obs_type != "GENERATION":
-                problems.append(f"{name!r} type is {obs.get('type')!r}, want 'GENERATION'")
+            if obs_type != want_type:
+                problems.append(f"{name!r} type is {obs.get('type')!r}, want {want_type!r}")
 
-    # 4) generation 的 usage / model（usage 逐键比对 EXPECTED_USAGE，验证真的过管道）
+    # 4) generation 的 model / usage（usage 逐键比对 EXPECTED_USAGE，验证真的过管道）
     for name in REQUIRED_GENERATIONS:
         for obs in by_name.get(name, []):
-            usage = obs.get("usageDetails") or obs.get("usage")
-            if not usage:
-                problems.append(f"{name!r} usageDetails is empty: {usage!r}")
-            elif isinstance(usage, dict):
+            model = obs.get("model")
+            if model != EXPECTED_MODEL:
+                problems.append(f"{name!r} model = {model!r}, want {EXPECTED_MODEL!r}")
+            usage = obs.get("usageDetails")
+            if not isinstance(usage, dict) or not usage:
+                problems.append(
+                    f"{name!r} usageDetails missing/empty: {usage!r} "
+                    f"(回读 URL 必须带 fields={OBSERVATION_FIELDS}，否则 v4 不回该字段)"
+                )
+            else:
                 for key, want in EXPECTED_USAGE.items():
                     got = usage.get(key)
                     if got != want:
@@ -352,13 +482,40 @@ def _verify_trace(trace: Any, trace_id: str) -> list[str]:
                             f"{name!r} usageDetails[{key!r}] = {got!r}, want {want!r} "
                             f"(full: {usage!r})"
                         )
-            if not str(obs.get("model") or "").strip():
-                problems.append(f"{name!r} model is empty: {obs.get('model')!r}")
-    for name in REQUIRED_TOOLS:
-        for obs in by_name.get(name, []):
-            obs_type = str(obs.get("type") or "").upper()
-            if obs_type != "TOOL":
-                problems.append(f"{name!r} type is {obs.get('type')!r}, want 'TOOL'")
+
+    # 5) 每条观测的会话 / 标签 / 版本（v4 把 trace 级属性下放到每条 observation）
+    for obs in items:
+        label = f"{str(obs.get('name') or '<unnamed>')!r}"
+        if obs.get("sessionId") != SESSION_ID:
+            problems.append(f"{label} sessionId = {obs.get('sessionId')!r}, want {SESSION_ID!r}")
+        tags = obs.get("tags")
+        tags_list = tags if isinstance(tags, list) else []
+        if SOURCE_TAG not in tags_list:
+            problems.append(f"{label} tags missing {SOURCE_TAG!r}: got {tags!r}")
+        if obs.get("version") != EXPECTED_VERSION:
+            problems.append(
+                f"{label} version = {obs.get('version')!r}, want {EXPECTED_VERSION!r}"
+            )
+
+    # 6) 树结构（以 isRootObservation 定 root，再按 parentObservationId 挂子）
+    if root is not None:
+        root_id = str(root.get("id"))
+        for child, parent_name in EXPECTED_PARENTS.items():
+            if parent_name is None:
+                want_id = root_id
+                want_label = f"root {ROOT_NAME!r} id {root_id!r}"
+            else:
+                parents = by_name.get(parent_name, [])
+                if not parents:
+                    continue  # 缺父节点已由第 3 条断言报告
+                want_id = str(parents[0].get("id"))
+                want_label = f"{parent_name!r} id {want_id!r}"
+            for obs in by_name.get(child, []):
+                got_id = obs.get("parentObservationId")
+                if str(got_id) != want_id:
+                    problems.append(
+                        f"{child!r} parent = {got_id!r}, want {want_label}"
+                    )
 
     return problems
 
@@ -447,25 +604,22 @@ def main(argv: list[str] | None = None) -> int:
         print("read-back skipped: missing LANGFUSE_PUBLIC_KEY/SECRET_KEY")
         return 0
 
-    print(f"reading back {_trace_api_url(host, trace_id)} (timeout={args.timeout:g}s) …")
-    trace, notes = _fetch_trace(
+    print(f"reading back {_observations_api_url(host, trace_id)} (timeout={args.timeout:g}s) …")
+    observations, notes = _fetch_trace(
         host,
         trace_id,
         public_key=public_key,
         secret_key=secret_key,
         timeout=args.timeout,
     )
-    if trace is None:
+    if observations is None:
         print(f"SMOKE FAIL: trace {trace_id} not retrievable from {host}")
         for note in notes:
             print(f"  {note}")
         print(f"  hint: 服务端是否已起？curl -s {host.rstrip('/')}/api/public/health")
+        print(f"  hint: v4 events_only 下 v3 的 /api/public/traces 已 404，只能读 {OBSERVATIONS_PATH}")
         return 1
 
-    raw_observations = trace.get("observations")
-    raw_observations = raw_observations if isinstance(raw_observations, list) else []
-    # 外部服务返回的 payload 不做信任假设：只保留 dict 元素（非 dict 由断言清单报告）
-    observations = [obs for obs in raw_observations if isinstance(obs, dict)]
     print(f"observations: {len(observations)}")
     print("observation tree:")
     tree = _observation_tree(observations)
@@ -477,7 +631,7 @@ def main(argv: list[str] | None = None) -> int:
             "contextvar 传播可能不成立（docs/09 §6 实测第 4 条）"
         )
 
-    problems = _verify_trace(trace, trace_id)
+    problems = _verify_trace(observations, trace_id)
     if problems:
         print(f"SMOKE FAIL: {len(problems)} assertion(s) failed")
         for problem in problems:

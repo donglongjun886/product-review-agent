@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from typing import Any
 
@@ -28,10 +29,12 @@ from pra.observability.langfuse_backend import LangfuseTracer, build_langfuse_tr
 
 
 def test_no_credentials_returns_null_tracer_without_importing_sdk(monkeypatch) -> None:
-    """无凭据 → NullTracer；且 `langfuse` 模块不被 import（默认路径零 SDK 依赖）。"""
-    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
-    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
-    monkeypatch.delenv("PRA_LANGFUSE_ENABLED", raising=False)
+    """无凭据 → NullTracer；且 `langfuse` 模块不被 import（默认路径零 SDK 依赖）。
+
+    用 monkeypatch 切断 `_env_or_settings`（配置来源含仓库根 `.env`）—— 否则开发机
+    真配了 Langfuse 时本用例会看到「已配置」而非「无凭据」，与用例意图不符。
+    """
+    monkeypatch.setattr(T, "_env_or_settings", lambda *a, **k: None)
     monkeypatch.delitem(sys.modules, "langfuse", raising=False)
 
     tracer = T.make_tracer()
@@ -300,8 +303,12 @@ def test_langfuse_tracer_never_raises_when_sdk_fails() -> None:
     assert client.flushed == 1
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("langfuse") is not None,
+    reason="本机已装 langfuse SDK（observability extra）—— 该用例只验证未安装路径",
+)
 def test_build_langfuse_tracer_without_sdk_returns_null_tracer() -> None:
-    """未安装 SDK（本项目默认）→ NullTracer，且给出安装提示。"""
+    """未安装 SDK（CI/默认）→ NullTracer，且给出安装提示。"""
     tracer = build_langfuse_tracer(
         public_key="pk", secret_key="sk", host="http://localhost:3000"
     )
