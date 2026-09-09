@@ -193,8 +193,12 @@ def visual_claim_unsupported(state) -> bool:             # 建议命名（草案
 
 ### 4.2 回归 / 口径记录要求
 
-- 刷新 `eval_data/v1/regression_baseline.json`（35 案 decisions 数组）；`eval_data/v2`（320 案）
-  目前无 baseline 文件（仅 cases_v2.jsonl + manifest.json），若同期引入 v2 baseline 则一并刷新。
+- 刷新 `eval_data/v1/regression_baseline.json`（35 案 decisions 数组）与
+  `eval_data/v2/regression_baseline.json`（320 案三方案，digest `387a345c…`，已 git 入库；
+  守护断言见 `tests/test_regression_v2.py` —— v1/v2 三方案决策序列全比对 + digest 逐字节
+  重放 + `(320,42)` 数据字节锁；`scripts/run_regression.py --data v2` 手动比对路径）。
+  若本约束（或任何改判定逻辑的变更）改变 scripted 决策，须用
+  `run_regression.py --record --data v2` / `--data v1` 重录两条基线并同步本段 digest。
 - 报告快照记录（对齐 02 §7.1「screening 行为快照」做法）：谓词/关键词表/阈值版本 + 变化 case
   清单（预期空）+ HUMAN_REVIEW 增量 + scripted 重放逐字节一致断言。
 - 口径记录：本约束是**证据一致性**而非**证据强度**——转人工原因写「视觉声称无视觉证据」，

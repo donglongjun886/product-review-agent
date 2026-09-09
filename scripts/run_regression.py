@@ -1,18 +1,23 @@
 """run_regression.py —— Evaluation 决策序列 Regression（docs/02-evaluation.md §8 里程碑）。
 
-用途：对 Phase 1 集（eval_data/v1/cases_v1.jsonl，35 条）跑 rule / single_call_llm /
-agent 三方案，把 EvalRecord 决策序列 hash 与**已记录的基线快照**比对 —— 后续任何改动
-（screening 修正 / RAG / LLM 接入）若改变三方案在该集上的决策 → 回归报错（退出码 1），
-防静默行为漂移。
+用途：对评测集跑 rule / single_call_llm / agent 三方案，把 EvalRecord 决策序列 hash
+与**已记录的基线快照**比对 —— 后续任何改动（screening 修正 / RAG / LLM 接入）若改变
+三方案在该集上的决策 → 回归报错（退出码 1），防静默行为漂移。
 
-用法::
+支持 v1（Phase 1 兼容口径，35 案）与 v2（Phase 2 正式集 320 案）两条回归路径
+（v2 基线 ``eval_data/v2/regression_baseline.json`` 由确定性跑分录制、git 入库，
+见 tests/test_regression_v2.py 的守护断言）：:
 
-    uv run python scripts/run_regression.py                  # 比对（基线缺失 → 自动记录并 PASS）
-    uv run python scripts/run_regression.py --record         # 强制重录基线（升级/有意变更后）
-    uv run python scripts/run_regression.py --baseline <path> # 自定义基线路径
+    uv run python scripts/run_regression.py                   # v1：比对（基线缺失 → 自动记录并 PASS）
+    uv run python scripts/run_regression.py --data v2         # v2：比对（同样自动记录兜底）
+    uv run python scripts/run_regression.py --record          # 强制重录 v1 基线（升级/有意变更后）
+    uv run python scripts/run_regression.py --record --data v2  # 强制重录 v2 基线
+    uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl  # 显式数据路径亦可
+    uv run python scripts/run_regression.py --baseline <path>  # 自定义基线路径（覆盖推断）
 
-基线快照默认存 ``eval_data/v1/regression_baseline.json``（任务契约口径；--baseline 覆盖）。
-首次运行（基线不存在）自动记录并报告 "RECORDED"；之后比对报 REGRESSION PASS/FAIL。
+基线快照默认存 ``<数据目录>/regression_baseline.json``（``eval_data/v1/…`` 与
+``eval_data/v2/…``；--baseline 覆盖）。首次运行（基线不存在）自动记录并报告
+"RECORDED"；之后比对报 REGRESSION PASS/FAIL。
 退出码：PASS=0 / FAIL=1 / 异常=非零（脚本内部 raise 后由 main 转非零）。
 """
 
@@ -31,18 +36,47 @@ from pra.evaluation.regression import (
 )
 
 DEFAULT_DATA = "eval_data/v1/cases_v1.jsonl"
-DEFAULT_BASELINE = "eval_data/v1/regression_baseline.json"
+# 已知数据集（键 → (数据 JSONL, 基线 JSON)）：--data 可给键（v1/v2）或显式 JSONL 路径
+KNOWN_DATASETS: dict[str, tuple[str, str]] = {
+    "v1": (
+        "eval_data/v1/cases_v1.jsonl",
+        "eval_data/v1/regression_baseline.json",
+    ),
+    "v2": (
+        "eval_data/v2/cases_v2.jsonl",
+        "eval_data/v2/regression_baseline.json",
+    ),
+}
+
+
+def _resolve_dataset(data_arg: str) -> tuple[str, str]:
+    """把 --data 参数解析为 (数据 JSONL 路径, 推断基线路径)。
+
+    已知键（v1/v2）→ 键内 (data, baseline)；显式 JSONL 路径 → 基线取同目录
+    ``regression_baseline.json``（与键布局一致，防"指 v2 数据却比 v1 基线"的误用）。
+    """
+    if data_arg in KNOWN_DATASETS:
+        return KNOWN_DATASETS[data_arg]
+    return data_arg, str(Path(data_arg).parent / "regression_baseline.json")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluation Regression：三方案决策序列 hash vs 基线快照（确定性重放扩展）"
+        description="Evaluation Regression：三方案决策序列 hash vs 基线快照"
+        "（确定性重放扩展；v1/v2 两路径，--data 给键或显式路径）"
     )
-    parser.add_argument("--data", default=DEFAULT_DATA, help=f"评测集 JSONL（默认 {DEFAULT_DATA}）")
+    parser.add_argument(
+        "--data",
+        default=DEFAULT_DATA,
+        help=(
+            "评测集：v1/v2 键或 JSONL 路径"
+            f"（默认 {DEFAULT_DATA}；键见 {list(KNOWN_DATASETS)}）"
+        ),
+    )
     parser.add_argument(
         "--baseline",
-        default=DEFAULT_BASELINE,
-        help=f"基线快照 JSON 路径（默认 {DEFAULT_BASELINE}；缺失自动记录）",
+        default=None,
+        help="基线快照 JSON 路径（默认取 --data 同目录 regression_baseline.json；缺失自动记录）",
     )
     parser.add_argument(
         "--schemes",
@@ -57,22 +91,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 async def _main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    baseline_file = Path(args.baseline)
+    data_path, baseline_default = _resolve_dataset(args.data)
+    baseline_file = Path(args.baseline) if args.baseline else Path(baseline_default)
     schemes = tuple(args.schemes)
+    label = Path(data_path).parent.name  # v1 / v2（输出明确标数据集）
 
     record = args.record or not baseline_file.exists()
     if record:
-        snapshot = await compute_current_snapshot(args.data, schemes=schemes)
+        snapshot = await compute_current_snapshot(data_path, schemes=schemes)
         write_baseline(snapshot, baseline_file)
-        print(f"[RECORDED] 基线快照已写入 {baseline_file}（cases={snapshot['total_cases']}）")
+        print(f"[RECORDED] {label} 基线快照已写入 {baseline_file}（cases={snapshot['total_cases']}）")
         print(f"            digest = {snapshot['digest']}")
         return 0
 
-    report = await run_regression(args.data, baseline_file, schemes=schemes)
+    report = await run_regression(data_path, baseline_file, schemes=schemes)
     print("=" * 90)
-    print("商品审核 Agent · Evaluation Regression")
+    print(f"商品审核 Agent · Evaluation Regression（数据集: {label}）")
     print("=" * 90)
-    print(f"数据集: {args.data}（基线 {report.baseline_cases} 条 vs 当前 {report.current_cases} 条）")
+    print(f"评测集: {data_path}")
+    print(f"基线:   {baseline_file}（基线 {report.baseline_cases} 条 vs 当前 {report.current_cases} 条）")
     print(f"比对结果: REGRESSION {report.status}")
     if report.ok:
         print("三方案决策序列与基线快照一致 —— 无静默行为漂移。")
