@@ -9,8 +9,7 @@
   一致、``BGE_DEFAULT_MODEL``/``BGE_DIM``/``dim`` 常量、``model_ready()`` 对不存在
   cache_dir 安全返回 False（只读磁盘探测、不触发下载）；
 - 真模型组（``TestBgeRealModel`` 类级 skipif 守卫，**仅该组跳过**）：模型缓存目录取
-  环境变量 ``PRA_RAG2_MODEL_CACHE``（默认
-  ``/Users/donglongjun/job-tracker/pra_rag2_work/model_cache``）；
+  环境变量 ``PRA_RAG2_MODEL_CACHE``（缺省为仓库内 ``.cache/model_cache``，机器无关）；
   ``BgeEmbedder(cache_dir=...).model_ready()`` 为 False 时整组跳过，绝不联网/不下载。
 
 语义 smoke 的 4 句中文探针（商品治理语料口径，docs/06 P2-1 已实测的
@@ -34,9 +33,11 @@ import pytest
 
 from pra.rag.embedder import BGE_DEFAULT_MODEL, BGE_DIM, BgeEmbedder
 
-# 真模型缓存目录：优先环境变量 PRA_RAG2_MODEL_CACHE，缺省为工作区 model_cache。
+# 真模型缓存目录：优先环境变量 PRA_RAG2_MODEL_CACHE，缺省为仓库内 .cache/model_cache
+# （机器无关；未放置模型时 model_ready()=False → 真模型组整体跳过，离线组不受影响）。
 _MODEL_CACHE = os.environ.get(
-    "PRA_RAG2_MODEL_CACHE", "/Users/donglongjun/job-tracker/pra_rag2_work/model_cache"
+    "PRA_RAG2_MODEL_CACHE",
+    str(Path(__file__).resolve().parents[1] / ".cache" / "model_cache"),
 )
 
 # 真模型就绪判定（只读磁盘探测；仅用于 TestBgeRealModel 的 skipif，离线组不受影响）。
