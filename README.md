@@ -1,5 +1,7 @@
 # product-review-agent
 
+[![tests](https://github.com/donglongjun886/product-review-agent/actions/workflows/test.yml/badge.svg)](https://github.com/donglongjun886/product-review-agent/actions/workflows/test.yml)
+
 电商平台商品内容治理 · **复杂风险调查 Agent**（Complex Risk Investigation Agent）
 
 > **定位**：传统机审负责**确定性异常**（黑名单 / 关键词 / Logo / 类目 / OCR / 分类模型）——快、便宜、可解释；Agent 只处理**开放性、上下文依赖强、需要多源交叉验证的复杂风险案件**，动态取证后输出三分类裁决：`PASS` 放行 / `REJECT` 违规拒绝上架（须有可引用政策依据）/ `HUMAN_REVIEW` 主动克制地转人工（证据不足、置信不足、预算耗尽、政策模糊或关键工具失败时）。
@@ -320,3 +322,7 @@ persist 落库等。
 | RAG | `pra.rag`：Policy KB + Case KB，BM25 / Vector / Hybrid；默认 numpy 内存索引 + MockHash embedding（无外部依赖），语义路 = Qdrant（进程内 / 本地持久 / 远端 url）+ `BgeEmbedder`（bge-small-zh-v1.5 · fastembed/onnx） | 已用（默认确定性 mock；语义路经 `--extra rag` + `backend="qdrant"` 显式开启，未接 HTTP 主流程） |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL 五表（DDL：migrations/001…）；Alembic 依赖就绪 | 已用（DDL 经 migrations/ 直执行） |
 | 规划 extras | Redis 幂等 / MQ worker；可观测：Langfuse + OpenTelemetry | 规划（pyproject optional groups 已声明） |
+
+## 许可
+
+[MIT](LICENSE)

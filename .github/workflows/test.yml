@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: 安装依赖（严格按 uv.lock）
+        run: uv sync --frozen
+      - name: 跑测试（全确定性；BGE 真模型组与真库冒烟用例自动 skip）
+        run: uv run --frozen pytest tests/ -q
