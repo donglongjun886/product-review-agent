@@ -71,7 +71,8 @@ class Settings(BaseSettings):
     .env。字段名大小写不敏感映射环境键（``DATABASE_URL`` ↔ ``database_url``）。
 
     字段：``database_url``（DSN）+ ``deepseek_api_key`` / ``deepseek_base_url``
-    （可选，real LLM 评测凭据 —— 声明为字段的理由见下方字段注释）。``extra`` 保持
+    （可选，real LLM 评测凭据）+ ``langfuse_*`` / ``pra_langfuse_*``（可选，可观测性
+    接入凭据与开关 —— 声明为字段的理由见下方字段注释）。``extra`` 保持
     pydantic-settings 默认的 **forbid**：未知键一律报错，不静默忽略。
     """
 
@@ -90,6 +91,20 @@ class Settings(BaseSettings):
     # 开发 DSN 连错库）。infra 自身不消费这两个值（默认 None，无副作用）。
     deepseek_api_key: str | None = None
     deepseek_base_url: str | None = None
+
+    # 可选：Langfuse 可观测性（docs/09-langfuse-observability.md）。
+    # 与 DEEPSEEK_* 同理 —— .env 现已是「DB + real 评测 + 可观测性」三类配置的
+    # 单一载体，不声明这些键同样会让 Settings() 整体抛 ValidationError（同一坑，
+    # commit 6cf763e）。**infra 不消费**这些值：真正的读取方是
+    # ``pra.observability.tracing``（直接读环境变量，见该模块 make_tracer）。
+    # 这里声明只为让 .env 能安全承载它们，且保持 extra="forbid" 不变。
+    langfuse_public_key: str | None = None  # LANGFUSE_PUBLIC_KEY（缺失 → NullTracer）
+    langfuse_secret_key: str | None = None  # LANGFUSE_SECRET_KEY（**勿提交**）
+    langfuse_host: str | None = None  # LANGFUSE_HOST，缺省 http://localhost:3000
+    pra_langfuse_enabled: str | None = None  # PRA_LANGFUSE_ENABLED（0/false/no/off 关闭）
+    pra_langfuse_experiment: str | None = None  # PRA_LANGFUSE_EXPERIMENT（缺省 baseline）
+    pra_langfuse_sample: str | None = None  # PRA_LANGFUSE_SAMPLE（缺省 1.0；str 避免类型转换副作用）
+    pra_langfuse_session: str | None = None  # PRA_LANGFUSE_SESSION（一次 evaluation run 的分组 id）
 
 
 # 模块级懒加载缓存（进程内单例）：首次 get_engine/get_sessionmaker 时创建，之后复用
