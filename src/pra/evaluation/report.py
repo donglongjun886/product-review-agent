@@ -8,14 +8,25 @@
 - 工具数据源 = InMemory 种子世界；LLM = 确定性桩（边界标注，见 agent_scheme）；
 - 三分类输出空间对齐映射：Rule COMPLEX→HUMAN_REVIEW；Single-call conf<门槛的
   REJECT→HUMAN（见 single_call_scheme / metrics.business 各自注明）；
+- **分母口径随数据版本分叉（P1-2/P2-4 透明化，不改计算）**：
+  - Phase 2 v2（真值含 HUMAN_REVIEW/SHOULD_ABSTAIN）：决策指标行（acc/prec/recall/
+    fpr/fnr/hrr/auto）= **二值真值**（PASS+REJECT）分母；abstention 五指标行 =
+    **全量**分母（§4.4 human_review_rate/automation_coverage）—— 头行与分层行
+    同步列出三值分布与两套分母；
+  - Phase 1 v1（真值仅 PASS/REJECT、无 abstain 标签）：两套分母重合（= 全量），
+    abstention 五指标区不渲染，仅注记"v1 无 abstain 标签（Phase 1 兼容口径）"。
 - Accuracy 口径：预测 HUMAN_REVIEW 计为"未命中业务真值"（判错：入分母不入
   (TP+TN) 分子）；Precision/Recall/FPR/FNR 只在自动判出子集上计算；
 - v1 screening 词表现状：BLACKLISTED_BRANDS 为空 → Rule baseline 无自动 REJECT
   （品牌词/规避词/空缺一律 COMPLEX → 评测映射 HUMAN_REVIEW）—— 如实呈现，非缺陷。
+
+结论边界块含「标注-审查员同口径耦合」声明与 Phase 3 real 实测对照（双向解读：
+同口径耦合高估一致性、工具覆盖有限低估真实上限；real 抽样与 scripted 高分方向相反）。
 """
 
 from __future__ import annotations
 
+from pra.evaluation.metrics.abstention import abstain_subset_of
 from pra.evaluation.metrics.business import DecisionMetrics
 from pra.evaluation.runner import ALL_SCHEMES, EvaluationResult
 
@@ -71,25 +82,58 @@ def _scene_row(scheme: str, m: DecisionMetrics) -> str:
     )
 
 
+def _scene_truth_parts(entry: dict) -> str:
+    """单 scene 三值真值分布的人读片段（仅列非零桶；P/R/H=真值 PASS/REJECT/HUMAN_REVIEW）。"""
+    total = int(entry.get("total", 0))
+    buckets = []
+    for key, tag in (("PASS", "P"), ("REJECT", "R"), ("HUMAN_REVIEW", "H")):
+        n = int(entry.get(key, 0))
+        if n:
+            buckets.append(f"{tag}{n}")
+    return f"{total}" + (f"({'/'.join(buckets)})" if buckets else "")
+
+
 def render_report(result: EvaluationResult) -> str:
     """渲染整份 Console Report（纯文本；行内口径说明见模块 docstring）。"""
     out: list[str] = []
     add = out.append
 
     add("=" * 100)
-    add("商品审核 Agent · Evaluation Phase 1 三方案对比 Console Report")
+    add("商品审核 Agent · Evaluation 三方案对比 Console Report")
     add("=" * 100)
     src = result.data_path or "(外部注入 cases)"
     add(f"数据集: {src}" + ("   [smoke 冒烟子集]" if result.smoke else ""))
     stats = result.scene_stats
     by_scene = stats.get("by_scene", {})
+    total = int(stats.get("total", 0))
     pass_n = sum(int(s.get("PASS", 0)) for s in by_scene.values() if isinstance(s, dict))
     reject_n = sum(int(s.get("REJECT", 0)) for s in by_scene.values() if isinstance(s, dict))
-    add(f"真值案: 共 {int(stats.get('total', 0))} 条（PASS={pass_n} / REJECT={reject_n}）")
+    human_n = sum(int(s.get("HUMAN_REVIEW", 0)) for s in by_scene.values() if isinstance(s, dict))
+    binary = pass_n + reject_n
+
+    # 三值真值分布 + 两套分母（P1-2/P2-4：46 条 SHOULD/HUMAN 真值不再隐身）
+    if result.has_should_abstain:
+        auto_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "AUTO_DECIDABLE")
+        should_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "SHOULD_ABSTAIN")
+        add(f"真值口径: Phase 2 三值（含 HUMAN_REVIEW/SHOULD_ABSTAIN 真值）→ 决策指标分母=二值真值 "
+            f"{binary}，abstention 五指标分母=全量 {total}（§4.4）")
+        add(f"真值案: 共 {total} 条（PASS={pass_n} / REJECT={reject_n} / HUMAN_REVIEW={human_n}）")
+        add(f"分母注记: 决策指标行（acc/prec/recall/fpr/fnr/hrr/auto）只计二值真值 {binary} 案 "
+            f"（AUTO_DECIDABLE={auto_n}；HUMAN 真值不计入其分母）；")
+        add(f"          abstention 五指标行分母 = 全量 {total}（AUTO_DECIDABLE={auto_n} / "
+            f"SHOULD_ABSTAIN={should_n}，human_review_rate 为全量分母，见下节）")
+    else:
+        add(f"真值口径: Phase 1 二值（v1 无 abstain 标签/HUMAN 真值）→ 决策指标分母=全量 {total}；"
+            f"abstention 五指标不适用")
+        add(f"真值案: 共 {total} 条（PASS={pass_n} / REJECT={reject_n} / HUMAN_REVIEW={human_n}）")
     dist = " | ".join(
         f"{scene}={int(by_scene.get(scene, {}).get('total', 0))}" for scene in _SCENES
     )
-    add(f"scene 分布: {dist}")
+    add(f"scene 分布(全量): {dist}")
+    if human_n:
+        add("scene 真值三值(P/R/H，仅列非零): " + " | ".join(
+            f"{scene}={_scene_truth_parts(by_scene.get(scene, {}) or {})}" for scene in _SCENES
+        ))
 
     add("-" * 100)
     add("结论边界 / 口径注记:")
@@ -100,8 +144,20 @@ def render_report(result: EvaluationResult) -> str:
     add("    Precision/Recall/FPR/FNR 只在自动判出(pred∈{PASS,REJECT})子集上计算")
     add("  · REJECT 为正类: Recall=TP/(TP+FN) 违规召回 / FPR=FP/(FP+TN) 误杀红线 / FNR=FN/(TP+FN) 漏放")
     add("  · HRR=转人工率 / auto=自动化率；reject_unhandled=该 REJECT 却转人工占比（保守度观测）")
-    add("  · v1 BLACKLISTED_BRANDS 为空 → Rule 无自动 REJECT（品牌词/规避词/空缺一律 COMPLEX→HUMAN）")
-    add("  · 结论边界: 工具为 InMemory 种子 + LLM 为桩 → 低估 Agent 上限；real 模式 / 全量指标留 Phase 2")
+    add("  · screening BLACKLISTED_BRANDS 为空 → Rule 无自动 REJECT（品牌词/规避词/空缺一律 COMPLEX→HUMAN）")
+    if not result.has_should_abstain:
+        add("  · abstention: v1 无 abstain 标签 → Phase 1 兼容口径（全案等价 AUTO_DECIDABLE，"
+            "§4.4 五指标区不渲染；如需五指标请用 v2 数据集）")
+    add("  · 结论边界（双向，勿单向解读）:")
+    add("    - 低估侧: 工具 = InMemory 种子 + LLM = 桩（覆盖有限，缺真实先例/完整规避史）→ 可能低估 Agent 真实上限")
+    add("    - 高估侧: 本集真值由生成器按「与审查员同源 EVAL_* 世界 + 同语义规则」程序化标注（单标注者、"
+        "SHOULD 无负例）")
+    add("      → scripted 高分含「标注-审查员同口径」耦合，主要衡量实现一致性而非调查能力；")
+    add("      不可外推为真实 LLM 能力（README「评测与结论」/ docs/02 §3.4/§7.2/§8）")
+    add("    - real 对照（docs/02 §8 Phase 3 已执行；v1 35 案 real 单次抽样）: acc 0.200 / HRR 0.771，")
+    add("      27/35 转人工由确定性 Gate 归因（R3_BUDGET_EXHAUSTED×19 / R3_HYPOTHESES_INDISTINGUISHABLE×7）")
+    add("      —— 与 scripted 高分方向相反（同口径耦合只会高估一致性，real 未调优首跑则大幅保守转人工）；"
+        "该抽样仅验证链路，非模型固定水平")
 
     add("-" * 100)
     add("总体指标   acc   prec  recall  fpr   fnr   hrr   auto    TP/FP/TN/FN   成本均值(llm/tool/tok)")
@@ -110,11 +166,22 @@ def render_report(result: EvaluationResult) -> str:
         if m is None:
             continue
         add(_overall_row(scheme, m, result.cost_summary.get(scheme, {})))
+    if result.has_should_abstain and result.abstention:
+        _render_abstention_section(add, result)
 
     add("-" * 100)
     add("按 scene 分层  acc   prec  recall  fpr   fnr   hrr   auto    TP/FP/TN/FN")
     scene_n = {s: int(by_scene.get(s, {}).get("total", 0)) for s in _SCENES}
-    add("  " + "  ".join(f"{s}={scene_n[s]}" for s in _SCENES))
+    # P2-4：分层分母 = 该 scene 二值真值案数；scene 含 HUMAN 真值时标注（仅标注，不改计算）
+    parts = []
+    for s in _SCENES:
+        entry = by_scene.get(s, {}) or {}
+        tot = int(entry.get("total", 0))
+        bin_n = int(entry.get("PASS", 0)) + int(entry.get("REJECT", 0))
+        parts.append(f"{s}={tot}" if bin_n == tot else f"{s}={tot}(二值{bin_n})")
+    add("  " + "  ".join(parts))
+    if human_n:
+        add("  （注: 分层行分母=该 scene 二值真值数 PASS+REJECT；HUMAN 真值案不计入下列 acc/prec/recall 数字）")
     for scene in _SCENES:
         if scene_n[scene] == 0:
             continue
@@ -125,7 +192,7 @@ def render_report(result: EvaluationResult) -> str:
                 add(_scene_row(scheme, m))
 
     add("-" * 100)
-    add("决策分布审计（每行: scheme  pred→truth 列计数；truth 仅 PASS/REJECT）")
+    add("决策分布审计（pred→truth 列计数；truth 仅 PASS/REJECT（二值真值），HUMAN 真值案不计入本矩阵）")
     add("  scheme           pred         →truth PASS →truth REJECT")
     for scheme in ALL_SCHEMES:
         matrix = _decision_matrix(result, scheme)
@@ -139,6 +206,50 @@ def render_report(result: EvaluationResult) -> str:
             )
     add("=" * 100)
     return "\n".join(out)
+
+
+def _render_abstention_section(add, result: EvaluationResult) -> None:
+    """P1-3：abstention 五指标渲染区（仅数据集含 SHOULD_ABSTAIN 真值—— v2 三值口径）。
+
+    口径（docs/02 §4.4；与 ablation report 同源）——分母 = 全量：
+      human_review_rate = pred HUMAN / 全部；automation_coverage = 1 − human_review_rate；
+      abstention_rate = AUTO_DECIDABLE 案中 pred HUMAN（过度保守）；
+      abstention_recall = SHOULD_ABSTAIN 案中 pred HUMAN（该转人工的召回，越高越克制）；
+      wrong_auto_decision_rate = AUTO_DECIDABLE 自动终裁中的错误占比。
+    与决策指标行的区别：hrr/auto 在业务层 = pred HUMAN / 二值真值（见上节分母注记）。
+    """
+    auto_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "AUTO_DECIDABLE")
+    should_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "SHOULD_ABSTAIN")
+    binary_n = sum(
+        int(s.get("PASS", 0)) + int(s.get("REJECT", 0))
+        for s in result.scene_stats.get("by_scene", {}).values()
+        if isinstance(s, dict)
+    )
+    add("-" * 100)
+    add("abstention 五指标（§4.4；分母=全量: AUTO_DECIDABLE=%d / SHOULD_ABSTAIN=%d）" % (auto_n, should_n))
+    add("  行含义: hrr/autom=human_review_rate/automation_coverage(全量分母) | "
+        "abst_r=abstention_rate(AUTO 中过度转人工) / abst_rl=abstention_recall(SHOULD 正确转人工) / "
+        "w_auto=wrong_auto_decision_rate(AUTO 自动终裁错误率)")
+    add("  scheme           hrr    autom  abst_r abst_rl w_auto   计数(AUTO/SHOULD；pred H/A)")
+    for scheme in ALL_SCHEMES:
+        a = result.abstention.get(scheme)
+        if a is None:
+            continue
+        add(
+            "  ".join(
+                [
+                    f"{scheme:<16}",
+                    _fmt(a.human_review_rate),
+                    _fmt(a.automation_coverage),
+                    _fmt(a.abstention_rate),
+                    _fmt(a.abstention_recall),
+                    _fmt(a.wrong_auto_decision_rate),
+                    f"{a.auto_decidable_total}/{a.should_abstain_total}; {a.human_pred_total}/{a.auto_pred_total}",
+                ]
+            )
+        )
+    add("  （注: 决策指标行 hrr/auto 分母=二值真值 %d，与本区 hrr/autom 全量分母不同，勿混读）"
+        % binary_n)
 
 
 def _decision_matrix(result: EvaluationResult, scheme: str) -> dict:

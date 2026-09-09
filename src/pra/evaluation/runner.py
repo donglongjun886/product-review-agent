@@ -1,4 +1,4 @@
-"""EvaluationRunner —— Phase 1 三方案对比最小闭环编排（evaluation/runner.py）。
+"""EvaluationRunner —— 三方案对比最小闭环编排（evaluation/runner.py）。
 
 流程（docs/00-system-design.md §11.4 / 02-evaluation.md §8 M2）::
 
@@ -11,6 +11,10 @@
     统一 EvalRecord（DecisionEvaluator 只吃它）
         ↓
     总体 + 按 scene 分层指标（Accuracy/Precision/Recall/FPR/FNR + HRR/Automation）
+        ↓
+    （数据集含 SHOULD_ABSTAIN 真值（Phase 2 v2 形态）→ 并行算 AbstentionEvaluator
+      五指标（§4.4）进 EvaluationResult；v1 无 abstain 标签 → abstention 区为空，
+      report 按 Phase 1 兼容口径呈现）
         ↓
     report.py 打印 Console Report
 
@@ -35,6 +39,11 @@ from pra.evaluation.harness.agent_scheme import AgentScheme
 from pra.evaluation.harness.base import EvalContext, EvalRecord, SchemeRunner
 from pra.evaluation.harness.rule_scheme import RuleBaseline
 from pra.evaluation.harness.single_call_scheme import SingleCallScheme
+from pra.evaluation.metrics.abstention import (
+    AbstentionEvaluator,
+    AbstentionMetrics,
+    abstain_subset_of,
+)
 from pra.evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
 
 __all__ = [
@@ -66,7 +75,17 @@ def expected_index(cases: list[EvalCase]) -> dict[str, dict]:
 
 
 class EvaluationResult(BaseModel):
-    """一次评测运行的全部产物（报告 / 测试断言共同消费）。"""
+    """一次评测运行的全部产物（报告 / 测试断言共同消费）。
+
+    新增（P1-3 abstention 接线，Phase 2 v2 形态才非空）：
+    - ``abstention`` / ``abstention_grouped``：scheme → AbstentionMetrics（五指标，
+      全量分母 = 数据集总案数）—— 数据集含 SHOULD_ABSTAIN 真值时才计算（v1 无 abstain
+      标签 → 恒空 dict，report 按 Phase 1 兼容口径呈现）；
+    - ``has_should_abstain``：数据集是否含 SHOULD_ABSTAIN / HUMAN 真值（True = Phase 2
+      三值口径；False = Phase 1 二值口径）。口径判定与 ``metrics/abstention.abstain_subset_of``
+      同源（abstain_label 缺失时按 decision==HUMAN_REVIEW 推断），保证 runner 与
+      AbstentionEvaluator 对"是否有 SHOULD 真值"的认知一致。
+    """
 
     data_path: str | None = Field(default=None, description="数据集路径（None=外部注入 cases）")
     smoke: bool = Field(default=False)
@@ -77,6 +96,12 @@ class EvaluationResult(BaseModel):
     overall: dict[str, DecisionMetrics] = Field(default_factory=dict)  # scheme → metrics
     grouped: dict[str, dict[str, DecisionMetrics]] = Field(default_factory=dict)  # scheme → scene → metrics
     cost_summary: dict[str, dict] = Field(default_factory=dict)  # scheme → {llm_calls, tool_calls, tokens} 均值
+    abstention: dict[str, AbstentionMetrics] = Field(default_factory=dict)  # scheme → 五指标（有 SHOULD 真值才计算）
+    abstention_grouped: dict[str, dict[str, AbstentionMetrics]] = Field(default_factory=dict)  # scheme → scene → 五指标
+    has_should_abstain: bool = Field(
+        default=False,
+        description="数据集含 SHOULD_ABSTAIN/HUMAN 真值（Phase 2 三值口径）；v1 无 abstain 标签 → False",
+    )
 
     @property
     def all_records(self) -> list[EvalRecord]:
@@ -88,7 +113,7 @@ class EvaluationResult(BaseModel):
 
 
 class EvaluationRunner:
-    """三方案对比运行器（Phase 1：不落 DB、确定性、CI 可跑）。"""
+    """三方案对比运行器（不落 DB、确定性、CI 可跑；v1 二值 / v2 三值均可）。"""
 
     def __init__(
         self,
@@ -138,10 +163,15 @@ class EvaluationRunner:
 
         schemes = self.build_schemes(include)
         exp = expected_index(cases)
+        # 有 SHOULD_ABSTAIN/HUMAN 真值 → 三值（Phase 2 v2）口径：abstention 五指标并行计算；
+        # v1（无 abstain 标签、真值仅 PASS/REJECT）→ abstention 区为空，Phase 1 兼容口径。
+        has_should = any(abstain_subset_of(v) == "SHOULD_ABSTAIN" for v in exp.values())
         records: dict[str, list[EvalRecord]] = {}
         overall: dict[str, DecisionMetrics] = {}
         grouped: dict[str, dict[str, DecisionMetrics]] = {}
         cost_summary: dict[str, dict] = {}
+        abstention: dict[str, AbstentionMetrics] = {}
+        abstention_grouped: dict[str, dict[str, AbstentionMetrics]] = {}
 
         for name, scheme in schemes.items():
             scheme_records: list[EvalRecord] = []
@@ -151,6 +181,11 @@ class EvaluationRunner:
             overall[name] = DecisionEvaluator.evaluate(scheme_records, exp)
             grouped[name] = DecisionEvaluator.evaluate_grouped(scheme_records, exp)
             cost_summary[name] = _cost_summary(scheme_records)
+            if has_should:
+                # P1-3：abstention 五指标接入主评测路径（§4.4；全量分母，与
+                # DecisionEvaluator 共享同一 expected 索引，不重复构造）
+                abstention[name] = AbstentionEvaluator.evaluate(scheme_records, exp)
+                abstention_grouped[name] = AbstentionEvaluator.evaluate_grouped(scheme_records, exp)
 
         return EvaluationResult(
             data_path=str(self.data_path) if self.data_path is not None else None,
@@ -162,6 +197,9 @@ class EvaluationRunner:
             overall=overall,
             grouped=grouped,
             cost_summary=cost_summary,
+            abstention=abstention,
+            abstention_grouped=abstention_grouped,
+            has_should_abstain=has_should,
         )
 
 
