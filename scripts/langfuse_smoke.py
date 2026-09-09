@@ -172,9 +172,22 @@ def _observations_api_url(
     return f"{host.rstrip('/')}{OBSERVATIONS_PATH}?{query}"
 
 
+#: 项目 id（v4 UI 路由需要）；与 `deploy/langfuse/.env` 的 `LANGFUSE_INIT_PROJECT_ID` 一致。
+DEFAULT_PROJECT_ID = "pra-local"
+
+
+def _project_id() -> str:
+    """UI 路由用的 project id（`PRA_LANGFUSE_PROJECT_ID` 可覆盖，缺省 ``pra-local``）。"""
+    return (os.environ.get("PRA_LANGFUSE_PROJECT_ID") or "").strip() or DEFAULT_PROJECT_ID
+
+
 def _ui_url(host: str, trace_id: str) -> str:
-    """Langfuse UI 中该 trace 的链接。"""
-    return f"{host.rstrip('/')}/trace/{trace_id}"
+    """Langfuse **v4** UI 中该 trace 的链接。
+
+    注意：v3 的短链 ``/trace/<id>`` 在 v4 里渲染为 notFound（HTTP 200 但页面空）——
+    实测 v4 正确路由是 ``/project/<projectId>/traces/<traceId>``（docs/09 §6.1）。
+    """
+    return f"{host.rstrip('/')}/project/{_project_id()}/traces/{trace_id}"
 
 
 def _auth_header(public_key: str, secret_key: str) -> str:

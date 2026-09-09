@@ -203,7 +203,10 @@ def test_trace_id_and_url_helpers(smoke) -> None:
     assert url.startswith("http://localhost:3000/api/public/v2/observations?")
     assert "traceId=" + "b" * 32 in url
     assert "limit=50" in url
-    assert smoke._ui_url("http://localhost:3000/", "c" * 32) == f"http://localhost:3000/trace/{'c' * 32}"
+    assert (
+        smoke._ui_url("http://localhost:3000/", "c" * 32)
+        == f"http://localhost:3000/project/pra-local/traces/{'c' * 32}"
+    )
 
 
 def test_observations_url_carries_fields(smoke) -> None:
@@ -591,7 +594,7 @@ def test_main_prints_pass_with_fake_readback(smoke, fake_enabled, monkeypatch, c
     assert rc == 0
     assert "SMOKE PASS" in out
     assert "observation tree:" in out
-    assert f"/trace/{trace_id}" in out  # UI 链接
+    assert f"/project/pra-local/traces/{trace_id}" in out  # v4 UI 链接
     assert "  - smoke [SPAN]" in out
     # main 实际发出的回读请求必须带 fields=（端到端护栏）
     assert seen, "应当发起回读请求"

@@ -249,7 +249,7 @@ def test_demo_script_without_credentials_exits_zero() -> None:
     assert "tracing disabled" in proc.stdout
     assert "decision:" in proc.stdout  # 业务照常：仍然产出裁决
     assert "trace_id:" in proc.stdout
-    assert "/trace/" in proc.stdout
+    assert "/project/pra-local/traces/" in proc.stdout  # v4 UI 路由
 
 
 def test_demo_script_accepts_explicit_run_id() -> None:

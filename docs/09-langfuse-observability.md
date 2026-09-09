@@ -419,7 +419,7 @@ review
 | observation 数 | **26** |
 | `tags` | `['env:local','source:http']` |
 | `version` | `baseline` |
-| UI `/trace/<id>` | **200** |
+| UI `/project/pra-local/traces/<id>` | **200**（注意：v3 短链 `/trace/<id>` 在 v4 渲染为 notFound，页面壳 200 但内容空） |
 | prompt / response 可回读 | ✅ `fields=io` 拿到完整 system prompt 与 JSON 输出 |
 | `model` | `scripted-walkthrough`（后端**自报**） |
 | `usage` | `{}` |

@@ -3,7 +3,7 @@
 用途：面试演示与端到端证据 —— 走 **HTTP 主流程同一入口** ``pra.api.service.run_review``
 跑一个真实案件（默认复古运动鞋 ``P_88231`` / 商家 ``M_5512``，与 README 快速开始、
 ``scripts/demo_walkthrough.py`` 同源构造，但本脚本**自包含**、不 import 其内部函数），
-跑完打印 ``run_id`` / ``trace_id`` / 决策值与 UI 链接 ``{LANGFUSE_HOST}/trace/{trace_id}``。
+跑完打印 ``run_id`` / ``trace_id`` / 决策值与 UI 链接 ``{LANGFUSE_HOST}/project/<projectId>/traces/{trace_id}``（v4 路由）。
 
 **无凭据 / SDK 未装时的行为（刻意如此，docs/09 §2）**：打印
 ``tracing disabled (NullTracer: <reason>)`` + 如何启用，**仍然照常跑完 Agent 并打印决策**
@@ -92,6 +92,32 @@ def _langfuse_host() -> str:
         return DEFAULT_LANGFUSE_HOST
 
 
+#: 项目 id（v4 UI 路由需要）；与 `deploy/langfuse/.env` 的 `LANGFUSE_INIT_PROJECT_ID` 一致。
+DEFAULT_PROJECT_ID = "pra-local"
+
+
+def _project_id() -> str:
+    """UI 路由用的 project id（``PRA_LANGFUSE_PROJECT_ID`` 可覆盖，缺省 ``pra-local``）。"""
+    try:
+        from pra.observability.tracing import _env_or_settings
+
+        return (
+            _env_or_settings("PRA_LANGFUSE_PROJECT_ID", "pra_langfuse_project_id")
+            or DEFAULT_PROJECT_ID
+        )
+    except Exception:  # noqa: BLE001
+        return DEFAULT_PROJECT_ID
+
+
+def _ui_url(trace_id: str) -> str:
+    """Langfuse **v4** UI 链接。
+
+    v3 短链 ``/trace/<id>`` 在 v4 渲染为 notFound（200 但空页）；实测正确路由为
+    ``/project/<projectId>/traces/<traceId>``（docs/09 §6.1）。
+    """
+    return f"{_langfuse_host().rstrip('/')}/project/{_project_id()}/traces/{trace_id}"
+
+
 def _tracing_state() -> tuple[bool, str]:
     """返回 (观测是否生效, 说明)。未生效说明形如 ``NullTracer: <reason>``。"""
     try:
@@ -170,15 +196,15 @@ async def main(argv: list[str] | None = None) -> int:
     )
 
     if tracing_on:
-        print(f"UI:                  {_langfuse_host()}/trace/{trace_id}")
+        print(f"UI:                  {_ui_url(trace_id)}")
     elif _has_credentials():
         print(
-            f"UI:                  {_langfuse_host()}/trace/{trace_id}"
+            f"UI:                  {_ui_url(trace_id)}"
             "   ← 凭据已配置但观测被关闭（见上），本次未上报"
         )
     else:
         print(
-            f"UI（配置凭据后）:     {_langfuse_host()}/trace/{trace_id}"
+            f"UI（配置凭据后）:     {_ui_url(trace_id)}"
             "   ← 当前无凭据，未上报"
         )
     flush_tracer()
