@@ -36,3 +36,8 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# 本地记忆（不进公开仓库；DSH 直接从磁盘加载 AGENTS.md，无需入库）
+AGENTS.md
+docs/07-project-status.md
+docs/08-eval-review-backlog.md
