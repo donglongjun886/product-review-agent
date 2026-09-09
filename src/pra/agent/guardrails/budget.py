@@ -11,6 +11,19 @@
 - tools_node 主循环按单批执行前检查（预算只够前 k 个时执行前 k 个）；
 - decide 入口决定是否还值得再烧一次 LLM 提案。
 
+**节点级护栏边界（P2-17，语义未改、仅文档化）**：检查只发生在**节点入口/路由**，
+单次节点调用内部可再 bump —— 例如 schema 校验重试 / transport 重试把单节点
+attempts 抬到 2（节点按 ``LLMCallOutcome.attempts`` 记账，见 nodes/*.py），一次节点
+调用可把 ``llm_calls`` 推高 2 格。故生效截胡点可为 **上限 + 1（至多越 1 次）**：
+入口 ``llm_calls == cap-1`` 的节点耗尽 2 次尝试后，要到**下一节点入口**才截胡
+（最终 ``llm_calls == cap+1``）。**cap 是节点级护栏而非全案精确调用上限**；如需
+严格上限须在每次 bump 前检查（当前刻意不做 —— 语义是上界，正常案件远低于上限）。
+
+token 记账口径（P2-16 注记，本模块不改口径）：``bump_llm_usage(tokens=…)`` 收到的
+tokens 由节点转交 ``LLMCallOutcome.tokens`` = 后端 ``usage.total_tokens``
+（**input+output 合计**，含 provider 缓存命中 token；**schema 校验失败的尝试也全额
+累计**；transport 失败无响应不计）—— 详见 llm_shell / litellm_backend 注释。
+
 超限返回**首个**超限维度名（LLM_CALLS / TOOL_CALLS / TOKENS / LATENCY），供审计
 与 overrides 记录；全部未超限返回 None。``latency`` 从 ``budget.start_time``
 （UTC）按墙钟推算。
@@ -47,6 +60,9 @@ def budget_exceeded(budget: Budget) -> str | None:
     """返回首个超限维度（LLM_CALLS/TOOL_CALLS/TOKENS/LATENCY）；全部未超限返回 None。
 
     阈值语义：``>=``（达到上限即视为超限停止 —— Guardrail 上界）。
+    检查时点：只在节点入口/路由调用 —— 单节点内 attempts=2 的重试可把计数器
+    bump 到 cap+1 才在下一次入口截胡（节点级护栏，至多越 1 次，见模块 docstring
+    P2-17）。
     """
     if budget.llm_calls >= budget.limits.max_llm_calls:
         return DIM_LLM_CALLS

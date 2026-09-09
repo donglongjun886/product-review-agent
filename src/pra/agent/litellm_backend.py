@@ -29,10 +29,18 @@
   渲染用的工具目录；None/空 → plan 上下文注明"无可用工具"并提示输出 conclude。
 
 本模块只做"渲染 + 转发"，含任一失败形态（网络/超时/HTTP/无 key/上游异常）→ 抛
-``LLMBackendError``（llm_shell 捕获后按失败处理：第 1 次追加修正提示重试 1 次，仍
-失败走节点降级）。**内容提取失败不抛**：返回 content 原样文本，交由上层
-``model_validate_json`` 校验（与 scripted 桩一致，见模块底部 ``_clean_json_text``
-说明）。
+``LLMBackendError``（llm_shell 捕获后按 **transport 类**处理：指数退避后重试 1 次，
+**不再用"schema 修正"文案重试 transport 失败** —— P2-15）。**内容提取失败不抛**：
+返回 content 原样文本 + ``truncated`` 标记（``choices[0].finish_reason == "length"``
+⇒ 输出被截断、内容可能不完整 —— llm_shell 按 transport 类处理：校验失败不重试，
+省一次大概率无效的调用），交由上层 ``model_validate_json`` 校验（与 scripted 桩
+一致，见模块底部 ``_clean_json_text`` 说明）。
+
+token 口径（P2-16 注记）：``LLMResponse.tokens`` = ``usage.total_tokens`` ——
+**input+output 合计**，DeepSeek 等 provider 的缓存命中 token 计入；无 usage → 0。
+llm_shell 对 schema 校验失败的尝试也**全额累计**（transport 失败无响应不计）——
+真实跑分的 tokens 是混合口径，不是纯 output 生成量，R3 按 tokens 维度归因时须按
+此口径解读。
 
 语法约定：顶部 ``from __future__ import annotations``；import 一律 ``pra.*`` 风格。
 """
@@ -213,9 +221,12 @@ class LiteLLMBackend(LLMBackend):
 
         - node ∈ {"hypothesize","plan","reevaluate","decide"}（词表外 → LLMBackendError，
           与 scripted 桩对未知 node 的处理一致，供降级路径测试）；
-        - 失败形态（无 key / 网络 / 超时 / HTTP / 上游异常）→ ``LLMBackendError``；
+        - 失败形态（无 key / 网络 / 超时 / HTTP / 上游异常）→ ``LLMBackendError``
+          （llm_shell 按 **transport 类**处理：退避重试、不追加 schema 修正文案）；
         - 响应 content 提取/清理失败**不抛**：返回原样文本，交给 llm_shell 的
-          ``model_validate_json`` 强校验（与 scripted 桩一致，校验在 llm_shell）。
+          ``model_validate_json`` 强校验（与 scripted 桩一致，校验在 llm_shell）；
+        - 截断（``finish_reason == "length"``）→ ``LLMResponse.truncated=True``
+          （P2-15：llm_shell 据此按 transport 类处理，不再当普通校验失败烧重试）。
         """
         # 1) node 词表校验（与 system prompt 词表一致）
         if node not in SYSTEM_PROMPTS:
@@ -264,14 +275,21 @@ class LiteLLMBackend(LLMBackend):
             raise LLMBackendError(
                 f"litellm 调用失败（node={node}, model={self.model}）：{exc}"
             ) from exc
-        # 6) 取 content（choices 异常结构 → 空串交由上层校验，不抛）
+        # 6) 取 content + 截断标记（choices 异常结构 → 空串 + truncated=False，交由上层校验）
         content = ""
+        truncated = False
         try:
-            message = resp.choices[0].message
+            choice = resp.choices[0]
+            message = choice.message
             content = message.content or ""
+            # finish_reason == "length" ⇒ 输出达上限被截断：内容可能不完整。
+            # P2-15：标记给 llm_shell 按 transport 类处理（校验失败不重试），
+            # 不再把截断当"普通 schema 校验失败"再烧一次全量调用。
+            truncated = str(getattr(choice, "finish_reason", "") or "") == "length"
         except Exception:
             content = ""
-        # 7) token 记账（无 usage → 0）
+        # 7) token 记账（无 usage → 0；口径 = usage.total_tokens：input+output 合计、
+        #    含 provider 缓存命中 token —— P2-16 注记）
         tokens = 0
         usage = getattr(resp, "usage", None)
         if usage is not None:
@@ -279,7 +297,9 @@ class LiteLLMBackend(LLMBackend):
                 tokens = int(getattr(usage, "total_tokens", 0) or 0)
             except (TypeError, ValueError):
                 tokens = 0
-        return LLMResponse(content=self._clean_json_text(content), tokens=tokens)
+        return LLMResponse(
+            content=self._clean_json_text(content), tokens=tokens, truncated=truncated
+        )
 
     # -- content 清理（best-effort，任何失败不抛，原样返回） ----------------------
 

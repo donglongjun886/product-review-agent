@@ -26,6 +26,17 @@
    逐字节一致），给 N 时追加 ``max_llm_calls=N``（10/12/15 档均可），装配产物可
    直接投 AgentScheme（real 臂构造路径，同 _main）。
 
+修复包 3 追加覆盖（P2-14/P2-16/P2-17/P1-6c，均确定性、无网络）：
+7. P2-14：``budget_limits`` 未知键（拼错字如 ``max_llm_call``）在构造与
+   ``_apply_budget_limits`` 都抛 ValueError（白名单校验）—— 不再被 pydantic
+   ``model_copy`` 静默挂属性、以生产默认跑；
+8. P2-16：R3 命中案的 ``EvalRecord.detail["budget_hit_dim"]`` 记录先撞限维度
+   （默认截胡案 = LLM_CALLS），overrides 码字面不变；收敛案为 None；
+9. P2-17：cap 是**节点级护栏** —— cap=1 且单节点 schema 重试 attempts=2 时，
+   生效截胡点可为 cap+1（llm_calls==2 才截胡），"至多越 1 次"文档化语义的
+   纯函数 + 端到端两条证据；
+10. P1-6c：real 报告 overrides 汇总函数（R5 降级案数 / R3 案数 / 混合案）计数正确。
+
 全程离线：无网络、无真 LLM；被测对象全部确定性。
 """
 
@@ -34,12 +45,16 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from pra.agent.guardrails.budget import DIM_LLM_CALLS, budget_exceeded
+import pytest
+
+from helpers import hypothesize_json
+from pra.agent.guardrails.budget import DIM_LLM_CALLS, budget_exceeded, bump_llm_usage
+from pra.agent.guardrails.llm_shell import LLMBackendError, LLMResponse
 from pra.agent.state import build_initial_state
 from pra.domain.models import Budget, BudgetLimits
 from pra.evaluation.dataset.loader import load_dataset
 from pra.evaluation.harness.agent_scheme import AgentScheme
-from pra.evaluation.harness.base import EvalContext
+from pra.evaluation.harness.base import EvalContext, EvalRecord
 
 DATA_PATH = Path(__file__).resolve().parents[1] / "eval_data" / "v1" / "cases_v1.jsonl"
 DATA_PATH_V2 = Path(__file__).resolve().parents[1] / "eval_data" / "v2" / "cases_v2.jsonl"
@@ -223,3 +238,139 @@ def test_cli_llm_budget_flag_maps_to_max_llm_calls_and_feeds_agent_scheme():
     # 装配产物直接投 AgentScheme（real 臂构造路径，同 _main）→ 覆盖被持有
     scheme = AgentScheme(budget_limits=limits)
     assert scheme._budget_limits == {"max_latency_ms": 600000, "max_llm_calls": 12}
+
+
+# ---------------------------------------------------------------------------
+# 5) 修复包 3 追加：P2-14 键白名单 / P2-17 节点级护栏 / P2-16 记录侧维度 / P1-6c 汇总
+# ---------------------------------------------------------------------------
+
+
+def test_budget_limits_unknown_key_raises_value_error():
+    """P2-14：未知键（拼错字）在装配与 ``_apply_budget_limits`` 都抛 ValueError。
+
+    pydantic v2 ``model_copy(update=...)`` 对未知键**不校验**：会静默挂成实例多余
+    属性而覆盖不生效 —— 旧行为会让 ``{"max_llm_call": 12}``（少个 s）以生产默认 10
+    跑完 B-2 实验、归因建立在实际未放宽之上。白名单校验让装配层失败响亮。
+    """
+    case = _v1_case()
+    state = build_initial_state(case.input)
+    with pytest.raises(ValueError) as ei:
+        AgentScheme._apply_budget_limits(state, {"max_llm_call": 12})
+    assert "max_llm_call" in str(ei.value)
+    assert "max_llm_calls" in str(ei.value)  # 报错信息带合法键提示
+    # 构造期同样拦截（装配层失败要响亮，不等 run 才暴露）
+    with pytest.raises(ValueError, match="max_llm_call"):
+        AgentScheme(budget_limits={"max_llm_call": 12})
+    with pytest.raises(ValueError, match="未知键"):
+        AgentScheme(budget_limits={"max_llm_calls": 12, "max_tool_call": 3})
+    # 合法键（部分/全部四键组合）不受影响，仍只覆盖给定键
+    out = AgentScheme._apply_budget_limits(state, {"max_llm_calls": 12, "max_tokens": 50000})
+    assert out["budget"].limits.max_llm_calls == 12
+    assert out["budget"].limits.max_tokens == 50000
+    assert out["budget"].limits.max_latency_ms == 30000  # 未给键保持默认
+
+
+def test_guardrail_cap_is_node_level_can_overshoot_by_one():
+    """P2-17 纯函数证据：cap 只在节点入口检查 → attempts=2 的单节点可把计数推到 cap+1。
+
+    cap=1：入口 llm_calls=0 放行 → 单节点 bump 2（schema/transport 重试，attempts=2）
+    → llm_calls=2（== cap+1）→ **下一节点入口**才截胡。语义 = "节点级护栏、至多越
+    1 次"（docstring 已注明；护栏语义未改，本测试锁该边界）。
+    """
+    caps = BudgetLimits(max_llm_calls=1)
+    b0 = Budget(llm_calls=0, limits=caps)
+    assert budget_exceeded(b0) is None  # 节点入口检查：0 < 1 放行
+    b1 = bump_llm_usage(b0, llm_calls=2)  # 单节点两次尝试（schema 修正/transport 重试）
+    assert b1.llm_calls == 2  # == cap + 1（越过 1 次）
+    assert budget_exceeded(b1) == DIM_LLM_CALLS  # 下一节点入口才截胡
+    # 对照：attempts=1 时恰好 cap 截胡（不越界）
+    b2 = bump_llm_usage(Budget(llm_calls=0, limits=caps), llm_calls=1)
+    assert b2.llm_calls == 1
+    assert budget_exceeded(b2) == DIM_LLM_CALLS
+
+
+class _CapOverrunBackend:
+    """cap=1 e2e 用替身（实现 LLMBackend Protocol）：hypothesize 第 1 次非法 JSON
+    （触发 llm_shell schema 修正重试 → 单节点 attempts=2）、第 2 次合法；
+    其它 node 永不应被调用（预算在 hypothesize 后已超限，各节点入口短路）。"""
+
+    name = "cap-overrun-test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, *, node, messages, json_schema):
+        self.calls += 1
+        if node != "hypothesize":
+            raise LLMBackendError(f"测试后端不应被调用的 node: {node}（第 {self.calls} 次）")
+        if self.calls == 1:
+            return LLMResponse(content='{"not_valid": true', tokens=0)  # 非法 JSON
+        if self.calls == 2:
+            return LLMResponse(content=hypothesize_json(), tokens=0)
+        raise LLMBackendError(f"hypothesize 被意外多调（第 {self.calls} 次）")
+
+
+async def test_e2e_node_guardrail_cap1_attempts2_intercepts_at_cap_plus_1():
+    """P2-17 端到端：cap=1 时单节点 schema 重试（attempts=2）越过 cap → 截胡点 cap+1。
+
+    确定性全图 + 注入替身（仅 hypothesize 生效；第 1 次非法输出触发 llm_shell 修正
+    重试 = 单节点 2 次尝试）→ hypothesize bump llm_calls=2，plan/decide 入口见预算
+    已超（>= cap 1）短路 → HUMAN + R3，llm_calls==2==cap+1。
+    """
+    ctx = EvalContext()
+    case = _v1_case()
+    backend = _CapOverrunBackend()
+    rec = await AgentScheme(llm=backend, budget_limits={"max_llm_calls": 1}).run(case, ctx)
+    assert backend.calls == 2  # 恰好 hypothesize 两次尝试；其余节点被预算短路
+    assert rec.decision == "HUMAN_REVIEW"
+    assert rec.cost["llm_calls"] == 2  # == cap(1) + 1 —— 节点级护栏"至多越 1 次"
+    assert "R3_BUDGET_EXHAUSTED" in rec.detail["overrides"]
+
+
+async def test_record_detail_reports_budget_hit_dimension():
+    """P2-16：R3 命中案在 ``EvalRecord.detail["budget_hit_dim"]`` 附先撞限维度。
+
+    overrides 码字面/语义不变（R3_BUDGET_EXHAUSTED 不拆码）—— 维度只作记录侧
+    附加审计（真实跑分 token 是第二截胡源时区分 llm_calls/tokens/latency）。
+    """
+    ctx = EvalContext()
+    cases = load_dataset(DATA_PATH_V2)
+    nonconv = next(c for c in cases if c.eval_case_id == "EC_V2_0260")
+    rec = await AgentScheme().run(nonconv, ctx)  # 默认预算 10 打满截胡（确定性）
+    assert rec.decision == "HUMAN_REVIEW"
+    assert "R3_BUDGET_EXHAUSTED" in rec.detail["overrides"]  # 码字面不变
+    assert rec.detail["budget_hit_dim"] == "LLM_CALLS"  # llm_calls 先撞限
+    # 收敛案（无 R3）→ dim None
+    ok = await AgentScheme().run(_v1_case(), ctx)
+    assert ok.detail["overrides"] == []
+    assert ok.detail["budget_hit_dim"] is None
+
+
+def test_real_overrides_summary_counts_r5_r3_and_mixed():
+    """P1-6c：real 报告 overrides 汇总函数（R5 降级案数 / R3 案数 / 混合案）计数正确。"""
+    mod = _real_script()
+
+    def _rec(overrides: list) -> EvalRecord:
+        return EvalRecord(
+            eval_case_id="EC_SUM",
+            scheme="agent",
+            decision="HUMAN_REVIEW",
+            detail={"overrides": list(overrides)},
+        )
+
+    records = [
+        _rec(["R5_DEGRADED_OR_FAILED_STEP"]),
+        _rec(["R5_DEGRADED_OR_FAILED_STEP", "R3_BUDGET_EXHAUSTED"]),  # 混合案
+        _rec(["R3_BUDGET_EXHAUSTED"]),
+        _rec(["R2_REJECT_GATE_FAIL"]),
+        _rec([]),  # 无码案不计数
+    ]
+    s = mod._overrides_summary(records)
+    assert s["cases_with_any"] == 4
+    assert s["R5_DEGRADED_OR_FAILED_STEP"] == 2
+    assert s["R3_BUDGET_EXHAUSTED"] == 2
+    assert s["r3_r5_mixed"] == 1
+    assert s["other_codes"] == {"R2_REJECT_GATE_FAIL": 1}
+    # 全无码 → 全 0（确定性）
+    empty = mod._overrides_summary([_rec([]), _rec([])])
+    assert empty["cases_with_any"] == 0 and empty["R5_DEGRADED_OR_FAILED_STEP"] == 0

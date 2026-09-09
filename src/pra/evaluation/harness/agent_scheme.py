@@ -39,10 +39,18 @@ scripted 模式；评测的确定性约束不覆盖 real 分支）。
    UNRESOLVED（"没查到 ≠ 证伪"，domain 口径）。**reevaluate/decide 的 LLM 消息只带
    hypotheses+evidence（不带 case 全量）→ 表面事实经 hypothesize 固化进假设
    statement/prior，本层只读假设与证据，不自造事实。**
+   **已知边界（P2-3，v2 无 family 覆盖、real/扩展数据可达 —— 标注不改语义、不补
+   family）**：品牌维度只判"在库品牌非空"（``_product_brand_nonnull``），**不比对
+   案件品牌与在库品牌是否一致** —— 案件 brand 与在库 brand 不一致（漂移/冒名）时
+   会被当作"核验通过"证伪；且"案件 brand 在案 + 虚构 pid 查无"只产**低先验
+   （prior 0.2 < 0.3）UNRESOLVED**，不挡 PASS（低优先 unresolved 不触发 HUMAN）。
 4. decide：由假设终态 + 证据推提案 —— 受支持的高优先风险假设中任一：文本仿冒 /
    强视觉(相似>=0.85 或 Logo>=0.7) /（弱视觉且商家系统性）→ REJECT（REJECT Gate 再
-   校验可引用依据与 dc）；无受支持风险且高优先假设均已证伪 → PASS；其余 → HUMAN
-   （克制转人工，不硬判）。Gate / abstention overlay 仍做最终收口（谁改判写进
+   校验可引用依据与 dc）；**无受支持的“高优先”风险（prior>=0.3）且高优先假设均已
+   证伪 / 无高优先未决 → PASS**（低先验 SUPPORTED 假设 —— 如弱相似 0.72、prior
+   0.22 —— 与 PASS 相容是刻意行为：交叉判据用"假设是否成立"而非"先验"，见
+   ``_decide``；故此处的"无受支持风险"应读作"无受支持的**高优先**风险"）；其余 →
+   HUMAN （克制转人工，不硬判）。Gate / abstention overlay 仍做最终收口（谁改判写进
    decision.overrides —— 转录层只读终态）。
 
 确定性约束：本模块逻辑为纯函数 + 异步包装；不读 expected、不读外部配置；阈值
@@ -59,6 +67,12 @@ from langgraph.graph.state import CompiledStateGraph
 
 from pra.agent.checkpointer import make_memory_checkpointer
 from pra.agent.graph import build_agent_graph
+from pra.agent.guardrails.budget import (  # 预算超限维度常量（P2-16 记录侧复用）
+    DIM_LLM_CALLS,
+    DIM_TOOL_CALLS,
+    DIM_TOKENS,
+    DIM_LATENCY,
+)
 from pra.agent.guardrails.llm_shell import LLMResponse
 from pra.agent.scripted_llm import (  # __STATE__ 解析/引用串格式
     _citation,
@@ -669,7 +683,14 @@ def _product_found(evs: list[dict]) -> bool:
 
 
 def _product_brand_nonnull(evs: list[dict]) -> bool:
-    """PRODUCT_FACT 表明在库品牌非空（value 形如 brand=云步, version=… / brand=null, …）。"""
+    """PRODUCT_FACT 表明在库品牌非空（value 形如 brand=云步, version=… / brand=null, …）。
+
+    **已知边界（P2-3，标注不改语义）**：只判"在库品牌非空"，**不比对案件品牌与
+    在库品牌是否一致** —— 案件 brand 与在库 brand 不一致（漂移/冒名）时，reevaluate
+    BRAND 分支会按"在库可查 → 案件空缺/存疑被证伪"（REFUTED）放行。v2 无对应
+    family（虚构 pid 案全是 brand 空缺）→ 当前不可达；real/扩展数据可达。如需
+    比对一致性须另立规则 + 新 family（设计拍板，本模块不加）。
+    """
     for e in evs:
         if e.get("type") == _T_PRODUCT and re.search(
             r"brand=(?!null\b)\S+", str(e.get("value") or "")
@@ -929,7 +950,14 @@ class EvalScriptedLLMBackend:
                     target = ("UNRESOLVED", None, [], [])  # 无命中/无可比 → 查无结论
             elif dim == "BRAND":
                 case_missing = _MARK_BRAND_MISSING in str(h.get("statement") or "")
+                # 已知边界（P2-3）：prod_brand_ok 只证"在库品牌非空"，不比对案件品牌
+                # 与在库品牌是否一致 —— 漂移/冒名（不一致）也会走 REFUTED"核验通过"。
+                # v2 无 family 覆盖（不可达）；real/扩展数据可达。加比对规则需新 family
+                # + 设计拍板，此处仅标注。
                 if not prod_found:
+                    # 在库未核验 → 不臆断；"案件 brand 在案 + 虚构 pid 查无"走这里 →
+                    # UNRESOLVED 且 prior 0.2(<0.3) → 不挡 PASS（低优先 unresolved
+                    # 不触发 HUMAN）—— 同上，属已知边界，不在此扩张规则。
                     target = ("UNRESOLVED", None, [], [])  # 在库未核验 → 不臆断
                 elif prod_brand_ok:
                     # 在库品牌可查 → 案件"空缺/存疑"被证伪（快照字段缺失 ≠ 规避）
@@ -1024,9 +1052,6 @@ class EvalScriptedLLMBackend:
             _dim_of(str(h.get("statement") or "")) == "MERCHANT" for h in supported_high
         )
         visual_strong = sim_strong or logo >= _LOGO_CONF
-        brand_supported = any(
-            _dim_of(str(h.get("statement") or "")) == "BRAND" for h in supported_high
-        )
 
         risk_types: list[str] = []
         # 视觉风险类型按"审查员可见证据视图"派生（sweep 抬 min_sim → 弱相似不再记 IP 风险）
@@ -1035,11 +1060,12 @@ class EvalScriptedLLMBackend:
         if merch_dirty:
             risk_types.append("EVASION_PATTERN")
 
+        # auto_reject 判定（P2-1：原第 4 子句 (V∧B∧M) 被第 3 子句 (V∧M) 蕴含、恒死，
+        # 已删 —— 含 brand 交叉的"弱视觉×商家"覆盖关系由第 3 子句承担，行为零变化）。
         auto_reject = (
             text_flag
             or visual_strong
             or (visual_supported and merchant_supported)
-            or (visual_supported and brand_supported and merchant_supported)
         )
         if supported_high:
             if auto_reject:
@@ -1110,6 +1136,48 @@ class EvalScriptedLLMBackend:
 # ---------------------------------------------------------------------------
 
 
+def _validate_budget_limit_keys(overrides: dict, model_cls: type) -> None:
+    """按 pydantic 模型字段白名单校验预算覆盖键（P2-14）；未知键抛 ValueError。
+
+    pydantic v2 的 ``model_copy(update=…)`` **不校验键**：未知键会静默挂成实例
+    多余属性而覆盖不生效 —— 拼错字（如 ``max_llm_call`` 少个 s）会让 B-2 档位
+    实验静默以生产默认 10 跑、归因建立在实际未放宽之上。装配层失败要响亮：
+    非空 overrides 的每个键都必须命中 ``model_cls.model_fields``。
+    """
+    allowed = set(model_cls.model_fields)
+    unknown = sorted(set(overrides) - allowed)
+    if unknown:
+        raise ValueError(
+            "AgentScheme budget_limits 含未知键（拼错字会被 model_copy 静默挂成多余"
+            f"属性而不生效，已拒绝）：{unknown}；合法键 = BudgetLimits 字段"
+            f"（无别名映射）：{sorted(allowed)}"
+        )
+
+
+def _budget_hit_dim_from_snapshot(budget) -> str | None:
+    """从决策预算快照重算“首个撞限维度”（P2-16 记录侧附加，不改 overrides 码）。
+
+    与 ``pra.agent.guardrails.budget.budget_exceeded`` 同阈值、同判定顺序
+    （LLM_CALLS→TOOL_CALLS→TOKENS→LATENCY），但 latency 用**快照已冻结的
+    ``latency_ms``**（build_decision 时 snapshot_budget 已补入）而非实时墙钟 ——
+    EvalRecord 保持不含进程相关量、可逐字节重放。只写进 EvalRecord.detail 供审计
+    归因（真实跑分 token 是第二截胡源时区分 llm_calls/tokens/latency 哪维先撞限），
+    R3_BUDGET_EXHAUSTED 码字面与语义不变。
+    """
+    if budget is None:
+        return None
+    limits = budget.limits
+    if budget.llm_calls >= limits.max_llm_calls:
+        return DIM_LLM_CALLS
+    if budget.tool_calls >= limits.max_tool_calls:
+        return DIM_TOOL_CALLS
+    if budget.tokens >= limits.max_tokens:
+        return DIM_TOKENS
+    if budget.latency_ms >= limits.max_latency_ms:
+        return DIM_LATENCY
+    return None
+
+
 class AgentScheme(SchemeRunner):
     """System 3 —— 完整调查 Agent（scripted 模式：eval 世界 + eval 审查员桩）。
 
@@ -1138,8 +1206,10 @@ class AgentScheme(SchemeRunner):
       ``max_tokens`` / ``max_latency_ms``，与生产模型字段名逐一对应、无别名映射，
       任意合法字段组合均可），在每次 run 的 ``build_initial_state`` 之后对
       ``budget.limits`` 做 model_copy 覆盖（整份 limits 逐层拷贝，不改生产对象）。
-      注：非法键会被 model_copy 静默挂成多余属性而不生效（拼写错字不报错），
-      装配侧用前自查。**用途 1：real 模式放宽墙钟护栏** —— 真实 LLM 每案 ~9 次
+      注（P2-14）：**未知键在构造/覆盖装配时抛 ValueError**（按
+      ``BudgetLimits.model_fields`` 白名单校验）—— 拼错字（如 ``max_llm_call``）
+      不再被 model_copy 静默挂成多余属性而“不生效”，装配层失败要响亮。**用途 1：
+      real 模式放宽墙钟护栏** —— 真实 LLM 每案 ~9 次
       串行调用天然 >30s（30s 是生产护栏，T-7 拍板），不放宽则每案都被 LATENCY
       超限截胡转人工，评测测不到 LLM 决策质量（scripted 毫秒级跑完不触发，无需
       放宽）。**用途 2（B-2 对照实验）：调 LLM 调用预算档** —— 如
@@ -1171,6 +1241,11 @@ class AgentScheme(SchemeRunner):
         # max_latency_ms / 调 max_llm_calls 档用 —— 只改每次 run 初始 state 的
         # budget.limits，见 run()）。
         self._budget_limits: dict | None = dict(budget_limits or {}) or None
+        if self._budget_limits is not None:
+            # P2-14：装配期即白名单校验（拼错字 → ValueError，不静默以生产默认跑）
+            from pra.domain.models import BudgetLimits  # 惰性 import：仅覆盖路径需要
+
+            _validate_budget_limit_keys(self._budget_limits, BudgetLimits)
 
     @staticmethod
     def _apply_budget_limits(state: dict, overrides: dict | None) -> dict:
@@ -1178,14 +1253,20 @@ class AgentScheme(SchemeRunner):
 
         overrides 为 ``BudgetLimits`` 字段名→值的 dict（None/空 = 原样返回）；用
         model_copy 逐层拷贝，不改生产 Budget/BudgetLimits 对象与默认值。
+
+        **键白名单校验（P2-14）**：未知键（如拼错的 ``max_llm_call``）先按
+        ``BudgetLimits.model_fields`` 校验并抛 ValueError —— pydantic v2 的
+        ``model_copy(update=…)`` 对未知键静默挂属性而不生效，若放任会令 B-2 档位
+        实验静默以生产默认 10 跑；装配层失败要响亮。
         """
         if not overrides:
             return state
+        from pra.domain.models import BudgetLimits  # 惰性 import：仅覆盖路径需要
+
+        _validate_budget_limit_keys(overrides, BudgetLimits)
         budget = state.get("budget")
         if budget is None:
             return state  # 防御：初始 state 恒有 budget，缺省不覆盖
-        from pra.domain.models import BudgetLimits  # 惰性 import：仅覆盖路径需要
-
         limits = budget.limits
         updated = limits.model_copy(update=dict(overrides))
         state["budget"] = budget.model_copy(update={"limits": updated})
@@ -1286,6 +1367,13 @@ class AgentScheme(SchemeRunner):
             },
             detail={
                 "overrides": list(decision.overrides),
+                # P2-16：R3 命中时附"哪一维先撞限"（LLM_CALLS/TOOL_CALLS/TOKENS/
+                # LATENCY）供真实跑分归因 —— 用快照冻结值重算（确定性），不改
+                # R3_BUDGET_EXHAUSTED 码字面/语义。真实跑分 tokens 口径 =
+                # usage.total_tokens（input+output、含缓存命中、失败重试全额累计），
+                # 故 TOKENS 是真实第二截胡源，需与 llm_calls 维度区分（见
+                # llm_shell/litellm_backend docstring 口径注记）。
+                "budget_hit_dim": _budget_hit_dim_from_snapshot(budget),
                 "hypothesis_trace": trace,
                 "tool_history_count": len(history),
             },

@@ -149,11 +149,12 @@ _SIMPLE_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_acompletion(contents: list, tokens: int = 7):
+def _make_fake_acompletion(contents: list, tokens: int = 7, finish_reason: str = "stop"):
     """返回可 monkeypatch 到 ``litellm.acompletion`` 的 async 替身，记录每次调用。
 
     ``contents`` 为逐个返回的 content 文本列表；耗尽后再被调用 → pytest.fail
     （哨兵：说明存在未 mock 的真实调用泄漏）。记录 ``calls`` = 每次的 kwargs/messages。
+    ``finish_reason`` 为每次响应的 finish_reason（"stop"/"length"；P2-15 截断测试用）。
     """
 
     queue = list(contents)
@@ -169,7 +170,10 @@ def _make_fake_acompletion(contents: list, tokens: int = 7):
         content = queue.pop(0)
         return types.SimpleNamespace(
             choices=[
-                types.SimpleNamespace(message=types.SimpleNamespace(content=content))
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content=content),
+                    finish_reason=finish_reason,
+                )
             ],
             usage=types.SimpleNamespace(total_tokens=tokens),
         )
@@ -178,11 +182,11 @@ def _make_fake_acompletion(contents: list, tokens: int = 7):
     return fake_acompletion
 
 
-def _patch_acompletion(monkeypatch, contents: list, tokens: int = 7):
+def _patch_acompletion(monkeypatch, contents: list, tokens: int = 7, finish_reason: str = "stop"):
     """import litellm 并把 acompletion monkeypatch 为按序返回的本地替身。"""
     import litellm  # 延迟 import：本文件顶部不 import，避免收集期拉起 litellm
 
-    fake = _make_fake_acompletion(contents, tokens=tokens)
+    fake = _make_fake_acompletion(contents, tokens=tokens, finish_reason=finish_reason)
     monkeypatch.setattr(litellm, "acompletion", fake)
     return fake
 
@@ -371,6 +375,8 @@ async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypat
 
     验证 LiteLLMBackend（真实渲染路径）+ llm_shell 的"校验失败重试 1 次"协作：
     修正提示被 _collect_feedbacks 收进 user 尾部回喂模型，不破坏重试。
+    P2-15：回喂内容必须含**第 1 次非法输出原文**（模型第 2 次能"看到"自己上一版
+    输出去修正），不只是 ValidationError 文本。
     """
     fake = _patch_acompletion(monkeypatch, contents=[_SCHEMA_BAD, plan_conclude_json()])
     backend = LiteLLMBackend(api_key="sk-test")
@@ -393,30 +399,41 @@ async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypat
     second_user = fake.calls[1]["messages"][1]["content"]
     assert "上一轮输出校验反馈" in second_user
     assert "重新输出" in second_user
+    # P2-15：回喂含第 1 次非法输出原文（next_action 超词表的 _SCHEMA_BAD 全文）
+    assert '"next_action": "SOMETHING_ELSE"' in second_user
+    assert "validation error" in second_user.lower()  # 校验错误文本也一并回喂
     # 第 1 次 user 无反馈分节（没有可回喂的上一轮错误）
     first_user = fake.calls[0]["messages"][1]["content"]
     assert "上一轮输出校验反馈" not in first_user
 
 
 async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeypatch):
-    """第 1 次 mock 网络失败（acompletion 抛异常）→ 修正重试 → 第 2 次成功恢复。"""
+    """第 1 次 mock 网络失败（transport 类）→ 退避后原样重试 → 第 2 次成功恢复。
+
+    P2-15：transport 失败没有可"修正"的输出 —— 第 2 次请求**不追加 schema 修正
+    文案**（不再误导模型"你的输出不满足 Schema"，实为网络超时），user 与第 1 次
+    完全一致（纯重试）。
+    """
     import litellm
 
     call_count = {"n": 0}
 
     async def fake_acompletion(**kwargs):
         call_count["n"] += 1
+        fake_acompletion.calls.append(list(kwargs["messages"]))
         if call_count["n"] == 1:
             raise TimeoutError("mock network timeout")
         return types.SimpleNamespace(
             choices=[
                 types.SimpleNamespace(
-                    message=types.SimpleNamespace(content=plan_conclude_json())
+                    message=types.SimpleNamespace(content=plan_conclude_json()),
+                    finish_reason="stop",
                 )
             ],
             usage=types.SimpleNamespace(total_tokens=7),
         )
 
+    fake_acompletion.calls = []
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     backend = LiteLLMBackend(api_key="sk-test")
     set_llm_backend(backend)
@@ -431,6 +448,75 @@ async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeyp
     assert outcome.attempts == 2
     assert outcome.error is None
     assert outcome.tokens == 7  # 第 1 次后端异常不计 tokens
+
+    # P2-15：transport 重试不加 schema 修正文案 —— 两次请求的 user 内容一致（纯重试）
+    first_user = fake_acompletion.calls[0][1]["content"]
+    second_user = fake_acompletion.calls[1][1]["content"]
+    assert second_user == first_user
+    assert "上一轮输出校验反馈" not in second_user
+    assert "输出不满足 JSON Schema" not in second_user
+
+
+async def test_backend_complete_marks_truncated_on_finish_reason_length(monkeypatch):
+    """P2-15：finish_reason=="length" → ``LLMResponse.truncated=True``（供 shell 分类）。"""
+    fake = _patch_acompletion(monkeypatch, contents=['{"partial": "json'], finish_reason="length")
+    backend = LiteLLMBackend(api_key="sk-test")
+    resp = await backend.complete(
+        node="hypothesize", messages=_HYPOTHESIZE_MESSAGES, json_schema={}
+    )
+    assert resp.truncated is True
+    assert len(fake.calls) == 1
+    # 对照：finish_reason="stop"（默认）→ truncated=False
+    fake2 = _patch_acompletion(monkeypatch, contents=['{"ok": 1}'], finish_reason="stop")
+    resp2 = await backend.complete(
+        node="hypothesize", messages=_HYPOTHESIZE_MESSAGES, json_schema={}
+    )
+    assert resp2.truncated is False
+    assert len(fake2.calls) == 1
+
+
+async def test_call_structured_llm_truncated_invalid_output_not_retried(monkeypatch):
+    """P2-15：截断（finish_reason=length）且校验失败 → **不重试**（attempts=1 降级）。
+
+    只 mock 一次响应：若 shell 仍按"普通 schema 校验失败"重试 → 哨兵 pytest.fail
+    拦截第二次 acompletion（省一次大概率无效的全量调用）。
+    """
+    fake = _patch_acompletion(
+        monkeypatch,
+        contents=['{"next_action": "SOME_TRUNCATED'],  # 截断 + 非法 JSON
+        finish_reason="length",
+    )
+    backend = LiteLLMBackend(api_key="sk-test")
+    set_llm_backend(backend)
+    try:
+        outcome = await call_structured_llm(
+            OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES
+        )
+    finally:
+        set_llm_backend(None)
+    assert outcome.model is None
+    assert outcome.attempts == 1  # 截断按 transport 类：不重试
+    assert outcome.error and "截断" in outcome.error
+    assert len(fake.calls) == 1  # 恰好一次（没有白烧第 2 次）
+
+
+async def test_call_structured_llm_truncated_but_valid_content_succeeds(monkeypatch):
+    """P2-15：截断但内容恰好合法 → 照常成功（attempts=1，不浪费）。"""
+    fake = _patch_acompletion(
+        monkeypatch, contents=[plan_conclude_json()], finish_reason="length"
+    )
+    backend = LiteLLMBackend(api_key="sk-test")
+    set_llm_backend(backend)
+    try:
+        outcome = await call_structured_llm(
+            OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES
+        )
+    finally:
+        set_llm_backend(None)
+    assert outcome.model is not None and outcome.model.next_action == "conclude"
+    assert outcome.attempts == 1
+    assert outcome.error is None
+    assert len(fake.calls) == 1
 
 
 async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):

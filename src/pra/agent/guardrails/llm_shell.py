@@ -3,10 +3,18 @@
 职责（对齐 docs/04-graph-design.md §4 LLM 壳契约 / graph-mvp-contracts §4）：
 
 - ``call_structured_llm``：把 ``messages`` 交给后端 ``LLMBackend.complete``，对返回
-  JSON 做 **OutputModel pydantic 强校验**（``model_validate_json``）。第 1 次失败
-  （ValidationError 或任何后端异常 —— 异常一律按 backend 失败处理）→ 向 messages
-  追加修正提示（role=user，内容含错误信息与"请严格按 Schema 重新输出"）再试第 2 次；
-  仍失败返回 ``LLMCallOutcome(model=None, attempts=2, tokens=已累计,
+  JSON 做 **OutputModel pydantic 强校验**（``model_validate_json``）。失败按类分类
+  （P2-15 —— 避免"schema 修正"文案/重试被 transport 失败错用）：
+  - **schema 修正类**（后端成功返回但校验失败）→ 向 messages 追加修正提示
+    （role=user；**内容含第 1 次非法输出原文 + 校验错误**，让第 2 次请求能"看到"
+    自己上一版输出并修正，而非只给错误文本）再试第 2 次；
+  - **transport 类**（后端 ``complete`` 抛异常：超时 / 网络 / HTTP / 连接 / 未知
+    node 等）→ 没有可"修正"的输出：**不追加 schema 修正文案**，指数退避
+    （``_transport_backoff``，轻量实现）后按原 messages 重试第 2 次；
+  - **截断（finish_reason=length，``LLMResponse.truncated``）**→ 内容可能不完整，
+    按 transport 类处理：校验失败时**不重试**（同 max_tokens 下大概率再截断，
+    attempts=1 直接降级 —— 不白烧一次调用）；截断但内容恰好合法则照常成功。
+  仍失败返回 ``LLMCallOutcome(model=None, attempts=实际尝试次数, tokens=已累计,
   error=最后一次错误文本)``。**永不抛异常** —— 校验失败如何降级由节点按 §2.1 决定
   （节点返回自己的降级结果并置 ``degraded=True``）。
 - 后端可注入（**MVP 注入位点**）：默认后端 = ``pra.agent.scripted_llm.
@@ -23,10 +31,16 @@
 
 注：修正提示追加在工作副本上（不污染调用方传入的 messages 列表 —— 节点每次
 ``_build_messages(state)`` 新造，两个语义等价）。
+
+token 口径（P2-16 注记）：``LLMResponse.tokens`` / ``LLMCallOutcome.tokens`` =
+后端 ``usage.total_tokens``（input+output 合计、含 provider 缓存命中 token）；
+**schema 校验失败的尝试也全额累计**；transport 失败无响应不计。节点按此 bump
+``budget.tokens`` —— 真实跑分的 token 维度是**混合口径**，非纯输出生成量。
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -44,7 +58,10 @@ class LLMResponse:
     """``LLMBackend.complete`` 的返回：LLM 输出的 JSON 文本 + 本次 token 数。"""
 
     content: str  # LLM 返回的 JSON 文本（须能被对应 OutputModel 校验通过）
-    tokens: int  # 本次调用 token 数（MVP 桩可给 0）
+    tokens: int  # 本次 token 数 = 后端 usage.total_tokens 口径（input+output 合计、
+                 # 含 provider 缓存命中 token —— P2-16 注记；MVP 桩可给 0）
+    truncated: bool = False  # finish_reason=="length"（输出被截断、内容可能不完整，
+                             # P2-15：llm_shell 按 transport 类处理，见模块 docstring）
 
 
 @runtime_checkable
@@ -74,8 +91,11 @@ class LLMCallOutcome:
     """一次 ``call_structured_llm`` 的结果（成功/失败统一携带，供节点记账与降级）。"""
 
     model: Optional[Any]  # 校验通过的 OutputModel 实例；失败为 None
-    attempts: int  # 本次实际尝试次数（1 或 2；入口短路 attempts=0 由节点自理）
-    tokens: int  # 已累计 token 数（成功响应 token 之和；失败可能为 0）
+    attempts: int  # 本次实际尝试次数（1 或 2；截断/不可恢复失败可为 1；
+                   # 入口短路 attempts=0 由节点自理）
+    tokens: int  # 已累计 token 数（口径 = usage.total_tokens：input+output 合计、
+                 # 含缓存命中；**schema 校验失败的尝试也全额计入**、transport 失败
+                 # 无响应不计 —— P2-16 注记；成功响应之和，全失败可能为 0）
     error: Optional[str]  # 最后一次失败原因（供节点写 failure.reason）；成功为 None
 
 
@@ -110,12 +130,37 @@ def get_llm_backend() -> LLMBackend:
     return _default_backend
 
 
-def _correction_message(error: Exception) -> dict:
-    """修正提示（§4.1 定稿文案）：追加到 messages 末尾驱动后端第 2 次重试。"""
+# transport 类失败重试的指数退避底数（秒）—— P2-15 轻量实现：真实生产可调大/换抖动
+# 退避表；保持小底数避免确定性/测试路径被拖慢。
+_TRANSPORT_BACKOFF_BASE_S = 0.05
+
+
+async def _transport_backoff(failure_index: int = 1) -> None:
+    """transport 类失败后、重试前的指数退避等待（P2-15 轻量实现）。
+
+    第 ``failure_index`` 次失败后等待 ``base * 2**(failure_index-1)``（第 1 次失败后
+    base、第 2 次 base*2 …）。本壳每节点最多 2 次尝试（attempts∈{1,2}），实际只触发
+    第 1 档；按指数结构留档，扩档无需改调用点。TODO（实现位）：真实生产可换抖动 +
+    更长退避表，并把 schedule 做成可注入以便测试快进。
+    """
+    await asyncio.sleep(_TRANSPORT_BACKOFF_BASE_S * (2 ** (failure_index - 1)))
+
+
+def _correction_message(content: str, error: Exception) -> dict:
+    """schema 修正提示（P2-15）：**回喂第 1 次非法输出原文** + 校验错误。
+
+    只用于"后端成功返回但校验失败"（schema 修正类）；transport 失败没有可修正的
+    输出、不追加本文案（分类见 ``call_structured_llm``）。含原文后，真实模型第 2 次
+    请求能"看到"自己上一版输出并针对性修正 —— 旧版只带 ValidationError 文本时，
+    它常常无法修正"它没看到"的输出。
+    """
     return {
         "role": "user",
-        "content": "输出不满足 JSON Schema，错误如下，请严格按 Schema 重新输出：\n"
-        + str(error),
+        "content": (
+            "输出不满足 JSON Schema，请严格按 Schema 重新输出。以下是你上一次的"
+            f"输出（供对照修正，不要复述它）：\n```\n{content}\n```\n"
+            f"校验错误如下：\n{error}"
+        ),
     }
 
 
@@ -125,17 +170,28 @@ async def call_structured_llm(
     node: str,
     messages: list[dict],
 ) -> LLMCallOutcome:
-    """强校验 LLM 调用壳：重试 1 次的输出校验 + 降级返回（永不抛异常）。
+    """强校验 LLM 调用壳：按失败类分类重试 + 降级返回（永不抛异常）。
 
-    - 成功：第 1 次校验通过 → ``attempts=1``；第 1 次失败 → 追加修正提示重试
-      第 2 次 → ``attempts=2``（model 为校验通过的 OutputModel 实例）。
-    - 失败（第 1 次与第 2 次均失败）：``model=None``，``error`` = 最后一次错误文本
+    - 成功：第 1 次校验通过 → ``attempts=1``；第 1 次失败 → 按类处理后重试第 2 次
+      → ``attempts=2``（model 为校验通过的 OutputModel 实例）。
+    - **schema 修正类**（后端返回成功但校验失败）：追加含**第 1 次非法输出原文 +
+      校验错误**的修正提示后重试（P2-15：第 2 次请求能看到自己上一版输出）；
+    - **transport 类**（后端 ``complete`` 抛异常：超时/网络/HTTP/未知 node 等）：
+      无输出可修正 → 不追加 schema 修正文案，指数退避后按原 messages 重试 1 次；
+    - **截断**（``LLMResponse.truncated``，finish_reason=length）：内容可能不完整，
+      校验失败时按 transport 类处理 —— **不重试**，attempts=1 直接降级（省一次
+      大概率无效的调用）；截断但内容恰好合法则照常成功。
+    - 失败（第 1 次与第 2 次均失败）：``model=None``，``error`` = 最后一次失败文本
       （供节点写 ``make_failure(reason=...)``），``tokens`` = 已累计 —— 不抛异常。
     - 不做预算检查（预算/降级短路在节点入口，§2.1 / §4.2）。
 
     ``OutputModel`` 为 pydantic 模型类（schemas.py 的 HypothesizeOutput / PlanOutput /
     ReevaluateOutput / DecisionProposal）；其 ``model_json_schema()`` 生成传给后端的
     ``json_schema``，``model_validate_json(content)`` 做强校验。
+
+    确定性约束（P2-15 守护）：本壳的失败分类/回喂/退避只出现在**失败重试路径**；
+    确定性 scripted 桩（EvalScriptedLLMBackend / ScriptedLLMBackend）恒返回可校验
+    通过内容、不抛异常 → 默认（无 llm 注入）路径决策序列零变化。
     """
     # OutputModel 的 JSON Schema（只算一次；非 pydantic 模型按不可恢复失败返回）
     try:
@@ -158,10 +214,12 @@ async def call_structured_llm(
             resp = await backend.complete(
                 node=node, messages=work_messages, json_schema=json_schema
             )
-        except Exception as exc:  # backend 层失败（LLMBackendError/网络/任何异常）
+        except Exception as exc:  # transport/后端失败（LLMBackendError/网络/任何异常）
             last_error = str(exc)
             if attempt == 1:
-                work_messages.append(_correction_message(exc))  # 契约：异常也走修正重试
+                # transport 类：没有可"修正"的输出 —— 不追加 schema 修正文案
+                # （旧版对超时/HTTP 也按"schema 修正"重试是误导）；退避后原样重试。
+                await _transport_backoff(failure_index=attempt)
             continue
         total_tokens += resp.tokens
         try:
@@ -169,7 +227,17 @@ async def call_structured_llm(
         except Exception as exc:  # 校验失败（pydantic.ValidationError 等）
             last_error = str(exc)
             if attempt == 1:
-                work_messages.append(_correction_message(exc))
+                if resp.truncated:
+                    # 截断（finish_reason=length）：输出未完成，按 transport 类处理。
+                    # 同 max_tokens 下重试大概率再截断 → 不烧第 2 次调用，直接降级。
+                    return LLMCallOutcome(
+                        model=None,
+                        attempts=1,
+                        tokens=total_tokens,
+                        error=f"模型输出被截断（finish_reason=length）且校验失败: {exc}",
+                    )
+                # schema 修正类：回喂第 1 次非法输出原文 + 校验错误（P2-15）
+                work_messages.append(_correction_message(resp.content, exc))
             continue
         # 成功：第 1 次校验通过 attempts=1；重试后通过 attempts=2
         return LLMCallOutcome(model=model, attempts=attempt, tokens=total_tokens, error=None)

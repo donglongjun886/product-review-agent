@@ -10,7 +10,10 @@
 1. 逐案一致性：scripted_decision vs real_decision（一致 / 差异 + 差异明细）；
 2. 决策业务指标（``DecisionEvaluator`` 口径：Accuracy/Precision/Recall/FPR/FNR
    + HRR/自动化率；truth 含 HUMAN_REVIEW 的案自动跳过并注明）；
-3. ``--out PATH`` 时把 real EvalRecord 全量 + 差异摘要落 JSON（目录需已存在）。
+3. ``--out PATH`` 时把 real EvalRecord 全量 + 差异摘要落 JSON（目录需已存在）；
+4. **overrides 汇总（P1-6c）**：real 每案归因码计数（R5 降级 N 案 / R3 预算截胡
+   N 案 / R3+R5 混合案）打印进 Console 与 JSON —— "整卷全 HUMAN 是链路降级"
+   一眼可见（不含 CLI keyless 决策，见 Q5）。
 
 用法示例::
 
@@ -48,10 +51,15 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pra.agent.guardrails.gate import (  # overrides 归因码（P1-6c 汇总用，只读）
+    R3_BUDGET_EXHAUSTED,
+    R5_DEGRADED_OR_FAILED_STEP,
+)
 from pra.evaluation.dataset.loader import load_dataset, scene_stats, smoke_subset
 from pra.evaluation.dataset.schema import EvalCase
 from pra.evaluation.harness.agent_scheme import (
@@ -235,6 +243,7 @@ def _compare_rows(
             "real_risk_level": r.risk_level,
             "real_risk_type": list(r.risk_type),
             "real_decision_confidence": r.decision_confidence,
+            "real_overrides": list((r.detail or {}).get("overrides") or []),  # P1-6c
         }
         rows.append(row)
         counter = by_scene.setdefault(case.scene, {"total": 0, "agree": 0})
@@ -302,6 +311,12 @@ async def run_comparison(
             }
             for r in scripted_records
         ],
+        # P1-6c：overrides 汇总 —— R5 降级 N 案 / R3 截胡 N 案 / 混合案，整卷
+        # "全 HUMAN = 链路降级"在 JSON 里也一眼可见（不只在 Console 报告）。
+        "overrides_summary": {
+            "real": _overrides_summary(real_records),
+            "scripted": _overrides_summary(scripted_records),
+        },
         "note": REAL_NOTE,
     }
     extra = {
@@ -314,6 +329,8 @@ async def run_comparison(
         "scene_stats": scene_stats(cases),
         "scripted_cost": _cost_summary(scripted_records),
         "real_cost": _cost_summary(real_records),
+        "real_overrides": _overrides_summary(real_records),  # P1-6c 渲染用
+        "scripted_overrides": _overrides_summary(scripted_records),
     }
     return payload, extra
 
@@ -339,6 +356,37 @@ def _cost_summary(records: list[EvalRecord]) -> dict:
     }
 
 
+def _overrides_summary(records: list[EvalRecord]) -> dict:
+    """overrides 汇总（P1-6c / Q5）：每案归因码计数 + R3/R5 混合案数 —— 链路降级一眼可见。
+
+    每案 overrides 来自 ``EvalRecord.detail["overrides"]``（gate overlay 全量写入的
+    归因码：R5_DEGRADED_OR_FAILED_STEP = LLM 步降级兜底转人工、R3_BUDGET_EXHAUSTED =
+    预算截胡、R2_*/R4_*/R1_* 为 Gate 改判）。无 case → 全 0。确定性函数（只读 detail）。
+    """
+    counts: Counter = Counter()
+    cases_with_any = 0
+    r3_r5_mixed = 0
+    for r in records:
+        ovs = list((r.detail or {}).get("overrides") or [])
+        if not ovs:
+            continue
+        cases_with_any += 1
+        counts.update(ovs)
+        if R3_BUDGET_EXHAUSTED in ovs and R5_DEGRADED_OR_FAILED_STEP in ovs:
+            r3_r5_mixed += 1
+    return {
+        "cases_with_any": cases_with_any,
+        R3_BUDGET_EXHAUSTED: counts.get(R3_BUDGET_EXHAUSTED, 0),
+        R5_DEGRADED_OR_FAILED_STEP: counts.get(R5_DEGRADED_OR_FAILED_STEP, 0),
+        "r3_r5_mixed": r3_r5_mixed,
+        "other_codes": {
+            k: v
+            for k, v in sorted(counts.items())
+            if k not in (R3_BUDGET_EXHAUSTED, R5_DEGRADED_OR_FAILED_STEP)
+        },
+    }
+
+
 def _metrics_line(label: str, m: DecisionMetrics, cost: dict) -> str:
     return "  ".join(
         [
@@ -360,6 +408,31 @@ def _risk_cell(row: dict) -> str:
     types = ",".join(row["real_risk_type"]) or "-"
     conf = "-" if row["real_decision_confidence"] is None else f"{row['real_decision_confidence']:.2f}"
     return f"{row['real_risk_level'] or '-'}/{types}/conf={conf}"
+
+
+def _overrides_cell(row: dict) -> str:
+    """逐案 real overrides 缩写（R3=R3_BUDGET_EXHAUSTED / R5=R5_DEGRADED_OR_FAILED_STEP）。"""
+    ovs = row.get("real_overrides") or []
+    if not ovs:
+        return "-"
+    short = {
+        R3_BUDGET_EXHAUSTED: "R3",
+        R5_DEGRADED_OR_FAILED_STEP: "R5",
+    }
+    return ",".join(short.get(c, c) for c in ovs)
+
+
+def _overrides_line(ov: dict, total: int) -> str:
+    """一行 overrides 汇总（P1-6c）：带码案数 / R5 降级 / R3 截胡 / 混合 / 其它码。"""
+    parts = [
+        f"带 overrides {ov['cases_with_any']}/{total} 案",
+        f"R5 降级 {ov[R5_DEGRADED_OR_FAILED_STEP]} 案",
+        f"R3 预算截胡 {ov[R3_BUDGET_EXHAUSTED]} 案",
+        f"R3+R5 混合 {ov['r3_r5_mixed']} 案",
+    ]
+    if ov.get("other_codes"):
+        parts.append("其它码 " + ",".join(f"{k}={v}" for k, v in ov["other_codes"].items()))
+    return " ｜ ".join(parts)
 
 
 def render_report(payload: dict, extra: dict, *, out_path: str | None = None) -> str:
@@ -388,6 +461,11 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
     add("    真值(判错，入分母不入分子)；Precision/Recall/FPR/FNR 只在自动判出(pred∈{PASS,REJECT})子集计算")
     add("  · REJECT 为正类: Recall=TP/(TP+FN) 违规召回 / FPR=FP/(FP+TN) 误杀红线 / FNR=FN/(TP+FN) 漏放")
     add("  · HRR=转人工率 / auto=自动化率；EvalRecord 不含墙钟 latency（real 墙钟仅进程内进度打印）")
+    add(
+        "  · cost.tokens 口径（P2-16）= usage.total_tokens：input+output 合计、含 provider"
+        " 缓存命中 token；schema 校验失败的尝试也全额累计 —— R3 按 tokens 维度归因时"
+        "按此口径解读（EvalRecord.detail.budget_hit_dim 记录哪一维先撞限）"
+    )
     if extra["truth_human"]:
         add(
             f"  · 真值含 HUMAN_REVIEW 的案 {extra['truth_human']} 条（v2 SHOULD_ABSTAIN）："
@@ -410,22 +488,24 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
     if diff_n == 0:
         add("差异 case 列表: （无 —— 两臂逐案裁决完全一致）")
     else:
-        add(f"差异 case 列表（共 {diff_n} 条 · 各行含 real risk 摘要）:")
+        add(f"差异 case 列表（共 {diff_n} 条 · 各行含 real risk 摘要 + overrides）:")
         for row in payload["disagree"]:
+            ovr_s = _overrides_cell(row)
+            ovr_note = f" | real ovr: {ovr_s}" if ovr_s != "-" else ""
             add(
                 f"  · {row['eval_case_id']} [{row['scene']}] truth={row['truth']} | "
                 f"scripted {row['scripted_decision']} → real {row['real_decision']} "
-                f"（{_risk_cell(row)}）"
+                f"（{_risk_cell(row)}）{ovr_note}"
             )
 
     add("-" * 100)
-    add("逐案对比明细  case         scene         truth      scripted   real         一致  real risk/type/conf")
+    add("逐案对比明细  case         scene         truth      scripted   real         一致  real risk/type/conf      real ovr")
     for row in extra["rows"]:
         mark = "是" if row["agree"] else "否"
         add(
             f"  {row['eval_case_id']:<11} [{row['scene']:<11}] truth={row['truth']:<6} "
             f"{row['scripted_decision']:<9} {row['real_decision']:<12} {mark:<4} "
-            f"{_risk_cell(row)}"
+            f"{_risk_cell(row):<34} {_overrides_cell(row)}"
         )
 
     add("-" * 100)
@@ -436,6 +516,23 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
         add(
             f"（上表两行均只覆盖二值真值案 {extra['scripted_metrics'].total} 条；"
             f"HUMAN_REVIEW 真值 {extra['truth_human']} 条被跳过）"
+        )
+
+    add("-" * 100)
+    add("overrides 汇总（审计：R5=LLM 步降级兜底转 HUMAN、R3=预算截胡 —— P1-6c）:")
+    total_cases = payload["count"]
+    add(f"  · real:     {_overrides_line(extra['real_overrides'], total_cases)}")
+    add(f"  · scripted: {_overrides_line(extra['scripted_overrides'], total_cases)}")
+    real_ov = extra["real_overrides"]
+    if real_ov[R5_DEGRADED_OR_FAILED_STEP]:
+        add(
+            f"    ⚠ real 有 {real_ov[R5_DEGRADED_OR_FAILED_STEP]} 案触发 R5 降级 —— 这些案"
+            "的 real 裁决来自降级兜底（HUMAN），**不是模型行为**；解读全卷差异/指标须扣除"
+        )
+    if total_cases and real_ov[R5_DEGRADED_OR_FAILED_STEP] == total_cases:
+        add(
+            "    ⚠⚠ real 全部案均 R5 降级：本卷 real 结果 = 100% 链路降级（典型原因：无"
+            "key/网关/base-url 配置问题或逐节点连续失败）—— 请勿把本卷 HUMAN 当模型结论"
         )
 
     add("-" * 100)
