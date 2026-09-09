@@ -123,3 +123,32 @@ tests/test_rag_qdrant.py        ← 新增：qdrant 索引单测 + BGE embedder 
 - Qdrant 进程内模式 = 真 Qdrant API 但非分布式部署；远端 server 未实测（代码路径
   同一，仅连接串差异）。
 - 跨进程/平台 embedding 浮点尾差不纳入逐字节契约；确定性回归恒以默认 mock 路径为准。
+
+## 6. 实测记录（2026-09-09 · commit 2533825 后补 · run_rag_phase2_demo.py）
+
+> 实证口径：BGE(bge-small-zh-v1.5) + Qdrant 进程内(:memory:) + hybrid 默认权重 0.5/0.5；
+> 同输入两次运行逐行一致（可重放）；完整输出见 `scripts/run_rag_phase2_demo.py` 运行 stdout。
+
+**语义 vs 词面（Part B，同义改写 query 与目标检索文本零/近零共享关键词，bm25.tokenize 程序化验证）**：
+
+| 目标 | bm25 | vector | hybrid |
+|---|---|---|---|
+| POLICY_1.4_v1_c1（鞋靴仿名牌，token 交集 0） | 漏 | 命中@1 | 命中@1 |
+| POLICY_4.2_v2_c1（改标题重上架规避，交集 0） | 漏 | 命中@2 | 命中@2 |
+| RAG_CASE_0001（无标高仿女跑鞋+多次下架，交集 2 低信号 bigram） | 漏 | 命中@1 | 命中@1 |
+| RAG_CASE_0011（冒用双 G logo 先例，交集 1） | 漏 | 命中@1 | 漏（如实呈现） |
+
+→ 「BM25 词面漏检、语义检索命中」在 Policy 2/2、Case 2/2 成立——语义路（BGE）补上了词面路（BM25/mock hash）够不到的同义改写，即 Phase 2 相对 MVP 的真实增量。
+
+**三路 Recall@3（Part C，Policy/Case 各 8 条人工标注 probe = 5 keyword + 3 同义改写）**：
+
+| KB | bm25 | vector | hybrid |
+|---|---|---|---|
+| Policy (8) | 6/8 (75%) | 8/8 (100%) | 8/8 (100%) |
+| Case (8) | 6/8 (75%) | 8/8 (100%) | 8/8 (100%) |
+
+→ 本 probe 下 hybrid 与 vector 并列最优且 ≥ bm25；hybrid 增益全部来自 vector 语义路救回 bm25
+漏掉的同义改写项，**无 hybrid 单独优于 vector 的案例**（N=8 小样本定向观测，不预设——R-6/P2-7 口径）。
+
+**边界**：单模型单语料定向演示（24/67 条），非大规模评测；评测回归基线恒以默认 mock 路径为准
+（BGE 浮点跨进程尾差不入逐字节契约）；Qdrant 远端 server 未实测。
