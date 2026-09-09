@@ -1134,12 +1134,20 @@ class AgentScheme(SchemeRunner):
       恢复 ``set_llm_backend(None)``，与 None 分支同路径。real 非确定性 / 不可重放 /
       需 API key —— 结论边界见模块 docstring。
     - ``budget_limits``：**评测侧预算覆盖**（None = 默认 10/15/40000/30000，行为不
-      变）—— 键为 ``BudgetLimits`` 字段名（如 ``{"max_latency_ms": 600000}``），
-      在每次 run 的 ``build_initial_state`` 之后对 ``budget.limits`` 做 model_copy
-      覆盖。**用途：real 模式放宽墙钟护栏** —— 真实 LLM 每案 ~9 次串行调用天然
-      >30s（30s 是生产护栏，T-7 拍板），不放宽则每案都被 LATENCY 超限截胡转人工，
-      评测测不到 LLM 决策质量（scripted 毫秒级跑完不触发，无需放宽）。只动评测
-      装配层，不改生产图/护栏代码。
+      变）—— 键为 ``BudgetLimits`` 字段名（``max_llm_calls`` / ``max_tool_calls`` /
+      ``max_tokens`` / ``max_latency_ms``，与生产模型字段名逐一对应、无别名映射，
+      任意合法字段组合均可），在每次 run 的 ``build_initial_state`` 之后对
+      ``budget.limits`` 做 model_copy 覆盖（整份 limits 逐层拷贝，不改生产对象）。
+      注：非法键会被 model_copy 静默挂成多余属性而不生效（拼写错字不报错），
+      装配侧用前自查。**用途 1：real 模式放宽墙钟护栏** —— 真实 LLM 每案 ~9 次
+      串行调用天然 >30s（30s 是生产护栏，T-7 拍板），不放宽则每案都被 LATENCY
+      超限截胡转人工，评测测不到 LLM 决策质量（scripted 毫秒级跑完不触发，无需
+      放宽）。**用途 2（B-2 对照实验）：调 LLM 调用预算档** —— 如
+      ``{"max_llm_calls": 12}`` / 15，回答"真实案件打满 10 次被截胡转人工是预算
+      太紧还是 Agent 收敛差"：档位抬高后仍打满上限 ⇒ 收敛问题；涨到收敛即止 ⇒
+      预算紧。**生产护栏恒为 10/15/40000/30000**：本覆盖只作用于评测装配层注入
+      的 initial_state，不改生产图/护栏代码（scripted 对照臂 = AgentScheme() 无
+      覆盖，恒默认，确定性基线不变）。
     """
 
     name = "agent"
@@ -1149,7 +1157,7 @@ class AgentScheme(SchemeRunner):
         allowed_tools: set[str] | None = None,
         *,
         llm: object | None = None,  # Phase 3 real 模式：注入 LLMBackend（None=确定性桩）
-        budget_limits: dict | None = None,  # 评测侧预算覆盖（None=默认；real 放宽 latency 用）
+        budget_limits: dict | None = None,  # 评测侧预算覆盖（None=默认 10/15/40000/30000；real 放宽 latency / 调 llm 档用）
     ) -> None:
         # 审查员后端改为**每次 run 按 ctx 装配**（阈值/裁剪随 EvalContext 变），
         # 不在构造期缓存 —— sweep/ablation 同进程换 ctx 重跑才能生效。
@@ -1160,7 +1168,8 @@ class AgentScheme(SchemeRunner):
         # 每次 run 仍统一经 build_agent_graph(llm=...) 注入并在 finally 恢复默认桩。
         self._llm: object | None = llm
         # 评测侧预算覆盖（None = 不覆盖，默认 10/15/40000/30000；real 模式放宽
-        # max_latency_ms 用 —— 只改每次 run 初始 state 的 budget.limits，见 run()）。
+        # max_latency_ms / 调 max_llm_calls 档用 —— 只改每次 run 初始 state 的
+        # budget.limits，见 run()）。
         self._budget_limits: dict | None = dict(budget_limits or {}) or None
 
     @staticmethod
@@ -1213,7 +1222,8 @@ class AgentScheme(SchemeRunner):
         try:
             initial_state = build_initial_state(case.input)
             if self._budget_limits is not None:
-                # 评测侧预算覆盖（real 放宽 max_latency_ms 用；None 分支原样返回）
+                # 评测侧预算覆盖（real 放宽 max_latency_ms / 调 max_llm_calls 档用；
+                # 键 = BudgetLimits 字段名；None 分支原样返回）
                 initial_state = self._apply_budget_limits(initial_state, self._budget_limits)
             final_state = await graph.ainvoke(
                 initial_state,

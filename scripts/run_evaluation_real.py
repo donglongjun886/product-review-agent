@@ -20,6 +20,7 @@
     uv run python scripts/run_evaluation_real.py --data eval_data/v2 --limit 5 --out /tmp/real_v2.json
     uv run python scripts/run_evaluation_real.py --world rag --limit 10  # RAG 世界（真实 KB 检索）
     uv run python scripts/run_evaluation_real.py --model deepseek/deepseek-chat --api-key sk-xxx
+    uv run python scripts/run_evaluation_real.py --llm-budget 12 --limit 10  # B-2: real 臂 LLM 预算档 12（生产护栏仍 10）
 
 成本与结论边界（必读）
 ====================
@@ -262,9 +263,9 @@ async def run_comparison(
     - ``extra``：报告渲染用中间物（rows / by_scene / 两臂 DecisionMetrics /
       scripted_records / truth_human 计数等，不进 JSON）。
 
-    ``budget_limits``：只给 **real 臂**的评测侧预算覆盖（如放宽 ``max_latency_ms``，
-    见 AgentScheme.budget_limits 说明）；scripted 臂恒为默认预算（确定性对照，
-    毫秒级跑完不触发墙钟护栏）。
+    ``budget_limits``：只给 **real 臂**的评测侧预算覆盖（如放宽 ``max_latency_ms``
+    或调 ``max_llm_calls`` 档，见 AgentScheme.budget_limits 说明）；scripted 臂恒为
+    默认预算（确定性对照，毫秒级跑完不触发墙钟护栏）。
     """
     exp = expected_index(cases)
     scripted = AgentScheme()
@@ -509,7 +510,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "real 评测的预算墙钟护栏上限（毫秒；默认 600000=10min）—— 生产护栏 30s "
             "（T-7）对真实 LLM 太紧（每案 ~9 次串行调用天然 >30s），不放宽则每案都被 "
             "LATENCY 超限截胡转人工、测不到决策质量；scripted 毫秒级不受影响。llm/"
-            "tool/token 护栏保持 10/15/40000 不变。报告注明本口径差异"
+            "tool/token 护栏默认 10/15/40000（--llm-budget 可覆盖 llm 档）。报告注明"
+            "本口径差异"
+        ),
+    )
+    parser.add_argument(
+        "--llm-budget",
+        type=int,
+        default=None,
+        help=(
+            "real 臂的 LLM 调用预算上限（max_llm_calls 覆盖；默认 None = 生产默认 10"
+            " 不变）—— B-2 对照实验：10/12/15 档跑同一批数据，回答真实案件打满 10 被"
+            "截胡转人工是预算太紧还是 Agent 收敛差（档位抬高仍打满 ⇒ 收敛问题；涨到"
+            "收敛即止 ⇒ 预算紧）。只作用于 real 臂，scripted 对照臂恒默认，生产护栏"
+            "不受影响"
         ),
     )
     parser.add_argument(
@@ -518,6 +532,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="结果 JSON 写出路径（目录需已存在；默认不写文件只打印）",
     )
     return parser.parse_args(argv)
+
+
+def _build_budget_limits(*, max_latency_ms: int, llm_budget: int | None) -> dict:
+    """real 臂评测侧预算覆盖装配（键 = ``BudgetLimits`` 字段名；scripted 臂恒默认）。
+
+    默认（``llm_budget=None``）→ 只含 ``max_latency_ms`` 放宽（与改动前逐字节一致）；
+    ``--llm-budget N`` → 追加 ``max_llm_calls=N``（B-2 对照：10/12/15 档看截胡归因，
+    生产护栏仍固定 10，本覆盖只作用于 real 臂装配）。
+    """
+    limits = {"max_latency_ms": max_latency_ms}
+    if llm_budget is not None:
+        limits["max_llm_calls"] = llm_budget
+    return limits
 
 
 async def _main(argv: list[str] | None = None) -> int:
@@ -553,9 +580,12 @@ async def _main(argv: list[str] | None = None) -> int:
     real_backend = _make_real_backend(
         model=args.model, api_key=api_key, base_url=base_url, world=args.world
     )
-    # real 评测只测 LLM 决策质量：放宽墙钟护栏（默认 10min），避免 LATENCY 截胡。
+    # real 评测只测 LLM 决策质量：放宽墙钟护栏（默认 10min），避免 LATENCY 截胡；
+    # --llm-budget N 再覆盖 LLM 调用预算档（B-2 对照，默认 None = 生产默认 10 不变）。
     # scripted 臂保持默认预算（毫秒级跑完，不受影响）—— AgentScheme() 无覆盖参数。
-    budget_limits = {"max_latency_ms": args.max_latency_ms}
+    budget_limits = _build_budget_limits(
+        max_latency_ms=args.max_latency_ms, llm_budget=args.llm_budget
+    )
 
     # 头部（跑分前先亮明边界，避免误以为可重放 / 无费用）
     stats = scene_stats(cases)
@@ -576,6 +606,11 @@ async def _main(argv: list[str] | None = None) -> int:
         f"[NOTE] real 臂预算墙钟护栏放宽至 {args.max_latency_ms}ms（默认 600000；"
         "生产护栏 30s 对真实 LLM 过紧会截胡转人工）；llm/tool/token 护栏保持默认"
     )
+    if args.llm_budget is not None:
+        print(
+            f"[NOTE] B-2 对照：real 臂 LLM 调用预算上限覆盖为 {args.llm_budget}"
+            "（默认 None = 生产默认 10）；scripted 臂与生产护栏不受影响"
+        )
 
     payload, extra = await run_comparison(
         cases=cases,
