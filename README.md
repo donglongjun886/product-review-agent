@@ -69,6 +69,9 @@ src/pra/
 │                 （Tool 层零改动）。默认索引 = numpy 内存 + MockHash embedding（确定性、
 │                 无外部依赖）；语义路 = BgeEmbedder（bge-small-zh-v1.5）+ Qdrant 索引，
 │                 经 factory `backend="qdrant"` 显式开启（docs/06）
+├── observability/ 可观测性适配层（docs/09）：tracing（Tracer / Observation 薄接口 +
+│                 NullTracer + 确定性采样）/ langfuse_backend（唯一 import SDK 的模块，
+│                 惰性加载）/ __init__（对外导出）；无凭据 → NullTracer，零网络零开销
 └── common/       通用工具：雪花 ID / JSON 工具 / 错误码
 
 docs/         设计文档（见「文档索引」）
@@ -78,7 +81,9 @@ scripts/      demo_walkthrough.py（端到端走查）/ demo_api.py（执行器�
               run_regression.py（回归比对）/ run_rag_demo.py（RAG 检索演示）/
               run_rag_phase2_demo.py（RAG 语义路演示：BGE + Qdrant）/
               run_rag_eval.py（RAG 检索质量评测）/ build_rag_corpus.py（语料构建）/
-              run_evaluation_real.py（真实 LLM 评测对照，需 API key）/ eval_dataset_gen.py
+              run_evaluation_real.py（真实 LLM 评测对照，需 API key）/ eval_dataset_gen.py /
+              langfuse_smoke.py（Langfuse 端到端自检，无凭据 exit 0）/
+              demo_langfuse_trace.py（真实案件跑一遍 + 打印 trace UI 链接）
 tests/        pytest 用例（确定性 mock，无网络 / API key：screening / evaluation / rag / agent / api / infra）
 ```
 
@@ -150,6 +155,44 @@ uv run python scripts/run_rag_phase2_demo.py --top-k 5 --mode hybrid
 **结论边界**见 [docs/06](docs/06-rag-phase2-qdrant-bge.md) §5：单模型（bge-small-zh-v1.5）
 × 小语料（24/67 条）的定向演示与 probe 观测，非大规模评测；Qdrant 进程内模式非分布式部署；
 确定性回归基线恒以默认 mock 路径为准。
+
+### Langfuse 可观测性（可选）
+
+把 Agent 执行的 **span 树**（root → node → LLM generation / tool / gate）发到本地 Langfuse：
+`trace_id` 与 MySQL `review_run.run_id` **同值**（32-hex），UI 侧 trace 可直接反查审计链；
+prompt / response 全文只进 Langfuse，不进 `review_trace`（审计表存摘要）。
+定位与口径边界见 [docs/09-langfuse-observability.md](docs/09-langfuse-observability.md)。
+
+```bash
+# 1) 起本地 Langfuse v4（6 容器：web/worker + postgres/redis/clickhouse/minio）
+cd deploy/langfuse && docker compose up -d
+curl -s http://localhost:3000/api/public/health     # → {"status":"OK","version":"4.32.0"}
+# UI：http://localhost:3000（LANGFUSE_INIT_* 自动建好 project pra-local，无需手工建 key）
+
+# 2) 根 .env 配凭据（本地 Docker 初始化值；.env 已 gitignore，勿提交真实 key）
+LANGFUSE_PUBLIC_KEY=pk-lf-pra-local
+LANGFUSE_SECRET_KEY=sk-lf-pra-local
+LANGFUSE_HOST=http://localhost:3000
+# 注意：默认 PRA_LANGFUSE_ENABLED=0（不发送 trace），看 trace 时用命令行覆盖为 1
+
+# 3) 装 SDK（不装 → 适配层恒走 NullTracer，全链路 no-op）
+uv sync --extra observability
+
+# 4) 真实案件（P_88231）跑一遍 → 打印 run_id / trace_id / 决策 + UI 链接，点链接看 span 树
+PRA_LANGFUSE_ENABLED=1 uv run python scripts/demo_langfuse_trace.py
+
+# 5) 端到端自检：发一条合成 trace 并用 v2 接口回读断言（无凭据也 exit 0）
+uv run python scripts/langfuse_smoke.py
+
+# 6) 评测侧关联：每个 case 一条 root trace，metadata 带 eval_case_id（Evaluation Case → Trace）
+PRA_LANGFUSE_SESSION=eval-demo-1 \
+  uv run python scripts/run_evaluation.py --smoke --smoke-limit 3 --experiment baseline --langfuse
+```
+
+口径（与 docs/09 §14 一致）：默认 **scripted 桩**下 trace 结构完整、prompt / response / model
+可回读，但 **token / cost 为空、latency ≈ 0**——桩无真实 provider 调用且瞬时执行，这是
+**真实情况**，不填假值；真实 token / latency 只在 `scripts/run_evaluation_real.py`（需 API key）
+出现。
 
 ### Real LLM 评测（需 API key，真实调用有费用）
 
@@ -293,6 +336,7 @@ persist 落库等。
 - [docs/04-graph-design.md](docs/04-graph-design.md) —— LangGraph StateGraph 正式设计（graph.py 实现前的最后设计）
 - [docs/05-visual-similarity-gate-proposal.md](docs/05-visual-similarity-gate-proposal.md) —— 视觉相似度 Gate 兜底设计提案（②b，未实施）
 - [docs/06-rag-phase2-qdrant-bge.md](docs/06-rag-phase2-qdrant-bge.md) —— RAG Phase 2：Qdrant 向量库 + 本地 BGE embedding（选型 / 装配 / 验收 / 结论边界 / 实测记录）
+- [docs/09-langfuse-observability.md](docs/09-langfuse-observability.md) —— Langfuse 可观测性接入（职责边界 / 埋点位置 / v4 API 实测 / 端到端实测记录 / 结论边界）
 
 ## Roadmap（方向与动机）
 
@@ -304,8 +348,9 @@ persist 落库等。
   （bge query instruction）需要独立评测口径，暂不做能力外推。
 - **MQ 异步 worker + 人工审核队列**：动机——HTTP 同步受理受吞吐 / 并发限制，异步化（含 MySQL
   Checkpointer、Redis 幂等）支撑接入解耦、削峰与事件溯源（docs/00 §9.3）。
-- **可观测性**：Langfuse（LLM 调用级）+ OpenTelemetry（业务链路 trace）；动机——真实 LLM 接入后
-  需要 prompt / token / 成本与行为观测数据驱动迭代。
+- **可观测性的下一步**：OpenTelemetry（跨服务业务链路 trace）与采样 / 容量治理；动机——
+  Langfuse（LLM 调用级）已接入（见「技术栈」与 docs/09），下一步是链路跨服务传播，以及真实
+  LLM 接入后 prompt / token / 成本观测数据驱动迭代。
 - **Screening 策略库化**：真实品牌黑名单经规则层注入、词表沉淀为可维护的策略库；动机——规则词表
   已是单一来源，随 R2/R3 归因观测与词表调优需要更结构化的策略管理。
 
@@ -321,7 +366,8 @@ persist 落库等。
 | 评测 | `pra.evaluation`：三方案 harness + business/abstention 指标 + ablation + sweep + regression（确定性重放） | 已用 |
 | RAG | `pra.rag`：Policy KB + Case KB，BM25 / Vector / Hybrid；默认 numpy 内存索引 + MockHash embedding（无外部依赖），语义路 = Qdrant（进程内 / 本地持久 / 远端 url）+ `BgeEmbedder`（bge-small-zh-v1.5 · fastembed/onnx） | 已用（默认确定性 mock；语义路经 `--extra rag` + `backend="qdrant"` 显式开启，未接 HTTP 主流程） |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL 五表（DDL：migrations/001…）；Alembic 依赖就绪 | 已用（DDL 经 migrations/ 直执行） |
-| 规划 extras | Redis 幂等 / MQ worker；可观测：Langfuse + OpenTelemetry | 规划（pyproject optional groups 已声明） |
+| 可观测性 | `pra.observability` 适配层（Null Object：无凭据 → `NullTracer`，零网络零开销）+ **Langfuse v4 本地 Docker 自托管**（`deploy/langfuse`，UI :3000）；埋点 **root / node / generation / tool / gate**（`trace_id == run_id`，与 MySQL 审计链互跳） | 已用（`--extra observability`；默认 `PRA_LANGFUSE_ENABLED=0`，不装 SDK 则全链路 no-op —— docs/09） |
+| 规划 extras | Redis 幂等 / MQ worker | 规划（pyproject optional groups 已声明） |
 
 ## 许可
 

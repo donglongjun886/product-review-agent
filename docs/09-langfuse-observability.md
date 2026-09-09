@@ -1,10 +1,14 @@
 # Langfuse 可观测性接入（设计定稿）
 
-> 状态：**进行中**（2026-09-09 用户拍板解冻，**仅此一项**，不扩到 OTel 全家桶）。
-> S2 适配层已提交 `288feb8`；S3 埋点进行中；S4/S5 未开始 —— 逐阶段实况见 §10。
+> 状态：**已完成（2026-09-09）**——S0~S6 全部落地并端到端实测，逐阶段见 §10、实测记录见 §10.1。
+> 关键证据一行：本机 Docker 自托管 Langfuse **4.32.0**（6 容器，postgres/redis/clickhouse/minio
+> healthy、restart count 全 0，`GET /api/public/health` → **200**）→ `scripts/langfuse_smoke.py`
+> **SMOKE PASS / exit=0**（7 条 observation）→ 真实 Agent case **P_88231 26 条 observation**
+> （`trace_id == run_id` 硬对齐）→ 评测 3 案 **3 条 root trace / 69 条 observation**（全部
+> `sessionId=eval-demo-1`）。解冻范围仍**仅此一项**，不扩到 OTel 全家桶。
 > 口径约定：全文数字均标注来源与口径；未实测的一律写「未验证」，不预支结论。
 > 配套：`deploy/langfuse/README.md`（本机 Docker 部署与镜像源实测）、
-> `docs/07-project-status.md`（内部记忆，gitignore；Langfuse 决策节待落笔）。
+> `docs/07-project-status.md`（内部记忆，gitignore；Langfuse 决策节）。
 
 ## 1. 定位（勿偏移）
 
@@ -216,6 +220,44 @@ NullTracer 分支；要真接线需 `uv sync --extra observability`）。
 > 自动埋点 / Collector（§11）；Langfuse SDK 内部基于 OTel 的 contextvar 机制属实现细节，
 > 不引入额外基础设施。
 
+### 6.1 v4 服务端 API 变化（2026-09-09 对 localhost:3000 实测）
+
+> 环境：本机 Docker 自托管 Langfuse **4.32.0**（`GET /api/public/health` → **200**
+> `{"status":"OK","version":"4.32.0"}`）。以下为**服务端**实测结论，与上表 SDK 侧结论互补；
+> **这是本次接入最关键的发现——按 v3 网上示例写的读写接口在 v4 上全部不工作。**
+
+**结论：v4 默认跑在 `events_only` 模式，v1 ingestion 与 v1 读接口全部不可用，接入必须走 OTLP。**
+
+| # | 实测结论 | 证据 |
+|---|---|---|
+| 1 | v4 默认 **`events_only` 模式** | 下述 2)–3) 全部因此失败 |
+| 2 | `POST /api/public/ingestion`（`trace-create`）**被拒绝** | **400** |
+| 3 | v1 读接口**全部 404**（响应提示 events_only） | `GET /api/public/traces` → 404；`GET /api/public/observations`（v1）→ 404；`GET /api/public/observations/{id}` → 404 |
+| 4 | **接入必须走 OTLP** | `POST /api/public/otel/v1/traces` → **200**；Langfuse Python SDK v3+/v4 默认就是 OTLP，故 SDK 侧无需改动 |
+| 5 | **回读（读侧）正确接口** | `GET /api/public/v2/observations?traceId=<32hex>&limit=50&fields=core,basic,model,usage,trace_context` → **200** |
+| 6 | **不传 `fields=` 时只返回 `core` + `basic` 两组** → `model` / `usageDetails` / `tags` **字段根本不存在**（不是 `null`）→ **必须显式请求** | 实测同 trace 两次回读对比 |
+| 7 | **v4 无单条 by-id 回读**；响应体形状 `{"data":[...],"meta":{}}` | 实测 |
+| 8 | root observation 的 `parentObservationId` 指向一个**幽灵 id**（不在本 trace 内）→ **建树必须以 `isRootObservation` 为准**，不能按 parentId 反查 | 实测 |
+| 9 | 实测 `statusMessage` 为 **`""`**（不是 `null`）；`data` 顺序**非** startTime 序 | 实测 |
+
+`fields=` 字段组（官方文档口径）：
+
+| 组 | 含字段 |
+|---|---|
+| `core` | id / traceId / startTime / endTime / projectId / parentObservationId / type |
+| `basic` | name / level / statusMessage / version / environment / sessionId / isRootObservation … |
+| `io` | input / output |
+| `metadata` | metadata |
+| `model` | model / modelParameters |
+| `usage` | usageDetails / inputUsage / outputUsage / totalUsage / costDetails … |
+| `metrics` | latency / timeToFirstToken |
+| `trace_context` | tags / release / traceName |
+
+**对本项目的直接影响**：`scripts/langfuse_smoke.py` 与 `scripts/demo_langfuse_trace.py` 的
+**回读**逻辑一律改用 v2 接口 + 显式 `fields=`；判定 root 用 `isRootObservation`；断言
+prompt/response 需 `fields=io`，断言 model/usage 需 `fields=model,usage`，断言 tags 需
+`fields=trace_context`，断言自建 `metadata.latency_ms` 需 `fields=metadata`。
+
 ## 7. Token / Latency 口径（诚实边界）
 
 | 字段 | scripted 桩（默认路径） | real litellm（评测脚本） | 说明 |
@@ -230,6 +272,12 @@ NullTracer 分支；要真接线需 `uv sync --extra observability`）。
 **红线：绝不伪造 token / cost / 模型名。** 桩路径 token 恒 0、无模型 → Langfuse 上
 「token=0 / cost 空」是**真实情况**，不是埋点缺陷；不得为了图表好看填假值。
 
+**实测补充（2026-09-09 对 localhost:3000）**：**Langfuse 对零耗时 span 返回
+`latency=None`**——scripted 桩瞬时执行，故 v4 回读的 `latency` 实测为 **≈0 / None**，
+桩路径 latency 在 Langfuse 侧**不可见**（不是 0，是 None）；本项目自己的
+`metadata.latency_ms` **仍然在**，但需显式请求 `fields=metadata` 才能回读（§6.1 字段组）。
+同理 `usage` 在桩路径回读为 **`{}`**（不是 null），因为桩没有真实 token 拆分。
+
 ## 8. 环境变量与配置
 
 | 变量 | 作用 | 默认 | 状态 |
@@ -238,7 +286,8 @@ NullTracer 分支；要真接线需 `uv sync --extra observability`）。
 | `LANGFUSE_SECRET_KEY` | 项目私钥（`sk-lf-pra-local`） | 无 → `NullTracer` | ✅ 已实现 |
 | `LANGFUSE_HOST` | 服务端地址 | `http://localhost:3000` | ✅ 已实现 |
 | `PRA_LANGFUSE_ENABLED` | 总开关（`0/false/no/off` 关闭） | 未设 = 启用（仍需凭据） | ✅ 已实现 |
-| `PRA_LANGFUSE_EXPERIMENT` | 实验名 → metadata.experiment + trace version | 未设 | ⚠️ **规划中**：当前代码未消费（实测 `grep` 无引用），S5 接线 |
+| `PRA_LANGFUSE_EXPERIMENT` | 实验名 → metadata.experiment + trace version | 未设 → 缺省 `baseline` | ✅ 已实现（`tracing.default_experiment()` 消费；`run_evaluation.py --experiment` 写入） |
+| `PRA_LANGFUSE_SESSION` | 一次 evaluation run 的会话分组 id | 未设 → `None` | ✅ 已实现（`run_evaluation.py --session` 写入） |
 | `PRA_LANGFUSE_SAMPLE` | 采样率（确定性判定） | `1.0` | ✅ 已实现 |
 
 **配置层陷阱（本项目真实踩过，commit `6cf763e`）**：`pra.infra.db.Settings` 是
@@ -249,8 +298,10 @@ NullTracer 分支；要真接线需 `uv sync --extra observability`）。
 打成恒 500 的）。接 Langfuse 时的正确做法：照 `deepseek_api_key` 的先例，在 `Settings`
 里补 `langfuse_public_key` / `langfuse_secret_key` / `langfuse_host` 等**可选字段**
 （默认 `None`，infra 不消费），**`extra="forbid"` 保持不变**（未知键仍报错，防 DSN 拼错
-静默连错库）。**该同步当前尚未落地（实测 `Settings` 只声明了 `database_url` +
-`deepseek_*`），属 S3/S5 必做项。**
+静默连错库）。**该同步已落地（commit `4b945b9`）**：`Settings` 现声明
+`langfuse_public_key` / `langfuse_secret_key` / `langfuse_host` / `pra_langfuse_enabled` /
+`pra_langfuse_experiment` / `pra_langfuse_sample` / `pra_langfuse_session` 七个可选字段
+（`src/pra/infra/db.py`），并同步了 `.env.example` 模板。
 
 ## 9. 部署（本地 Docker 自托管）
 
@@ -282,25 +333,141 @@ NullTracer 分支；要真接线需 `uv sync --extra observability`）。
   （`curl -f http://localhost:9000/minio/health/live`）/ 建桶方式（改用 `minio-init`）；
 - **端口占用检查**（`lsof -nP -iTCP -sTCP:LISTEN` 实测全部空闲）：3000 / 3030 / 5432 /
   6379 / 8123 / 9000 / 9090 / 9091；
-- 部署文件落在 `deploy/langfuse/`：`docker-compose.yml`（261 行，vendored 官方 v4 并按
+- 部署文件落在 `deploy/langfuse/`：`docker-compose.yml`（**263 行**，vendored 官方 v4 并按
   上述差异调整）+ `.env`（**gitignore，不入库**）+ `README.md`（部署/镜像源/排障全流程）。
 
-## 10. 实施顺序与当前状态（S0~S6）
+**启动实测（2026-09-09，已完成）**：
+
+- `cd deploy/langfuse && docker compose up -d` → **6 个容器**运行：`langfuse-web` /
+  `langfuse-worker` **Up**，`postgres` / `redis` / `clickhouse` / `minio` **healthy**，
+  **restart count 全 0**；
+- `curl http://localhost:3000/api/public/health` → **200** `{"status":"OK","version":"4.32.0"}`；
+- `LANGFUSE_INIT_*` 自动初始化生效：`GET /api/public/projects`（Basic Auth）返回
+  project **`pra-local`** / **`product-review-agent`**（无需手工建项目、无需手工建 key）；
+- 镜像源实测：`redis:7-alpine`（58.7MB）在 4 个源（1panel / daocloud / 1ms.run / hub.rat.dev）
+  **均 33–34s**；6 镜像分散到 4 源并行拉取 —— web **1.73GB** / worker **1.81GB** /
+  clickhouse **1.05GB** / postgres **667MB** / redis **192MB** / minio **228MB**；
+- `cgr.dev/chainguard/minio` → **403**（拉不到），改用 **`minio/minio`**（该镜像自带
+  curl + mc + sh，故 `healthcheck` 用 `/minio/health/live`，建桶用一次性 `minio-init` 容器）。
+
+## 10. 实施顺序与状态（S0~S6）
 
 | 阶段 | 内容 | 状态 | 证据 / 说明 |
 |---|---|---|---|
-| S0 | SDK spike（API 形状实测） | ✅ **已完成** | 4 项实测：client 实例入口与签名 / `trace_context` 生效 / contextvar 三种调度嵌套 / `as_type` 类型（详见 §6） |
-| S1 | 本地 Docker Langfuse v4 | 🔄 **镜像拉取中** | 实测 6 个 `docker pull` 在跑；已到位 `redis:7-alpine`（4 源）、`minio/minio:latest`、`alpine:3.20` 探针；`langfuse-web` / `langfuse-worker` / `clickhouse` / `postgres:17` / `redis:7` / `minio/mc` **未完成**；**容器尚未启动，服务未验证** |
-| S2 | 适配层（`tracing.py` + `langfuse_backend.py`） | ✅ **已提交 `288feb8`** | 16 用例全绿（实测 `uv run pytest tests/test_observability_tracing.py -q` → `16 passed`）；**零业务改动** |
-| S3 | LLM + Tool 埋点 | 🔄 **进行中（未提交、未验证）** | 埋点代码已落在**工作树**：`llm_shell.py` / `tools_node.py` 已调 `get_tracer()`；`litellm_backend.py` 已透出 `usage`（`LLMResponse.usage`）。**尚未提交、未跑测试、未端到端验证** |
-| S4 | Node + Root + Gate 埋点 | ⏳ **未开始** | 埋点位置已定稿（§4.1/4.2/4.5） |
-| S5 | Evaluation 接线 | ⏳ **未开始** | `PRA_LANGFUSE_EXPERIMENT` / `session_id` / `uuid5` 确定性 trace_id **均未实现**（实测 `grep` 为空）；`Settings` 字段同步亦未做（§8） |
-| S6 | 文档 | 🔄 **进行中** | 本文档即其一；`deploy/langfuse/README.md` 已就绪 |
+| S0 | SDK spike（API 形状实测） | ✅ **已完成** | 4 项实测：client 实例入口与签名 / `trace_context` 生效 / contextvar 三种调度嵌套 / `as_type` 类型（§6） |
+| S1 | 本地 Docker Langfuse v4 | ✅ **已完成（`4c3fc94`）** | `deploy/langfuse/docker-compose.yml`（263 行）→ 6 容器运行、health 200 `4.32.0`、`LANGFUSE_INIT_*` 初始化出 project `pra-local`（§9 启动实测） |
+| S2 | 适配层（`tracing.py` + `langfuse_backend.py`） | ✅ **已完成（`288feb8`）** | 16 用例全绿（`uv run pytest tests/test_observability_tracing.py -q` → `16 passed`）；**零业务改动** |
+| S3 | LLM + Tool 埋点 | ✅ **已完成（`55b6220`）** | `llm_shell.py` 内层 `backend.complete()` 每次真实调用一条 generation；`tools_node.py` 每次 `tool.call()` 一条 tool span；`LLMResponse.usage` 透出 |
+| S4 | Node + Root + Gate 埋点 | ✅ **已完成（`af50285`）** | 5 节点统一包装 + 3 处 root（`trace_id = run_id` / uuid5）+ decide 内 gate 子 span；同 commit 修掉 `trace_root` 吞异常缺陷 |
+| S5 | Evaluation 接线 | ✅ **已完成（`6f2e45d`，配套 `0c4fe9b` / `af9a9d0` / `4b945b9`）** | `--experiment` / `--session` / uuid5 确定性 trace_id 全部落地；`flush_tracer` 导出；`scripts/langfuse_smoke.py` 自检；`Settings` 补 7 个可选字段（§8）；读接口改 v4 v2 + `fields=` |
+| S6 | 文档 | ✅ **已完成（本文件 + `README.md`）** | 本文（含 §6.1 v4 API 实测、§10.1 端到端实测记录、§14 结论边界）+ `deploy/langfuse/README.md`；`6b83ac2` 收尾 extra 收紧为 `langfuse>=4.15,<5` |
 
-> 状态一律如实标注：**S1 服务未起、S3 未提交未验证、S4/S5 代码未接线**，任何「已接入」
-> 的说法在 S4/S5 完成并实测端到端 trace 之前都不成立。
-> 本节状态为**本文落笔时快照**（2026-09-09 22:30 前后）；S3 正在并行落地，后续以
-> `git log` 与 `docs/07-project-status.md` 为准。
+> 状态口径：**S0~S6 全部完成并端到端实测**（2026-09-09），逐条证据见 §10.1 与 `git log`。
+
+### 10.1 端到端实测记录（2026-09-09）
+
+> 环境：本机 Docker 自托管 Langfuse **4.32.0**（`localhost:3000`）+ 仓库主 venv
+> `langfuse 4.15.1`（`uv sync --extra observability --extra rag`）。
+
+#### (1) 合成 trace 自检 —— `scripts/langfuse_smoke.py`
+
+```bash
+uv run python scripts/langfuse_smoke.py     # 对着活服务端
+```
+
+结果：**SMOKE PASS / exit=0**，共 **7 条 observation**，树形为
+`smoke(root) → hypothesize → llm.hypothesize(GENERATION) / plan → plan.async_child /
+tools → ProductTool(TOOL)`；回读校验逐键一致：
+
+| 断言项 | 实测值 |
+|---|---|
+| `model` | `scripted` |
+| `usageDetails` | `{"input":12,"output":34,"total":46}`（逐键一致） |
+| `sessionId` | `langfuse-smoke` |
+| `tags` | `['env:local','source:smoke']` |
+| `version` | `smoke` |
+
+#### (2) 真实 Agent case（P0 核心验收）—— `pra.api.service.run_review`
+
+用 `pra.api.service.run_review` 跑 **P_88231**（scripted 桩）→ **26 条 observation**：
+
+```text
+run_id = trace_id = 61387b551a7046e3a66a5cfa2c1ae9e3   ← trace_id == run_id（与 MySQL review_run.run_id 硬对齐）
+decision = HUMAN_REVIEW / HIGH / conf=0.87
+
+review
+├─ hypothesize → llm.hypothesize (GENERATION)
+├─ plan → llm.plan
+├─ tools → ImageAnalysisTool (TOOL)
+├─ reevaluate → llm.reevaluate
+├─ plan → llm.plan
+├─ reevaluate → llm.reevaluate
+├─ tools → ProductTool, MerchantTool
+├─ plan → llm.plan
+├─ tools → PolicySearchTool, CaseSearchTool
+├─ reevaluate → llm.reevaluate
+└─ decide → gate (SPAN) + llm.decide (GENERATION)
+```
+
+| 项 | 实测值 |
+|---|---|
+| observation 数 | **26** |
+| `tags` | `['env:local','source:http']` |
+| `version` | `baseline` |
+| UI `/trace/<id>` | **200** |
+| prompt / response 可回读 | ✅ `fields=io` 拿到完整 system prompt 与 JSON 输出 |
+| `model` | `scripted-walkthrough`（后端**自报**） |
+| `usage` | `{}` |
+| `latency` | **≈0 / None** |
+
+后两项是 scripted 桩无真实 token 且瞬时执行的**真实结果**（§7 红线），非埋点缺陷。
+
+#### (3) 评测侧关联（P0 第 3 项）—— `run_evaluation.py --langfuse`
+
+```bash
+PRA_LANGFUSE_SESSION=eval-demo-1 \
+  uv run python scripts/run_evaluation.py --smoke --smoke-limit 3 --experiment baseline --langfuse
+```
+
+结果：**3 个 case = 3 条 root trace**，共 **69 条 observation**，全部 `sessionId=eval-demo-1`。
+
+| 项 | 实测值 |
+|---|---|
+| root `tags` | `['env:local','scheme:agent','experiment:baseline','source:evaluation','tool_world:eval']` |
+| root `version` | `baseline` |
+| metadata 键 | `eval_case_id=EC_0001/EC_0002/EC_0003`、`scene=normal`、`case_id=CASE_EC_000x`、`scheme=agent`、`experiment=baseline`、`source=evaluation` |
+
+→ **「Evaluation Case → Agent Trace」硬关联成立**（`eval_case_id` 在 trace metadata 里可直接反查）。
+
+#### (4) 测试与回归（主 agent 复跑）
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| 全量测试 | `uv run pytest tests/ -q` | **432 passed, 1 skipped**（skip = 未装 SDK 才跑的那条用例；本机已装 SDK） |
+| v1 回归 | `uv run python scripts/run_regression.py` | **PASS** |
+| v2 回归 | `uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl` | **PASS**（与上项**双 PASS**） |
+| 依赖 | `pyproject.toml` 的 `observability = ["langfuse>=4.15,<5"]`（去掉未用的 OTel 埋点包） | `uv lock` 125 包；`uv sync --extra observability --extra rag` 装出 `langfuse 4.15.1` |
+| 测试隔离 | `tests/conftest.py` autouse fixture **预置 tracer 单例为 `NullTracer`**（不设环境变量，避免污染 `Settings` 用例） | 测试**永不**向真实 Langfuse 发 trace |
+
+#### (5) 已落地脚本与用例
+
+`scripts/langfuse_smoke.py` / `scripts/demo_langfuse_trace.py` /
+`tests/test_observability_eval_cli.py` 等已落地（详见 git log）。
+
+**commit 链**（可引用）：
+
+```text
+6b83ac2 build(observability): observability extra 收紧为 langfuse>=4.15,<5
+4c3fc94 feat(deploy): Langfuse v4 自托管 docker-compose
+6f2e45d feat(observability): S5b 评测接线 + 冒烟脚本改 v4 读接口 + 测试环境隔离
+0c4fe9b feat(observability): 导出 flush_tracer + deploy 文档澄清
+af50285 feat(observability): S4 Node/Root/Gate 埋点 + 修 trace_root 吞异常缺陷 + .env 配置来源
+af9a9d0 feat(observability): 新增 Langfuse 端到端自检脚本 langfuse_smoke.py
+55b6220 feat(observability): S3 埋点 —— LLM generation + Tool span
+9f6dde2 docs(observability): docs/09 设计定稿
+4b945b9 feat(observability): Settings 声明 LANGFUSE_* 可选字段
+288feb8 feat(observability): Langfuse 适配层骨架
+```
 
 ## 11. 明确不做（范围冻结）
 
@@ -330,37 +497,69 @@ Gate 行为或图结构的工作都会污染既有 347 全绿基线与 v1/v2 回
 - real LLM 目前只跑过 **v1 35 案单次抽样**（acc 0.200 / HRR 0.771，出处
   `docs/02-evaluation.md`）：因此「real 路径的 Langfuse 观测」样本极小、非确定性，
   不可当能力证据。
-- S1 服务端与端到端 trace 落库**尚未验证**（§10）；本文档所有 API 结论来自 SDK 侧
-  spike 实测，**服务端 UI 回读未验证**（待 S1 起服务后确认）。
+- S1 服务端与端到端 trace 落库**已实测验证**（§10.1）；SDK 侧结论（§6）与服务端 v4 API
+  结论（§6.1）均为实测，**冲突以实测为准**；本节其余「未验证」表述已由 **§14** 复核。
 
 ## 13. 验收命令
 
 ```bash
-# 1) 全量测试（含适配层 16 用例；无需任何 Langfuse key）
-uv run pytest tests/ -q
+# 1) 全量测试（含适配层 16 用例 + observability 相关用例；无需任何 Langfuse key）
+uv run pytest tests/ -q                       # 实测 432 passed, 1 skipped
 
-# 2) 评测确定性回归（不烧 key、不联网）
+# 2) 评测确定性回归（不烧 key、不联网）—— 实测双 PASS
 uv run python scripts/run_regression.py
+uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl
 
-# 3) 服务端健康检查（先起本地 Langfuse：cd deploy/langfuse && docker compose up -d）
+# 3) 依赖（不装则适配层恒走 NullTracer，全链路 no-op）
+uv sync --extra observability --extra rag      # 实测装出 langfuse 4.15.1
+
+# 4) 起本地 Langfuse 服务端（6 容器；首次拉镜像 / 镜像源见 deploy/langfuse/README.md）
+cd deploy/langfuse && docker compose up -d
 curl -s http://localhost:3000/api/public/health
+# → {"status":"OK","version":"4.32.0"}
+
+# 5) 端到端自检：发一条合成 trace → 用 v2 接口回读断言
+uv run python scripts/langfuse_smoke.py       # 实测 SMOKE PASS / exit=0，7 条 observation
+uv run python scripts/langfuse_smoke.py --no-verify   # 只发不读（服务端未起时看埋点）
+
+# 6) 真实案件 demo：跑 P_88231，打印 run_id / trace_id / 决策 + UI 链接
+#    注意默认 PRA_LANGFUSE_ENABLED=0 → 看 trace 时命令行覆盖为 1
+PRA_LANGFUSE_ENABLED=1 uv run python scripts/demo_langfuse_trace.py
+PRA_LANGFUSE_ENABLED=1 uv run python scripts/demo_langfuse_trace.py --run-id <32-hex>
+
+# 7) 评测侧关联（每 case 一条 root trace，session 分组）
+PRA_LANGFUSE_SESSION=eval-demo-1 \
+  uv run python scripts/run_evaluation.py --smoke --smoke-limit 3 --experiment baseline --langfuse
+# 实测：3 case → 3 条 root trace / 69 条 observation，全部 sessionId=eval-demo-1
+
+# 8) 回读（v4 读侧唯一可用接口，必须显式 fields=，见 §6.1）
+curl -s -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
+  "http://localhost:3000/api/public/v2/observations?traceId=<32hex>&limit=50&fields=core,basic,model,usage,trace_context"
 ```
 
-端到端发一条 trace（**待实现**，S5 后补）：
+凭据：根 `.env` 配 `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST`
+（本地 Docker 初始化值 `pk-lf-pra-local` / `sk-lf-pra-local`，见 `deploy/langfuse/.env`）；
+`.env` 已 gitignore，勿提交真实 key。
 
-```bash
-# 占位脚本：scripts/demo_langfuse_trace.py —— 尚未创建（实测 ls 不存在）
-# 预期用法（待实现后确认）：
-#   export LANGFUSE_PUBLIC_KEY=pk-lf-pra-local
-#   export LANGFUSE_SECRET_KEY=sk-lf-pra-local
-#   export LANGFUSE_HOST=http://localhost:3000
-#   uv run --extra observability python scripts/demo_langfuse_trace.py --case-id <CASE>
-# 预期行为（未验证）：发一条 root trace + node/llm/tool span，flush 后在
-#   http://localhost:3000 按 trace_id（= run_id）查到完整 span 树。
-```
+## 14. 结论边界（实测后复核）
 
-启用真实 Langfuse 的可选依赖（当前主 venv 未安装，实测 `import langfuse` 失败）：
+> 本节是对 §12 的**实测后复核**：§12 写于接线前（含「未验证」表述），本节是端到端实测后的
+> 最终口径；两者冲突时**以本节为准**。
 
-```bash
-uv sync --extra observability   # 装 langfuse SDK；不装则适配层恒走 NullTracer
-```
+- **能确认的**：本机 Docker 自托管（Langfuse 4.32.0）+ **scripted 桩**下，**trace 结构完整**
+  （root → node → generation/tool/gate 逐层可见）、**prompt / response / model 可回读**
+  （`fields=io` / `fields=model`），且 `trace_id == run_id` 与 MySQL `review_run.run_id`
+  硬对齐（§10.1(2)）；评测侧 `eval_case_id` 进 trace metadata，「Evaluation Case → Agent
+  Trace」硬关联成立（§10.1(3)）。
+- **token / cost 为空、latency ≈ 0 是真实情况，不是缺陷**：桩路径无真实 provider 调用
+  → `usage = {}`、cost 空；桩瞬时执行 → Langfuse 对**零耗时 span 返回 `latency=None`**
+  （§7 实测补充），故 latency 在 Langfuse 侧不可见；本项目自建的 `metadata.latency_ms`
+  仍在，需 `fields=metadata` 回读。**绝不为此填假值**（§7 红线）。
+- **真实 token / latency 只在 real LLM 评测出现**：`scripts/run_evaluation_real.py`
+  （注入 `LiteLLMBackend`，**需 API key**）才会产生真实 token 拆分与真实耗时；服务运行时
+  LLM 恒为 scripted 桩。real 路径目前仅 v1 35 案单次抽样（acc 0.200 / HRR 0.771，出处
+  `docs/02-evaluation.md`），样本小、非确定性，**不可当能力证据**。
+- **范围不变**：仍是「面试项目级可演示的最小完整闭环」，不是生产级 Observability 平台
+  （§11/§12：无采样治理、无容量规划、无多租户、无告警、无 SLA；不扩 OTel 全家桶）。
+- **测试口径**：`tests/conftest.py` 预置 `NullTracer`，测试**永不**向真实 Langfuse 发 trace；
+  432 passed / 1 skipped 的结果不依赖 Langfuse 服务端是否运行。
