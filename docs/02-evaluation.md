@@ -241,7 +241,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 | 指标 | 计算口径（Phase 1） | 取数字段 | 备注 |
 |---|---|---|---|
-| Accuracy（决策准确率） | 自动终裁案（decision∈{PASS,REJECT}）上 decision==expected 的占比 | decision × expected.decision | 混淆口径见下表注 |
+| Accuracy（决策准确率） | 二值真值案（expected∈{PASS,REJECT}）上 decision==expected 的占比；**预测 HUMAN_REVIEW 计为错** | decision × expected.decision | 实现口径（2026-09-09 Q1 拍板 (b)），口径注见下表 |
 | Precision（精确率） | 预测 REJECT 且 expected=REJECT / 预测 REJECT | 同上 | 误拒直接伤害商家 |
 | Recall（违规召回） | 预测 REJECT 且 expected=REJECT / expected=REJECT | 同上 | 违规漏放伤害平台 |
 | False Positive Rate（FPR，误杀率） | expected=PASS（正常）中自动终裁为 REJECT 的比例 | 同上 | **防误伤红线、Phase 1 重点观察**（《00》§7.2-2）；sweep 主观察曲线之一 |
@@ -249,10 +249,16 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | human_review_rate | 输出 HUMAN_REVIEW 的 case 占全部 case 的比例 | decision | 转人工占用（人工负担）；Rule 的 COMPLEX 映射与 Agent/Single-call 的 abstention 都计入 |
 | automation_coverage | 1 − human_review_rate（自动终裁占比） | decision | 自动化覆盖率；与 FPR/FNR **必须并读**（§4.4 核心口径） |
 
-> **Phase 1 混淆口径注**：Golden Dataset 无 HUMAN 真值案（P-3/P-4），五指标在**自动终裁子集**（decision∈{PASS,REJECT}）上计算；
-> HUMAN_REVIEW 输出**不计对错**（转人工既不误杀也不漏放，是保守降级，不是安全错误），其代价由 human_review_rate / automation_coverage 呈现——
-> 因此"大量转人工"的方案会在二分类指标上显得准，**必须与 automation_coverage 并读**才能看出它只是没有在自动判。
-> abstention 的**质量**评估（该转人工是否转了、自动决策是否安全）属 Phase 2 语义（AUTO_DECIDABLE / SHOULD_ABSTAIN），见 §4.4。
+> **口径注（2026-09-09 Q1 拍板 (b)，实现为准）**：二值真值案 = expected∈{PASS,REJECT} 的案
+> （v2 = 274；46 条 SHOULD_ABSTAIN 真值不参与本表分母，其质量由 §4.4 abstention 指标承接）。
+> Accuracy 分母 = 全部二值真值案，**预测 HUMAN_REVIEW 计为错**——这是比"auto 子集口径"更严的
+> 工程口径：保守转人工与决策错误同罚，迫使"自动化 + abstention 指标并读"（§4.4 核心口径），
+> 否则"大量转人工"的方案会在 Accuracy 上显得准。对照参考（auto 子集口径，即分母排除 HUMAN 预测、
+> 只算 decision∈{PASS,REJECT} 的案）：v2 rule 0.825 / single 0.866 / agent 1.000 —— 两口径的
+> 差别就是 abstain 惩罚量（code 口径 rule 0.380 / agent 0.964），报告已并排披露（abstention 区
+> abstention_rate + wrong_auto_decision_rate 量化该惩罚）。Precision/Recall/FPR/FNR 分母只含
+> 对应真值类、HUMAN 预测不计入（保持 §4.4 "HUMAN 不当第三真值类"语义）。abstention 质量评估
+> （该转人工是否转了、自动决策是否安全）见 §4.4（AUTO_DECIDABLE / SHOULD_ABSTAIN）。
 
 ### 4.2 Agent 指标（仅 agent scheme 有意义）
 
@@ -303,10 +309,17 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ### 5.1 扫哪些常量（只动配置，不动判定逻辑；《00》§11.5/03 T-11）
 
-| 常量 | 第一轮口径（P-5） | 影响路径 |
+| 常量 | 第一轮口径（P-5） | 实际影响路径（2026-09-09 Q4 拍板 (b)，实证收窄） |
 |---|---|---|
-| `EVIDENCE_MIN_SIM` / `EVIDENCE_STRONG` | **只 sweep Evidence 阈值一维**：0.60/0.65/0.70/0.75/0.80/0.85/0.90；每次只动一个常量、另一个取当前默认（0.70/0.85）固定 | 产 IMAGE_SIMILARITY 证据的三档分界 → 影响含图片证据案（agent tools_node quality_filter / Rule 图片相关路径） |
+| `EVIDENCE_MIN_SIM` / `EVIDENCE_STRONG` | **只 sweep Evidence 阈值一维**：0.60/0.65/0.70/0.75/0.80/0.85/0.90；每次只动一个常量、另一个取当前默认（0.70/0.85）固定 | **只作用于评测确定性审查员（EvalScriptedLLMBackend）读证据视图的阈值**（sweep.py 经 EvalContext 注入）；**生产侧 tools_node quality_filter（0.70）/ REJECT Gate 强档（0.85）不随 sweep 变化**，Rule baseline 不读相似度（无图片相关路径）——sweep **不校准生产常量**（§5.3 已修订）；另见下方数据带限制注 |
 | `CONFIDENCE_ABSTAIN_THRESHOLD` | **固定 0.7，第一轮不扫** | REJECT Gate 安全门槛 → 主要影响 Agent 与 Single-call LLM 的 abstention |
+
+> **数据带限制（2026-09-09 实证）**：当前种子世界图片相似度权重仅两簇——{0.72,0.73}（弱相似）与
+> {0.90,0.91,0.93,0.95}（强相似），**(0.73,0.90) 区间无任何数据**。实测 v2 320 案：EVIDENCE_STRONG
+> 全网格 0.60–0.90 **0 决策差异**、EVIDENCE_MIN_SIM 仅 0.90 档 14 案变化（v1 仅 2 案）。因此
+> **曲线平不代表生产阈值不敏感**——是数据带没覆盖；任何 operating point 结论都受此限制，报告必须
+> 注明。若要把 sweep 变成生产阈值的校准工具，须先把注入下沉到 tools_node/gate 实际常量读取点并补
+> 0.75–0.88 区间 family（另行立项，Q4 本轮未做）。
 
 - **不做多参数联合 Grid Search**（EVIDENCE×CONFIDENCE 乃至 MIN×STRONG 全组合都不做）——变量过多、无法判断效果来源（P-5）。
 - 第一轮观察 **Accuracy / Precision / Recall / FPR / FNR / human_review_rate / automation_coverage（自动化覆盖率）** 随 Evidence 阈值的变化，判断效果来源后，再决定是否联合校准 Confidence（P-5）。
@@ -319,11 +332,15 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 - 只允许在 **validation 集**（§2.5）上选取 operating point；选点优先级建议：先压 FPR（防误伤商家红线，《00》§7.2-2），再保 Recall（违规召回），human_review_rate / automation_coverage 作为可接受成本。
 - operating point 定义 = (`EVIDENCE_MIN_SIM`, `EVIDENCE_STRONG`) 一组值（第一轮 `CONFIDENCE_ABSTAIN_THRESHOLD` 固定 0.7），记录选点理由与所选点的观测指标值。
 
-### 5.3 校准结果回写
+### 5.3 校准结果回写（2026-09-09 Q4 拍板 (b) 修订）
 
-- 回写《00》§7.6 数值口径表、03-decisions.md §5 常量表（新增决策条目，注明"经 02-evaluation §5 sweep 校准"）。
-- 同步修订 eval_case 标签中受影响的证据阈值口径（§2.2/《00》§11.2 注）。
-- 报告必须附 **sweep 曲线**而不是只报最终点（《00》§11.5：证明阈值是"选"出来的，不是拍脑袋）。
+- **当前 sweep 只观测评测确定性审查员的读证据视图，不写回生产常量**（tools_node quality_filter /
+  gate 强档未被 sweep 观测过——把选点写进生产属于"写进未测层级"，禁止）。旧版"回写《00》§7.6 /
+  03 §5 常量表 + 同步修订 eval_case 标签阈值口径"的回写流程**仅在注入下沉到生产常量读取点并补
+  中间相似度带数据后**才可启用（另行立项）。
+- sweep 结论（曲线/选点）作为**评测内部实验记录**，附 §5.1 数据带限制注后，可与 docs §8 一并引用。
+- 报告必须附 **sweep 曲线**而不是只报最终点（《00》§11.5 精神：证明阈值是"选"出来的，不是拍脑袋
+  ——在当前数据带下曲线近平，如实呈现并注明限制）。
 
 ---
 

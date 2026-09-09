@@ -13,7 +13,7 @@
 3. ``--out PATH`` 时把 real EvalRecord 全量 + 差异摘要落 JSON（目录需已存在）；
 4. **overrides 汇总（P1-6c）**：real 每案归因码计数（R5 降级 N 案 / R3 预算截胡
    N 案 / R3+R5 混合案）打印进 Console 与 JSON —— "整卷全 HUMAN 是链路降级"
-   一眼可见（不含 CLI keyless 决策，见 Q5）。
+   一眼可见（Q5 已拍板 (a)：无 key 模式不支持，CLI 预检报错，见下方校验逻辑）。
 
 用法示例::
 
@@ -34,7 +34,8 @@
   复现（回归基线永远以 scripted = ``AgentScheme()`` 默认行为为准，real 只观测对照）。
 - API key 读取顺序：``--api-key`` > 环境变量 ``DEEPSEEK_API_KEY`` > 仓库根 ``.env``
   （脚本开头自动注入，setdefault 语义）；base-url 同理（``--base-url`` >
-  ``DEEPSEEK_BASE_URL``）。两者都无 → 直接报错，不带着空凭据去烧请求。
+  ``DEEPSEEK_BASE_URL``）。**API key 必填**（无 key 本地网关模式不支持，Q5 拍板 (a)）
+  —— 缺 key 预检即报错，不带着空凭据去烧请求。
 - 工具数据源 = 评测种子世界（eval / RAG，与 scripted 同一世界）→ 两臂差异只归因
   于 LLM。EvalRecord 不含墙钟 latency（Phase 1 口径）；real 墙钟只进进程内进度打印，
   不落 JSON。
@@ -666,11 +667,15 @@ async def _main(argv: list[str] | None = None) -> int:
 
     api_key = _resolve_api_key(args.api_key)
     base_url = args.base_url or os.environ.get(ENV_BASE_URL, "") or None
-    if api_key is None and base_url is None:
+    # Q5 拍板 (a)：real 后端（LiteLLMBackend）强制要求 api_key —— 无 key 模式（仅给
+    # --base-url 的本地网关）当前不可用：任何缺 key 调用预检即报错。旧文档「只给
+    # --base-url 即可」的误导文案已删（按旧方式会整卷 R5 降级 HUMAN、exit 0，静默
+    # 产出假 real 结果）。base_url 仍可用于指向自定义网关端点，但必须配真实 key。
+    if api_key is None:
         raise ValueError(
-            f"未检测到 API key（--api-key 或环境变量 {ENV_API_KEY} / 仓库根 .env）"
-            "且未给 --base-url —— 真实调用会失败；请配置凭据（本地无需 key 的网关"
-            "可只给 --base-url）后重跑"
+            f"未检测到 API key（--api-key 或环境变量 {ENV_API_KEY} / 仓库根 .env）。"
+            "real 模式必须配置 API key：无 key 本地网关（仅 --base-url）当前不支持"
+            "（LiteLLMBackend 强制 api_key）——请配置真实 key 后重跑"
         )
 
     ctx = _build_ctx(args.world)
@@ -693,7 +698,7 @@ async def _main(argv: list[str] | None = None) -> int:
     print("=" * 100)
     print(f"数据集: {data_path}（{len(cases)} 条）| world={args.world} | real 模型: {args.model}")
     print("scene 分布: " + " | ".join(f"{s}={scene_n[s]}" for s in SCENES))
-    key_state = "已配置（--api-key / 环境变量 / .env）" if api_key else "未配置（base_url 本地网关模式）"
+    key_state = "已配置（--api-key / 环境变量 / .env）"
     print(f"API key: {key_state}（值不入日志/报告/JSON）")
     print(
         f"[NOTE] real 侧真实调用 LLM（有费用、非确定性、不可重放）；"
