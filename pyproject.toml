@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rag = ["qdrant-client"]
+rag = ["qdrant-client", "fastembed"]
 observability = ["langfuse", "opentelemetry-sdk", "opentelemetry-instrumentation-fastapi"]
 
 [dependency-groups]

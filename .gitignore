@@ -25,6 +25,9 @@ env/
 .coverage
 htmlcov/
 
+# Phase 2 本地缓存（fastembed 模型缓存 / qdrant 本地持久索引统一落 .cache/，docs/06）
+.cache/
+
 # IDE / editor
 .idea/
 .vscode/
