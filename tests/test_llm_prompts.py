@@ -4,7 +4,11 @@
 不联网 / 无 API key / 不调真实 LLM）：
 - hypothesize：禁重复提出既有假设（system 规则 + user 上下文渲染「既有假设清单」）
   与"假设必须可取证、允许少提"；
-- plan：政策条款/先例一次性适用性判定（不重复安排同类检索）；
+- plan：政策条款/先例一次性适用性判定（不重复安排同类检索）；证据已充分（高优先假设
+  已全部结论化、无未解决高优先级疑点）应提前 conclude，UNRESOLVED 低优先级/边际假设
+  与只会重复采集的工具调用不阻止收尾；
+- decide：证据链充分且无矛盾/缺口时应本轮直接裁决（不把可裁决案件推给 HUMAN_REVIEW），
+  人工只留给真正的证据不足/矛盾/政策模糊/取证失败场景；
 - reevaluate：外观/视觉类假设判 SUPPORTED 必须引用图像类证据（IMAGE_SIMILARITY），
   CASE_PRECEDENT / POLICY_REF 只能佐证；new_hypotheses 禁重复、允许为空。
 
@@ -135,6 +139,23 @@ def test_plan_system_policy_applicability_one_shot():
     assert "新证据" in prompt and "conclude" in prompt and "next_action" in prompt
 
 
+def test_plan_system_early_conclude_when_evidence_sufficient():
+    """plan system：证据已充分（高优先假设已全部结论化、无未解决高优先级疑点）应
+    立即提前 conclude；UNRESOLVED 的低优先级/边际假设与只会重复采集的工具不阻止收尾。"""
+    prompt = build_system_prompt("plan")
+    # 判定基准：高优先假设全部得出基于证据的结论 + 无未解决高优先级疑点 = 证据已充分
+    assert "证据已充分 → 提前收尾（conclude）" in prompt
+    assert "高优先（high prior）" in prompt and "得出基于证据的结论" in prompt
+    assert "没有未解决的高优先级疑点" in prompt
+    # 低优先级/边际 UNRESOLVED、或只会重复采集已满足维度/复核已引用条款的工具不阻止
+    assert "低优先级/边际假设" in prompt
+    assert "不构成阻止 conclude 的理由" in prompt
+    # 反对为「看起来有进展」安排多余取证：立即 conclude（tools 空数组）并提前结束循环
+    assert "应**立即**输出" in prompt and 'next_action="conclude"' in prompt
+    assert "不要为了「看起来有进展」而安排多余取证烧预算" in prompt
+    assert "**提前结束**调查循环" in prompt
+
+
 def test_reevaluate_system_visual_evidence_gate():
     """reevaluate system：外观/视觉类 SUPPORTED 必须引用图像类证据（禁止脑补）。"""
     prompt = build_system_prompt("reevaluate")
@@ -156,6 +177,18 @@ def test_reevaluate_system_new_hypotheses_no_duplicate_and_policy_one_shot():
     assert "政策/先例引用一次判定" in prompt
     assert "适用性已判定" in prompt
     assert "不能替代对应维度的真实取证" in prompt
+
+
+def test_decide_system_rule_when_evidence_sufficient():
+    """decide system：证据链充分且无矛盾/缺口时应本轮直接裁决（不推 HUMAN_REVIEW）；
+    人工只留给真正的证据不足/矛盾/政策模糊/取证失败；禁止凭标题/先例脑补事实。"""
+    prompt = build_system_prompt("decide")
+    assert "证据充分即裁决（硬性）" in prompt
+    assert "PASS 侧无证据缺口" in prompt
+    assert "REJECT 侧有上下文证据中**真实出现**的政策条款" in prompt
+    assert "不要把本可裁决的案件推给 HUMAN_REVIEW" in prompt
+    assert "HUMAN_REVIEW 仍只留给真正的证据不足" in prompt
+    assert "禁止凭标题、类目或先例脑补上下文没有的事实" in prompt
 
 
 def test_output_schema_contracts_unchanged():
