@@ -458,6 +458,10 @@ async def test_process_review_direct_branches(monkeypatch, case, expect_verdict)
         calls["direct"] = {"run_id": run_id, "verdict": triage_result.verdict}
         return {"case_id": c.case_id, "run_id": "RUN_DIRECT",
                 "verdict": triage_result.verdict,
+                "decision": ps._direct_decision(
+                    triage_result.verdict,
+                    [ps.rule_evidence(c, h) for h in triage_result.hits],
+                ),
                 "counts": {"evidence": len(triage_result.hits)}}
 
     async def fake_agent(case, **kwargs):  # pragma: no cover
@@ -486,6 +490,10 @@ async def test_process_review_direct_decision_evidence(monkeypatch):
     async def fake_direct(c, triage_result, *, run_id=None):
         return {"case_id": c.case_id, "run_id": "RUN_DIRECT",
                 "verdict": triage_result.verdict,
+                "decision": ps._direct_decision(
+                    triage_result.verdict,
+                    [ps.rule_evidence(c, h) for h in triage_result.hits],
+                ),
                 "counts": {"evidence": len(triage_result.hits)}}
 
     monkeypatch.setattr(ps, "run_screening_direct", fake_direct)

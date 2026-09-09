@@ -93,7 +93,7 @@ _NODE_STEP_TYPE = {
     "plan": "PLAN",
     "reevaluate": "REEVALUATE",
     "decide": "DECIDE",
-    "tools": "TOOL_CALL",  # 仅供识别；实际每行取 TOOL_CALL（见 _write_trace 分发）
+    "tools": "TOOL_CALL",  # 仅供识别；实际每行取 TOOL_CALL（见 run_and_persist c 段 tools 特判分发）
 }
 
 
@@ -179,7 +179,7 @@ def _hypothesis_summary(h: Any) -> dict:
     }
 
 
-def _node_output_summary(node_name: str, update: dict, case_id: str) -> dict:
+def _node_output_summary(node_name: str, update: dict) -> dict:
     """按节点构造 trace 输出摘要（保持小体积、可读、可统计）。
 
     摘要含 budget 快照（llm_calls/tool_calls/tokens）供 step 级预算审计 —— 该摘要为
@@ -281,6 +281,75 @@ def _node_input_summary(node_name: str, update: dict, case_id: str) -> dict:
         "pending_tool_calls_count": len(list(update.get("pending_tool_calls") or [])),
         "budget_tokens": _token_count(update.get("budget")),
     }
+
+
+def _evidence_row(
+    session: Any,
+    run_id: str,
+    ev: Evidence,
+    created_at: datetime | None = None,
+) -> None:
+    """把一条 Evidence 映射为 review_evidence ORM 行并 add（不 commit；commit 节奏由调用方控制）。
+
+    三处落库（extra_evidence / decision.evidence / 直判 hits）共用同一映射 ——
+    ORM 加列只改这里，杜绝逐字段复制漂移（persist review 建议 1）。
+    """
+    session.add(
+        ReviewEvidenceORM(
+            run_id=run_id,
+            type=ev.type,
+            source_tool=ev.source,
+            value=ev.value,
+            weight=ev.weight,
+            ref_id=ev.ref_id,
+            extra_json=_json_cap(ev.extra) if ev.extra else None,
+            created_at=created_at or _utcnow(),
+        )
+    )
+
+
+def _result_payload(
+    decision: ReviewDecision, case_id: str, source_run_id: str
+) -> dict:
+    """review_result 行 12 键 payload（Agent 图终态与直判 _direct_decision 共用）。
+
+    decision_json = ReviewDecision 全量快照（同构列）；列清单单点维护 ——
+    原两处逐字重复的 upsert 链是 DDL 演进最高危漂移点（persist review 建议 2）。
+    """
+    return {
+        "case_id": case_id,
+        "source_run_id": source_run_id,
+        "decision": decision.decision.value,
+        "risk_level": decision.risk_level.value,
+        "risk_type_json": [_enum_value(t) for t in decision.risk_type],
+        "decision_confidence": decision.decision_confidence,
+        "policy_refs_json": list(decision.policy),
+        "decision_json": decision.model_dump(mode="json"),
+        "created_at": _utcnow(),
+        "updated_at": _utcnow(),
+    }
+
+
+async def _upsert_result(session: Any, payload: dict) -> None:
+    """review_result upsert（last-writer-wins 覆盖该 case 最新裁决，语义同原内联实现）。
+
+    ``created_at`` 只进 .values() 不进 update 子句 —— 首裁时间不被覆盖。
+    """
+    stmt = (
+        mysql_insert(ReviewResultORM)
+        .values(**payload)
+        .on_duplicate_key_update(
+            source_run_id=payload["source_run_id"],
+            decision=payload["decision"],
+            risk_level=payload["risk_level"],
+            risk_type_json=payload["risk_type_json"],
+            decision_confidence=payload["decision_confidence"],
+            policy_refs_json=payload["policy_refs_json"],
+            decision_json=payload["decision_json"],
+            updated_at=payload["updated_at"],
+        )
+    )
+    await session.execute(stmt)
 
 
 # ---------------------------------------------------------------------------
@@ -394,18 +463,7 @@ async def run_and_persist(
         # （resolved_run_id，含 process_review 未传 run_id 时内部生成的情形）。
         extra_rows = 0
         for ev in extra_evidence or []:
-            session.add(
-                ReviewEvidenceORM(
-                    run_id=resolved_run_id,
-                    type=ev.type,
-                    source_tool=ev.source,
-                    value=ev.value,
-                    weight=ev.weight,
-                    ref_id=ev.ref_id,
-                    extra_json=_json_cap(ev.extra) if ev.extra else None,
-                    created_at=_utcnow(),
-                )
-            )
+            _evidence_row(session, resolved_run_id, ev)
             extra_rows += 1
         if extra_rows:
             await session.commit()  # 与 run 行同批里程碑：run 存在即可查到命中证据
@@ -468,7 +526,7 @@ async def run_and_persist(
                                 _node_input_summary(node_name, update, case_id)
                             ),
                             output_json=_json_cap(
-                                _node_output_summary(node_name, update, case_id)
+                                _node_output_summary(node_name, update)
                             ),
                             tokens=step_tokens,
                             latency_ms=node_latency_ms,
@@ -497,51 +555,35 @@ async def run_and_persist(
                 f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
             )
 
+        # 不变量（persist review P2-2 收口）：分流命中证据（extra_evidence）经 b'
+        # 已落本 run，且从不进 AgentState（build_initial_state evidence=[]）——
+        # decision.evidence 不应含同源行，否则 RULE_HIT 重复落库、counts.evidence
+        # 双计。显式断言把"两集合不相交"变成可执行契约（未来若图内引入 Screening
+        # 来源证据会在此炸响，而不是静默重复落库）。
+        extra_keys = {
+            (e.type, e.source, e.value) for e in (extra_evidence or [])
+        }
+        overlap = [
+            ev
+            for ev in decision.evidence
+            if (ev.type, ev.source, ev.value) in extra_keys
+        ]
+        if overlap:
+            raise RuntimeError(
+                f"decision.evidence 与分流 extra_evidence 重叠 {len(overlap)} 条"
+                f"（run_id={resolved_run_id}）—— 分流命中不应进入 AgentState 证据链"
+            )
+
         # evidence 全量（state 全量与 decision.evidence 同型，以裁决链为准；
         # 基数含前置 extra_evidence 分流命中行）
         evidence_rows = extra_rows
         for ev in decision.evidence:
-            session.add(
-                ReviewEvidenceORM(
-                    run_id=resolved_run_id,
-                    type=ev.type,
-                    source_tool=ev.source,
-                    value=ev.value,
-                    weight=ev.weight,
-                    ref_id=ev.ref_id,
-                    extra_json=_json_cap(ev.extra) if ev.extra else None,
-                    created_at=_utcnow(),
-                )
-            )
+            _evidence_row(session, resolved_run_id, ev)
             evidence_rows += 1
 
-        result_payload = {
-            "case_id": case_id,
-            "source_run_id": resolved_run_id,
-            "decision": decision.decision.value,
-            "risk_level": decision.risk_level.value,
-            "risk_type_json": [_enum_value(t) for t in decision.risk_type],
-            "decision_confidence": decision.decision_confidence,
-            "policy_refs_json": list(decision.policy),
-            "decision_json": decision.model_dump(mode="json"),  # ReviewDecision 全量快照
-            "created_at": _utcnow(),
-            "updated_at": _utcnow(),
-        }
-        stmt = (
-            mysql_insert(ReviewResultORM)
-            .values(**result_payload)
-            .on_duplicate_key_update(
-                source_run_id=result_payload["source_run_id"],
-                decision=result_payload["decision"],
-                risk_level=result_payload["risk_level"],
-                risk_type_json=result_payload["risk_type_json"],
-                decision_confidence=result_payload["decision_confidence"],
-                policy_refs_json=result_payload["policy_refs_json"],
-                decision_json=result_payload["decision_json"],
-                updated_at=result_payload["updated_at"],
-            )
+        await _upsert_result(
+            session, _result_payload(decision, case_id, resolved_run_id)
         )
-        await session.execute(stmt)
 
         # ---- e. 收尾状态机：run/case 置 DECIDED ----
         end_now = _utcnow()
@@ -605,6 +647,7 @@ async def run_screening_direct(
                 "case_id": str,
                 "run_id": str,
                 "verdict": "PASS" | "REJECT",
+                "decision": ReviewDecision,    # 直判同构裁决（供 API 包装返回）
                 "counts": {"evidence": int},   # RULE_HIT 行数（PASS 零命中则 0）
             }
 
@@ -670,49 +713,14 @@ async def run_screening_direct(
         for hit in triage.hits:
             ev = rule_evidence(case, hit)
             evidence_list.append(ev)
-            session.add(
-                ReviewEvidenceORM(
-                    run_id=resolved_run_id,
-                    type=ev.type,
-                    source_tool=ev.source,
-                    value=ev.value,
-                    weight=ev.weight,
-                    ref_id=ev.ref_id,
-                    extra_json=_json_cap(ev.extra) if ev.extra else None,
-                    created_at=_utcnow(),
-                )
-            )
+            _evidence_row(session, resolved_run_id, ev)
             evidence_rows += 1
 
         # ---- d. review_result（source_run_id=直判 run；decision_json 同构快照）----
         decision = _direct_decision(triage.verdict, evidence_list)
-        result_payload = {
-            "case_id": case_id,
-            "source_run_id": resolved_run_id,
-            "decision": decision.decision.value,
-            "risk_level": decision.risk_level.value,
-            "risk_type_json": [_enum_value(t) for t in decision.risk_type],
-            "decision_confidence": decision.decision_confidence,
-            "policy_refs_json": list(decision.policy),
-            "decision_json": decision.model_dump(mode="json"),  # ReviewDecision 全量快照
-            "created_at": _utcnow(),
-            "updated_at": _utcnow(),
-        }
-        stmt = (
-            mysql_insert(ReviewResultORM)
-            .values(**result_payload)
-            .on_duplicate_key_update(
-                source_run_id=result_payload["source_run_id"],
-                decision=result_payload["decision"],
-                risk_level=result_payload["risk_level"],
-                risk_type_json=result_payload["risk_type_json"],
-                decision_confidence=result_payload["decision_confidence"],
-                policy_refs_json=result_payload["policy_refs_json"],
-                decision_json=result_payload["decision_json"],
-                updated_at=result_payload["updated_at"],
-            )
+        await _upsert_result(
+            session, _result_payload(decision, case_id, resolved_run_id)
         )
-        await session.execute(stmt)
 
         # ---- e. commit ----
         await session.commit()
@@ -725,6 +733,7 @@ async def run_screening_direct(
         "case_id": case_id,
         "run_id": resolved_run_id,
         "verdict": triage.verdict,
+        "decision": decision,  # 直判同构 ReviewDecision（process_review 直接取用，P3-8）
         "counts": {"evidence": evidence_rows},
     }
 
@@ -779,8 +788,6 @@ async def process_review(
         "case_id": summary["case_id"],
         "run_id": summary["run_id"],
         "verdict": t.verdict,
-        "decision": _direct_decision(
-            t.verdict, [rule_evidence(case, hit) for hit in t.hits]
-        ),
+        "decision": summary["decision"],  # 直判同构裁决（run_screening_direct 构造一次）
         "counts": dict(summary.get("counts") or {}),
     }

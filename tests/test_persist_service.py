@@ -82,7 +82,7 @@ def test_node_output_summary_hypothesize():
         "degraded": False,
         "budget": Budget(llm_calls=2, tool_calls=0, tokens=30),
     }
-    s = _node_output_summary("hypothesize", update, "CASE_1")
+    s = _node_output_summary("hypothesize", update)
     assert s["node"] == "hypothesize"
     assert s["degraded"] is False
     assert s["hypotheses_count"] == 1
@@ -103,7 +103,7 @@ def test_node_output_summary_plan_dedup_skipped():
         "degraded": False,
         "budget": Budget(llm_calls=1),
     }
-    s = _node_output_summary("plan", update, "CASE_1")
+    s = _node_output_summary("plan", update)
     assert s["node"] == "plan"
     assert s["pending_tool_calls_count"] == 1
     assert s["pending_tool_calls"][0]["tool"] == "ProductTool"
@@ -125,7 +125,7 @@ def test_node_output_summary_reevaluate_status_counts():
         "degraded": False,
         "budget": Budget(),
     }
-    s = _node_output_summary("reevaluate", update, "CASE_1")
+    s = _node_output_summary("reevaluate", update)
     assert s["node"] == "reevaluate"
     assert s["hypotheses_count"] == 3
     assert s["status_counts"] == {"SUPPORTED": 1, "REFUTED": 1, "PENDING": 1}
@@ -146,8 +146,9 @@ def test_node_output_summary_decide():
                              posterior=0.91)],
         overrides=["R5_DEGRADED_OR_FAILED_STEP"],
     )
-    s = _node_output_summary("decide", {"decision": decision, "budget": Budget(llm_calls=8)},
-                             "CASE_1")
+    s = _node_output_summary(
+        "decide", {"decision": decision, "budget": Budget(llm_calls=8)}
+    )
     assert s["node"] == "decide"
     assert s["decision"] == "HUMAN_REVIEW"
     assert s["risk_level"] == "HIGH"
@@ -162,7 +163,7 @@ def test_node_output_summary_decide():
 
 def test_node_output_summary_decide_none_decision():
     """decide update 无 decision（理论不出现）→ decision=None 摘要，不抛。"""
-    s = _node_output_summary("decide", {"degraded": True}, "CASE_1")
+    s = _node_output_summary("decide", {"degraded": True})
     assert s["node"] == "decide"
     assert s["degraded"] is True
     assert s["decision"] is None
