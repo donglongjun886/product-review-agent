@@ -202,7 +202,40 @@ docker images
 
 ---
 
-## 7. 排障
+## 7. ⚠️ v4 写入模式：默认 `events_only`（实测踩坑，必读）
+
+Langfuse v4 默认 `LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only`，**旧的 v3 ingestion / 读取 API 全部不可用**：
+
+| 调用 | 结果（本机实测） |
+| --- | --- |
+| `POST /api/public/ingestion`（`trace-create`） | **400** `Event type "trace-create" is not accepted ... when LANGFUSE_MIGRATION_V4_WRITE_MODE is events_only` |
+| `GET /api/public/traces` | **不可用** `This endpoint is not available on deployments running in Langfuse v4 events_only mode` |
+| `POST /api/public/otel/v1/traces`（OTLP/HTTP） | ✅ **200**，写入 MinIO `events/otel/...` → worker → ClickHouse `events_full` |
+
+**结论：接 `product-review-agent` 必须走 v4 路径**，即 Langfuse Python SDK v3+（默认走 OTLP）或
+OpenTelemetry OTLP exporter，不要用旧的 `langfuse.trace()` 直传 ingestion 的写法。
+
+若暂时只能用旧 SDK，可在 `.env` 加一行作为过渡（web 与 worker 都要生效）：
+
+```bash
+LANGFUSE_MIGRATION_V4_WRITE_MODE=dual
+```
+
+然后 `docker compose up -d` 重建 web/worker。`dual` 会同时保留 v3 与 v4 写入路径，代价是数据双写。
+
+**本机已实测的接入参数**：
+
+```bash
+LANGFUSE_HOST=http://localhost:3000
+LANGFUSE_PUBLIC_KEY=pk-lf-pra-local
+LANGFUSE_SECRET_KEY=sk-lf-pra-local
+# OTLP endpoint（SDK 自动使用；手写 exporter 时用）
+# http://localhost:3000/api/public/otel
+```
+
+---
+
+## 8. 排障
 
 | 现象 | 处理 |
 | --- | --- |
