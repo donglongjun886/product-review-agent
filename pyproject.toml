@@ -19,7 +19,9 @@ dependencies = [
 
 [project.optional-dependencies]
 rag = ["qdrant-client", "fastembed"]
-observability = ["langfuse", "opentelemetry-sdk", "opentelemetry-instrumentation-fastapi"]
+# 可观测性（docs/09）：只需 Langfuse Python SDK（v4，内部已带 OTel 依赖）。
+# **不引入 OTel 自动埋点/collector** —— 本项目只做"最小可演示观测闭环"，不铺 OTel 全家桶。
+observability = ["langfuse>=4.15,<5"]
 
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio", "ruff", "httpx"]
