@@ -13,12 +13,17 @@ P-5 口径：只 sweep Evidence 阈值、单参数（0.60..0.90 步 0.05），�
 （agent 的评测侧相似度证据视图；rule / single_call 不读相似度 → 行恒定）。
 
 退出码 0 = 全部档点跑通；任何异常 → 非零退出。CSV 输出含 docs §5.2 七项指标。
+
+数据版本注记（Q11 低风险半）：默认数据为 v1（Phase 1，35 案）；v1 相对 Phase 2 正式集
+属 smoke 级，正式口径为 v2 320 案（docs/02-evaluation.md §8）—— 运行默认 v1 时输出首行
+会打印该标注，防 v1 数字被当正式结论（不翻默认数据：翻默认属行为变更，另行拍板）。
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +38,11 @@ from pra.evaluation.sweep import (
 )
 
 DEFAULT_DATA = "eval_data/v1/cases_v1.jsonl"
+
+
+def _is_default_v1(data_path: str) -> bool:
+    """数据是否 = 脚本默认 v1 文件（Q11：需首行标注 v1 属 smoke 级，勿当正式结论）。"""
+    return os.path.normpath(data_path) == os.path.normpath(DEFAULT_DATA)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -73,6 +83,14 @@ async def _main(argv: list[str] | None = None) -> int:
         schemes=tuple(args.schemes),
     )
 
+    if _is_default_v1(args.data):
+        # Q11 低风险半：v1 默认数字易被当正式结论 —— 输出首行标注数据版本
+        #（v1 = Phase 1 集，相对 Phase 2 正式集属 smoke 级；不翻默认数据）。
+        print(
+            f"[数据版本] {DEFAULT_DATA} = Phase 1 v1 集（35 案，本次跑 {result.total_cases} 案），"
+            "相对 Phase 2 正式集属 smoke 级 —— 正式口径为 v2 320 案"
+            "（docs/02-evaluation.md §8）；以下 v1 数字仅对该数据集成立，勿当正式结论。"
+        )
     print("=" * 100)
     print("商品审核 Agent · Evaluation Phase 2 Evidence Threshold Sweep")
     print("=" * 100)

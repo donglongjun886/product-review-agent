@@ -14,6 +14,12 @@
 快照含确定性元数据（format_version / data_hint / 总案数）供人读，比对只依据
 ``digest`` 与各 scheme 决策序列 —— 同数据重跑 digest 必然一致。
 
+**digest 边界（如实声明）**：``digest`` 只覆盖 **case_id 序 + 决策串**（见
+``canonical_digest``），**不锁 case 内容**（标题/证据文本等输入不在 payload 内）。
+因此本回归是**决策漂移守护**，不是数据守护：手改 case 输入而三方案决策不变时，
+digest 不报 —— 这是设计意图（回归答的是"行为有没有漂移"），不是缺陷；若要锁 case
+内容本身，需另加内容级 digest（域 B P1-1 的 v2 内容锁缺失正是该边界另一侧的缺口）。
+
 本模块不写 eval_data 之外的任何东西；默认基线路径只在 scripts/run_regression.py 中
 声明（可由 --baseline 覆盖；测试一律用 tmp_path，不污染评测数据目录）。
 """
@@ -49,7 +55,11 @@ def _canonical_json(obj) -> str:
 
 
 def canonical_digest(per_case_ids: list[str], decisions: dict[str, list[str]]) -> str:
-    """(case 序, scheme→决策序列) → sha256（deterministic digest）。"""
+    """(case 序, scheme→决策序列) → sha256（deterministic digest）。
+
+    边界：payload **只含 case_id 序 + 决策串，不含任何 case 内容** → digest 是
+    决策漂移守护而非数据守护（手改 case 输入、决策不变时不报；见模块 docstring）。
+    """
     payload = _canonical_json({"per_case_ids": per_case_ids, "decisions": decisions})
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

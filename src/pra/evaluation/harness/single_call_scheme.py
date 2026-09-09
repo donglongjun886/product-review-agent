@@ -36,6 +36,11 @@ prompt（仍不给工具）。extra_context=None 时本模块行为与 Phase 1 *
 按 docstring 的规则消费。**公平性**：预塞的只能是"基础输入外的事实文本"
 （评测世界里可查的政策/先例），不得含 expected 答案 —— 注入键由 mock 显式读取，
 不进 EvalRecord 证据链（单次调用仍无工具/无在库查询）。
+
+**已知泄漏边界（P2-5，仅注释标注）**：``run`` 把整份 case 输入（含图片 url 字面）
+喂给 llm_fn；当前 eval 数据的 image url 含语义段（``eval/viol_*`` / ``logo_*`` 等）。
+现有 mock 不读 url → 无实际影响；**换真实 single-call LLM 前必须先改中性 URL**，
+否则真实模型会从 url 字符串读到类别信号（等同把 GT 类目注入 prompt）。
 """
 
 from __future__ import annotations
@@ -406,6 +411,11 @@ class SingleCallScheme(SchemeRunner):
         return self._extra_context
 
     async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
+        # 快照 = 整份 case 输入（含图片 url 字面）。已知泄漏边界（P2-5）：
+        # 当前 eval 数据的 image url 带语义段（`eval/viol_*` / `logo_*` / `clean_*` /
+        # `bound_*`），本模块的 mock 不读 url（只扫 ocr_text / 表面文本）→ 现无实际影响；
+        # 将来换真实 single-call LLM 前必须改中性 URL，否则模型会从 url 字符串直接
+        # 读到类别信号，等同泄漏 GT 类目（换 real LLM 属本方案待办，见模块 docstring）。
         case_json = case.input.model_dump(mode="json")
         raw = self._llm_fn(case_json)
         if not isinstance(raw, dict) or "decision" not in raw:

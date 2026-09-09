@@ -16,6 +16,13 @@ P-5 已拍板：第一轮**只 sweep Evidence 阈值、单参数**，不做多�
 视图"随阈值变化；**rule 与 single_call_llm 的决策路径不读取图片相似度**（screening 规则
 为词表命中；single-call mock 为表面文本）→ 这两行指标随阈值恒定，属预期，报告注明。
 
+**数据带局限（实证注记，不改数据）**：当前种子世界可观测的相似度权重只落两簇 ——
+{0.72, 0.73} 与 {0.90+}，(0.73, 0.90) 之间无 case。因此档间曲线平**不代表生产阈值
+不敏感**，只说明该数据带无样本可判别；校准结论受数据带限制，不能外推成"生产阈值不
+敏感"或据此回写生产常量（tools_node quality_filter / gate overlay 0.70/0.85 不随 ctx
+变，见上）。被扫参数当前只作用于评测审查员读证据视图；Q4（注入下沉 vs 文档收窄）待
+拍板，本模块只陈述现状与边界，不做该方向决策。
+
 产出：每档阈值的七项指标（Accuracy / Precision / Recall / FPR / FNR /
 human_review_rate / automation_coverage —— docs §5.2）每 scheme 一组；
 另给四曲线要点（FPR / Recall / HRR / Acc vs 阈值）。可导出 CSV（``to_csv_lines``）。
@@ -184,6 +191,12 @@ class ThresholdSweepRunner:
             (
                 "真实图 tools_node quality_filter(0.70) / gate overlay(0.85) 为 pra.agent 模块常量，"
                 "本轮不随 sweep —— agent 档间差异源于评测侧证据视图（报告口径见模块 docstring）。"
+            ),
+            (
+                "数据带局限（实证注记）: 本种子世界相似度权重仅两簇 {0.72,0.73} 与 {0.90+}，"
+                "(0.73,0.90) 无 case —— 曲线平不代表生产阈值不敏感，校准结论受数据带限制；"
+                "被扫参数只作用于评测审查员读证据视图（生产常量不随 ctx 变，不写回；"
+                "Q4 注入下沉 vs 文档收窄待拍板）。"
             ),
         ]
         return result

@@ -10,12 +10,21 @@
      digest，本模块 ``build_rag_context`` 由 EVAL_PRECEDENTS / EVAL_POLICY_CLAUSES 生成），
      **不含 expected 答案**；
    - ``2c`` = AgentScheme 现行为（多步主动调查）。
-   报告给出并排指标与差异行：2b vs 2a = "更多文本"增益；2c vs 2b = "主动调查"增量。
+   报告给出并排指标与差异行。**差异口径诚实化（P2-12，实证注记）**：docs §6 的分解
+   目标（先量化 2b 的"更多文本"增益、再把 2c−2b 归因"主动调查增量"）依赖 2b 腿可激活；
+   实测 v1/v2 全量 2a≡2b（0 差异）——R-2b 升级路径在本评测世界的种子摘要下永远不命中
+   （见 run() 注记），故"更多文本"增益**不可测**；2c−2b 因而 = 2c−2a = **Single-call→
+   Agent 整体差异**（工具 + 多步 + mock 变体 ContextAware 一并替换），**不可分解归因于
+   "主动调查"**。本报告差异行据此口径命名（2c vs 2b 不称"主动调查增量"）。
 
 2. **组件级（同图结构逐组件去掉）**：Full Agent（基线）/ −RAG（无 CaseSearch+
    PolicySearch）/ −MerchantTool / −CaseTool / −ImageTool。实现为**装配层裁剪**：
    ``AgentScheme(allowed_tools=…)`` —— 图工具注册与该方案的 plan tool schema 都只给
    ``全工具 − 被裁组件``（见 harness/agent_scheme.py），判定逻辑不变。
+   **0 决策变化 ≠ 组件无用（P2-13 防误读）**：证据可能被另一组件**同案冗余替代**
+   —— REJECT Gate 的 citable 只要 POLICY_REF 或 CASE_PRECEDENT 之一（gate 判例行），
+   本评测世界 REJECT 案政策齐备 → CaseSearch 证据被 PolicySearch 兜底（−CaseTool 实测
+   0/35 变化），报告在 0 变化组件旁标注冗余替代读法，勿读成"该组件无用"。
 
 **InMemory 种子局限标注（docs §6 前置依赖）**：种子里查不到某工具的证据时，
 −该工具必然无差异、结论失效 —— 本模块对每个组件统计"该组件在评测世界中的证据覆盖"
@@ -274,7 +283,10 @@ class AblationRunner:
             result.notes.append(
                 "2b 预塞文本 = 类目静态判例/政策 digest（build_rag_context，无 expected 答案）；"
                 "R-2b 只在'弱 REJECT 候选 + 自动拒绝判例命中表面词'时升级 —— 现行评测世界政策"
-                "口径为转人工、先例摘要不含表面规避词 → 真实数据上 2b≈2a 属预期，机制由单测覆盖。"
+                "口径为转人工、先例摘要不含表面规避词 → 2b 腿 inert（P2-12 实证）：v1/v2 "
+                "全量实测 2a≡2b（0 差异），'更多文本'增益在本数据上不可测；2c−2b 因而 = "
+                "2c−2a = Single-call→Agent 整体差异（工具+多步+ContextAware mock 一并替换），"
+                "不可分解归因于'主动调查' —— 本报告差异行按此口径命名。"
             )
 
         if component_level:
@@ -383,14 +395,15 @@ def render_ablation_report(result: AblationResult) -> str:
 
     if result.scheme_outcomes:
         _section(
-            "方案级消融（同一数据集；2b−2a=更多文本增益，2c−2b=主动调查增量）",
+            "方案级消融（同一数据集；差异行口径：2b vs 2a 观察'更多文本'增益（2b 腿 inert 时"
+            "不可测）、2c vs 2b = Single-call→Agent 整体差异，非'主动调查'增量 —— 见注记）",
             SCHEME_LEVEL_VARIANTS,
             result.scheme_outcomes,
         )
         add("")
         for label, a_name, b_name in (
-            ("2b vs 2a（'更多文本'增益）", "2a", "2b"),
-            ("2c vs 2b（'主动调查'增量）", "2b", "2c"),
+            ("2b vs 2a（'更多文本'增益观察；2b 腿 inert → 差异不可测，见注记）", "2a", "2b"),
+            ("2c vs 2b（Single-call→Agent 整体差异；非'主动调查'增量，见注记）", "2b", "2c"),
         ):
             if a_name not in result.scheme_outcomes or b_name not in result.scheme_outcomes:
                 continue
@@ -421,9 +434,19 @@ def render_ablation_report(result: AblationResult) -> str:
                 if variant is None:
                     continue
                 _changed, pairs = _decision_diff(full.records, variant.records)
-                add(f"    {COMPONENT_LABELS[name]}: {len(_changed)} 个 case 决策改变")
-                for p in pairs:
-                    add(f"        {p}")
+                if _changed:
+                    add(f"    {COMPONENT_LABELS[name]}: {len(_changed)} 个 case 决策改变")
+                    for p in pairs:
+                        add(f"        {p}")
+                else:
+                    # P2-13 防误读：0 决策变化 ≠ 组件无用 —— 证据可能被另一组件同案冗余替代
+                    #（REJECT Gate 的 citable 只要 POLICY_REF 或 CASE_PRECEDENT 之一；
+                    # 本世界 REJECT 案政策齐备 → CASE_PRECEDENT 被 POLICY_REF 兜底）。
+                    add(
+                        f"    {COMPONENT_LABELS[name]}: 0 个 case 决策改变 —— 勿读成组件无用："
+                        "该组件证据可能被另一组件同案冗余替代（CASE_PRECEDENT 被 POLICY_REF "
+                        "兜底，REJECT Gate 只要二者之一）；须与上方工具覆盖并读。"
+                    )
 
     add("")
     add("=" * 108)
