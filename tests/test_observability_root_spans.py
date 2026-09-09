@@ -376,7 +376,7 @@ async def test_agent_scheme_root_metadata_and_deterministic_uuid5(fake_tracer, m
     root_ctx = fake_tracer.roots[0]
     assert root_ctx.name == "review"
     expected_trace_id = uuid5(
-        NAMESPACE_URL, f"baseline:{case.eval_case_id}:agent"
+        NAMESPACE_URL, f"baseline:{case.eval_case_id}:agent:eval-scripted-reviewer"
     ).hex
     assert root_ctx.trace_id == expected_trace_id
     assert fake_tracer.roots[1].trace_id == expected_trace_id  # 重跑落同一条 trace
@@ -392,6 +392,7 @@ async def test_agent_scheme_root_metadata_and_deterministic_uuid5(fake_tracer, m
         "scene": case.scene,
         "scheme": "agent",
         "experiment": "baseline",
+        "llm_backend": "eval-scripted-reviewer",
         "tool_world": "eval",
         "rag_mode": None,
         "source": "evaluation",
@@ -425,7 +426,7 @@ async def test_agent_scheme_root_metadata_and_deterministic_uuid5(fake_tracer, m
     await AgentScheme().run(case, ctx)
     third = fake_tracer.roots[2]
     assert third.trace_id == uuid5(
-        NAMESPACE_URL, f"prompt-v2:{case.eval_case_id}:agent"
+        NAMESPACE_URL, f"prompt-v2:{case.eval_case_id}:agent:eval-scripted-reviewer"
     ).hex
     assert third.version == "prompt-v2"
     assert third.session_id == "eval-run-1"
@@ -574,3 +575,40 @@ async def test_run_review_default_stub_decision_is_unchanged(monkeypatch) -> Non
     assert result.run_id == run_id
     assert result.review_decision.decision == Decision.HUMAN_REVIEW
     assert "langfuse" not in sys.modules
+
+
+# --------------------------------------------------------------------------------------
+# 3c. 两臂隔离：同 experiment + 同案 + 不同 LLM 后端 → 不同 trace
+#     （修 run_evaluation_real.py 的 scripted 对照臂与 real 臂同 trace_id 的实测缺陷）
+# --------------------------------------------------------------------------------------
+
+
+def test_root_trace_id_is_scoped_by_llm_backend() -> None:
+    """trace_id 必须含 LLM 后端名 —— 否则 scripted 对照臂会污染 real trace。
+
+    实测背景（2026-09-09）：`run_evaluation_real.py` 同进程跑 scripted + real 两臂、
+    两臂 experiment 相同；旧公式 `uuid5(experiment:case:agent)` 让两臂落进**同一条
+    trace**（每 trace 出现 2 个 root、generation 交织，按 trace 汇总 token 会混入
+    0-token 的桩 generation）。
+    """
+    from pra.agent.state import build_initial_state
+    from pra.evaluation.harness.agent_scheme import _root_trace_context
+
+    case = _v2_case()
+    ctx = EvalContext(tool_world="eval")
+    state = build_initial_state(case.input)
+
+    scripted = _root_trace_context(
+        case, ctx, state, backend_name="eval-scripted-reviewer"
+    )
+    real = _root_trace_context(
+        case, ctx, state, backend_name="litellm-deepseek/deepseek-chat"
+    )
+
+    assert scripted.trace_id != real.trace_id  # 两臂不混
+    assert scripted.metadata["llm_backend"] == "eval-scripted-reviewer"
+    assert real.metadata["llm_backend"] == "litellm-deepseek/deepseek-chat"
+    # 除 trace_id / llm_backend 外，其余关联信息一致（同一批 case 可横向对比）
+    assert {k: v for k, v in scripted.metadata.items() if k != "llm_backend"} == {
+        k: v for k, v in real.metadata.items() if k != "llm_backend"
+    }

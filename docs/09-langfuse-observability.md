@@ -181,8 +181,13 @@ Gate **不是 Graph Node**：`run_decision_overlay`（`src/pra/agent/guardrails/
 - **只给 `agent` scheme 打 trace**：`rule` / `single_call_llm` 无图执行（无节点、无
   LLM 壳、无工具循环），**不伪造空 trace**——否则 UI 上会出现一堆无内容的 trace，
   反而污染对比；
-- 评测路径 `trace_id = uuid5(experiment:eval_case_id:scheme)` —— **确定性**：
-  同 experiment + 同案 + 同方案重跑**落同一条 trace**（可覆盖、可对比，不产生重复）；
+- 评测路径 `trace_id = uuid5(experiment:eval_case_id:scheme:llm_backend)` —— **确定性**：
+  同 experiment + 同案 + 同方案 + **同 LLM 后端**重跑**落同一条 trace**（可覆盖、可对比，
+  不产生重复）。**`llm_backend` 是 2026-09-09 实测后补上的**：`run_evaluation_real.py`
+  会在同一进程对同一批 case 跑 scripted 对照臂 + real 臂且 experiment 相同 —— 旧公式
+  `uuid5(experiment:case:scheme)` 会让**两臂落进同一条 trace**（实测每 trace 2 个 root、
+  generation 交织、按 trace 汇总 token 混入 0-token 桩 generation）。补后端名后两臂各自
+  成 trace（实测同 `EC_0001` → 2 条独立 trace，metadata `llm_backend` 可区分）；
 - `session_id` = 一次 evaluation run 的标识 → 把该 run 的 320 条 trace 聚成一个会话，
   UI 按 session 过滤即「这一轮评测的全部案件」；
 - 采样：`PRA_LANGFUSE_SAMPLE`，**默认 1.0（全采）**；判定必须**确定性** ——
@@ -453,6 +458,23 @@ PRA_LANGFUSE_SESSION=eval-demo-1 \
 
 `scripts/langfuse_smoke.py` / `scripts/demo_langfuse_trace.py` /
 `tests/test_observability_eval_cli.py` 等已落地（详见 git log）。
+
+**真实 LLM（DeepSeek）端到端（2026-09-09，`run_evaluation_real.py --limit 3`，session
+`real-llm-3`）**：3 trace / 150 observation / **45 generation**（real 臂 24 + scripted 对照臂 21）；
+**real 臂 24 条 generation 的 `usageDetails` 全部非空**：input 合计 50,973（mean 2,123.88）、
+output 合计 8,396（mean 349.83）、**total 合计 59,369（mean 2,473.71）**；**latency 1.727–4.285s
+（mean 2.72s）**；`model=litellm-deepseek/deepseek-chat`。与脚本打印的 `tok` 均值 ×3 =
+59,369.01 **精确一致**，latency 合计 65.4s ↔ 三案墙钟 65.6s 一致。
+对照同批 scripted 臂：`usageDetails` 非空 **0/21**、token 合计 **0**、latency 18 条 `None` + 3 条
+0.001s → **桩路径"token=0 / latency≈0"是事实，real 路径确实产出非零 token 与秒级 latency**。
+（成本：Langfuse 未算 —— `litellm-deepseek/deepseek-chat` 不在其定价表内，`costDetails={}`；
+**不编造成本数字**。）
+
+**实测缺陷与修复（两臂同 trace_id）**：上述 demo 暴露出 `run_evaluation_real.py` 的 scripted
+对照臂与 real 臂因 experiment 相同、旧 trace_id 公式不含后端名而**落进同一条 trace**（每 trace
+2 个 root、generation 交织）。修复：trace_id 纳入 `llm_backend`（§5）。复验（`--limit 1`，
+session `real-llm-fix-1`）：同一 `EC_0001` → **2 条独立 trace**（`eval-scripted-reviewer` /
+`litellm-deepseek/deepseek-chat`），metadata `llm_backend` 可区分，58 observation 不再交织。
 
 **commit 链**（可引用）：
 

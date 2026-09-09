@@ -1186,14 +1186,22 @@ def _budget_hit_dim_from_snapshot(budget) -> str | None:
 
 
 def _root_trace_context(
-    case: EvalCase, ctx: EvalContext, initial_state: dict
+    case: EvalCase, ctx: EvalContext, initial_state: dict, *, backend_name: str = "unknown"
 ) -> TraceContext:
     """评测路径 root trace 的关联信息（docs/09 §4.1 落点 3 / §5）。
 
-    ``trace_id = uuid5(NAMESPACE_URL, f"{experiment}:{eval_case_id}:agent")`` ——
-    **确定性**：同 experiment + 同案 + 同方案重跑落同一条 trace（可覆盖、可对比，
-    不产生重复）；``session_id`` 取 ``PRA_LANGFUSE_SESSION``（一次评测 run 一个值，
-    把整轮 320 条 trace 聚成一个会话；缺省 None）；``version`` = experiment 名。
+    ``trace_id = uuid5(NAMESPACE_URL, f"{experiment}:{eval_case_id}:agent:{backend_name}")``
+    —— **确定性**：同 experiment + 同案 + 同方案 + **同 LLM 后端**重跑落同一条 trace
+    （可覆盖、可对比，不产生重复）。
+
+    **为什么把 ``backend_name`` 纳入 trace_id**：``run_evaluation_real.py`` 会在同一
+    进程里对同一批 case 跑 **scripted 对照臂 + real 臂**（两臂 experiment 相同）——
+    若 trace_id 不含后端名，两臂会**落进同一条 trace**（实测每 trace 出现 2 个 root
+    observation、real/scripted generation 交织，按 trace 汇总 token 会混入 0-token 的
+    桩 generation）。纳入后端名后两臂各自成 trace，且 scripted 臂的确定性不变。
+
+    ``session_id`` 取 ``PRA_LANGFUSE_SESSION``（一次评测 run 一个值，把整轮 320 条
+    trace 聚成一个会话；缺省 None）；``version`` = experiment 名。
     只读：不写 state、不参与任何判定。
     """
     experiment = experiment_name()
@@ -1203,6 +1211,7 @@ def _root_trace_context(
         "scene": case.scene,
         "scheme": "agent",
         "experiment": experiment,
+        "llm_backend": backend_name,
         "tool_world": ctx.tool_world,
         "rag_mode": ctx.rag_mode,
         "source": "evaluation",
@@ -1219,7 +1228,9 @@ def _root_trace_context(
     if ctx.tool_world:
         tags.append(f"tool_world:{ctx.tool_world}")
     return TraceContext(
-        trace_id=uuid5(NAMESPACE_URL, f"{experiment}:{case.eval_case_id}:agent").hex,
+        trace_id=uuid5(
+            NAMESPACE_URL, f"{experiment}:{case.eval_case_id}:agent:{backend_name}"
+        ).hex,
         name="review",
         session_id=session_id(),
         version=experiment,
@@ -1357,10 +1368,13 @@ class AgentScheme(SchemeRunner):
                 # 评测侧预算覆盖（real 放宽 max_latency_ms / 调 max_llm_calls 档用；
                 # 键 = BudgetLimits 字段名；None 分支原样返回）
                 initial_state = self._apply_budget_limits(initial_state, self._budget_limits)
-            # Root trace（docs/09 §4.1 落点 3）：每案一条，trace_id 确定性 uuid5；
+            # Root trace（docs/09 §4.1 落点 3）：每案一条，trace_id 确定性 uuid5
+            # （含 LLM 后端名 —— scripted 对照臂与 real 臂各自成 trace）；
             # **不 per-case flush**（320 次太慢）—— 由评测入口整轮结束后
             # ``tracing.flush_tracer()`` 统一刷出（S5 CLI 收尾调用）。
-            root_ctx = _root_trace_context(case, ctx, initial_state)
+            root_ctx = _root_trace_context(
+                case, ctx, initial_state, backend_name=getattr(backend, "name", "unknown")
+            )
             with get_tracer().trace_root(root_ctx) as root:
                 final_state = await graph.ainvoke(
                     initial_state,
