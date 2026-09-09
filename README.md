@@ -64,7 +64,9 @@ src/pra/
 │                 regression（三方案决策序列 hash 比对基线）
 ├── rag/          Policy KB + Case KB（RAG_CASE_ 前缀、与评测 GT 隔离）：BM25 / Vector /
 │                 Hybrid 三模式检索；实现 tools 层 PolicyIndex / CaseIndex Protocol
-│                 （Tool 层零改动，向量库替换经工厂注入点接入）
+│                 （Tool 层零改动）。默认索引 = numpy 内存 + MockHash embedding（确定性、
+│                 无外部依赖）；语义路 = BgeEmbedder（bge-small-zh-v1.5）+ Qdrant 索引，
+│                 经 factory `backend="qdrant"` 显式开启（docs/06）
 └── common/       通用工具：雪花 ID / JSON 工具 / 错误码
 
 docs/         设计文档（见「文档索引」）
@@ -72,6 +74,8 @@ migrations/   MySQL 核心表 DDL：001_review_core_tables.sql（5 表）/ 002_r
 scripts/      demo_walkthrough.py（端到端走查）/ demo_api.py（执行器演示）/
               run_evaluation.py（三方案评测）/ run_ablation.py / run_sweep.py /
               run_regression.py（回归比对）/ run_rag_demo.py（RAG 检索演示）/
+              run_rag_phase2_demo.py（RAG 语义路演示：BGE + Qdrant）/
+              run_rag_eval.py（RAG 检索质量评测）/ build_rag_corpus.py（语料构建）/
               run_evaluation_real.py（真实 LLM 评测对照，需 API key）/ eval_dataset_gen.py
 tests/        pytest 用例（确定性 mock，无网络 / API key：screening / evaluation / rag / agent / api / infra）
 ```
@@ -125,6 +129,25 @@ uv run python scripts/run_rag_demo.py
 # 回归：三方案决策序列 sha256 与基线快照比对（基线缺失时首次自动记录；此后一致输出 PASS）
 uv run python scripts/run_regression.py
 ```
+
+### RAG 语义路（可选：Qdrant + 本地 BGE embedding）
+
+默认 RAG 路径是**确定性 mock embedding**（词面 hash，无外部依赖、可逐字节回归）；语义路
+需额外依赖 + 本地模型缓存（首次联网下载 onnx 模型约 90MB）：
+
+```bash
+uv sync --extra rag
+
+# 三模式并排 + 「语义 vs 词面」同义改写对比 + 标注 probe 的 Recall@3（不预设 Hybrid 最优）
+uv run python scripts/run_rag_phase2_demo.py
+uv run python scripts/run_rag_phase2_demo.py --top-k 5 --mode hybrid
+```
+
+模型缓存目录用 `PRA_EMBED_CACHE_DIR` 指定（缺省走 fastembed 默认目录）；国内网络可先
+`export HF_ENDPOINT=https://hf-mirror.com`。**缓存缺失时脚本带指引退出、绝不静默回退 mock**。
+**结论边界**见 [docs/06](docs/06-rag-phase2-qdrant-bge.md) §5：单模型（bge-small-zh-v1.5）
+× 小语料（24/67 条）的定向演示与 probe 观测，非大规模评测；Qdrant 进程内模式非分布式部署；
+确定性回归基线恒以默认 mock 路径为准。
 
 ### Real LLM 评测（需 API key，真实调用有费用）
 
@@ -222,6 +245,11 @@ uv run pytest tests/ -q   # 全确定性 mock，无网络 / 无 API key，CI 可
 agent guardrails（budget / converge / errors / gate / llm_shell / scripted_llm）、api routes、
 persist 落库等。
 
+两类用例依赖外部条件、**不可用时自动 skip**（CI 与外部读者均可直接复用）：真库冒烟
+`tests/test_infra_persist_smoke.py` 需本机 MySQL 可达；BGE 真模型 4 用例需模型缓存
+（环境变量 `PRA_RAG2_MODEL_CACHE`，缺省仓库内 `.cache/model_cache`，缺失时整组跳过，
+绝不联网下载）。
+
 ## 关键设计决策速查
 
 - **LLM 只提案、确定性 Gate 把关**：decide 节点先让 LLM 产 `DecisionProposal` 提案，
@@ -261,15 +289,17 @@ persist 落库等。
 - [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测方案：三方案定义（公平性前提）/ 指标口径（含 abstention）/ Ablation / Threshold Sweep / 里程碑与阶段验收（§8）
 - [docs/03-decisions.md](docs/03-decisions.md) —— T-1~T-12 参数与语义拍板表（Decision Gate 口径等）
 - [docs/04-graph-design.md](docs/04-graph-design.md) —— LangGraph StateGraph 正式设计（graph.py 实现前的最后设计）
+- [docs/05-visual-similarity-gate-proposal.md](docs/05-visual-similarity-gate-proposal.md) —— 视觉相似度 Gate 兜底设计提案（②b，未实施）
+- [docs/06-rag-phase2-qdrant-bge.md](docs/06-rag-phase2-qdrant-bge.md) —— RAG Phase 2：Qdrant 向量库 + 本地 BGE embedding（选型 / 装配 / 验收 / 结论边界 / 实测记录）
 
 ## Roadmap（方向与动机）
 
 本节只列**方向与动机**，不标注完成状态、不引用进度事实；评测向的阶段性里程碑与验收规划以
 [docs/02-evaluation.md](docs/02-evaluation.md) §8 为准。
 
-- **RAG 向量库化（语义检索）**：以真实 embedding + 向量库（Qdrant）替换确定性 mock embedding；
-  动机——mock 只验证检索链路与可重放性（docs/02 §7.2 边界），语义检索价值留待向量库化后验证；
-  `pra.rag.factory` 注入点与 pyproject `rag` extra 已为此预留装配位。
+- **RAG 语义检索的口径扩展**：动机——Phase 2 已把语义路接上（Qdrant + BGE，见技术栈），
+  但结论边界是单模型 × 小语料定向演示（docs/06 §5）；扩大语料与模型对比、补检索指令
+  （bge query instruction）需要独立评测口径，暂不做能力外推。
 - **MQ 异步 worker + 人工审核队列**：动机——HTTP 同步受理受吞吐 / 并发限制，异步化（含 MySQL
   Checkpointer、Redis 幂等）支撑接入解耦、削峰与事件溯源（docs/00 §9.3）。
 - **可观测性**：Langfuse（LLM 调用级）+ OpenTelemetry（业务链路 trace）；动机——真实 LLM 接入后
@@ -287,6 +317,6 @@ persist 落库等。
 | 领域/校验 | Pydantic v2（契约 DTO，`extra="forbid"`） | 已用 |
 | LLM | `LLMBackend` 抽象：默认确定性 scripted 桩（无 key 可跑）；`LiteLLMBackend`（litellm 真后端，四节点完整 prompt）经 `set_llm_backend`/`build_agent_graph(llm=)` 注入 | 已用（桩 + 真后端） |
 | 评测 | `pra.evaluation`：三方案 harness + business/abstention 指标 + ablation + sweep + regression（确定性重放） | 已用 |
-| RAG | `pra.rag`：Policy KB + Case KB，BM25 / Vector / Hybrid（numpy + mock embedding，无外部依赖） | 已用（确定性 mock embedding；语义向量化见 Roadmap） |
+| RAG | `pra.rag`：Policy KB + Case KB，BM25 / Vector / Hybrid；默认 numpy 内存索引 + MockHash embedding（无外部依赖），语义路 = Qdrant（进程内 / 本地持久 / 远端 url）+ `BgeEmbedder`（bge-small-zh-v1.5 · fastembed/onnx） | 已用（默认确定性 mock；语义路经 `--extra rag` + `backend="qdrant"` 显式开启，未接 HTTP 主流程） |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL 五表（DDL：migrations/001…）；Alembic 依赖就绪 | 已用（DDL 经 migrations/ 直执行） |
-| 规划 extras | Redis 幂等 / MQ worker；RAG 向量库化：Qdrant + 本地 embedding；可观测：Langfuse + OpenTelemetry | 规划（pyproject optional groups 已声明） |
+| 规划 extras | Redis 幂等 / MQ worker；可观测：Langfuse + OpenTelemetry | 规划（pyproject optional groups 已声明） |
