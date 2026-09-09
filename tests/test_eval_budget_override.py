@@ -166,9 +166,11 @@ async def test_override_isolated_to_injected_arm_scripted_control_stays_default(
 async def test_e2e_nonconverging_case_interception_follows_cap_12_not_10():
     """确定性不收敛案（v2 EC_V2_0260：脚本桩下持续烧预算）—— 截胡次数 == 生效上限。
 
-    v2 全量 320 案中有 28 案（EC_V2_0145-0160 / EC_V2_0260-0280 段）在默认预算 10
-    下确定性打满后被转人工（R3_BUDGET_EXHAUSTED）；把上限抬到 12/15 它们仍烧满新
-    上限 → 归因是"收敛逻辑差"而非"预算紧"。此处用 EC_V2_0260 端到端证明**覆盖后的
+    v2 全量 320 案中恰有 28 案（EC_V2_0145/0150/0155/0160、EC_V2_0260-0288（步长 4）、
+    EC_V2_0305-0320；scene = evasion/multi-signal/boundary）在默认预算 10 下确定性
+    打满后被转人工（R3_BUDGET_EXHAUSTED）；28 案全量 sweep（cap 10/12/15，结果见
+    pra_budget_work/sweep_cap_table.{json,md}）显示抬到 12/15 后仍 28/28 烧满新上限
+    → 归因是"收敛逻辑差"而非"预算紧"。此处用 EC_V2_0260 端到端证明**覆盖后的
     上限才是截胡边界**：默认 10 → 恰好第 10 次截胡；cap 12 → 第 10、11 次不截胡、
     第 12 次才截胡；cap 15 → 第 15 次才截胡。
     """
