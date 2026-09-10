@@ -394,11 +394,11 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
     },
 }
 
-# 先例库种子（CaseSearchTool：category 精确 + risk_type 交叠 + similarity 排序）
+# 先例库种子（CaseSearchTool：category 精确 + risk_type 交叠 + retrieval_score 排序）
 EVAL_PRECEDENTS: list[dict[str, Any]] = [
     {
         "case_id": "CASE_1832",
-        "similarity": 0.86,
+        "retrieval_score": 0.86,
         "decision": "REJECT",
         "risk_level": "HIGH",
         "risk_type": ["POTENTIAL_IP_RISK"],
@@ -409,7 +409,7 @@ EVAL_PRECEDENTS: list[dict[str, Any]] = [
     },
     {
         "case_id": "CASE_0911",
-        "similarity": 0.31,
+        "retrieval_score": 0.31,
         "decision": "PASS",
         "risk_level": "NONE",
         "risk_type": [],
@@ -420,7 +420,7 @@ EVAL_PRECEDENTS: list[dict[str, Any]] = [
     },
     {
         "case_id": "CASE_2033",
-        "similarity": 0.88,
+        "retrieval_score": 0.88,
         "decision": "REJECT",
         "risk_level": "HIGH",
         "risk_type": ["POTENTIAL_IP_RISK"],
@@ -431,7 +431,7 @@ EVAL_PRECEDENTS: list[dict[str, Any]] = [
     },
     {
         "case_id": "CASE_2120",
-        "similarity": 0.84,
+        "retrieval_score": 0.84,
         "decision": "REJECT",
         "risk_level": "HIGH",
         "risk_type": ["POTENTIAL_IP_RISK"],

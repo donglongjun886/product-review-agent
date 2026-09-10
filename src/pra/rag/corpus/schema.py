@@ -5,8 +5,8 @@
   ``PolicyClauseHit``：policy_id + version + clause_id + title + text + category +
   risk_type + status + effective_date）。同 policy_id 的不同 version 行共存
   （旧版 status=EXPIRED / 新版 status=EFFECTIVE）→ 版本有效性过滤的测试面。
-- ``CasePrecedentRecord``：Case KB 一条**先例**（对齐 ``CaseHit`` 除 similarity
-  —— similarity 是检索期计算值，不入库，见 rag/retrieval.py）。
+- ``CasePrecedentRecord``：Case KB 一条**先例**（对齐 ``CaseHit`` 除 ``retrieval_score``
+  —— ``retrieval_score`` 是检索期计算值，不入库，见 rag/retrieval.py）。
 - 顶层信封（``PolicyCorpus`` / ``CaseCorpus``）：``meta`` 承载来源/隔离声明等
   人读元数据（JSON 无注释，故用 meta 字段记录）；``records`` 为数据本体。
 
@@ -63,7 +63,7 @@ class PolicyCorpus(_RowModel):
 
 
 class CasePrecedentRecord(_RowModel):
-    """Case KB 单条先例记录（对齐 CaseHit 除 similarity —— 检索期计算，不入库）。"""
+    """Case KB 单条先例记录（对齐 CaseHit 除 ``retrieval_score`` —— 检索期计算，不入库）。"""
 
     case_id: str = Field(description="先例主键（脱敏；RAG_CASE_ 前缀，与 eval GT 隔离）")
     category: str = Field(description="商品类目（元数据过滤用）")

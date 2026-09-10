@@ -2,12 +2,12 @@
 
 对齐 docs/06-rag-phase2-qdrant-bge.md §2.1/§2.3/§4 验收 3/6：
 1. **同构等价（核心）**：同一 corpus rows + 同一 embedder（MockHash）下，qdrant 与
-   local（Rag*Index）两索引的 ``search`` 返回**同序同 id**；case 的 similarity
+   local（Rag*Index）两索引的 ``search`` 返回**同序同 id**；case 的 retrieval_score
    允许 ulp 级浮点尾差（qdrant COSINE 存 float32 vs 纯 Python float64 余弦，
    实测偏差 ~1e-8；个别恰好跨 6 位取整边界时显示差 ≤1e-6 → 断言 ``abs <= 1e-6``）。
    mode 覆盖 hybrid / vector / bm25。
 2. 确定性：同索引同 query 两次调用结果相等（同输入同输出）。
-3. 协议形状：返回 PolicyClauseHit / CaseHit、similarity ∈ [0,1]、Top-K ≤ top_k。
+3. 协议形状：返回 PolicyClauseHit / CaseHit、retrieval_score ∈ [0,1]、Top-K ≤ top_k。
 4. 隔离（R-4）：真实 Case KB 命中 case_id 均为 RAG_CASE_ 前缀。
 5. 元数据/版本过滤语义与 local 逐条一致（EXPIRED 排除 / 全类目命中 / category /
    risk_type 交叠）。
@@ -143,8 +143,8 @@ async def test_case_qdrant_equivalent_to_local(mode: str) -> None:
         # （实测 ~1e-8；个别恰跨 6 位取整边界时显示差 = 相邻两位小数 ≈1e-6，docs/06
         # §2.1 同构口径）。两值均已 6 位取整：diff 先 round 清二进制表示 ulp 再断 ≤1e-6。
         for a, b in zip(lh, qh):
-            assert round(abs(a.similarity - b.similarity), 9) <= 1e-6, (
-                a.case_id, a.similarity, b.similarity
+            assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= 1e-6, (
+                a.case_id, a.retrieval_score, b.retrieval_score
             )
 
 
@@ -169,7 +169,7 @@ async def test_qdrant_deterministic_same_index_twice(mode: str) -> None:
         else:
             a = await idx.search("无品牌高相似", CaseSearchFilters(), 5)
             b = await idx.search("无品牌高相似", CaseSearchFilters(), 5)
-            assert [(h.case_id, h.similarity) for h in a] == [(h.case_id, h.similarity) for h in b]
+            assert [(h.case_id, h.retrieval_score) for h in a] == [(h.case_id, h.retrieval_score) for h in b]
 
 
 def test_qdrant_missing_client_raises_runtime_error(monkeypatch) -> None:
@@ -197,11 +197,11 @@ async def test_qdrant_hit_types_and_topk_shape() -> None:
     ph = await p_idx.search("仿冒 外观模仿", PolicySearchFilters(), top_k=3, effective_only=True)
     assert ph and all(isinstance(h, PolicyClauseHit) for h in ph)
     assert len(ph) <= 3
-    # case 协议形状：CaseHit、similarity ∈ [0,1]、Top-K ≤ top_k
+    # case 协议形状：CaseHit、retrieval_score ∈ [0,1]、Top-K ≤ top_k
     ch = await c_idx.search("无品牌高相似", CaseSearchFilters(), top_k=10)
     assert ch and all(isinstance(h, CaseHit) for h in ch)
     assert len(ch) <= 10
-    assert all(0.0 <= h.similarity <= 1.0 for h in ch)
+    assert all(0.0 <= h.retrieval_score <= 1.0 for h in ch)
 
 
 async def test_qdrant_case_kb_isolation_rag_prefix() -> None:

@@ -11,7 +11,7 @@
    （mode 可切换，R-6：不预设 Hybrid 最优 —— 报告如实并排，由 Evaluation 实验回答）；
 2. 经真实 Tool（PolicySearchTool / CaseSearchTool 注入 RAG 索引）检索后生成的
    证据引用（POLICY_REF weight=0.9 / ref_id=clause_id；CASE_PRECEDENT
-   weight=similarity / ref_id=case_id —— 与 InMemory 世界同一引用格式）。
+   weight=retrieval_score / ref_id=case_id —— 与 InMemory 世界同一引用格式）。
 
 全链路确定性：无网络、无真 LLM、固定 corpus + mock embedding；同输入可重放。
 """
@@ -80,7 +80,7 @@ async def _case_table(query: str, top_k: int) -> None:
         for h in hits:
             tags = "/".join(t.value for t in h.risk_type) or "-"
             cells.append(
-                f"{h.case_id} sim={h.similarity:.3f} {h.decision.value}/{h.risk_level.value}[{tags}] {_clip(h.summary, 40)}"
+                f"{h.case_id} sim={h.retrieval_score:.3f} {h.decision.value}/{h.risk_level.value}[{tags}] {_clip(h.summary, 40)}"
             )
         print(f"  [{mode:<7}] " + (" | ".join(cells) if cells else "(无命中)"))
 

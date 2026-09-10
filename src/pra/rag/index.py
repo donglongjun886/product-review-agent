@@ -4,7 +4,7 @@
 - ``RagPolicyIndex`` 实现 ``PolicyIndex.search(query, filters, top_k, effective_only)``，
   返回 ``list[PolicyClauseHit]``（与 InMemoryPolicyIndex 同型，可 model_validate）；
 - ``RagCaseIndex`` 实现 ``CaseIndex.search(query, filters, top_k)``，
-  返回 ``list[CaseHit]``（similarity 为检索期融合分 0~1，同 InMemory 的种子相似度
+  返回 ``list[CaseHit]``（retrieval_score 为检索期分：bm25/vector 归一化分或 hybrid 的 RRF 分，同 InMemory 的种子检索分
   语义 —— 排序 + 证据 weight 用）。
 
 与 InMemory 的差异（这正是 RAG 的意义）：query **参与匹配** —— 元数据过滤
@@ -186,7 +186,7 @@ class RagCaseIndex:
                 CaseHit.model_validate(
                     {
                         **row.model_dump(mode="json"),
-                        "similarity": h.score,  # 检索期融合分 → CaseHit.similarity
+                        "retrieval_score": h.score,  # 检索期融合分 → CaseHit.retrieval_score
                     }
                 )
             )

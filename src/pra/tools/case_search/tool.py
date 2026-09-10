@@ -6,13 +6,19 @@
 分层（依赖倒置）：
 
 - ``CaseIndex``（Protocol）：窄接口 —— 混合检索（BM25 + 向量融合、元数据过滤、
-  粗召回 Top-50 → rerank Top-K，《00》§6.3）的查询面。返回按相似度降序的命中。
+  粗召回 Top-50 → rerank Top-K，《00》§6.3）的查询面。返回按 ``retrieval_score``
+  降序的命中。
 - ``InMemoryCaseIndex``：**Mock 默认实现**（显式标注，仅供开发/测试/演示）。
-  只做元数据过滤（category / risk_type）+ 按种子 similarity 排序截断，**不做真实
-  语义检索**（真实 BM25/向量/rerank 在 rag 阶段接入，替换同一接口）。
+  只做元数据过滤（category / risk_type）+ 按种子 ``retrieval_score`` 排序截断，
+  **不做真实语义检索**（真实混合检索在 rag 阶段接入，替换同一接口）。
 
-本工具不含业务判定：每个 hit → 1 条 CASE_PRECEDENT 证据（weight=similarity、
+本工具不含业务判定：每个 hit → 1 条 CASE_PRECEDENT 证据（weight=retrieval_score、
 ref_id=case_id 必填，可追溯），是否采信先例归 reevaluate/decide。
+
+``retrieval_score`` 口径（docs/10 §0 拍板 C1，**勿误读**）：它是**检索分，不是语义相似度**。
+``bm25`` / ``vector`` 模式下 = 该模式的归一化分（0~1）；**hybrid 模式下 = RRF 融合分**
+（``Σ 1/(k+rank)``）—— 禁止在任何文档/注释/报告里把它表述成「语义相似度」。取值域仍恒
+⊂ [0,1]（RRF 每项 ≤ 1/(k+1)，k≥1），故 ``CaseHit`` 保留 ``ge=0, le=1`` 约束不变。
 """
 
 from __future__ import annotations
@@ -44,7 +50,14 @@ class CaseHit(BaseModel):
     """单个先例命中（§5.5 result.data.hits[] 元素；DB ``case_precedent``）。"""
 
     case_id: str = Field(description="回案库引用主键（脱敏文本只含摘要，§5.5）")
-    similarity: float = Field(ge=0.0, le=1.0, description="与查询的相似度")
+    retrieval_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "检索分（**不是语义相似度**）：bm25/vector 模式 = 该模式归一化分；"
+            "hybrid 模式 = RRF 融合分 Σ1/(k+rank)（docs/10 §0 C1）"
+        ),
+    )
     decision: Decision = Field(description="人工裁决：PASS / REJECT / HUMAN_REVIEW")
     risk_level: RiskLevel = Field(default=RiskLevel.NONE)
     risk_type: list[RiskType] = Field(default_factory=list)
@@ -62,7 +75,7 @@ class CaseIndex(Protocol):
 _DEFAULT_PRECEDENTS: list[dict[str, Any]] = [
     {
         "case_id": "CASE_1832",
-        "similarity": 0.86,
+        "retrieval_score": 0.86,
         "decision": "REJECT",
         "risk_level": "HIGH",
         "risk_type": ["POTENTIAL_IP_RISK"],
@@ -73,7 +86,7 @@ _DEFAULT_PRECEDENTS: list[dict[str, Any]] = [
     },
     {
         "case_id": "CASE_0911",
-        "similarity": 0.31,
+        "retrieval_score": 0.31,
         "decision": "PASS",
         "risk_level": "NONE",
         "risk_type": [],
@@ -88,9 +101,9 @@ _DEFAULT_PRECEDENTS: list[dict[str, Any]] = [
 class InMemoryCaseIndex:
     """CaseIndex 的 Mock 默认实现（显式标注，仅供开发/测试/演示）。
 
-    检索 = 元数据过滤（category 精确 / risk_type 交叠）+ 按种子 similarity 降序 +
-    top_k 截断；**query 不参与匹配**（种子相似度即最终排序值），真实语义检索待
-    rag 阶段实现同一接口。
+    检索 = 元数据过滤（category 精确 / risk_type 交叠）+ 按种子 ``retrieval_score``
+    降序 + top_k 截断；**query 不参与匹配**（种子检索分即最终排序值），真实混合检索
+    待 rag 阶段实现同一接口。
     """
 
     def __init__(self, precedents: list[dict[str, Any]] | None = None) -> None:
@@ -104,7 +117,7 @@ class InMemoryCaseIndex:
         if filters.risk_type:
             wanted = set(filters.risk_type)
             rows = [r for r in rows if wanted & set(r.get("risk_type", []))]
-        ranked = sorted(rows, key=lambda r: r.get("similarity", 0.0), reverse=True)
+        ranked = sorted(rows, key=lambda r: r.get("retrieval_score", 0.0), reverse=True)
         return [CaseHit.model_validate(r) for r in ranked[:top_k]]
 
 
@@ -124,7 +137,7 @@ class CaseSearchArgs(ToolArgs):
 class CaseSearchResult(ToolResult):
     """CaseSearchTool 出参信封 + 负载（§5.5 result.data.hits）。"""
 
-    hits: list[CaseHit] = Field(default_factory=list, description="按相似度降序的 Top-K 先例")
+    hits: list[CaseHit] = Field(default_factory=list, description="按检索分降序的 Top-K 先例")
 
 
 class CaseSearchTool:
@@ -144,7 +157,8 @@ class CaseSearchTool:
     def to_evidence(self, result: CaseSearchResult) -> list[Evidence]:
         """结果 → Evidence（§5.5 → Evidence 列）：每个 hit 1 条 CASE_PRECEDENT。
 
-        weight=similarity（相似度即证据强度）；``ref_id=case_id`` **必填**
+        weight=retrieval_score（检索分即证据强度；**不要**把它读成语义相似度，
+        docs/10 §0 C1）；``ref_id=case_id`` **必填**
         （RAG 可追溯引用，§5.5 /《00》§6.3）；``policy_refs`` 等信息留待后续
         Evidence.extra（契约扩展）承载，value 只给决策参照摘要。
         """
@@ -156,7 +170,7 @@ class CaseSearchTool:
                     type=CASE_PRECEDENT_TYPE,
                     source=self.name,
                     value=f"{h.case_id} 高度相似 → {h.decision.value}（{risk_types}）",
-                    weight=h.similarity,
+                    weight=h.retrieval_score,
                     ref_id=h.case_id,
                 )
             )

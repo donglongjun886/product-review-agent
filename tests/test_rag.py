@@ -141,8 +141,8 @@ async def test_case_retrieval_hits_relevant_precedent() -> None:
     assert any(h.case_id == _SHOE_FLAGSHIP_CASE for h in hits), (
         f"女鞋先例检索应含 demo 改写旗舰案 {_SHOE_FLAGSHIP_CASE}"
     )
-    # similarity 为检索期融合分（0~1），可作 CASE_PRECEDENT 证据 weight
-    assert all(0.0 <= h.similarity <= 1.0 for h in hits)
+    # retrieval_score 为检索期分（0~1），可作 CASE_PRECEDENT 证据 weight
+    assert all(0.0 <= h.retrieval_score <= 1.0 for h in hits)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ async def test_three_modes_switchable() -> None:
         assert isinstance(c_idx, RagCaseIndex) and c_idx.mode == mode
         c_hits = await c_idx.search(q_case, CaseSearchFilters(), top_k=5)
         assert c_hits, f"case mode={mode} 应返回结果"
-        assert all(0.0 <= h.similarity <= 1.0 for h in c_hits)
+        assert all(0.0 <= h.retrieval_score <= 1.0 for h in c_hits)
 
 
 def test_hybrid_fusion_weights_effective() -> None:
@@ -265,7 +265,7 @@ async def test_retrieval_deterministic() -> None:
         else:
             ha = await idx_a.search(q, filters, top_k=top_k)
             hb = await idx_b.search(q, filters, top_k=top_k)
-            assert [(h.case_id, h.similarity) for h in ha] == [(h.case_id, h.similarity) for h in hb]
+            assert [(h.case_id, h.retrieval_score) for h in ha] == [(h.case_id, h.retrieval_score) for h in hb]
 
 
 def test_mock_hash_embedder_deterministic_and_fixed_dim() -> None:

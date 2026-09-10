@@ -304,7 +304,7 @@ async def _part_a(pool: _IndexPool, kind: str, queries: list[str], top_k: int, m
         print(f"\n▶ Part A 先例检索（固定 query 集 × {len(modes)} 模式 × Top-{top_k}）")
     if kind == "policy":
         print("  （注：PolicyClauseHit 契约不含 score 字段 —— 与 run_rag_demo 同口径，政策行不打印分；"
-              "case 的 similarity 即检索最终分）")
+              "case 的 retrieval_score 即检索最终分）")
     for query in queries:
         print(f"    query = {query}")
         for mode in modes:
@@ -319,7 +319,7 @@ async def _part_a(pool: _IndexPool, kind: str, queries: list[str], top_k: int, m
                 else:
                     tags = "/".join(t.value for t in h.risk_type) or "-"
                     cells.append(
-                        f"{h.case_id} sim={h.similarity:.3f} {h.decision.value}/{h.risk_level.value}[{tags}] {_clip(h.summary, 40)}"
+                        f"{h.case_id} sim={h.retrieval_score:.3f} {h.decision.value}/{h.risk_level.value}[{tags}] {_clip(h.summary, 40)}"
                     )
             line = " | ".join(cells) if cells else "(无命中)"
             print(f"    {_mode_tag(mode)} " + line)
@@ -447,7 +447,7 @@ def _print_boundaries() -> None:
     print("    （代码路径同一，仅连接串差异）。")
     print("  - 跨进程/平台 embedding 浮点尾差不入逐字节契约；确定性回归恒以默认 mock 路径为准。")
     print("  - hybrid = 0.5·norm(bm25) + 0.5·vector（默认权重，可配）；不预设 hybrid 更优。")
-    print("  - PolicyClauseHit 契约不含 score（政策行不打印分）；CaseHit.similarity = 检索最终分。")
+    print("  - PolicyClauseHit 契约不含 score（政策行不打印分）；CaseHit.retrieval_score = 检索最终分。")
 
 
 def _resolve_model_cache(model_cache: str | None) -> str:

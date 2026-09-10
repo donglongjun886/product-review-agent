@@ -15,7 +15,7 @@ R-6 拍板）：
 归一化口径：bm25 原始分在**候选集内 min-max 到 [0,1]**（候选全集 = 1.0，空/等值集
 = 1.0 防除零）—— 保证三模式分数同量纲、可并排比较；vector 余弦天然 [0,1]。
 返回元素带 ``score``（该模式最终分，0~1）与 ``details``（bm25_raw / bm25_norm /
-vector / fused 原始值，供报告与调试）—— case 索引据此写 ``CaseHit.similarity``。
+vector / fused 原始值，供报告与调试）—— case 索引据此写 ``CaseHit.retrieval_score``（docs/10 §0 C1：检索分，非语义相似度）。
 """
 
 from __future__ import annotations

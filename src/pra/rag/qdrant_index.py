@@ -401,7 +401,7 @@ class QdrantCaseIndex:
 
     构造/检索语义与 ``QdrantPolicyIndex`` 同架构，与 ``RagCaseIndex``（rag/index.py）
     逐条一致：category **精确匹配**（filters.category 为空不过滤）、risk_type 交叠
-    非空；similarity = 检索期最终分（0~1）写入 ``CaseHit.similarity`` 作证据 weight。
+    非空；检索分 = 检索期最终分（bm25/vector 为归一化分；hybrid 为 RRF 分）写入 ``CaseHit.retrieval_score`` 作证据 weight（**非语义相似度**，docs/10 §0 C1）。
     """
 
     _kind = "case"
@@ -484,7 +484,7 @@ class QdrantCaseIndex:
                 CaseHit.model_validate(
                     {
                         **row.model_dump(mode="json"),
-                        "similarity": score,  # 检索期最终分 → CaseHit.similarity
+                        "retrieval_score": score,  # 检索期最终分 → CaseHit.retrieval_score
                     }
                 )
             )
