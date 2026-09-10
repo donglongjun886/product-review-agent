@@ -28,7 +28,8 @@
   bm25 / vector / hybrid 三模式下的 ``Recall@K``（默认 K=3），Policy KB 与 Case KB
   并排。⚠️ 口径（docs/10 §5-4）：**并排输出、不预设任何模式最优**；分数**量纲不同**
   （local hybrid = [0,1] 加权融合分；chroma hybrid = RRF 分 ``Σ1/(60+rank)``
-  ≈ 0.0167~0.0331）—— **不归一化、不跨模式/后端比大小、不把 RRF 分当相似度**。
+  上界 2/60 = 1/30 ≈ 0.0333；**实测观测区间**约 0.0275~0.0333）—— **不归一化、不跨模式/后端
+  比大小、不把 RRF 分当相似度**。
 - ``--backend {local,chroma,qdrant}``（**缺省 local**）：同时作用于 agent A/B 的 RAG
   臂与 ``--probe`` 报告。``local`` = 既有实现（调用面零改动）；``chroma`` = docs/10
   §1/§3 的 ChromaDB(cosine) + LlamaIndex + BM25(jieba) + RRF（需 ``rag`` extra +
@@ -248,7 +249,7 @@ async def _probe_report(
     print("分数口径（**量纲不可比 → 本报告不做任何归一化**）")
     print("  - local 后端：hybrid = 0.5·norm(bm25) + 0.5·cos，量纲 [0,1]（加权融合分）；")
     print("    bm25/vector 两列也是各自归一化分 —— 与 chroma 的分数**不是同一把尺**。")
-    print("  - chroma 后端：hybrid = **RRF 融合分** Σ 1/(60 + rank)（k=60），量纲 ≈ 0.0167~0.0331；")
+    print("  - chroma 后端：hybrid = **RRF 融合分** Σ 1/(60 + rank)（k=60），rank 从 0 起 → 上界 2/60 ≈ 0.0333；")
     print("    vector = 1 − Chroma cosine distance（余弦相似度）；bm25 = 候选集内 min-max 归一化 bm25s 分。")
     print("  - ⚠️ RRF 分是**排名融合分，不是相似度、不是概率**；禁止跨模式/跨后端比大小。")
     print("  - CaseHit.retrieval_score = 检索分（docs/10 §0 C1）；PolicyClauseHit 契约不含分。")

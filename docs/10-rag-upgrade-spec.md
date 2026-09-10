@@ -82,6 +82,14 @@ Query
   会炸）。**另注**：自距离在 l2 空间同样为 0 → **空间判定的唯一真值来源是读 configuration**，
   自检只是第二道防线（分工已写进实现 docstring，防后人误以为自检可替代空间断言）。
 - 客户端三形态：`HttpClient(host, port)`（服务端）/ `EphemeralClient()`（内存，**离线测试恒跑**）/ `PersistentClient(path=)`（本地）。
+- 🔴 **向量取数必须把「精确候选 id 集合」交给 Chroma（`ids=`），而不是靠 `where` 近似 + `n_results=N`**
+  —— 这是 2026-09-10 修掉的一个**真缺陷**（详见 §6-R10）：`risk_type` 推不下去、`effective_only` 也不在
+  `where` 里，若按 `n_results = len(candidates)` 取 top-N，非候选行会按距离**抢占名额**，Python 侧复检
+  剔除后**不补位** → 结果是 `local` 的**真子集**，最坏为空。修法：`ids=<候选 node id 集合>` +
+  `n_results = min(len(candidate_ids), collection.count())`，使「返回集 ⊇ 候选集」**由构造保证**；
+  取回后仍**断言覆盖率**（重试 3 次，仍缺真候选 → `RuntimeError`，拒绝返回子集），并保留一条
+  取已存向量 + 现算余弦的兜底路径（复用 `rag.vectors.cosine_similarity`），命中时计入
+  `served_counters()["vector_bruteforce_fallbacks"]`（**正常路径恒 0**，便于发现「兜底在偷偷干活」）。
 
 **LlamaIndex**
 
@@ -153,12 +161,15 @@ Query
 
    | 模式 | 与 `local` 的关系 | 断言 |
    |---|---|---|
-   | `vector` | **同序同 id**（实测通过） | 同序同 id + 打分 6 位一致（容差 1e-6：Chroma float32 存算，实测尾差 ≤1e-6） |
+   | `vector` | **同序同 id（无条件，含各种过滤组合）** —— 修复 R10 后的实测结论 | 同序同 id + 打分 6 位一致（容差 1e-6：Chroma float32 存算，实测尾差 0.000e+00 ~ 1e-6） |
    | `bm25` | **不可比**（本地 = 自写 Okapi + CJK 字符 bigram、全库 IDF；Chroma 路 = `bm25s` + jieba 真词、语料 = 候选 node） | 只断言「候选完整、可复现、R-4 隔离」，**并如实记录口径差异** |
-   | `hybrid` | **不可比**（本地 = `0.5·norm(bm25)+0.5·cos`，量纲 [0,1]；Chroma 路 = **RRF** `Σ1/(60+rank)`，实测 ~0.0167–0.0331） | 同上；且 `retrieval_score` 必须标注为 RRF 分（C1） |
+   | `hybrid` | **不可比**（本地 = `0.5·norm(bm25)+0.5·cos`，量纲 [0,1]；Chroma 路 = **RRF** `Σ1/(60+rank)`，rank 从 0 起 → 上界 **`2/60 = 1/30 ≈ 0.0333`**，实测 0.033333） | 同上；且 `retrieval_score` 必须标注为 RRF 分（C1） |
 
-   实测记录（2026-09-10，主 agent 独立探针 + SA-1 探针，结论一致）：vector 模式 policy/case
-   同序同 id ✅；case 分差 `[0,0,0,0,1e-6]`。
+   实测记录（2026-09-10，主 agent 独立探针）：修复 R10 后 7 个组合（含 `risk_type` 过滤、
+   `effective_only` 切换、无 store 过滤三类）**全部同序同 id**，`max |chroma − local| = 0.000e+00`、
+   `vector_bruteforce_fallbacks = 0`、`llm_calls = 0`。
+   **验收教训**：初版验收只用「干净 query」测同序同 id —— 那种组合下下推的 `where` 恰好等于候选
+   谓词，漏召回**不会暴露**。**契约类验收必须覆盖过滤器组合**（这是 R10 漏掉的直接原因）。
 2. **确定性**：同一输入两次运行结果逐字节一致。
 3. **R-4 隔离**：Case KB 命中 `case_id` 全部 `RAG_CASE_` 前缀，与 eval GT 零交集。
 4. **三路并排报告**：`bm25` / `vector` / `rrf-hybrid` 的 probe `Recall@3` **并排输出，不预设 RRF 最优**（口径同 docs/06 §6）。
@@ -180,16 +191,36 @@ Query
 - **R2（口径后果）**：过滤位置分裂（向量路 store 侧 / BM25 路 Python 侧），见 §3。需在文档如实标注。
 - **R3（依赖体量）**：LlamaIndex 最小集成组合实测 **+35 包**（含 `nltk` / `networkx` / `banks` / `aiosqlite` / `bm25s` / `jieba` / `pystemmer`），现项目共 138 包 → 约 +25%。公开仓库需评估是否可接受。
 - **R4（默认嵌入）**：真实 RAG 默认切 BGE 后，**CI / 无模型缓存环境**必须优雅降级或 skip（沿用 `BgeEmbedder.available()` 与「绝不静默回退 mock」约定）。
-- **R5（R RF 不可解释为相似度）**：已由 C1 处置（字段改名 `retrieval_score`），文档与 docstring 必须同步措辞，禁止再写「相似度」。
+- **R5（RRF 不可解释为相似度）**：已由 C1 处置（字段改名 `retrieval_score`），文档与 docstring 必须同步措辞，禁止再写「相似度」。
+  **上界订正（实测）**：`_fuse_rrf` 的 rank **从 0 起**（`enumerate`），故上界是 **`2/60 = 1/30 ≈ 0.0333`**（实测 0.033333），
+  **不是 `2/61`** —— 与 llama-index `_reciprocal_rerank_fusion` 的 `1.0/(rank + k)` 逐条一致，
+  即**代码对、原先的说法错**。另：理论下界 `1/61` 需候选集 ≥61 才可达，本语料（24/67，且候选常为
+  过滤后子集）**实测观测区间约 0.0275–0.0333**，报告不得照抄「0.0167」。已修 `chroma_backend.py` 3 处、
+  `scripts/run_rag_eval.py` 2 处、本文件。
 
 **执行期新增（2026-09-10，SA-1 实测与主 agent 复查）**：
 
 - **R6（BM25 分词替换的健壮性，未解决）**：`bm25s.tokenize` 的受控替换 + 模块级锁**未做并发正确性实测**；
   多线程/多进程场景下这是脆弱点（库无注入点所致）。可选出路：换用 lib 的其它注入路径、或直接包 `bm25s`
   不用 LlamaIndex 的 retriever（会削弱「全量 LlamaIndex」）。**待拍板**。
-- **R7（两路检索文本不一致，未解决）**：`BM25Retriever` 内部用 `MetadataMode.EMBED` → **case 的 BM25 索引
-  文本里混入 `case_id` / `category` / `decision` 等 metadata 字面值**，而向量路只 embed 正文 →
-  两路文本口径不同（BM25 可能因 metadata 字面命中）。是否裁剪为「只索引正文」**待拍板**。
+- **R7（两路检索文本不一致）—— 已解决（用户拍板「裁剪为只索引正文」）**：实现改为在 `TextNode` 上设
+  `excluded_embed_metadata_keys`（`BM25Retriever` 内部用 `MetadataMode.EMBED`），使 BM25 只索引正文
+  （policy `title。text` / case `summary`），与向量路口径一致；并已实测该排除设置**随 `_node_content`
+  JSON 往返存活**（`BM25Retriever` 正是这样重建节点）。**证据**：仅由 metadata 字面值构成的 query
+  修复前命中 case 67/67、policy 24/24，修复后 `RAG_CASE_0037` / `POTENTIAL_IP_RISK` / `EVASION_PATTERN`
+  / `REJECT` **一律 0 命中**（`箱包/女包` 67→9，仅正文真命中）。副作用如实记录：**policy 的
+  bm25/hybrid 名次确有变化**（第 1/2 名与第 5 名互换），case 名次不变。
+
+  ⚠️ **「0 命中」的口径澄清（测试作者实测纠正，务必按此读）**：这里的 0 是 **BM25 原始分层面**
+  （非零分文档数 67/67 → **0/67**，policy 24/24 → **0/24**）。**`search()` API 层面并不是返回 0 条** ——
+  `BM25Retriever` 对零分查询仍按 `similarity_top_k` 返回节点，且本仓库既有的 `normalize_minmax`
+  对「全等值集」按约定给全 `1.0`（防除零）→ 零信号查询会返回**全部候选且 `retrieval_score` 全为 1.0
+  （平坦）**，与「完全无匹配的零信号 query」结果逐字节一致。
+  故**可判别的断言**是：① 原始分恒 0 / 分数平坦 / 与零信号 query 逐字节一致（对照：正文 query 非平坦且原始分 > 0）；
+  ② 机制层 `node.get_content(MetadataMode.EMBED)` 逐字 == 正文。**不要**断言 `len(hits) == 0`。
+  另两条反例挑选纪律：`全类目` / `女鞋/运动鞋` / `箱包/女包` 本就在**正文**里（命中是正确的）、
+  `POLICY_5.3` 会被 jieba 拆出单字符 `'3'` 命中正文「≥3 次」（分词假阳性，与 R7 无关）——
+  这三种不能当反例。
 - **R8（hybrid 权重尺度变化对 Agent 的影响）——已查清，无影响**：RRF 分让
   `CaseHit.retrieval_score` 从 ~0.89 变成 ~0.033，进而 `Evidence.weight(CASE_PRECEDENT)` 同步变小。
   读码确认：**Agent/Gate 侧对 `CASE_PRECEDENT` 只按「类型 + `ref_id` 存在」判定**
@@ -197,8 +228,20 @@ Query
   `quality_filter` 与 `gate._strong_similarity`、`evidence.py` 的三处门限**全部只作用于 `IMAGE_SIMILARITY`**。
   → 无阈值破坏。**唯一残留**：weight 数值仍会出现在证据记录/prompt 中（真实 LLM 可见），
   量纲需在报告中说明。
-- **R9（评测侧是否给 chroma 开开关，待拍板）**：`agent_scheme.make_rag_world_tools` 目前只走
-  `local` / `qdrant`；`tool_world="rag"` 的评测是否切到 chroma，需决定（影响 RAG 侧评测口径的切分）。
+- **R9（评测侧是否给 chroma 开开关）—— 已解决**：`scripts/run_rag_eval.py` 新增
+  `--backend {local,chroma,qdrant}` + `--probe`（缺省 `local`）；评测侧经 `EvalContext.rag_backend` /
+  `rag_backend_options` → `make_rag_world_tools(backend=…)` **最小关键字透传**（缺省值 = 原行为，
+  实测缺省输出与改动前**逐字节一致**）。未改 `src/pra/agent/**` 判定逻辑。
+  三路 Recall@3（MockHash，8+8 条）：Policy `bm25/vector/hybrid` = local 6/5/**6** vs chroma 6/5/**7**；
+  Case = local 6/4/**7** vs chroma 6/4/**6** → **两个 KB 上 hybrid 相对位置相反**，实证「不预设最优」。
+  保守边界（写进报告）：8 条 probe、粒度 12.5%；用 MockHash **不是 BGE**，故 para 类失败**不得**解读为
+  「语义检索不行」；A/B 上 chroma 臂 35 案决策 digest 与 InMemory/local 相同（probe 层差异未传导到决策）。
+- **R10（🔴 已修复的真缺陷：vector 模式漏召回）—— 由测试套件挖出，主 agent 独立复现，SA-1 修复**：
+  现象 = 结果变成 `local` 的**真子集**、最坏**为空**（policy `risk_type=[FALSE_CLAIM]`：local 3 / chroma **0**；
+  case `risk_type=[IP]` k=30：25 / 14；甚至**无 store 过滤**时也会发生 —— policy brand 词 + `effective_only`
+  ：21 / 19，纯属 EXPIRED 行抢位）。根因与修法见 §3 最后一条。**验收教训**：初版验收只用干净 query
+  （此时 `where` 恰好等于候选谓词）→ 漏洞不暴露；**契约类验收必须覆盖过滤器组合**。
+  修复后 7 个组合全部同序同 id（分差 0.000e+00），并已把「带过滤的 vector 同序同 id」写成回归用例。
 
 ## 7. Subagent 分派
 
