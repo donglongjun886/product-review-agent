@@ -20,8 +20,10 @@ import，失败抛 ``RuntimeError`` 提示 ``uv sync --extra rag``（P2-5：默�
 设计要点（对齐 docs/06 §2.1 逐条）：
 - collection：每个 KB 一个（``<prefix or "pra">_<policy|case>_<dim>``），建库
   cosine + size=dim=embedder 维度；已存在校验 dim 一致后复用（不重建）。
-- point id = ``sha256(clause_id/case_id)`` 前 16 字节 → 无符号 int（稳定、幂等
-  upsert 覆盖 → 重建幂等）。候选 id 过滤用 ``HasIdCondition``（本版 qdrant-client
+- point id = ``sha256(clause_id/case_id)`` **前 8 字节 → u64 无符号 int**（稳定、幂等
+  upsert 覆盖 → 重建幂等）。**必须落 u64**：真 server 只收 u64 或 UUID，128 位会
+  400（进程内模式不校验 → 只有连 server 才暴露；见 ``_point_id`` docstring）。
+  候选 id 过滤用 ``HasIdCondition``（本版 qdrant-client
   的 Filter 嵌套条件；``PointIdsList`` 在该版本是 scroll/delete 的顶层
   FilterSelector，不能放 Filter.must —— REPL 验证后以等价原生条件实现，测试以
   行为断言为准）。
@@ -164,8 +166,19 @@ def _seed_collection(
 
 
 def _point_id(key: str) -> int:
-    """point id = ``sha256(key)`` 前 16 字节 → 无符号 int（稳定、幂等 upsert 覆盖）。"""
-    return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:16], "big")
+    """point id = ``sha256(key)`` **前 8 字节** → u64 无符号 int（稳定、幂等 upsert 覆盖）。
+
+    **为什么是 8 字节（u64）而不是 16 字节**：Qdrant 服务端只接受 **u64 整数或
+    UUID** 形式的 point id，超出即 ``400 Bad Request``。而 qdrant-client 的
+    **进程内模式（``:memory:`` / ``path=``）不校验 id 上界** —— 取 16 字节（128 位）
+    时内存/本地路径全绿，**只有连真 server（``url=``）才炸**。2026-09-10 实测暴露，
+    详见 ``deploy/qdrant/README.md`` §7。
+
+    u64 熵对 KB 规模足够，且同键碰撞由调用方
+    （``len(set(point_ids)) != len(point_ids)`` → ``ValueError``）显式拦截，
+    不依赖「不会撞」的假设。
+    """
+    return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:8], "big")
 
 
 def _collection_name(prefix: str | None, kind: str, dim: int) -> str:

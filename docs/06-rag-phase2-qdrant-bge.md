@@ -120,8 +120,10 @@ tests/test_rag_qdrant.py        ← 新增：qdrant 索引单测 + BGE embedder 
 
 - 语义质量 = 单模型（bge-small-zh-v1.5）单语料（24/67 条）的**定向演示与 probe
   观测**，非大规模评测；换模型/语料结果变。
-- Qdrant 进程内模式 = 真 Qdrant API 但非分布式部署；远端 server 未实测（代码路径
-  同一，仅连接串差异）。
+- Qdrant 进程内模式 = 真 Qdrant API 但非分布式部署。**远端 server（`url=`）已于
+  2026-09-10 实测**（`deploy/qdrant`，v1.19.0）：原「代码路径同一，**仅连接串差异**」
+  的假设**被证伪** —— 进程内模式不校验 point id 上界，故 128 位 id 在本机全绿、
+  只在真 server 以 400 暴露；已修（u64）并补真服务端集成测试，详见 §7。
 - 跨进程/平台 embedding 浮点尾差不纳入逐字节契约；确定性回归恒以默认 mock 路径为准。
 
 ## 6. 实测记录（2026-09-09 · commit 2533825 后补 · run_rag_phase2_demo.py）
@@ -151,4 +153,28 @@ tests/test_rag_qdrant.py        ← 新增：qdrant 索引单测 + BGE embedder 
 漏掉的同义改写项，**无 hybrid 单独优于 vector 的案例**（N=8 小样本定向观测，不预设——R-6/P2-7 口径）。
 
 **边界**：单模型单语料定向演示（24/67 条），非大规模评测；评测回归基线恒以默认 mock 路径为准
-（BGE 浮点跨进程尾差不入逐字节契约）；Qdrant 远端 server 未实测。
+（BGE 浮点跨进程尾差不入逐字节契约）。
+
+## 7. 远端 server（`url=`）实测与修复（2026-09-10 · `deploy/qdrant`）
+
+**动机**：§5 曾把 `url=` 标注为「未实测、仅连接串差异」——用真服务端验证该假设。
+
+**部署**：`deploy/qdrant`（`qdrant/qdrant:v1.19.0`，仅绑 `127.0.0.1:6333/6334`，
+healthcheck 用 bash `/dev/tcp` 判 `/readyz`——官方镜像无 curl/wget）。镜像须走国内源
+拉取后 retag（`registry-1.docker.io` 直连实测超时），命令见该目录 README §3。
+
+**发现（假设证伪）**：`build_policy_index(backend="qdrant", location="http://127.0.0.1:6333")`
+→ **400** `value … is not a valid point ID`。根因：`_point_id` 取 sha256 **前 16 字节
+（128 位 int）**，而真 server 只收 **u64 或 UUID**；**qdrant-client 进程内模式不校验
+id 上界** → `:memory:` / `path=` 与既有测试全绿，缺陷被「未实测」掩盖。
+
+**修复**：`_point_id` 改为 `digest()[:8]` → u64（保留 `int` 类型，调用点零改动；
+同键碰撞由既有 `len(set(ids))` 校验拦截）。id 变更同时作用于本地路径 → 既有 `path=`
+持久索引需重建（本仓库 `.cache/` 无遗留索引，无迁移负担）。
+
+**验证（真 server）**：policy KB **24 点** / case KB **67 点**全量落库成功；检索顶层序
+与 `local` 后端**逐条一致**（§2.1 同构契约在真 server 上成立）；id 接受性直测通过。
+
+**回归守护**：离线恒跑 `tests/test_rag_qdrant.py::test_point_id_fits_in_u64`（钉住
+id 取值域，**不依赖服务端**）+ `tests/test_rag_qdrant_server.py`（真 server 端到端；
+服务端不可达则 skip —— 与「真库冒烟 × 纯单测兜底」同一分工）。

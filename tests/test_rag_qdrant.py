@@ -16,6 +16,8 @@
    collection 复用/维度校验、本地持久 ``path=`` 模式。
 7. qdrant client 生命周期：每测试自建 ``QdrantClient(":memory:")`` 注入（或默认
    location=":memory:" 自建），collection 名冲突用独立 collection_prefix / 新 client。
+8. **point id 取值域（u64）**：离线钉住 ``_point_id <= 2**64-1`` —— 进程内模式不校验
+   id 上界，故原 128 位实现在本文件全绿、只在真 server（url=）炸（见该用例 docstring）。
 
 约定与现有 tests 一致：**零网络、零模型下载**（qdrant 进程内模式 + MockHash），
 embedder 一律 MockHashEmbedder；无 qdrant-client 环境整文件 skip（importorskip）。
@@ -341,3 +343,29 @@ async def test_qdrant_local_persistence_path_mode(tmp_path) -> None:
     assert hits and all(h.status == "EFFECTIVE" for h in hits)
     # qdrant-client path= 在目录下落库（collection 持久化产物存在，非空内存库）
     assert loc.exists() and any(loc.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# 8. point id 必须是 u64 —— 真服务端（url=）才暴露的缺陷回归守护
+# ---------------------------------------------------------------------------
+
+
+def test_point_id_fits_in_u64() -> None:
+    """``_point_id`` 必须产出 **u64**（真 server 只收 u64 或 UUID）。
+
+    缺陷复盘（2026-09-10，`deploy/qdrant/README.md` §7）：原实现取 ``sha256`` **前 16
+    字节 → 128 位 int**，而 **qdrant-client 进程内模式（``:memory:`` / ``path=``）不校验
+    id 上界** —— 于是本文件此前所有用例全绿，缺陷只在连真 server（``url=``）时以
+    ``400 Bad Request: ... is not a valid point ID`` 暴露。本用例是**离线兜底**：
+    不需要服务端也能钉住 id 的取值域（真 server 端到端另有
+    ``tests/test_rag_qdrant_server.py``，不可达则 skip）。
+    """
+    from pra.rag.qdrant_index import _point_id
+
+    u64_max = 2**64 - 1
+    keys = [r.clause_id for r in POLICY_ROWS] + [r.case_id for r in CASE_ROWS]
+    ids = [_point_id(k) for k in keys]
+    assert all(0 <= pid <= u64_max for pid in ids), "point id 超出 u64 → 真 server 必 400"
+    assert len(set(ids)) == len(ids), "corpus 行键内出现 point id 碰撞"
+    # 稳定性：同键同值（幂等 upsert 覆盖 / 重建幂等的前提）
+    assert _point_id("POLICY_1.4_v1_c1") == _point_id("POLICY_1.4_v1_c1")

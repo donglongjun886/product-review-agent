@@ -156,6 +156,17 @@ uv run python scripts/run_rag_phase2_demo.py --top-k 5 --mode hybrid
 × 小语料（24/67 条）的定向演示与 probe 观测，非大规模评测；Qdrant 进程内模式非分布式部署；
 确定性回归基线恒以默认 mock 路径为准。
 
+默认走 qdrant-client **进程内模式**（`:memory:` / `path=`），**无需任何服务**。若要验证
+`url=` 远端 server 路径（生产叙事位），本仓库附带单机部署：
+
+```bash
+cd deploy/qdrant && docker compose up -d    # 仅绑 127.0.0.1:6333/6334；说明见该目录 README
+# 装配：build_policy_index(backend="qdrant", location="http://127.0.0.1:6333")
+```
+
+`pytest` 会真跑 3 个服务端集成用例（服务端未起则自动 skip）。远端路径的实测记录与一个
+**已修缺陷的完整复盘**见 [docs/06](docs/06-rag-phase2-qdrant-bge.md) §7。
+
 ### Langfuse 可观测性（可选）
 
 把 Agent 执行的 **span 树**（root → node → LLM generation / tool / gate）发到本地 Langfuse：
