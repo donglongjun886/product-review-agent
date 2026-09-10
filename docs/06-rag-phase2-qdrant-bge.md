@@ -175,6 +175,12 @@ id 上界** → `:memory:` / `path=` 与既有测试全绿，缺陷被「未实�
 **验证（真 server）**：policy KB **24 点** / case KB **67 点**全量落库成功；检索顶层序
 与 `local` 后端**逐条一致**（§2.1 同构契约在真 server 上成立）；id 接受性直测通过。
 
-**回归守护**：离线恒跑 `tests/test_rag_qdrant.py::test_point_id_fits_in_u64`（钉住
-id 取值域，**不依赖服务端**）+ `tests/test_rag_qdrant_server.py`（真 server 端到端；
-服务端不可达则 skip —— 与「真库冒烟 × 纯单测兜底」同一分工）。
+**回归守护（两条互补路径）**：
+- `tests/test_rag_qdrant_point_id.py` —— **不依赖 qdrant-client，任何环境恒跑**（含 CI）：
+  钉住 id ∈ [0, 2⁶⁴-1] + corpus 内无碰撞 + 稳定性。**必须独立成文件**：其余 qdrant
+  测试都在顶层 `importorskip("qdrant_client")`，而 **CI 只跑 `uv sync --frozen`（不装
+  extra）→ 那些文件在 CI 上整文件 skip**（即 qdrant 后端此前在 CI 上零覆盖）。
+- `tests/test_rag_qdrant_server.py` —— 真 server 端到端（建库 / 全量 upsert 点数 /
+  与 local 同口径 / R-4 前缀 / id 接受性）；服务端不可达则 skip，`PRA_QDRANT_URL` 可覆盖。
+
+全量测试：**439 passed, 1 skipped**（服务端不在时 **436 passed, 4 skipped**）；v1/v2 回归双 PASS。

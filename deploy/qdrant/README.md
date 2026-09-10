@@ -143,17 +143,21 @@ qdrant-client 的**进程内模式对 id 类型宽容**（本地实现不校验�
 多 64 位熵，代价是波及面更大。
 
 **顺带处理**：① id 变更**同时改变本地路径 id** → 既有 `path=` 持久索引需重建（本仓库
-`.cache/` 下无遗留 qdrant 索引，实测无迁移负担）；② 补测试两类 ——
-离线恒跑 `tests/test_rag_qdrant.py::test_point_id_fits_in_u64`（钉住 id 取值域，
-**不依赖服务端**）+ 真服务端集成 `tests/test_rag_qdrant_server.py`（建库/全量 upsert/
-与 local 同口径/id 接受性，服务端不可达则 skip）。
+`.cache/` 下无遗留 qdrant 索引，实测无迁移负担）；② 补测试三类 ——
+`tests/test_rag_qdrant_point_id.py`（**不依赖 qdrant-client，任何环境恒跑**：钉住 id 取值域
++ 无碰撞 + 稳定性。**独立成文件的原因**：其余 qdrant 测试都在顶层
+`importorskip("qdrant_client")`，而 CI 只跑 `uv sync --frozen`（**不装 extra**）→ 那些文件
+在 CI 上**整文件 skip**，qdrant 后端此前在 CI 上零覆盖）+ 真服务端集成
+`tests/test_rag_qdrant_server.py`（建库/全量 upsert/与 local 同口径/id 接受性，
+服务端不可达则 skip）。
 
 **验证**：真 server 上 policy/case 两个 KB 全量落库成功、检索与 `local` 顶层序一致；
-全量测试与 v1/v2 回归见仓库提交记录。
+全量测试 **439 passed, 1 skipped**（服务端不在时 **436 passed, 4 skipped**）；
+v1/v2 回归双 PASS；lint 违例数与 HEAD 持平（120 vs 120，零新增）。
 
-**仍存在的边界**：CI 无 Qdrant 服务端 → 真服务端集成测试**自动 skip**（诚实标注，与
-「真库冒烟 × 纯单测兜底」同一分工：id 取值域由离线用例恒跑兜底）；服务端未做分布式/
-集群、未压测、未开鉴权。
+**仍存在的边界**：CI 既无 Qdrant 服务端、也不装 `rag` extra → 真服务端集成测试与
+`test_rag_qdrant.py` 在 CI 上均 skip（如实标注）；id 取值域由
+`test_rag_qdrant_point_id.py` 在 CI 上恒跑兜底；服务端未做分布式/集群、未压测、未开鉴权。
 
 > 结论边界：以上均为 `v1.19.0` 服务端 + `qdrant-client 1.19.0` 的实测结果；语料仍为
 > 24 政策 / 67 案例的小语料，**不构成能力声明**（对齐 docs/06 §5）。

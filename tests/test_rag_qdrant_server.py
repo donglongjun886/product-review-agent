@@ -8,10 +8,14 @@ point id 上界** —— 于是「``_point_id`` 产出 128 位 int」这个缺�
 ``400 Bad Request: ... is not a valid point ID`` 拒绝 upsert。本文件把那条路径钉住：
 **真 server 建库 + 全量 upsert + 检索**，并与 ``local`` 后端断言同口径。
 
-跳过代价（诚实标注）：服务端未起时本测试**静默跳过而非失败** —— 但 id 取值域另有
-``tests/test_rag_qdrant.py::test_point_id_fits_in_u64`` **离线兜底（恒跑）**，
-不依赖本文件即可拦住该类回归（与 ``test_infra_persist_smoke.py`` × ``test_infra_settings.py``
-的「真库冒烟 + 纯单测兜底」同一分工）。
+跳过代价（诚实标注）：服务端未起时本文件**整文件跳过而非失败** —— 但 id 取值域另有
+``tests/test_rag_qdrant_point_id.py`` **兜底**：该文件**刻意不依赖 qdrant-client**
+（``pra.rag.qdrant_index`` 顶层本就延迟 import），因此**任何环境恒跑**。
+本文件与 ``test_rag_qdrant.py`` 都带 ``importorskip("qdrant_client")``，CI 只跑
+``uv sync --frozen``（不装 extra）→ **两者在 CI 上都不执行**（实测：屏蔽 ``qdrant_client``
+后本文件 skip、``test_rag_qdrant_point_id.py`` 3 passed）。分工即
+「真服务端端到端（本机）× 无依赖纯单测兜底（含 CI）」——
+与 ``test_infra_persist_smoke.py`` × ``test_infra_settings.py`` 同一思路。
 
 服务端起法：``cd deploy/qdrant && docker compose up -d``（仅绑 ``127.0.0.1:6333``，
 说明见同目录 README）。URL 可用环境变量 ``PRA_QDRANT_URL`` 覆盖（默认
