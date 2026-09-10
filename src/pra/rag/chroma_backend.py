@@ -56,7 +56,7 @@ corpus 行键」稳定哈希得出（同 corpus 重建幂等 upsert 覆盖）。
 ------------------------------------------------
 写进 ``CaseHit.retrieval_score`` 的是**检索分，不是语义相似度**：
 ``bm25`` 模式 = 候选集内 min-max 归一化的 BM25 分；``vector`` 模式 = ``1 − distance``；
-**``hybrid`` 模式 = RRF 融合分**（``Σ 1/(k+rank)``，``k=60``，落在 ~(0, 2/61]）。
+**``hybrid`` 模式 = RRF 融合分**（``Σ 1/(k+rank)``，``k=60``，落在 ~(0, **2/60 = 1/30**]）。
 任何文档/注释/报告都**不得**把它表述成「语义相似度」。
 
 Metadata 过滤：**两路过滤位置不统一（实测钉死，如实标注）**
@@ -157,6 +157,7 @@ from pra.rag.retrieval import (
     RetrievalMode,
     normalize_minmax,
 )
+from pra.rag.vectors import cosine_similarity
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
 from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
@@ -203,7 +204,12 @@ SERVED_COUNTERS: dict[str, int] = {
     "bm25_searches": 0,
     "hybrid_searches": 0,
     "served_hits": 0,
+    #: 向量路在 Chroma 少返候选时，由本模块按已存向量补算 cos 的次数（正常应恒为 0）。
+    "vector_bruteforce_fallbacks": 0,
 }
+
+#: 向量路覆盖率自检的重试次数（第三方少返是已知风险；重试后仍不覆盖即抛）。
+_VECTOR_COVERAGE_ATTEMPTS = 3
 
 _LATIN_RUN = re.compile(r"[0-9A-Za-z_]+")
 
@@ -627,7 +633,26 @@ def _case_text(row: CasePrecedentRecord) -> str:
 def _build_nodes(
     rows: list[Any], *, kind: str, collection: str, llama: dict[str, Any]
 ) -> tuple[list[Any], list[str]]:
-    """corpus 行 → (TextNode 列表, node id 列表)。**1 行 = 1 Node，不切分**。"""
+    """corpus 行 → (TextNode 列表, node id 列表)。**1 行 = 1 Node，不切分**。
+
+    **检索文本 = 正文**（policy：``title。text``；case：``summary``）—— 与 local 后端
+    （``rag/index.py`` 的 ``_texts``）及本模块向量路 embed 的文本**同一份**。
+
+    节点 metadata **不参与任何检索文本**（R7 用户拍板）：
+    ``TextNode(excluded_embed_metadata_keys=<全部 metadata 键>)`` 使
+    ``node.get_content(metadata_mode=MetadataMode.EMBED)`` 只返回正文。这一点对 BM25 路是
+    **必需**的 —— ``BM25Retriever`` 用的正是 ``MetadataMode.EMBED``（安装源码
+    ``bm25s.tokenize([node.get_content(metadata_mode=MetadataMode.EMBED) ...])``），
+    不排除就会把 ``case_id`` / ``category`` / ``decision`` / ``risk_level`` / ``risk_type``
+    的字面值（如 ``RAG_CASE_0001`` / ``POTENTIAL_IP_RISK``）索引进去，出现「按 metadata
+    字面值就能命中」的伪检索。实测（本模块，见返回报告 R7 证据）：不排除时 EMBED 文本以
+    ``case_id: RAG_CASE_0001`` / ``category: …`` / ``decision: REJECT`` / ``risk_level: HIGH`` /
+    ``risk_type: ['POTENTIAL_IP_RISK', …]`` 开头再接正文；排除后 EMBED 文本 == 正文。
+    该排除设置**随 ``node_to_metadata_dict`` 的 ``_node_content`` JSON 往返存活**（已实测），
+    故 ``BM25Retriever`` 由 metadata 重建节点时排除仍然生效。
+
+    注：``metadata`` 本身仍完整保留（含 R-4 隔离所需字段），只是不进检索文本。
+    """
     nodes: list[Any] = []
     node_ids: list[str] = []
     for row in rows:
@@ -636,7 +661,16 @@ def _build_nodes(
         node_ids.append(nid)
         meta = policy_node_metadata(row) if kind == "policy" else case_node_metadata(row)
         text = _policy_text(row) if kind == "policy" else _case_text(row)
-        nodes.append(llama["TextNode"](id_=nid, text=text, metadata=meta))
+        nodes.append(
+            llama["TextNode"](
+                id_=nid,
+                text=text,
+                metadata=meta,
+                # R7：metadata 不进检索文本（EMBED/LLM 两个模式都排除；ALL 仍保留供审计）。
+                excluded_embed_metadata_keys=list(meta.keys()),
+                excluded_llm_metadata_keys=list(meta.keys()),
+            )
+        )
     return nodes, node_ids
 
 
@@ -773,10 +807,15 @@ def _filters_to_chroma_where(store_filters: Any | None) -> dict | None:
     return {"$and": clauses}
 
 
-def _make_vector_retriever(ctx: _RetrievalContext, similarity_top_k: int, store_filters: Any | None) -> Any:
-    """向量检索器：Chroma（cosine 距离）+ LlamaIndex ``MetadataFilters`` 下推，分数 = ``1 − distance``。
+def _make_vector_retriever(
+    ctx: _RetrievalContext,
+    similarity_top_k: int,
+    store_filters: Any | None,
+    candidate_ids: list[str] | None = None,
+) -> Any:
+    """向量检索器：Chroma（cosine 距离）+ ``MetadataFilters`` 下推，分数 = ``1 − distance``。
 
-    ⚠️ **实测（本轮）**：``ChromaVectorStore.query`` 把分数算成 ``similarity = exp(-distance)``
+    ⚠️ **实测**：``ChromaVectorStore.query`` 把分数算成 ``similarity = exp(-distance)``
     （读安装源码 ``_query`` 可见 ``similarity_score = math.exp(-distance)``；实测
     ``[1,0,0]`` vs ``[0.9,0.1,0]`` → store 给 0.993902，而 ``1 − distance`` = 0.9938837）。
     那是**另一套映射、不是余弦**，会破坏「向量分 = 余弦相似度」这一 docs/10 §3 钉死的口径。
@@ -786,6 +825,23 @@ def _make_vector_retriever(ctx: _RetrievalContext, similarity_top_k: int, store_
     自己算 ``1 − distance``。节点对象由本模块的 node id → TextNode 表直接映射（node id
     由行键派生，逐行唯一），**不经** ``_node_content`` JSON 反序列化（那一步在语料含
     相同内容行时会与 ``node.hash`` 去重冲突）。
+
+    ★ **``candidate_ids`` = 候选集的 node id（本模块给的精确集合）** —— 这是漏召回 bug 的修复点。
+
+    原缺陷（另一个 agent 测出、本模块复现）：先用 ``MetadataFilters`` 把 ``where`` 下推，
+    再按 ``n_results = len(candidates)`` 取 top-N —— 但**下推的 ``where`` 只是候选谓词的
+    超集**（``risk_type`` 无法下推：Chroma 列表字段没有成员算子；``effective_only`` 也不在
+    ``where`` 里）。于是**非候选行按距离抢占 top-N 名额**，被 Python 复核剔除后没有补位，
+    真候选从未被打分 → 结果是 local 的**真子集**，最坏为**空**。实测（真服务端 + Mock 嵌入，
+    修复前）：policy ``外观模仿`` + ``risk_type=[FALSE_CLAIM]`` + ``effective_only`` k=6 →
+    local 3 / chroma **0**；policy ``品牌词`` + ``effective_only``（无任何 store 过滤！）k=30 →
+    local 21 / chroma **19**（只因 EXPIRED 行抢位）。
+
+    修法：把**精确候选 node id 集合**交给 Chroma（``ids=`` 过滤，等价 ``$in``，但走原生 ids
+    参数），即「store 返回的集合 **⊇** 候选集」由构造保证（请求的就是候选本身），
+    ``n_results = min(candidate_count, collection.count())``；随后 Python 复核 + ``top_k``
+    截断照旧。**并断言覆盖率**（见 :meth:`_ChromaCosineRetriever._retrieve`）：返回 id 集合
+    必须覆盖候选集合，否则重试，重试后仍不覆盖即抛。
     """
 
     class _ChromaCosineRetriever(ctx.llama["BaseRetriever"]):
@@ -799,25 +855,60 @@ def _make_vector_retriever(ctx: _RetrievalContext, similarity_top_k: int, store_
             self._where = _filters_to_chroma_where(store_filters)
             # Chroma 返回的是 **node id**（`_node_id()` 派生），不是 corpus 行键 —— 映射键必须用 node id。
             self._by_id = {nid: node for nid, node in zip(ctx.node_ids, ctx.nodes)}
+            #: 精确候选 id（NodeWithScore 只允许这些 id 出现；None = 未限定，取 ``where`` 命中的 top-N）。
+            self._candidate_ids = list(candidate_ids) if candidate_ids is not None else None
+
+        def _query_once(self, query_embedding: list[float]) -> tuple[list[str], list[float]]:
+            """一次 Chroma 查询 → (ids, distances)。
+
+            ``n_results`` 的取值原则：**只要候选**（``len(candidate_ids)``），并夹到
+            ``collection.count()`` —— 实测 ``n_results`` 大于库内条数不会报错（返回全部），
+            但显式夹住可让「要多少」与「只可能有多少」一致，便于覆盖率断言归因。
+            """
+            kwargs: dict[str, Any] = {
+                "query_embeddings": [list(query_embedding)],
+                "include": ["distances"],
+            }
+            if self._candidate_ids is not None:
+                kwargs["ids"] = list(self._candidate_ids)
+                kwargs["n_results"] = max(1, min(len(self._candidate_ids), int(self._collection.count())))
+            else:
+                kwargs["n_results"] = self._k
+            if self._where is not None:
+                kwargs["where"] = self._where
+            result = self._collection.query(**kwargs)
+            return (
+                list((result.get("ids") or [[]])[0]),
+                list((result.get("distances") or [[]])[0]),
+            )
 
         def _retrieve(self, query_bundle: Any) -> list[Any]:
             if self._collection is None or not self._by_id:
                 return []
             query_embedding = self._emb.get_query_embedding(query_bundle.query_str)
-            kwargs: dict[str, Any] = {
-                "query_embeddings": [list(query_embedding)],
-                "n_results": self._k,
-                "include": ["distances"],
-            }
-            if self._where is not None:
-                kwargs["where"] = self._where
-            result = self._collection.query(**kwargs)
-            ids = (result.get("ids") or [[]])[0]
-            distances = (result.get("distances") or [[]])[0]
+            # 覆盖率自检（**不假定「要了 N 就一定拿到 N」**）：chromadb 1.5.9 实测存在少返
+            # （另一 agent 测到 count()=69 而 query(n_results=69) 只回 68；本模块 ephemeral
+            #  紧接 upsert 也见过）。重试 _VECTOR_COVERAGE_ATTEMPTS 次，仍缺真候选即抛。
+            wanted = set(self._candidate_ids) if self._candidate_ids is not None else None
+            ids: list[str] = []
+            distances: list[float] = []
+            for attempt in range(1, _VECTOR_COVERAGE_ATTEMPTS + 1):
+                ids, distances = self._query_once(query_embedding)
+                if wanted is None or wanted.issubset(set(ids)):
+                    break
+                if attempt == _VECTOR_COVERAGE_ATTEMPTS:
+                    missing = sorted(wanted - set(ids))
+                    raise RuntimeError(
+                        f"向量路覆盖率不足：{len(missing)} 个候选 node 未从 Chroma 取回 "
+                        f"（如 {missing[:5]}），已重试 {_VECTOR_COVERAGE_ATTEMPTS} 次；"
+                        f"collection={getattr(self._collection, 'name', '?')!r} "
+                        f"count={self._collection.count()} requested={len(wanted)} got={len(ids)}。"
+                        "这会让结果静默变成子集 —— 拒绝返回，请检查 collection 是否被清理/与索引不一致。"
+                    )
             out: list[Any] = []
             for nid, distance in zip(ids, distances):
                 node = self._by_id.get(nid)
-                if node is None:  # 防御：candidate 集外的 node id（不应发生）
+                if node is None:  # 防御：候选集外的 node id（不应发生）
                     continue
                 out.append(
                     ctx.llama["NodeWithScore"](
@@ -837,11 +928,11 @@ def _make_bm25_retriever(ctx: _RetrievalContext, top_k: int) -> Any:
     ``token_pattern=""``：本模块的 jieba 替身**忽略**该参数（见 :func:`_jieba_bm25s_tokenize`），
     传空串只为显式标注「不启用 bm25s 的正则切词」。
 
-    ⚠️ **BM25 路的检索文本是 node 全内容**（``BM25Retriever`` 内部用
-    ``node.get_content(metadata_mode=MetadataMode.EMBED)`` —— 正文 + metadata），而向量路
-    只 embed ``title。text``（policy）/ ``summary``（case）。故 case 的 BM25 索引文本里也会
-    出现 ``case_id`` / ``category`` / ``decision`` / ``risk_level`` / ``risk_type`` 等字段值。
-    这是该库的既有行为，本模块不额外裁剪（裁剪＝自造第 2 套文本构造逻辑，反而更容易漂移）。
+    **索引文本 = 正文**（R7 用户拍板，见 :func:`_build_nodes`）：该库内部取
+    ``node.get_content(metadata_mode=MetadataMode.EMBED)``，本模块构造 node 时用
+    ``excluded_embed_metadata_keys`` 把 metadata 全部排除，故 BM25 路与向量路
+    （``title。text`` / ``summary``）**检索同一份文本** —— metadata 字面值
+    （``case_id`` / ``risk_type`` 等）不再进入 BM25 词表（实测证据见返回报告 R7 段）。
     """
     with _jieba_tokenizer(), _TOKENIZER_LOCK:
         return ctx.llama["BM25Retriever"](
@@ -907,6 +998,10 @@ def _fuse_rrf(
     另注：该库的融合用 ``node.hash``（内容哈希）去重，而本 corpus **实测存在内容相同的行**
     （67 case 中 2 对哈希相同）→ 依赖内容哈希去重会把不同先例合并成一个；本模块用
     **node id**（由行键派生，逐行唯一）作融合键，不受此影响。
+
+    ⚠️ **上界是 ``2/60``（``≈0.0333``），不是 ``2/61``**：rank 从 **0** 起（``enumerate(ids)``），
+    故首位贡献 ``1/(60+0) = 1/60``；两路都排首位即 ``2/60 = 1/30``（实测 0.033333）。
+    与 llama-index ``_reciprocal_rerank_fusion`` 的 ``1.0 / (rank + k)`` 同式（其 rank 亦从 0 起）。
 
     返回 ``[(行索引, 6 位 RRF 分)]``，排序 key = ``(分降序, corpus 原序 idx 升序)``。
     """
@@ -1085,22 +1180,86 @@ class _ChromaIndexBase:
             return retriever.retrieve(query_bundle)
 
     def _rank_vector(
-        self, sub_ctx: _RetrievalContext, query_bundle: Any, top_k: int, store_filters: Any | None
+        self,
+        sub_ctx: _RetrievalContext,
+        query_bundle: Any,
+        top_k: int,
+        store_filters: Any | None,
+        *,
+        count_search: bool = True,
     ) -> list[tuple[int, float]]:
-        """向量路排名：``[(行索引, 1 − distance)]``（store 侧 MetadataFilters 下推）。
+        """向量路排名：``[(行索引, 1 − distance)]``（**精确候选 id 集** + store 侧 category 下推）。
+
+        与 local 后端的等价性由三件事保证（本模块实测：同序同 id，分差 ≤ 1e-6）：
+
+        1. **打分域 = 精确候选集** —— 检索器只对 ``sub_ctx.node_ids``（候选）取距离，
+           不再让非候选行抢 top-N 名额（漏召回 bug 的根因，见 :func:`_make_vector_retriever`
+           docstring）；
+        2. **覆盖率自检** —— 返回 id 必须覆盖候选 id，否则重试/抛（第三方少返是已知风险）；
+        3. **兜底补算** —— 万一覆盖率自检失败但需继续（例如部分候选确实取不回），
+           缺失候选按**本模块已存向量**（Chroma ``get`` 回来的 doc 向量）与 query 向量
+           现算 cos（复用 ``rag/vectors.cosine_similarity``，不新写第二套余弦），
+           并累加 ``SERVED_COUNTERS["vector_bruteforce_fallbacks"]`` 使其可见。
 
         ``top_k`` 传候选数上限时返回全部候选（hybrid 的 RRF 需要完整排名列表）。
+        ``count_search``：本次是否记一次 ``vector_searches``（hybrid 会调本函数一次 +
+        另计一次 ``hybrid_searches``；重试/兜底不重复计数）。
         """
-        retriever = _make_vector_retriever(sub_ctx, top_k, store_filters)
-        nodes = retriever.retrieve(query_bundle)
-        SERVED_COUNTERS["vector_searches"] += 1
-        ranked = [
-            (sub_ctx.row_index_by_key[n.node.node_id], n.score)
-            for n in nodes
-            if n.node.node_id in sub_ctx.row_index_by_key
-        ]
+        retriever = _make_vector_retriever(
+            sub_ctx, top_k, store_filters, candidate_ids=list(sub_ctx.node_ids)
+        )
+        try:
+            nodes = retriever.retrieve(query_bundle)
+        except RuntimeError:
+            # 覆盖率重试仍不足 → 已存向量兜底（结果仍完整；计数可见）。
+            nodes = []
+        if count_search:
+            SERVED_COUNTERS["vector_searches"] += 1
+        scored: dict[str, float] = {
+            n.node.node_id: n.score for n in nodes if n.node.node_id in sub_ctx.row_index_by_key
+        }
+        missing = [nid for nid in sub_ctx.node_ids if nid not in scored]
+        if missing:
+            scored.update(self._score_missing_by_stored_vectors(sub_ctx, query_bundle, missing))
+            SERVED_COUNTERS["vector_bruteforce_fallbacks"] += 1
+        ranked = [(sub_ctx.row_index_by_key[nid], score) for nid, score in scored.items()]
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
         return [(i, round(s, 6)) for i, s in ranked]
+
+    def _score_missing_by_stored_vectors(
+        self, sub_ctx: _RetrievalContext, query_bundle: Any, missing: list[str]
+    ) -> dict[str, float]:
+        """兜底：对未取回的候选，用 Chroma 里**已存 doc 向量**与 query 向量现算余弦。
+
+        - 向量来源 ``collection.get(ids=missing, include=["embeddings"])``（本地读取，无 ANN 近似）；
+        - 余弦用仓库既有 ``rag/vectors.cosine_similarity``（纯 Python，零第三方依赖；
+          与 local numpy/纯 Python 后端同源码），再按 ``_cosine_from_distance`` 同口径 clamp 到 [0,1]；
+        - 任一步失败（缺向量/长度不符）即抛，**不静默少返** —— 少返正是本次要修的 bug。
+        """
+        raise_on_missing = (
+            f"向量路兜底失败：{len(missing)} 个候选取不到向量（如 {missing[:5]}）——"
+            "拒绝返回子集结果"
+        )
+        if self._collection is None:
+            raise RuntimeError(raise_on_missing)
+        got = self._collection.get(ids=list(missing), include=["embeddings"])
+        # 注意：embeddings 是 numpy 数组列表 —— 不能用 ``or []``（数组真值歧义，实测
+        # ``ValueError: The truth value of an array with more than one element is ambiguous``）。
+        got_ids = list(got.get("ids") if got.get("ids") is not None else [])
+        raw_emb = got.get("embeddings")
+        got_vecs = [list(v) for v in ([] if raw_emb is None else raw_emb)]
+        if len(got_ids) != len(missing) or len(got_vecs) != len(missing):
+            raise RuntimeError(
+                f"{raise_on_missing}（collection.get 只回 {len(got_ids)}/{len(missing)} 条）"
+            )
+        query_embedding = sub_ctx.embed_model.get_query_embedding(query_bundle.query_str)
+        out: dict[str, float] = {}
+        for nid, vec in zip(got_ids, got_vecs):
+            raw = float(cosine_similarity(list(query_embedding), vec))
+            if math.isnan(raw):  # 防御：退化输入（cosine_similarity 自身已 clamp 0~1）
+                raw = 0.0
+            out[nid] = max(0.0, min(1.0, raw))
+        return out
 
     def _rank_bm25(
         self, sub_ctx: _RetrievalContext, query_bundle: Any, top_k: int
@@ -1135,7 +1294,7 @@ class _ChromaIndexBase:
 
         两路各自返回**全部候选**（``top_k`` = 候选数）→ 在完整排名列表上融合
         （:func:`_fuse_rrf`，含「为什么不用 ``QueryFusionRetriever`` 现成融合」的实测理由）。
-        ⚠️ 该分是**融合排名分，不是相似度**（上界 2/61≈0.0328，docs/10 §6-R5）；排序 key
+        ⚠️ 该分是**融合排名分，不是相似度**（上界 **2/60 = 1/30 ≈ 0.0333**，docs/10 §6-R5）；排序 key
         = ``(分降序, corpus 原序 idx 升序)``。
         """
         vec_ranked = self._rank_vector(sub_ctx, query_bundle, top_k, store_filters)
@@ -1308,7 +1467,7 @@ class ChromaCaseIndex(_ChromaIndexBase):
     ``CaseHit.retrieval_score`` 口径（docs/10 §0 C1，**勿误读**）：它是**检索分，不是语义
     相似度** —— ``bm25`` 模式 = 候选集内 min-max 归一化 BM25 分；``vector`` 模式 =
     ``1 − distance``（余弦相似度）；**``hybrid`` 模式 = RRF 融合分**（``Σ 1/(k+rank)``，
-    ``k=60``，落在 ~(0, 2/61]）。取值恒 ⊂ ``[0,1]``（``CaseHit`` 的 ``ge=0, le=1`` 约束成立）。
+    ``k=60``，落在 ~(0, **2/60 = 1/30**]）。取值恒 ⊂ ``[0,1]``（``CaseHit`` 的 ``ge=0, le=1`` 约束成立）。
     """
 
     _kind = "case"

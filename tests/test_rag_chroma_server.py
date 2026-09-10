@@ -41,7 +41,14 @@ chromadb = pytest.importorskip(
     reason="未安装 chromadb（CI 只跑 uv sync --frozen，不装 rag extra）→ 整文件跳过；装上后：uv sync --extra rag",
 )
 
-from pra.rag.chroma_backend import make_chroma_client
+from pra.domain.models import RiskType
+from pra.rag.chroma_backend import (
+    ChromaCaseIndex,
+    ChromaPolicyIndex,
+    make_chroma_client,
+    reset_served_counters,
+    served_counters,
+)
 from pra.rag.corpus import load_cases, load_policies
 from pra.rag.embedder import MockHashEmbedder
 from pra.rag.factory import build_case_index, build_policy_index
@@ -58,6 +65,7 @@ POLICY_ROWS = load_policies()[0]
 CASE_ROWS = load_cases()[0]
 
 _QUERY = "外观高度模仿知名品牌"
+_BAG_CATEGORY = "箱包/女包"
 _SCORE_TOL = 1e-6
 
 
@@ -108,9 +116,8 @@ async def test_chroma_policy_index_against_real_server() -> None:
     覆盖点：① factory 的 ``chroma_host``/``chroma_port`` 分支真连上服务端；② 24 个 node
     **落在服务端**（换一个 client 连接读 ``collection.count()``）；③ 服务端 collection 的
     向量空间回读为 cosine（docs/10 §3 硬要求）；④ vector 模式命中序/id 与 local 逐条一致
-    —— 组合取「无 risk_type + ``effective_only=False``」（下推 ≡ Python 谓词的那批）；
-    risk_type / effective_only 不可下推时 vector 路**会漏召回**，实测证据见
-    ``tests/test_rag_chroma.py`` 第 6 节（该偏差与本文件无关，但必须知道它的边界）。
+    —— 组合**含过滤**：无过滤、``effective_only=True``、``risk_type``（后者正是修复前会
+    漏召回的那类，修复后由「精确候选 id 集 + 覆盖率自检」在真服务端同样保证完整）。
     """
     prefix = _prefix("policy")
     # 独立连接（走被测的 make_chroma_client 装配路径）：读的是服务端真实状态
@@ -126,6 +133,7 @@ async def test_chroma_policy_index_against_real_server() -> None:
             collection_prefix=prefix,
         )
         local = RagPolicyIndex(POLICY_ROWS, embedder=MockHashEmbedder(), mode="vector")
+        assert isinstance(remote, ChromaPolicyIndex), "factory backend='chroma' 应给出 ChromaPolicyIndex"
 
         cols = _names_with_prefix(reader, prefix)
         assert cols == [f"{prefix}_policy_256"], f"应恰好建 1 个 collection，实际 {cols}"
@@ -136,11 +144,22 @@ async def test_chroma_policy_index_against_real_server() -> None:
         )
         assert remote_col.metadata["pra_dim"] == 256
 
-        rh = await remote.search(_QUERY, PolicySearchFilters(), top_k=5, effective_only=False)
-        lh = await local.search(_QUERY, PolicySearchFilters(), top_k=5, effective_only=False)
-        assert rh, "真服务端检索不应为空"
-        assert [h.clause_id for h in rh] == [h.clause_id for h in lh], (
-            "真服务端 vector 模式应与 local 同序同 id（§5-1 第一行）"
+        for query, filters, effective_only, top_k in (
+            (_QUERY, PolicySearchFilters(), False, 5),
+            (_QUERY, PolicySearchFilters(), True, 5),
+            # 修复前的漏召回组合（real server 版对照；当时 local 3 / chroma 0 类情形）
+            ("外观模仿", PolicySearchFilters(risk_type=[RiskType.FALSE_CLAIM]), True, 6),
+            ("外观模仿", PolicySearchFilters(risk_type=[RiskType.POTENTIAL_IP_RISK]), True, 6),
+            ("外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), True, 20),
+        ):
+            rh = await remote.search(query, filters, top_k, effective_only)
+            lh = await local.search(query, filters, top_k, effective_only)
+            assert [h.clause_id for h in rh] == [h.clause_id for h in lh], (
+                f"真服务端 vector 模式应与 local 同序同 id（§5-1 第一行）："
+                f"q={query!r} filters={filters} eff={effective_only} k={top_k}"
+            )
+        assert served_counters()["vector_bruteforce_fallbacks"] == 0, (
+            "真服务端上向量路动用了兜底补算 —— 精确 id 取数 / 覆盖率自检失效"
         )
     finally:
         _delete_mine(reader, prefix)
@@ -168,6 +187,7 @@ async def test_chroma_case_index_against_real_server() -> None:
             collection_prefix=prefix,
         )
         local = RagCaseIndex(CASE_ROWS, embedder=MockHashEmbedder(), mode="vector")
+        assert isinstance(remote, ChromaCaseIndex), "factory backend='chroma' 应给出 ChromaCaseIndex"
 
         cols = _names_with_prefix(reader, prefix)
         assert cols == [f"{prefix}_case_256"], f"应恰好建 1 个 collection，实际 {cols}"
@@ -175,14 +195,26 @@ async def test_chroma_case_index_against_real_server() -> None:
         assert remote_col.count() == len(CASE_ROWS) == 67, "服务端点数必须 == corpus 行数"
         assert remote_col.configuration_json["hnsw"]["space"] == "cosine"
 
-        filters = CaseSearchFilters(category="女鞋/运动鞋")
-        rh = await remote.search(_QUERY, filters, top_k=5)
-        lh = await local.search(_QUERY, filters, top_k=5)
-        assert rh, "真服务端检索不应为空"
-        assert [h.case_id for h in rh] == [h.case_id for h in lh], "case 与 local 同序同 id"
-        for a, b in zip(lh, rh):
-            assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= _SCORE_TOL
-        assert all(str(h.case_id).startswith("RAG_CASE_") for h in rh), "R-4：Case KB 隔离"
+        reset_served_counters()
+        for filters, top_k in (
+            (CaseSearchFilters(category="女鞋/运动鞋"), 5),
+            # 修复前的漏召回组合（candidate 25 条而库里匹配 67 条）
+            (CaseSearchFilters(risk_type=[RiskType.POTENTIAL_IP_RISK]), 30),
+            (CaseSearchFilters(category="女鞋/运动鞋",
+                               risk_type=[RiskType.POTENTIAL_IP_RISK]), 10),
+        ):
+            rh = await remote.search(_QUERY if top_k == 5 else "外观模仿", filters, top_k)
+            lh = await local.search(_QUERY if top_k == 5 else "外观模仿", filters, top_k)
+            assert rh, "真服务端检索不应为空"
+            assert [h.case_id for h in rh] == [h.case_id for h in lh], (
+                f"case 真服务端应与 local 同序同 id（§5-1 第一行）：filters={filters} k={top_k}"
+            )
+            for a, b in zip(lh, rh):
+                assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= _SCORE_TOL
+            assert all(str(h.case_id).startswith("RAG_CASE_") for h in rh), "R-4：Case KB 隔离"
+        assert served_counters()["vector_bruteforce_fallbacks"] == 0, (
+            "真服务端上向量路动用了兜底补算 —— 精确 id 取数 / 覆盖率自检失效"
+        )
     finally:
         _delete_mine(reader, prefix)
     assert _names_with_prefix(reader, prefix) == []

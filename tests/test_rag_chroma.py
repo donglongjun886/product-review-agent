@@ -6,9 +6,11 @@
 1. **协议形状**：``ChromaPolicyIndex.search(query, filters, top_k, effective_only)`` /
    ``ChromaCaseIndex.search(query, filters, top_k)`` 返回 ``PolicyClauseHit`` /
    ``CaseHit``（tools 层 Protocol 未被改动 —— docs/10 §2 铁律）。
-2. **同构等价按模式分别断言**（§5-1 表格，初稿「三种模式同序同 id」已被实测改写）：
+2. **同构等价按模式分别断言**（§5-1 表格，初稿「三种模式同序同 id」曾被实测改写成
+   「只在下推 ≡ 谓词时成立」；**漏召回 bug 已修**，故 vector 行恢复为**无条件**成立，
+   且断言覆盖**过滤组合**，见第 2 节与第 6 节）：
    - ``vector``：与 local 后端**同序同 id** + 打分 6 位一致（容差 1e-6，Chroma 存算
-     float32 的尾差）—— 但**只在「过滤条件可完整下推」的组合上成立**，见第 6 节；
+     float32 的尾差）—— 组合表含 ``risk_type`` / ``effective_only`` / category 过滤；
    - ``bm25`` / ``hybrid``：**不可比**（本地 = 自写 Okapi + CJK 字符 bigram + 全库 IDF；
      Chroma 路 = ``bm25s`` + jieba 真词 + 语料 = 候选 node；且 hybrid 本地 = 0.5·norm(bm25)
      + 0.5·cos、量纲 [0,1]，Chroma 路 = RRF ``Σ1/(60+rank)``、量纲 ~0.0167–0.0333）。
@@ -17,16 +19,21 @@
      把 bm25/hybrid 的差异误读成回归。
 3. **``retrieval_score`` 语义（C1）**：bm25 = 候选集内 min-max 归一化（⊂ [0,1]）；
    vector = ``1 − distance`` 余弦（⊂ [0,1]）；**hybrid = RRF 融合分**（``Σ1/(60+rank)``，
-   恒 ⊂ ``(0, 2/60]``，见第 3 节关于 2/60 与文档所写 2/61 的实测分歧）—— 任何场合都
-   不得表述成「语义相似度」（docs/10 §0 C1 / §6-R5）。
+   恒 ⊂ ``(0, 2/60]`` —— rank **从 0 起**，故上界是 ``2/60 = 1/30``，不是 ``2/61``；
+   实现 docstring 与本套件均已按实测更正）—— 任何场合都不得表述成「语义相似度」
+   （docs/10 §0 C1 / §6-R5）。
 4. **确定性**：同 query 两次 ``model_dump(mode="json")`` 逐字节一致；检索链路
    ``llm_calls == 0``（检索侧零 LLM，docs/10 §3）。
 5. **cosine space 硬要求（§3）**：建库必须**显式** cosine（Chroma 缺省 l2 会让
    「相似度 = 1 − distance」静默失效 —— 这正是本文件要钉住的坑），并做单位向量数值自检。
-6. **已知偏差（不粉饰）**：vector 路在 risk_type / effective_only 无法下推时**会漏召回**
-   （实测 policy 16→13、case 25→14），与 §5-1「vector 同序同 id」不符 —— 见
-   ``test_vector_mode_recall_leak_*``（断言的是**实测事实**，不是预期；实现修好后这些
-   用例会失败，届时按下述注释更新）。
+6. **两道回归闸（本轮补，都是「上一版没测所以漏了」的直接产物）**：
+   - **向量路候选完整性**：vector 取数改为「精确候选 id 集 + 覆盖率自检 + 已存向量兜底」，
+     本文件断言**过滤组合**下同序同 id、结果长度 == ``min(top_k, 可用候选数)``，
+     且 ``served_counters()["vector_bruteforce_fallbacks"] == 0``（兜底没被默默用上）；
+   - **R7：BM25 只索引正文**：纯 metadata 字面值（``RAG_CASE_0037`` / ``POTENTIAL_IP_RISK`` …）
+     不得产生任何 BM25 信号（原始分恒 0、结果与零信号查询逐字节一致），且 node 的 EMBED
+     文本逐字等于正文。⚠️ 反例字面值必须**token 级**不在正文里（``全类目`` / ``女鞋/运动鞋``
+     本来就出现在正文，命中是正确行为，用例内会现场自检这一点）。
 
 **在 CI 上本文件整文件 skip（诚实标注，勿声称 CI 覆盖）**：顶层
 ``pytest.importorskip("chromadb")``，而 CI 只跑 ``uv sync --frozen``（**不装任何 extra**）
@@ -39,6 +46,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -61,6 +69,7 @@ from pra.rag.corpus import load_cases, load_policies
 from pra.rag.embedder import MockHashEmbedder
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.rag.index import RagCaseIndex, RagPolicyIndex
+from pra.rag.vectors import cosine_similarity
 from pra.tools import build_tools
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
 from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
@@ -73,9 +82,9 @@ CASE_ROWS = load_cases()[0]
 _RRF_K = 60
 #: hybrid 分的实测上界 = 两路各自第 0 名相加 = ``2/60``（见第 3 节的分歧说明）。
 _RRF_MAX = 2.0 / _RRF_K
-#: 文档（docs/10 §6-R5 与 chroma_backend 模块 docstring）写的上界 —— 实测**不成立**，
-#: 保留常量只为在断言消息里对比证据。
-_DOC_CLAIMED_RRF_MAX = 2.0 / 61.0
+#: 上一轮被证伪、后由实现与本套件一并更正的历史上界（``2/61``）—— 仅作对照常量保留，
+#: 断言**不再**引用它（真值是 :data:`_RRF_MAX`）。
+_DOC_CLAIMED_RRF_MAX_LEGACY = 2.0 / 61.0
 
 _EXPIRED_OLD_CLAUSE = "POLICY_2.1_v1_c1"  # 全类目 EXPIRED 旧版（版本过滤测试面）
 _FULL_CATEGORY = "全类目"
@@ -294,68 +303,183 @@ def test_chroma_collection_name_shape_and_metadata() -> None:
 # 2) 同构等价 —— vector 与 local 同序同 id；bm25/hybrid **不可比**（§5-1 表格）
 # ---------------------------------------------------------------------------
 
-#: **过滤条件可完整下推到 Chroma 的组合**（vector 路「同序同 id」只在这里成立）：
-#: 无 risk_type（Chroma 对列表字段无可用成员算子，只能 Python 侧判）且二者之一：
-#: ① ``effective_only=False`` —— 谓词只剩 category；② 无 category —— 下推为空。
-#: ③ category + effective_only=True 的组合**不在此列**：下推只含 category，库内
-#:    EXPIRED 行会占据 top-n_results 名额 → 实测漏召回（见第 6 节）。
-_POLICY_VECTOR_PARITY: list[tuple[str, PolicySearchFilters, bool, int]] = [
-    ("外观高度模仿知名品牌无授权", PolicySearchFilters(), False, 5),
-    ("外观高度模仿知名品牌无授权", PolicySearchFilters(category=_SHOE_CATEGORY), False, 5),
-    ("外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), False, 20),
-    ("永久去皱 根治脚气 功效夸大", PolicySearchFilters(), False, 10),
-    ("不存在类目 数码3C", PolicySearchFilters(category=_MISSING_CATEGORY), False, 5),
+#: **vector 模式与 local 的同序同 id 组合（含过滤组合）** —— 逐条参数化，**不再只是「干净查询」**。
+#:
+#: 为什么必须带过滤组合（2026-09-10 缺陷复盘）：最初只测「无 risk_type + 下推 ≡ 谓词」的组合，
+#: 于是 vector 路的漏召回 bug 全绿通过 —— 只有当 **下推的 where 只是候选谓词的真超集** 时
+#: 才会暴露（``risk_type`` 无法下推：Chroma 列表字段没有成员算子；``effective_only`` 也不在
+#: where 里）。当时实测：policy ``外观模仿``+risk_type=[FALSE_CLAIM]+eff k=6 → local 3 / chroma **0**；
+#: policy 品牌词+eff（**无任何 store 过滤**）k=30 → local 21 / chroma **19**（EXPIRED 行抢位）；
+#: case 外观模仿+risk_type=[IP] k=30 → local 25 / chroma **14**。
+#: 这些组合现在全部逐条断言（下面每条都标注了「修复前的实测值」）。
+_VECTOR_PARITY_POLICY: list[tuple[str, str, PolicySearchFilters, bool, int]] = [
+    # (用例后缀, query, filters, effective_only, top_k)
+    ("no_filter_eff", "外观高度模仿知名品牌无授权", PolicySearchFilters(), True, 5),
+    ("no_filter_all", "永久去皱 根治脚气 功效夸大", PolicySearchFilters(), False, 10),
+    ("category_only", "外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), False, 20),
+    # ↓ 修复前：local 21 / chroma 19（EXPIRED 行抢占 n_results 名额，无任何 store 过滤也中招）
+    ("brand_eff_k30", "外观高度模仿知名品牌无授权", PolicySearchFilters(), True, 30),
+    # ↓ 修复前：local 3 / chroma 0（risk_type 不可下推 → 非候选行排满 top-N，真候选一条没取到）
+    ("risk_type_false_claim", "外观模仿", PolicySearchFilters(risk_type=[_FALSE_CLAIM]), True, 6),
+    # ↓ 修复前：local 6 / chroma 4
+    ("risk_type_ip", "外观模仿", PolicySearchFilters(risk_type=[_IP]), True, 6),
+    # ↓ 修复前：local 6 / chroma 5
+    ("risk_type_evasion", "规避 换链接 重上架", PolicySearchFilters(risk_type=[_EVASION]), True, 6),
+    # ↓ 修复前：local 16 / chroma 13（保住了前缀但漏了 3 条）
+    ("category_eff_k20", "外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), True, 20),
+    ("category_plus_risk_type", "外观模仿",
+     PolicySearchFilters(category=_SHOE_CATEGORY, risk_type=[_IP]), True, 20),
+    ("missing_category", "不存在类目 数码3C", PolicySearchFilters(category=_MISSING_CATEGORY), True, 20),
 ]
-_CASE_VECTOR_PARITY: list[tuple[str, CaseSearchFilters, int]] = [
-    ("无品牌高相似商家多次上架", CaseSearchFilters(), 5),
-    ("无品牌高相似商家多次上架", CaseSearchFilters(category=_SHOE_CATEGORY), 5),
-    ("外观模仿", CaseSearchFilters(category=_BAG_CATEGORY), 30),
-    ("食品 不存在类目", CaseSearchFilters(category="食品"), 5),
+_VECTOR_PARITY_CASE: list[tuple[str, str, CaseSearchFilters, int]] = [
+    ("no_filter", "无品牌高相似商家多次上架", CaseSearchFilters(), 5),
+    ("category_only", "无品牌高相似商家多次上架", CaseSearchFilters(category=_SHOE_CATEGORY), 5),
+    ("category_all_candidates", "外观模仿", CaseSearchFilters(category=_BAG_CATEGORY), 30),
+    ("no_match_category", "食品 不存在类目", CaseSearchFilters(category="食品"), 5),
+    # ↓ 修复前：local 25 / chroma 14（候选 25 条而库里匹配 67 条，取数上限被非候选行占满）
+    ("risk_type_k30", "外观模仿", CaseSearchFilters(risk_type=[_IP]), 30),
+    # ↓ 修复前：local 6 / chroma 5
+    ("category_plus_risk_type", "外观模仿",
+     CaseSearchFilters(category=_SHOE_CATEGORY, risk_type=[_IP]), 10),
 ]
 
 
-@pytest.mark.parametrize("mode", ["vector"])
-async def test_chroma_policy_vector_equivalent_to_local(mode: str) -> None:
-    """**vector 模式 policy：与 local 同序同 id + 打分 6 位一致**（§5-1 第一行）。
+@pytest.mark.parametrize(
+    ("label", "query", "filters", "effective_only", "top_k"),
+    _VECTOR_PARITY_POLICY,
+    ids=[case[0] for case in _VECTOR_PARITY_POLICY],
+)
+async def test_chroma_policy_vector_equivalent_to_local(
+    label: str, query: str, filters: PolicySearchFilters, effective_only: bool, top_k: int
+) -> None:
+    """**vector 模式 policy：与 local 同序同 id + 打分 6 位一致（§5-1 第一行，无条件）**。
 
-    只在本表组合上断言（理由见 ``_POLICY_VECTOR_PARITY`` 注释与第 6 节）：vector 路
-    的取数走 Chroma 原生 ``collection.query`` → ``1 − distance``（**不是** ``exp(-distance)``，
-    docs/10 §3 实测），排序 tie-break 为「分降序 + corpus 原序」→ 与 local 的
-    ``rank_documents`` 同口径；打分差异只来自 Chroma float32 存算的尾差 ⊂ 1e-6。
+    vector 路走 Chroma 原生 ``collection.query`` → ``1 − distance``（**不是** ``exp(-distance)``，
+    docs/10 §3 实测），排序 tie-break = 「分降序 + corpus 原序」→ 与 local ``rank_documents``
+    同口径；分差只来自 Chroma float32 存算尾差（⊂ 1e-6，故这里对 policy 只断 id 序）。
+
+    组合表覆盖**过滤组合**（``risk_type`` / ``effective_only`` / category，见
+    ``_VECTOR_PARITY_POLICY`` 注释里的「修复前实测值」）——「干净查询」测不出漏召回，
+    这正是当初漏掉这个 bug 的原因。同时断言结果长度 == ``min(top_k, 可用候选数)``
+    （候选完整，不只是「同 id 截断后的前缀」）。
     """
-    local = _policy_local(mode)
-    chroma_idx = _policy_chroma(mode)
-    for query, filters, effective_only, top_k in _POLICY_VECTOR_PARITY:
+    local = _policy_local("vector")
+    chroma_idx = _policy_chroma("vector")
+    lh = await local.search(query, filters, top_k, effective_only)
+    ch = await chroma_idx.search(query, filters, top_k, effective_only)
+    assert [h.clause_id for h in lh] == [h.clause_id for h in ch], (
+        f"policy vector[{label}] q={query!r} filters={filters} eff={effective_only} k={top_k}: "
+        f"与 local 命中序/id 不一致\nlocal ={[(h.clause_id, getattr(h, 'retrieval_score', '-')) for h in lh]}\n"
+        f"chroma={[h.clause_id for h in ch]}"
+    )
+    eligible = _eligible_policy(filters, effective_only)
+    assert len(ch) == min(top_k, eligible), (
+        f"policy vector[{label}]: 候选不完整 {len(ch)} != min({top_k}, {eligible})"
+    )
+    assert all(h.status == "EFFECTIVE" for h in ch) if effective_only else True
+
+
+@pytest.mark.parametrize(
+    ("label", "query", "filters", "top_k"),
+    _VECTOR_PARITY_CASE,
+    ids=[case[0] for case in _VECTOR_PARITY_CASE],
+)
+async def test_chroma_case_vector_equivalent_to_local(
+    label: str, query: str, filters: CaseSearchFilters, top_k: int
+) -> None:
+    """**vector 模式 case：与 local 同序同 id + ``retrieval_score`` 差 ≤ 1e-6（无条件）**。
+
+    与 policy 同理，组合覆盖 ``risk_type`` / category 过滤（``_VECTOR_PARITY_CASE`` 注释里
+    标注了每条修复前的实测偏差）；额外断言结果长度 == ``min(top_k, 可用候选数)``。
+    """
+    local = _case_local("vector")
+    chroma_idx = _case_chroma("vector")
+    lh = await local.search(query, filters, top_k)
+    ch = await chroma_idx.search(query, filters, top_k)
+    assert [h.case_id for h in lh] == [h.case_id for h in ch], (
+        f"case vector[{label}] q={query!r} filters={filters} k={top_k}: 与 local 命中序/id 不一致"
+    )
+    eligible = _eligible_case(filters)
+    assert len(ch) == min(top_k, eligible), (
+        f"case vector[{label}]: 候选不完整 {len(ch)} != min({top_k}, {eligible})"
+    )
+    for a, b in zip(lh, ch):
+        assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= _SCORE_TOL, (
+            "Chroma float32 存算尾差应 ⊂ 1e-6（实测 case 分差 [0,0,0,0,1e-6]）",
+            label,
+            a.case_id,
+            a.retrieval_score,
+            b.retrieval_score,
+        )
+
+
+async def test_chroma_vector_path_covers_candidates_without_bruteforce_fallback() -> None:
+    """**vector 路按「精确候选 id 集」取数，正常路径不得动用兜底**（漏召回 bug 的回归闸）。
+
+    修复后的机制（docs/10 复盘）：候选 node id 集合直接交给 Chroma ``ids=``（``where`` 仍下推，
+    但只作收窄），``n_results = min(候选数, collection.count())`` → 「返回 ⊇ 候选」由构造保证；
+    另有两道保险：覆盖率自检（重试 3 次后仍缺即抛 ``RuntimeError``）与**按已存向量补算 cos 的兜底**
+    （``served_counters()["vector_bruteforce_fallbacks"]``）。
+
+    本用例断言的是「**兜底没有被默默用上**」：risk_type 过滤（正是修复前会漏的那类查询）下
+    ① 结果长度 == min(top_k, 可用候选数)、② 分数与 local 逐条 ≤1e-6（若走了兜底补算，
+    分数仍可能接近但会经纯 Python 余弦而非 Chroma float32 —— 更重要的是
+    ③ ``vector_bruteforce_fallbacks`` 必须恒为 **0**：一旦它变成非 0，说明精确取数/覆盖率那道闸
+    在真实环境里失效了，结果正确只是「兜底替它干活」的假象。
+    """
+    reset_served_counters()
+    idx = _policy_chroma("vector")
+    local = _policy_local("vector")
+    probes = [
+        ("外观模仿", PolicySearchFilters(risk_type=[_FALSE_CLAIM]), True, 6),
+        ("外观模仿", PolicySearchFilters(risk_type=[_IP]), True, 6),
+        ("规避 换链接 重上架", PolicySearchFilters(risk_type=[_EVASION]), True, 6),
+        ("外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), True, 20),
+    ]
+    for query, filters, effective_only, top_k in probes:
+        ch = await idx.search(query, filters, top_k, effective_only)
         lh = await local.search(query, filters, top_k, effective_only)
-        ch = await chroma_idx.search(query, filters, top_k, effective_only)
-        assert [h.clause_id for h in lh] == [h.clause_id for h in ch], (
-            f"policy vector q={query!r} filters={filters} eff={effective_only} k={top_k}: "
-            "与 local 命中序/id 不一致"
+        assert len(ch) == min(top_k, _eligible_policy(filters, effective_only)), (
+            f"q={query!r} filters={filters}: 候选不完整（结果靠兜底补齐即说明精确取数失效）"
         )
+        assert [h.clause_id for h in ch] == [h.clause_id for h in lh]
+    counters = served_counters()
+    assert counters["vector_bruteforce_fallbacks"] == 0, (
+        "vector 路动用了「按已存向量补算」兜底 —— 精确 id 取数 / 覆盖率自检在真实环境失效："
+        f"{counters}"
+    )
+    assert counters["vector_searches"] >= len(probes), f"空跑不算数：{counters}"
 
 
-@pytest.mark.parametrize("mode", ["vector"])
-async def test_chroma_case_vector_equivalent_to_local(mode: str) -> None:
-    """**vector 模式 case：与 local 同序同 id + ``retrieval_score`` 差 ≤ 1e-6**（§5-1）。
+def test_chroma_vector_bruteforce_fallback_scores_missing_candidates() -> None:
+    """兜底路径**本身可用**（直接调用，绕开「让 Chroma 少返」这种不可控触发）。
 
-    case 侧无 ``effective_only``、category 走**精确匹配**下推（与 Python 谓词等价），
-    故 parity 组合更多；风险类型过滤仍不可下推，对照组见第 6 节。
+    修复引入的最后一道防线：万一覆盖率自检 3 次重试后仍缺候选，``_rank_vector`` 会改走
+    ``_score_missing_by_stored_vectors``（按 Chroma 里**已存的 doc 向量**现算 ``cosine_similarity``）。
+    这段代码正常路径**永不执行**（上面那条 ``fallbacks == 0`` 就是证明），因此它的正确性只能直测：
+
+    ① 补算出的分 == 用同一 embedder 现算的余弦（口径与 local 同源，不是第二套公式）；
+    ② 取不到向量的 id → **抛 RuntimeError，绝不静默少返**（静默少返正是被修掉的那个 bug）。
     """
-    local = _case_local(mode)
-    chroma_idx = _case_chroma(mode)
-    for query, filters, top_k in _CASE_VECTOR_PARITY:
-        lh = await local.search(query, filters, top_k)
-        ch = await chroma_idx.search(query, filters, top_k)
-        assert [h.case_id for h in lh] == [h.case_id for h in ch], (
-            f"case vector q={query!r} filters={filters} k={top_k}: 与 local 命中序/id 不一致"
+    idx = _case_chroma("vector")
+    sub_ctx = idx._sub_context([0, 5, 7])
+    query_bundle = idx._llama["QueryBundle"](query_str="外观模仿")
+    missing = [idx.node_ids[0], idx.node_ids[7]]
+    scored = idx._score_missing_by_stored_vectors(sub_ctx, query_bundle, missing)
+    assert set(scored) == set(missing)
+    embedder = MockHashEmbedder()
+    query_vec = embedder.embed("外观模仿")
+    for node_id, score in scored.items():
+        row = CASE_ROWS[idx.node_ids.index(node_id)]
+        expected = cosine_similarity(query_vec, embedder.embed(row.summary))
+        assert abs(score - expected) <= _SCORE_TOL, (
+            node_id,
+            score,
+            expected,
         )
-        for a, b in zip(lh, ch):
-            assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= _SCORE_TOL, (
-                "Chroma float32 存算尾差应 ⊂ 1e-6（实测 case 分差 [0,0,0,0,1e-6]）",
-                a.case_id,
-                a.retrieval_score,
-                b.retrieval_score,
-            )
+
+    with pytest.raises(RuntimeError, match="兜底失败|拒绝返回子集"):
+        idx._score_missing_by_stored_vectors(sub_ctx, query_bundle, ["pra-不存在的-node-id"])
 
 
 @pytest.mark.parametrize("mode", ["bm25", "hybrid"])
@@ -461,28 +585,24 @@ async def test_chroma_retrieval_score_is_rrf_for_hybrid_not_similarity() -> None
     1/(60+b)}`` 内、恒 > 0、上界 ``2/60``；并对照 local hybrid（量纲 [0,1]，实测 top-1
     ≈ 0.61 > 2/60）证明两者量纲不同 —— 这正是「禁止把该分读成语义相似度」的实测依据。
 
-    ⚠️ **与文档的分歧（实测）**：docs/10 §6-R5 与 ``chroma_backend`` 模块 docstring 写
-    「hybrid 落在 ~(0, 2/61]（上界 2/61≈0.0328）」，但实测出现 **0.033333**（> 2/61）。
-    原因：实现 ``_fuse_rrf`` 用 ``enumerate(ids)``（**0 起**）→ 第 0 名贡献
-    ``1/(60+0) = 1/60``，两路相加 = ``2/60 = 1/30``。这与 llama-index
-    ``QueryFusionRetriever._reciprocal_rerank_fusion`` 的 ``1.0/(rank + k)``
-    （同为 0 起）**逐条一致**，即「与库同源」成立、**文档写的 2/61 才是错的**。
-    本用例按实测真值断言 ``(0, 2/60]``。
+    上界的来历（**本轮已修文档**）：rank 从 **0** 起（``_fuse_rrf`` 用 ``enumerate(ids)``）→ 第 0 名
+    贡献 ``1/(60+0) = 1/60``，两路都排首位即 ``2/60 = 1/30 ≈ 0.03333``（实测 0.033333），
+    **不是 2/61**。实现（``_fuse_rrf`` / ``_rank_hybrid`` / ``ChromaCaseIndex`` 三处 docstring）
+    与本测试套件上一轮都按实测值更正为 ``2/60``；上与 llama-index
+    ``QueryFusionRetriever._reciprocal_rerank_fusion`` 的 ``1.0/(rank + k)``（同 0 起）逐条一致。
+    本用例把该口径钉住：任何把它写回 ``2/61`` 的改动都会让「实测存在 == round(2/60, 6) 的命中」变红。
     """
     case_idx = _case_chroma("hybrid")
     local = _case_local("hybrid")
     achievable = _rrf_achievable_scores()
-    # 该组合实测 top-1 两路都排第 0 → RRF = 1/60 + 1/60 = 0.033333（> 文档所写 2/61）
+    # 该组合实测 top-1 两路都排第 0 → RRF = 1/60 + 1/60 = 0.033333（= 上界 2/60）
     query = "外观模仿"
     filters = CaseSearchFilters(category=_SHOE_CATEGORY, risk_type=[_IP])
     hits = await case_idx.search(query, filters, top_k=25)
     assert hits
     for h in hits:
         assert 0.0 < h.retrieval_score <= _RRF_MAX + 1e-12, (
-            (
-                "hybrid 分必须 ⊂ (0, 2/60]（实测上界 2/60；文档所写 2/61 "
-                f"已被 0.033333 > {_DOC_CLAIMED_RRF_MAX:.6f} 证伪）"
-            ),
+            "hybrid 分必须 ⊂ (0, 2/60]（rank 从 0 起 → 两路首位相加 = 2/60 = 0.0333）",
             h.case_id,
             h.retrieval_score,
         )
@@ -495,8 +615,10 @@ async def test_chroma_retrieval_score_is_rrf_for_hybrid_not_similarity() -> None
             h.retrieval_score,
         )
     assert any(h.retrieval_score == round(_RRF_MAX, 6) for h in hits), (
-        "实测存在两路都排第 0 的命中 → 分恰为 round(2/60, 6) = 0.033333"
-        "（这正是文档所写上界 2/61 不成立的实证）"
+        "实测存在两路都排第 0 的命中 → 分恰为 round(2/60, 6) = 0.033333（上界即 2/60，不是 2/61）"
+    )
+    assert max(h.retrieval_score for h in hits) > _DOC_CLAIMED_RRF_MAX_LEGACY, (
+        "实测最高分必须 > 历史文档所写的 2/61 —— 这条同时钉住「上界写 2/61 是错的」这一更正依据"
     )
     # local hybrid 是另一套量纲（0.5·norm(RRF 化前的 bm25) + 0.5·cos）→ 不可比
     local_hits = await local.search(query, filters, top_k=25)
@@ -720,92 +842,162 @@ def test_chroma_dim_mismatch_on_reuse_is_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6) 已知偏差（实测，不粉饰）：vector 路在「过滤不可完整下推」时漏召回
+# 6) R7 守卫：BM25 索引文本 = 正文，metadata 字面值不得成为检索信号
 # ---------------------------------------------------------------------------
 
-#: vector 路漏召回组合（实测，两处机制）：
-#: - ``risk_type`` 完全不能下推（Chroma 1.5.5+ 对列表字段无成员算子、LlamaIndex 的
-#:   ANY/CONTAINS 无翻译）→ 取数上限 = 候选数，但库里符合条件的行更多；
-#: - ``effective_only=True`` 不在 where 里 → 库内 EXPIRED 行占掉 top-n_results 名额。
-_VECTOR_LEAK_POLICY: list[tuple[str, PolicySearchFilters, bool, int]] = [
-    ("外观模仿", PolicySearchFilters(risk_type=[_FALSE_CLAIM]), True, 6),   # local 3 → chroma 0
-    ("仿冒 高仿 复刻 原单", PolicySearchFilters(risk_type=[_IP]), True, 6),   # local 6 → chroma 4
-    ("规避 换链接 改标题 重上架", PolicySearchFilters(risk_type=[_EVASION]), True, 6),
-    ("外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), True, 20),      # local 16 → chroma 13
-]
-_VECTOR_LEAK_CASE: list[tuple[str, CaseSearchFilters, int]] = [
-    ("外观模仿", CaseSearchFilters(category=_SHOE_CATEGORY, risk_type=[_IP]), 6),
-    ("外观模仿", CaseSearchFilters(risk_type=[_IP]), 30),
-]
+#: 纯 metadata 字面值查询（**修复前实测命中 67/67 case、24/24 policy**）。
+#: 取自 node metadata 的实际取值：``case_id`` / ``risk_type`` / ``decision`` / ``risk_level``
+#: （policy 侧另有 ``clause_id`` / ``status``）。
+#: ⚠️ **挑选纪律（实测踩过）**：不能凭「看起来像 metadata」就拿来当反例 —— 必须是
+#: **token 级**在正文里不出现的字面值（下面每个用例都会现场自检这一点）：
+#: - 类目字面值 ``女鞋/运动鞋`` / ``箱包/女包`` 与 ``全类目`` 本来就出现在正文里
+#:   （实测 case 正文含 ``运动鞋``，policy 正文含 ``类目``）→ 命中是**正确行为**，不能当反例；
+#: - ``POLICY_5.3`` 会被 jieba 拆成 ``['policy', '_', '5', '3', '5.3']``，其中单字符 ``'3'``
+#:   命中政策正文里的「≥3 次」等表述 → 原始分非 0 属**分词假阳性**，与 R7 无关（已剔除）。
+_CASE_METADATA_LITERALS = ("RAG_CASE_0037", "RAG_CASE_0001", "POTENTIAL_IP_RISK",
+                           "EVASION_PATTERN", "REJECT", "HUMAN_REVIEW", "PASS", "HIGH", "LOW")
+_POLICY_METADATA_LITERALS = ("POLICY_1.1_v2_c1", "POLICY_1.5", "POTENTIAL_IP_RISK",
+                             "EVASION_PATTERN", "REJECT", "EFFECTIVE", "EXPIRED")
+
+#: 「毫无信号」的对照查询：latin 乱码，与全库正文/词表零交集。
+_NO_SIGNAL_QUERY = "zzzqqq wwweee"
 
 
-async def test_vector_mode_recall_leak_policy_documented_truth() -> None:
-    """**实测偏差**：policy vector 路在 risk_type / effective_only 不可下推时会漏召回。
+def _jieba_tokens_of(text: str) -> list[str]:
+    """与被测 BM25 索引**同一分词器**切词（复用模块内 ``_jieba_tokens``，不自造第二套）。"""
+    from pra.rag.chroma_backend import _jieba_tokens
 
-    本用例断言的是**实测事实**（不是预期行为），因为 docs/10 §5-1 表格给 vector 的
-    断言是「与 local 同序同 id + 打分一致」，而以下组合**做不到**：
+    return _jieba_tokens(text)
 
-    | 组合 | local | Chroma vector |
-    |---|---|---|
-    | ``q=外观模仿`` + risk_type=[FALSE_CLAIM], eff=True, k=6 | 3 | **0**（整组丢光 —— 最坏形态） |
-    | ``q=仿冒 高仿 复刻 原单`` + risk_type=[POTENTIAL_IP_RISK], k=6 | 6 | **4** |
-    | ``q=规避 换链接 改标题 重上架`` + risk_type=[EVASION_PATTERN], k=6 | 6 | **5** |
-    | ``q=外观模仿`` + category=箱包/女包, eff=True, k=20 | 16 | **13** |
 
-    机制：``_retrieve_ranked`` 取 ``n_results = len(candidates)``，但**下推的 where 只是
-    候选谓词的真超集**（risk_type 不推、effective_only 不推）→ 库里多出的行按距离挤进
-    top-n_results，再被 Python 侧 ``recheck`` 剔除，于是结果**不足** min(top_k, 候选数)，
-    极端情况（非候选行恰好排满 top-n_results）下**一条都不剩**。
-    实现 docstring 声称「取候选数上限即可避免结果不足」，实测**仅在 where ≡ 谓词时成立**。
+def _body_tokens(rows: list[Any], *, kind: str) -> set[str]:
+    """该 KB **正文**（BM25 索引文本）的 jieba 词集合 —— 用于自检「反例确实不在正文里」。"""
+    from pra.rag.chroma_backend import _jieba_tokens
 
-    断言的稳定性质（不会因实现修好以外的原因抖动）：① 命中是 local 的**真子集**（只漏召回、
-    不会凭空多出；允许为空集）；② 相对顺序与 local 一致；③ 结果数 < min(top_k, 可用候选数)。
-    ⚠️ 若实现改为「按全库取数或补齐 where」，本用例会失败 —— 届时**删掉本用例**并把
-    §5-1 的 vector 行恢复为无条件成立（这是本用例存在的意义，勿改断言迁就）。
+    text = " ".join(
+        (f"{r.title}。{r.text}" if kind == "policy" else r.summary) for r in rows
+    )
+    return set(_jieba_tokens(text))
+
+
+def _bm25_raw_scores(idx: object, candidates: list[int], query: str) -> list[float]:
+    """直接向 BM25 检索器要**原始分**（不经 ``normalize_minmax``）—— 「有没有信号」的直接证据。
+
+    走模块内部件（``_sub_context`` / ``_make_bm25_retriever`` / ``_bm25_retrieve``）是**有意为之**：
+    ``search()`` 的分数已被归一化成 [0,1]，而「纯 metadata 字面值是否命中」这件事只体现在原始分上；
+    R7 的验收口径本就该看检索器视野里有没有这个词，而不是看归一化后的包装值。
     """
-    local = _policy_local("vector")
-    idx = _policy_chroma("vector")
-    empty_leaks = 0
-    for query, filters, effective_only, top_k in _VECTOR_LEAK_POLICY:
-        lh = await local.search(query, filters, top_k, effective_only)
-        ch = await idx.search(query, filters, top_k, effective_only)
-        lid, cid = [h.clause_id for h in lh], [h.clause_id for h in ch]
-        empty_leaks += 1 if (lid and not cid) else 0
-        assert set(cid) < set(lid), (
-            f"q={query!r} filters={filters} eff={effective_only}: 期望「local 的真子集」"
-            f"（漏召回），实际 local={lid} chroma={cid}"
-        )
-        assert [i for i in lid if i in set(cid)] == cid, "漏召回不得改变剩余命中的相对顺序"
-        eligible = _eligible_policy(filters, effective_only)
-        assert len(cid) < min(top_k, eligible), (
-            f"候选不完整：{len(cid)} < min({top_k}, {eligible}) —— 这正是与 §5-1 的冲突点"
-        )
-    assert empty_leaks >= 1, (
-        "实测存在「候选非空但 Chroma vector 返回空结果」的组合（risk_type=[FALSE_CLAIM]）——"
-        "这是漏召回的最坏形态，必须如实钉住"
+    from pra.rag.chroma_backend import _make_bm25_retriever
+
+    sub_ctx = idx._sub_context(candidates)  # 测试内省（有意读私有件，见 docstring）
+    query_bundle = idx._llama["QueryBundle"](query_str=query)
+    retriever = _make_bm25_retriever(sub_ctx, len(candidates))
+    nodes = idx._bm25_retrieve(retriever, query_bundle)
+    return [float(node.score or 0.0) for node in nodes]
+
+
+@pytest.mark.parametrize("literal", _CASE_METADATA_LITERALS)
+async def test_chroma_case_bm25_ignores_metadata_literals(literal: str) -> None:
+    """**R7 守卫（case）**：纯 metadata 字面值查询在 ``bm25`` 模式下**不产生任何检索信号**。
+
+    背景（R7 用户拍板，实现 ``_build_nodes`` 用 ``TextNode(excluded_embed_metadata_keys=...)``）：
+    ``BM25Retriever`` 内部索引的是 ``node.get_content(metadata_mode=MetadataMode.EMBED)`` ——
+    不排除 metadata 时索引文本是「``case_id: RAG_CASE_0001`` / ``category: …`` / ``decision: REJECT``
+    / ``risk_level: HIGH`` / ``risk_type: ['POTENTIAL_IP_RISK']`` + 正文」，于是**按 metadata 字面值
+    就能命中**（修复前实测 ``RAG_CASE_0037`` 命中 67/67 篇、且该篇被排到首位）—— 这是伪检索：
+    用「RAG_CASE_0037」这类字样去搜，本不该有任何先例因为「恰好被引用到 id」而浮上来。
+
+    ⚠️ **实测口径纠正（勿照抄「命中 0 篇」）**：修复后 ``search()`` 仍返回**全部候选**，但
+    （a）**BM25 原始分全部为 0**、（b）分数完全平坦（全 1.0）、（c）结果与「零信号查询」**逐字节一致**。
+    「1.0」不是「命中」而是两段既有约定的合力：① ``BM25Retriever`` 对零分查询仍按其
+    ``similarity_top_k`` 返回节点；② ``_rank_bm25`` 用仓库既有 ``normalize_minmax``，而
+    「全等值集 → 全 1.0」是它防除零的既定确定性约定。故本用例断言**原始分 == 0** 这一直接证据，
+    再用「平坦 + 与对照查询逐字节一致」把可观测语义钉住 —— metadata 一旦重回索引文本，
+    该字面值所属先例会被区分出来，三处断言同时破。
+    """
+    assert not (set(_jieba_tokens_of(literal)) & _body_tokens(CASE_ROWS, kind="case")), (
+        f"{literal!r} 的 token 出现在正文里 → 它不是「纯 metadata 字面值」反例（请换一个）"
+    )
+    idx = _case_chroma("bm25")
+    all_rows = list(range(len(CASE_ROWS)))
+    raw = _bm25_raw_scores(idx, all_rows, literal)
+    assert raw and max(raw) == 0.0, (
+        f"纯 metadata 字面值 {literal!r} 在 BM25 索引里产生了非零原始分（max={max(raw)}）——"
+        "说明 metadata 又进了检索文本（R7 回归）"
     )
 
+    literal_hits = await idx.search(literal, CaseSearchFilters(), top_k=len(CASE_ROWS))
+    assert len(literal_hits) == len(CASE_ROWS), "零分查询仍会返回候选（见 docstring 的实测口径）"
+    assert {h.retrieval_score for h in literal_hits} == {1.0}, "零信号查询的归一化分必须平坦"
+    control = await idx.search(_NO_SIGNAL_QUERY, CaseSearchFilters(), top_k=len(CASE_ROWS))
+    assert [h.model_dump(mode="json") for h in literal_hits] == [
+        h.model_dump(mode="json") for h in control
+    ], f"字面值查询 {literal!r} 的结果必须与零信号查询逐字节一致（字面值不得有信号）"
 
-async def test_vector_mode_recall_leak_case_documented_truth() -> None:
-    """**实测偏差**：case vector 路同样在 risk_type 不可下推时漏召回（机制同 policy）。
+    # 对照：正文查询必须是**有区分度**的（否则上面的「平坦」可能只是整条链路都失灵）
+    body_raw = _bm25_raw_scores(idx, all_rows, "无品牌高相似商家多次上架")
+    assert max(body_raw) > 0.0, "正文查询应当有非零 BM25 原始分 —— 否则本用例前提不成立"
+    body = await idx.search("无品牌高相似商家多次上架", CaseSearchFilters(), top_k=10)
+    assert body and len({h.retrieval_score for h in body}) > 1, "正文查询应当有区分度（非平坦）"
 
-    实测：``category=女鞋/运动鞋 + risk_type=[IP], k=6`` → local 6 / Chroma **5**；
-    ``risk_type=[IP], k=30`` → local 25 / Chroma **14**（候选 25 条而库里匹配 67 条，
-    取数上限 25 被非候选行占满）。断言性质与 policy 用例相同（真子集 + 序一致 + 结果不足）。
+
+@pytest.mark.parametrize("literal", _POLICY_METADATA_LITERALS)
+async def test_chroma_policy_bm25_ignores_metadata_literals(literal: str) -> None:
+    """**R7 守卫（policy）**：同上一路（``clause_id`` / ``policy_id`` / ``risk_type`` / ``status``）。
+
+    修复前实测：``POLICY_1.1_v2_c1`` 这类字面值命中 24/24 篇。修复后：BM25 原始分全 0、
+    ``search()`` 结果平坦且与零信号查询逐字节一致（口径说明见 case 侧用例 docstring）。
+    ⚠️ ``PolicyClauseHit`` **没有** ``retrieval_score`` 字段（C1 契约只改 ``CaseHit``），
+    故 policy 侧的「有没有信号」只能靠原始分 + 命中序与对照查询一致来断言。
     """
-    local = _case_local("vector")
-    idx = _case_chroma("vector")
-    for query, filters, top_k in _VECTOR_LEAK_CASE:
-        lh = await local.search(query, filters, top_k)
-        ch = await idx.search(query, filters, top_k)
-        lid, cid = [h.case_id for h in lh], [h.case_id for h in ch]
-        assert ch, f"漏到空结果已属更严重回归：q={query!r} filters={filters}"
-        assert set(cid) < set(lid), (
-            f"q={query!r} filters={filters} k={top_k}: 期望「local 的真子集」，"
-            f"实际 local={len(lid)} chroma={len(cid)}"
-        )
-        assert [i for i in lid if i in set(cid)] == cid
-        assert len(cid) < min(top_k, _eligible_case(filters))
+    assert not (set(_jieba_tokens_of(literal)) & _body_tokens(POLICY_ROWS, kind="policy")), (
+        f"{literal!r} 的 token 出现在正文里 → 它不是「纯 metadata 字面值」反例（请换一个）"
+    )
+    idx = _policy_chroma("bm25")
+    all_rows = list(range(len(POLICY_ROWS)))
+    raw = _bm25_raw_scores(idx, all_rows, literal)
+    assert raw and max(raw) == 0.0, (
+        f"纯 metadata 字面值 {literal!r} 在 BM25 索引里产生了非零原始分（max={max(raw)}）——"
+        "说明 metadata 又进了检索文本（R7 回归）"
+    )
+    literal_hits = await idx.search(literal, PolicySearchFilters(), top_k=len(POLICY_ROWS),
+                                    effective_only=False)
+    assert len(literal_hits) == len(POLICY_ROWS)
+    control = await idx.search(_NO_SIGNAL_QUERY, PolicySearchFilters(),
+                               top_k=len(POLICY_ROWS), effective_only=False)
+    assert [h.model_dump(mode="json") for h in literal_hits] == [
+        h.model_dump(mode="json") for h in control
+    ], f"字面值查询 {literal!r} 的结果必须与零信号查询逐字节一致（字面值不得有信号）"
+    body_raw = _bm25_raw_scores(idx, all_rows, "仿冒 高仿 复刻")
+    assert max(body_raw) > 0.0, "正文查询应当有非零 BM25 原始分 —— 否则本用例前提不成立"
+
+
+async def test_chroma_bm25_index_text_equals_body_text_not_metadata() -> None:
+    """**R7 结构性断言**：node 的 EMBED 文本 == 正文（``title。text`` / ``summary``），metadata 不在其中。
+
+    比「查询行为」更直接：直接读构造出来的 ``TextNode`` 的
+    ``get_content(metadata_mode=MetadataMode.EMBED)``（``BM25Retriever`` 用的就是这一份），
+    断言它**逐字等于**正文，且**不含**任何 metadata 字面值（``case_id`` / ``decision`` /
+    ``risk_type`` 取值）。这样即使将来有人把 exclusion 挪到别处却忘了另一条路径，也能立刻发现。
+    """
+    from llama_index.core.schema import MetadataMode
+
+    case_idx = _case_chroma("bm25")
+    policy_idx = _policy_chroma("bm25")
+    assert case_idx.nodes[0].get_content(metadata_mode=MetadataMode.EMBED) == CASE_ROWS[0].summary
+    row = POLICY_ROWS[0]
+    assert policy_idx.nodes[0].get_content(metadata_mode=MetadataMode.EMBED) == (
+        f"{row.title}。{row.text}"
+    )
+    for node in (*case_idx.nodes, *policy_idx.nodes):
+        embed_text = node.get_content(metadata_mode=MetadataMode.EMBED)
+        for key, value in node.metadata.items():
+            if key in ("case_id", "clause_id", "decision", "risk_level"):
+                assert value not in embed_text, f"metadata {key}={value!r} 出现在 EMBED 文本里"
+        assert "risk_type" not in embed_text, "metadata 键名不得出现在 EMBED 文本里"
+    # metadata 本身仍完整保留（R-4 隔离字段、过滤/审计都靠它）
+    assert case_idx.nodes[0].metadata["case_id"] == CASE_ROWS[0].case_id
+    assert policy_idx.nodes[0].metadata["clause_id"] == POLICY_ROWS[0].clause_id
 
 
 # ---------------------------------------------------------------------------
