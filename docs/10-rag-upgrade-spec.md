@@ -69,6 +69,18 @@ Query
   （b）**运行期自检**：读 `collection.configuration_json["hnsw"]["space"] == "cosine"`，并用单位向量
   校验 `1 − distance == numpy 余弦`。**不得假设** —— L2 库不报错，只会让 §5-1「与 local 同口径」
   静默失败（本文件初稿正是漏写了这条，由 subagent 实测发现后回改）。
+
+  **⚠️ 更隐蔽的第二层（实测，必须一并防）**：对**已存在**的 l2 collection，
+  `get_or_create_collection(..., configuration={"hnsw":{"space":"cosine"}})` **与**
+  `metadata={"hnsw:space":"cosine"}` **都不会改建其空间**（实测两次重取仍是 `l2`、距离仍是
+  `0.020000005`）→ **只在新库写配置不足以保证语义正确，复用路径必须校验**。
+  实现已在**创建与复用两条路径**都断言（不符即 `ValueError` 并给出「删除重建 / 换 prefix」指引）；
+  主 agent 独立验证：埋一个 l2 库 → 同前缀构造 → **被正确拦截**，未静默沿用。
+
+  **float32 尾差（实测）**：自距离可为 **`-1.1920929e-07`** 而非 `0.0` → 自检须用 `abs() <= 1e-6`；
+  经 `1 − distance` 可能得 `1.0000001`，由取分函数夹取保证 ⊂ [0,1]（否则 `CaseHit` 的 `ge=0, le=1`
+  会炸）。**另注**：自距离在 l2 空间同样为 0 → **空间判定的唯一真值来源是读 configuration**，
+  自检只是第二道防线（分工已写进实现 docstring，防后人误以为自检可替代空间断言）。
 - 客户端三形态：`HttpClient(host, port)`（服务端）/ `EphemeralClient()`（内存，**离线测试恒跑**）/ `PersistentClient(path=)`（本地）。
 
 **LlamaIndex**

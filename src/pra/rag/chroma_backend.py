@@ -167,6 +167,8 @@ __all__ = [
     "SERVED_COUNTERS",
     "ChromaCaseIndex",
     "ChromaPolicyIndex",
+    "check_cosine_self_check",
+    "check_cosine_space",
     "delete_collection",
     "make_chroma_client",
     "reset_served_counters",
@@ -388,22 +390,46 @@ def _verify_collection_space(collection: Any, name: str, *, context: str) -> Non
         )
 
 
-def _self_check_cosine(collection: Any, sample_vector: list[float]) -> float:
+def check_cosine_self_check(
+    collection: Any, sample_vector: list[float], *, name: str
+) -> float:
     """cosine 自检：用「库内已有向量」查库，返回自身距离（cosine 空间必须 ≈ 0）。
 
     取一条**已入库**的向量（通常 ``_doc_vectors[0]``）作查询：cosine 空间里它与自身的
-    距离为 0（实测精确 0.0；l2 空间亦为 0，故这一项只能抓「库被清空/未 upsert」类问题）。
-    真正的空间判定由 :func:`_verify_collection_space` 读 configuration 负责；本函数是
-    第二道防线 + 提供可打印的实测数字（见返回报告「空间自检」）。
+    距离应为 0。实测（MockHashEmbedder，真服务端）出现两类值：``0.0`` 与
+    ``-1.1920929e-07``（float32 尾差，Chroma 存 float32）—— 故用 ``abs() <= _SELF_CHECK_TOL``
+    判定，并让调用方据此回带精确数值（返回原值，便于打印实测证据）。
 
-    与「单位向量自检」（``1 − distance`` vs numpy 余弦）的区别：后者需要一条**已知不同**
-    的单位向量对，故由验收脚本在独立 collection 上做（本函数不往业务库里塞探针向量）。
+    真值来源仍是 :func:`_verify_collection_space` 的 configuration 判定（本项自身距离在
+    **l2 空间同样为 0**，单独看不区分空间）；本函数是第二道防线：抓「库未 upsert / 被清空 /
+    空间被外力改掉后数值不可信」这类问题，并给出可打印的实测数字。
+    「单位向量自检」（``1 − distance`` vs numpy 余弦）需要一条**已知不同**的单位向量对，
+    由验收脚本在独立 collection 上做（本函数不往业务库里塞探针向量）。
     """
-    result = collection.query(query_embeddings=[list(sample_vector)], n_results=1, include=["distances"])
+    result = collection.query(
+        query_embeddings=[list(sample_vector)], n_results=1, include=["distances"]
+    )
     distances = (result.get("distances") or [[]])[0]
     if not distances:
         raise ValueError("cosine 自检失败：collection 查询未返回任何结果（库是否已 upsert？）")
-    return float(distances[0])
+    value = float(distances[0])
+    if abs(value) > _SELF_CHECK_TOL:
+        raise ValueError(
+            f"cosine 自检失败：collection {name!r} 内向量与自身距离 {value!r}"
+            f"（cosine 空间应为 0，容差 {_SELF_CHECK_TOL}）—— 库可能未正确 upsert 或空间异常"
+        )
+    return value
+
+
+def check_cosine_space(collection: Any, name: str) -> str:
+    """检索前复检空间（默认对**每次** ``search`` 调用执行，返回空间名）。
+
+    读 ``configuration["hnsw"]["space"]``（:func:`_collection_space`）并断言为 cosine。
+    成本可忽略（框架本地字段读取，无网络）；收益是「空间错误」永远在检索前暴露，而不是
+    让错误的 ``1 − distance`` 静默流进 ``CaseHit.retrieval_score`` 与 Evidence.weight。
+    """
+    _verify_collection_space(collection, name, context="检索前复检")
+    return _collection_space(collection) or _REQUIRED_SPACE
 
 
 def _open_collection(
@@ -983,14 +1009,10 @@ class _ChromaIndexBase:
             metadatas=[node.metadata for node in self._nodes],
             documents=[node.get_content() for node in self._nodes],
         )
-        self._self_check_distance = _self_check_cosine(collection, self._doc_vectors[0])
-        if abs(self._self_check_distance) > _SELF_CHECK_TOL:
-            raise ValueError(
-                f"cosine 自检失败：collection {self.collection_name!r} 内向量与自身距离 "
-                f"{self._self_check_distance!r}（cosine 空间应为 0，容差 {_SELF_CHECK_TOL}）——"
-                "库可能未正确 upsert 或空间被改成了 l2"
-            )
         self.collection_space = _collection_space(collection)
+        self._self_check_distance = check_cosine_self_check(
+            collection, self._doc_vectors[0], name=self.collection_name
+        )
         self._collection = collection
         self._vector_store = self._llama["ChromaVectorStore"](chroma_collection=collection)
 
@@ -1148,6 +1170,8 @@ class _ChromaIndexBase:
         """
         if top_k < 1 or not candidates:
             return []
+        if self._collection is not None:
+            check_cosine_space(self._collection, self.collection_name)  # 检索前空间闸
         sub_ctx = self._sub_context(candidates)
         query_bundle = self._llama["QueryBundle"](query_str=query)
         # 三路都取「候选数」上限：先拿到**完整候选排名**，再复核过滤、最后截断 Top-K。
