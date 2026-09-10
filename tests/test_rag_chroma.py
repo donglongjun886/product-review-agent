@@ -1302,8 +1302,9 @@ def test_r6_bm25_tokenizer_patch_installed_under_lock() -> None:
         chroma_backend._TOKENIZER_LOCK = original_lock
 
     assert hits, "空结果会让本用例失去意义（先确认检索真的跑了）"
-    # 两个调用点（建索引 / 检索）各取一次锁 → 两次都必须在「补丁未安装」时取到锁
-    assert probe.patched_at_acquire == [False, False], (
+    # 实测两次（建索引 / 检索各一次）；这里断言**性质**而非次数，避免调用点增减后误红
+    assert probe.patched_at_acquire, "未观察到取锁 → 探针没挂上（本用例会空跑，必须先修探针）"
+    assert not any(probe.patched_at_acquire), (
         f"补丁先于取锁安装 → 临界区未覆盖补丁（R6）：{probe.patched_at_acquire}"
     )
     assert bm25s.tokenize is _REAL_BM25S_TOKENIZE, "检索结束后 bm25s.tokenize 必须已复原"
@@ -1336,11 +1337,16 @@ def test_r6_concurrent_bm25_searches_do_not_pollute_tokenizer() -> None:
 
     errors: list[str] = []
     mismatches: list[str] = []
+    completed: list[int] = []  # 真跑完的轮次（防空跑：线程早退/barrier 破裂不得静默通过）
     barrier = threading.Barrier(_R6_THREADS)
 
     def worker(tid: int) -> None:
         query = queries[tid % len(queries)]
-        barrier.wait(timeout=30)  # 起点对齐 → 最大化临界区重叠
+        try:
+            barrier.wait(timeout=30)  # 起点对齐 → 最大化临界区重叠
+        except threading.BrokenBarrierError as exc:  # pragma: no cover —— 只在异常调度下发生
+            errors.append(f"t{tid} barrier: {type(exc).__name__}: {exc}")
+            return
         for rnd in range(_R6_ROUNDS):
             try:
                 got = _bm25_hits(index, query, 5)
@@ -1349,6 +1355,7 @@ def test_r6_concurrent_bm25_searches_do_not_pollute_tokenizer() -> None:
                 continue
             if got != golden[query]:
                 mismatches.append(f"t{tid}r{rnd} {query!r}: {got} != {golden[query]}")
+            completed.append(1)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(_R6_THREADS)]
     for t in threads:
@@ -1356,6 +1363,9 @@ def test_r6_concurrent_bm25_searches_do_not_pollute_tokenizer() -> None:
     for t in threads:
         t.join(timeout=120)
 
+    assert len(completed) == _R6_THREADS * _R6_ROUNDS, (
+        f"实际只跑完 {len(completed)}/{_R6_THREADS * _R6_ROUNDS} 轮 → 本用例空跑，不能算通过"
+    )
     assert not errors, f"并发检索抛异常（{len(errors)} 次），前 3 条：{errors[:3]}"
     assert not mismatches, f"并发结果与单线程 golden 不一致（{len(mismatches)} 次）：{mismatches[:3]}"
     assert bm25s.tokenize is _REAL_BM25S_TOKENIZE, (
