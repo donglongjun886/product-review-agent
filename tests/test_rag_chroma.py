@@ -30,10 +30,19 @@
    - **向量路候选完整性**：vector 取数改为「精确候选 id 集 + 覆盖率自检 + 已存向量兜底」，
      本文件断言**过滤组合**下同序同 id、结果长度 == ``min(top_k, 可用候选数)``，
      且 ``served_counters()["vector_bruteforce_fallbacks"] == 0``（兜底没被默默用上）；
-   - **R7：BM25 只索引正文**：纯 metadata 字面值（``RAG_CASE_0037`` / ``POTENTIAL_IP_RISK`` …）
-     不得产生任何 BM25 信号（原始分恒 0、结果与零信号查询逐字节一致），且 node 的 EMBED
-     文本逐字等于正文。⚠️ 反例字面值必须**token 级**不在正文里（``全类目`` / ``女鞋/运动鞋``
-     本来就出现在正文，命中是正确行为，用例内会现场自检这一点）。
+   - **R7：BM25 只索引正文**。⚠️ **不要把断言写成「命中 0 条」**（那是错的，会让正确实现变红）：
+     ``BM25Retriever`` 对全零分查询仍按 ``similarity_top_k`` 返回节点，且仓库既有 ``normalize_minmax``
+     对「空/等值集」按既定约定给全 1.0 → 实测 ``search("RAG_CASE_0037", CaseSearchFilters(), 5)``
+     **返回 5 条、分全 1.0**（``[('RAG_CASE_0001', 1.0), ('RAG_CASE_0002', 1.0), …]``）。
+     正确口径是「**没有信号**」，用两层断言：
+     ① 机制级（定向、便宜）``test_chroma_build_nodes_embed_text_is_body_only``：``_build_nodes`` 产出的
+        node 其 ``get_content(metadata_mode=EMBED)`` 逐字等于正文、不含任何 metadata 字面值，且
+        **``node_to_metadata_dict`` → ``metadata_dict_to_node`` 往返后仍成立**（``BM25Retriever`` 正
+        这样重建节点）；``test_chroma_index_nodes_carry_metadata_exclusions`` 再证明索引构造路径确实用了这套 node；
+     ② 黑盒判别式 ``test_chroma_*_bm25_ignores_metadata_literals``：纯 metadata 字面值查询的结果必须与
+        「无信号乱码查询」**逐字节一致**，且该字面值的 BM25 **原始分恒 0**（正文查询作对照：原始分 > 0 且分数非平坦）。
+     ⚠️ 反例字面值必须**token 级**不在正文里：``全类目`` / ``女鞋/运动鞋`` / ``箱包/女包`` 本来就出现在正文
+     （命中是正确行为），``POLICY_5.3`` 会被 jieba 拆出单字符 ``'3'`` 命中「≥3 次」表述 —— 用例内会现场自检。
 
 **在 CI 上本文件整文件 skip（诚实标注，勿声称 CI 覆盖）**：顶层
 ``pytest.importorskip("chromadb")``，而 CI 只跑 ``uv sync --frozen``（**不装任何 extra**）
@@ -857,10 +866,14 @@ def test_chroma_dim_mismatch_on_reuse_is_rejected() -> None:
 _CASE_METADATA_LITERALS = ("RAG_CASE_0037", "RAG_CASE_0001", "POTENTIAL_IP_RISK",
                            "EVASION_PATTERN", "REJECT", "HUMAN_REVIEW", "PASS", "HIGH", "LOW")
 _POLICY_METADATA_LITERALS = ("POLICY_1.1_v2_c1", "POLICY_1.5", "POTENTIAL_IP_RISK",
-                             "EVASION_PATTERN", "REJECT", "EFFECTIVE", "EXPIRED")
+                             "EVASION_PATTERN", "REJECT", "EFFECTIVE", "EXPIRED",
+                             # ``RAG_CASE_0037`` 不是 policy 的 metadata 取值，列在此处只作**跨 KB 对照**：
+                             # 「与本 KB 任何字段都无关的字面值同样不得产生信号」（与零信号基线同效）。
+                             "RAG_CASE_0037")
 
-#: 「毫无信号」的对照查询：latin 乱码，与全库正文/词表零交集。
-_NO_SIGNAL_QUERY = "zzzqqq wwweee"
+#: 「毫无信号」的对照查询：latin 乱码，与全库正文/词表零交集（实测原始分恒 0）。
+#: 口径与主 agent 的独立实测一致（``"zzzqqqxxx"``）；本套件另验证过 ``"zzzqqq wwweee"`` 同效。
+_NO_SIGNAL_QUERY = "zzzqqqxxx"
 
 
 def _jieba_tokens_of(text: str) -> list[str]:
@@ -934,6 +947,20 @@ async def test_chroma_case_bm25_ignores_metadata_literals(literal: str) -> None:
         h.model_dump(mode="json") for h in control
     ], f"字面值查询 {literal!r} 的结果必须与零信号查询逐字节一致（字面值不得有信号）"
 
+    # 退化区间的具体形态（主 agent 实测口径：该查询返回前 5 行且分全 1.0）
+    top5 = await idx.search(literal, CaseSearchFilters(), top_k=5)
+    assert [(h.case_id, h.retrieval_score) for h in top5] == [
+        (row.case_id, 1.0) for row in CASE_ROWS[:5]
+    ], "零信号查询应退化为「corpus 原序 + 全 1.0」（不是按字面值相关度排序）"
+
+    # 跨后端对照（**仅在全零分退化区间**成立：无任何区分度 → 两边都退化为 corpus 原序 + 全 1.0）。
+    # 这不是对 §5-1「bm25 与 local 不可比」的反例 —— 那条针对的是有信号的检索结果。
+    local = _case_local("bm25")
+    local_literal = await local.search(literal, CaseSearchFilters(), top_k=len(CASE_ROWS))
+    assert [h.model_dump(mode="json") for h in local_literal] == [
+        h.model_dump(mode="json") for h in literal_hits
+    ], "零信号退化区间下 chroma 与 local 都应「无区分度」"
+
     # 对照：正文查询必须是**有区分度**的（否则上面的「平坦」可能只是整条链路都失灵）
     body_raw = _bm25_raw_scores(idx, all_rows, "无品牌高相似商家多次上架")
     assert max(body_raw) > 0.0, "正文查询应当有非零 BM25 原始分 —— 否则本用例前提不成立"
@@ -968,36 +995,111 @@ async def test_chroma_policy_bm25_ignores_metadata_literals(literal: str) -> Non
     assert [h.model_dump(mode="json") for h in literal_hits] == [
         h.model_dump(mode="json") for h in control
     ], f"字面值查询 {literal!r} 的结果必须与零信号查询逐字节一致（字面值不得有信号）"
+    # 跨后端对照（**仅在全零分退化区间**成立，理由见 case 侧用例）
+    local = _policy_local("bm25")
+    local_literal = await local.search(literal, PolicySearchFilters(), top_k=len(POLICY_ROWS),
+                                       effective_only=False)
+    assert [h.model_dump(mode="json") for h in local_literal] == [
+        h.model_dump(mode="json") for h in literal_hits
+    ], "零信号退化区间下 chroma 与 local 都应「无区分度」"
+
     body_raw = _bm25_raw_scores(idx, all_rows, "仿冒 高仿 复刻")
     assert max(body_raw) > 0.0, "正文查询应当有非零 BM25 原始分 —— 否则本用例前提不成立"
 
 
-async def test_chroma_bm25_index_text_equals_body_text_not_metadata() -> None:
-    """**R7 结构性断言**：node 的 EMBED 文本 == 正文（``title。text`` / ``summary``），metadata 不在其中。
+def test_chroma_build_nodes_embed_text_is_body_only() -> None:
+    """**(a) 机制级 R7 守卫（定向、便宜）**：``_build_nodes`` 产出的 node，其 EMBED 文本 == 正文。
 
-    比「查询行为」更直接：直接读构造出来的 ``TextNode`` 的
-    ``get_content(metadata_mode=MetadataMode.EMBED)``（``BM25Retriever`` 用的就是这一份），
-    断言它**逐字等于**正文，且**不含**任何 metadata 字面值（``case_id`` / ``decision`` /
-    ``risk_type`` 取值）。这样即使将来有人把 exclusion 挪到别处却忘了另一条路径，也能立刻发现。
+    直接按签名调 ``_build_nodes(rows, *, kind, collection, llama)``（``llama`` 用实现自己的
+    ``_import_llama()`` 装配面，不做 monkeypatch），逐条断言三种口径：
+    ① ``node.get_content(metadata_mode=MetadataMode.EMBED)`` **逐字等于正文**
+       （policy ``f"{title}。{text}"`` / case ``summary``）—— 这就是 ``BM25Retriever``
+       索引时取的那一份文本（安装源码 ``bm25s.tokenize([node.get_content(metadata_mode=EMBED) ...])``）；
+    ② 该 node 的 metadata 字面值（标量 + 列表逐元素，如 ``case_id`` / ``POTENTIAL_IP_RISK`` /
+       ``REJECT`` / ``HIGH`` / ``女鞋/运动鞋``）**都不出现在 EMBED 文本里**；
+    ③ **JSON 往返后仍成立**：``node_to_metadata_dict`` → ``metadata_dict_to_node`` 是
+       ``BM25Retriever`` 重建节点的真实路径（``metadata_dict_to_node(node_dict)``），
+       若 ``excluded_*_metadata_keys`` 不随 ``_node_content`` 往返存活，R7 就是假的 —— 这里直接测。
+
+    ⚠️ **本断言的安全性有实测前提**：本 corpus 实测「正文含自身 metadata 字面值」的 node 数为
+    **case 0/67、policy 0/24**（否则 ② 会是误报 —— 例如把类目名写进 summary）。语料若改动
+    导致某 node 的正文天然含某字面值，请在该 node 上跳过那个字面值并在注释里说明，不要放宽断言。
+
+    ⚠️ **诚实标注本用例的边界**：它只证明「node 暴露给 EMBED 的文本是正文」。它**不**证明
+    检索器真的走 EMBED（那是库内部行为）——端到端性质由黑盒用例
+    ``test_chroma_*_bm25_ignores_metadata_literals``（字面值查询 ≡ 无信号查询）兜底；
+    两者互为补充：本用例定位「哪一层坏了」，黑盒用例证明「用户看到的行为对不对」。
     """
     from llama_index.core.schema import MetadataMode
+    from llama_index.core.vector_stores.utils import (
+        metadata_dict_to_node,
+        node_to_metadata_dict,
+    )
 
+    from pra.rag.chroma_backend import _build_nodes, _import_llama
+
+    llama = _import_llama()
+
+    def _literals(metadata: dict) -> list[str]:
+        """metadata 的全部字面值（标量 + 列表逐元素），统一转 str 供子串断言。"""
+        out: list[str] = []
+        for value in metadata.values():
+            if isinstance(value, list):
+                out.extend(str(item) for item in value)
+            else:
+                out.append(str(value))
+        return [item for item in out if item]
+
+    for kind, rows, body_of in (
+        ("case", CASE_ROWS, lambda r: r.summary),
+        ("policy", POLICY_ROWS, lambda r: f"{r.title}。{r.text}"),
+    ):
+        nodes, node_ids = _build_nodes(
+            rows, kind=kind, collection=f"unit_{kind}_256", llama=llama
+        )
+        assert len(nodes) == len(node_ids) == len(rows), "1 行 = 1 Node（不切碎）"
+        for node, row in zip(nodes, rows):
+            body = body_of(row)
+            embed_text = node.get_content(metadata_mode=MetadataMode.EMBED)
+            assert embed_text == body, (
+                f"{kind} node {node.node_id}: EMBED 文本 != 正文 —— metadata 进了检索文本（R7 回归）\n"
+                f"EMBED={embed_text[:120]!r}\n正文={body[:120]!r}"
+            )
+            for literal in _literals(node.metadata):
+                assert literal not in embed_text, (
+                    f"{kind} node {node.node_id}: metadata 字面值 {literal!r} 出现在 EMBED 文本里"
+                )
+            # ③ 往返（BM25Retriever 的重建路径）后 exclusion 仍生效
+            rebuilt = metadata_dict_to_node(node_to_metadata_dict(node))
+            assert rebuilt.get_content(metadata_mode=MetadataMode.EMBED) == body, (
+                f"{kind} node {node.node_id}: JSON 往返后 EMBED 文本不再是正文 —— "
+                "excluded_embed_metadata_keys 未随 _node_content 存活（BM25Retriever 正是这样重建节点的）"
+            )
+            # metadata 本体仍完整（R-4 隔离 / 过滤 / 审计都靠它）；只做「非空 + 含行键」的最小断言
+            assert node.metadata
+            assert str(node.metadata.get("case_id") or node.metadata.get("clause_id")) == (
+                row.case_id if kind == "case" else row.clause_id
+            )
+
+
+def test_chroma_index_nodes_carry_metadata_exclusions() -> None:
+    """**装配层守卫**：真实索引里的 node 确实带上了 ``excluded_*_metadata_keys``（不是只有单测路径）。
+
+    ``_build_nodes`` 单测（上一条）覆盖「文本口径」；本条覆盖「**索引构造路径确实用了这套 node**」——
+    即 ``Chroma*Index.nodes`` 的每个 node 都有非空 exclusion 且覆盖其全部 metadata 键，
+    否则前面的机制单测可能测的是「另一条没人用的构造分支」。同时断言 metadata 本体未被裁剪。
+    """
     case_idx = _case_chroma("bm25")
     policy_idx = _policy_chroma("bm25")
-    assert case_idx.nodes[0].get_content(metadata_mode=MetadataMode.EMBED) == CASE_ROWS[0].summary
-    row = POLICY_ROWS[0]
-    assert policy_idx.nodes[0].get_content(metadata_mode=MetadataMode.EMBED) == (
-        f"{row.title}。{row.text}"
-    )
-    for node in (*case_idx.nodes, *policy_idx.nodes):
-        embed_text = node.get_content(metadata_mode=MetadataMode.EMBED)
-        for key, value in node.metadata.items():
-            if key in ("case_id", "clause_id", "decision", "risk_level"):
-                assert value not in embed_text, f"metadata {key}={value!r} 出现在 EMBED 文本里"
-        assert "risk_type" not in embed_text, "metadata 键名不得出现在 EMBED 文本里"
-    # metadata 本身仍完整保留（R-4 隔离字段、过滤/审计都靠它）
-    assert case_idx.nodes[0].metadata["case_id"] == CASE_ROWS[0].case_id
-    assert policy_idx.nodes[0].metadata["clause_id"] == POLICY_ROWS[0].clause_id
+    for idx, rows in ((case_idx, CASE_ROWS), (policy_idx, POLICY_ROWS)):
+        assert len(idx.nodes) == len(rows)
+        for node in idx.nodes:
+            assert set(node.excluded_embed_metadata_keys) == set(node.metadata), (
+                "node 的 EMBED exclusion 必须覆盖全部 metadata 键（否则 metadata 会回到检索文本）"
+            )
+            assert set(node.excluded_llm_metadata_keys) == set(node.metadata)
+            assert node.metadata.get("case_id") or node.metadata.get("clause_id")
+            assert node.excluded_embed_metadata_keys, "exclusion 为空 = R7 未生效"
 
 
 # ---------------------------------------------------------------------------
