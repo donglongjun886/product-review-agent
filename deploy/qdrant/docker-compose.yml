@@ -1,0 +1,45 @@
+# ============================================================================
+# Qdrant 单机部署（本地开发 / RAG 的 url= 远端模式）
+#
+# 定位（docs/06-rag-phase2-qdrant-bge.md P2-3）：Qdrant 在 Phase 2 里以
+# qdrant-client **进程内模式**接入（":memory:" / path=），本 compose 补的是 P2-3
+# 里那条「url=（远端 server，生产叙事位）」——docs/06 §5 曾如实标注「远端 server
+# 未实测」，本目录起服务后即可实测。
+#
+# 机器适配（本机实测，与 deploy/langfuse 同源约束）：
+#   registry-1.docker.io / hub.docker.com 直连超时，镜像须走国内镜像源拉取后
+#   retag 成规范名（见 README.md「镜像拉取」）。compose 里只写规范名，不写源前缀。
+#
+# 端口（本机 6333/6334 实测空闲）：6333 = REST + Web UI（/dashboard），
+#   6334 = gRPC。两端口都只绑 127.0.0.1 —— 仅本机可访问，不对外暴露；
+#   若要跨机访问，请同时启用 API key（见 README.md「安全」）。
+# ============================================================================
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    restart: always
+    ports:
+      - 127.0.0.1:6333:6333
+      - 127.0.0.1:6334:6334
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      # 关闭匿名遥测（与仓库「默认不联网」基调一致）
+      QDRANT__TELEMETRY_DISABLED: "true"
+      QDRANT__LOG_LEVEL: INFO
+    healthcheck:
+      # 官方镜像（Debian 13）内**既无 curl 也无 wget**，只能用 bash 的 /dev/tcp
+      # 发一个最小 HTTP 请求判 200（/readyz 是 Qdrant 的就绪探针）。
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q 200 <&3"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  qdrant_storage:
+    driver: local
