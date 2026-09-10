@@ -139,6 +139,13 @@ uv run python scripts/run_regression.py
 
 ### RAG 语义路（可选：Qdrant + 本地 BGE embedding）
 
+> **向量库已定为 ChromaDB**（docs/10 拍板，取代 Qdrant）：部署在
+> [`deploy/chroma`](deploy/chroma/README.md)，`docker compose up -d` 一条命令起服务
+> （仅绑 `127.0.0.1:8001`）；升级方案与实施契约见
+> [docs/10-rag-upgrade-spec.md](docs/10-rag-upgrade-spec.md)。
+> ⚠️ **检索升级尚未实施** —— 下面这节描述的仍是**当前**可用路径（Qdrant + BGE），
+> Chroma 后端代码尚未落地；Qdrant 部署在迁移期暂留不删。
+
 默认 RAG 路径是**确定性 mock embedding**（词面 hash，无外部依赖、可逐字节回归）；语义路
 需额外依赖 + 本地模型缓存（首次联网下载 onnx 模型约 90MB）：
 
@@ -375,7 +382,7 @@ persist 落库等。
 | 领域/校验 | Pydantic v2（契约 DTO，`extra="forbid"`） | 已用 |
 | LLM | `LLMBackend` 抽象：默认确定性 scripted 桩（无 key 可跑）；`LiteLLMBackend`（litellm 真后端，四节点完整 prompt）经 `set_llm_backend`/`build_agent_graph(llm=)` 注入 | 已用（桩 + 真后端） |
 | 评测 | `pra.evaluation`：三方案 harness + business/abstention 指标 + ablation + sweep + regression（确定性重放） | 已用 |
-| RAG | `pra.rag`：Policy KB + Case KB，BM25 / Vector / Hybrid；默认 numpy 内存索引 + MockHash embedding（无外部依赖），语义路 = Qdrant（进程内 / 本地持久 / 远端 url）+ `BgeEmbedder`（bge-small-zh-v1.5 · fastembed/onnx） | 已用（默认确定性 mock；语义路经 `--extra rag` + `backend="qdrant"` 显式开启，未接 HTTP 主流程） |
+| RAG | `pra.rag`：Policy KB + Case KB，BM25 / Vector / Hybrid；默认 numpy 内存索引 + MockHash embedding（无外部依赖），语义路**当前** = Qdrant（进程内 / 本地持久 / 远端 url）+ `BgeEmbedder`（bge-small-zh-v1.5 · fastembed/onnx）；**向量库已定为 ChromaDB**（docs/10，部署 `deploy/chroma`，Qdrant 迁移期暂留） | 已用（默认确定性 mock；语义路经 `--extra rag` + `backend="qdrant"` 显式开启，未接 HTTP 主流程。**Chroma 后端 = 升级契约定稿、未实施**) |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL 五表（DDL：migrations/001…）；Alembic 依赖就绪 | 已用（DDL 经 migrations/ 直执行） |
 | 可观测性 | `pra.observability` 适配层（Null Object：无凭据 → `NullTracer`，零网络零开销）+ **Langfuse v4 本地 Docker 自托管**（`deploy/langfuse`，UI :3000）；埋点 **root / node / generation / tool / gate**（`trace_id == run_id`，与 MySQL 审计链互跳） | 已用（`--extra observability`；默认 `PRA_LANGFUSE_ENABLED=0`，不装 SDK 则全链路 no-op —— docs/09） |
 | 规划 extras | Redis 幂等 / MQ worker | 规划（pyproject optional groups 已声明） |

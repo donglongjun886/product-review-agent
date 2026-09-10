@@ -40,7 +40,7 @@ Query
 | `rag/index.py`（local numpy） | ✅ **保留**为确定性基线（默认后端不变） |
 | `rag/vectors.py`、`rag/retrieval.py` | ✅ 保留（local 后端与既有单测仍用） |
 | `rag/factory.py`、`build_tools(data_source, rag_backend)` | 🔧 扩展：新增 `rag_backend="chroma"` |
-| `rag/qdrant_index.py` | ⏸️ **暂留不删**（`rag_backend="qdrant"` 保持可用） |
+| `rag/qdrant_index.py` | ⏸️ **暂留不删**（`rag_backend="qdrant"` 保持可用）。**注意状态差异**：代码与 `deploy/qdrant` **保留在仓库**，但**本机容器/镜像/数据卷已卸**（恢复 = `cd deploy/qdrant && docker compose up -d`，镜像走国内源约 30s）；因此 pytest 里 3 个 Qdrant 真服务端用例当前为 skip |
 | `scripts/run_rag_eval.py` | 🔧 扩展为三路/多后端对比 |
 | `scripts/run_rag_phase2_demo.py` | ⏸️ 暂留（Qdrant Phase 2 演示，不删） |
 
@@ -51,8 +51,24 @@ Query
 - **`/api/v1` 已废弃**：实测 `GET /api/v1/heartbeat` → **410 Unimplemented**（"Please use /v2"）；只有 `/api/v2/*` 可用。healthcheck 用 `/api/v2/heartbeat`。
 - `GET /api/v2/version` 返回 **`"1.0.0"`**（API 版本，非包版本 1.5.9）。
 - 镜像 **`chromadb/chroma:1.5.9` 是 Rust 内核，内部无 `python` / `curl` / `wget`**（Debian 13，有 `bash`）→ 探针只能 bash `/dev/tcp`。
-- 建库需显式 `embedding_function=None`，否则 Chroma 会启用**默认 ONNX 嵌入函数**（会去下模型）——我们**自带 BGE 向量**，必须显式关掉。
-- 距离口径（实测）：`distance = 1 − cosine_similarity`（用 `[1,0,0]` vs `[0.9,0.1,0]` 验证：距 0.006116271 ↔ 1−cos 0.00611627）。**相似度 = 1 − distance**。
+- 建库需显式 `embedding_function=None`，否则 Chroma 会启用**默认 ONNX 嵌入函数**（会去下模型）——
+  我们**自带 BGE 向量**，必须显式关掉。证据：省略 EF 时落库配置为
+  `{"type":"known","name":"default","config":{}}`，而 `DefaultEmbeddingFunction` 源码 docstring
+  逐字写 “delegates to `ONNXMiniLM_L6_V2`”。
+- 🔴 **建库必须显式指定 `space="cosine"` —— Chroma 缺省是 `l2`，此坑静默且致命**：
+  用 `configuration={"hnsw": {"space": "cosine"}}`（等价旧写法 `metadata={"hnsw:space": "cosine"}`）。
+  实测同一对向量 `[1,0,0]` vs `[0.9,0.1,0]`：
+
+  | 建库方式 | 落库 space | Chroma 返回 distance | 判定 |
+  |---|---|---|---|
+  | 只写 `embedding_function=None`（**缺省**） | **`l2`** | **`0.020000005`** | ❌ = 2(1−cos)，口径静默错 |
+  | `configuration={"hnsw":{"space":"cosine"}}` | `cosine` | **`0.006116271`** | ✅ = 1−cos |
+  | `metadata={"hnsw:space":"cosine"}` | `cosine` | `0.006116271` | ✅ |
+
+  → **`相似度 = 1 − distance` 只在 cosine space 下成立**。实现必须（a）建库时显式指定 cosine；
+  （b）**运行期自检**：读 `collection.configuration_json["hnsw"]["space"] == "cosine"`，并用单位向量
+  校验 `1 − distance == numpy 余弦`。**不得假设** —— L2 库不报错，只会让 §5-1「与 local 同口径」
+  静默失败（本文件初稿正是漏写了这条，由 subagent 实测发现后回改）。
 - 客户端三形态：`HttpClient(host, port)`（服务端）/ `EphemeralClient()`（内存，**离线测试恒跑**）/ `PersistentClient(path=)`（本地）。
 
 **LlamaIndex**

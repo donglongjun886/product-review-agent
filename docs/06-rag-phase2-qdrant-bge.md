@@ -1,5 +1,14 @@
 # RAG Phase 2：Qdrant 向量库 + 本地 BGE Embedding（设计定稿）
 
+> ⚠️ **已被取代（superseded）**：本文的 Phase 2 设计（**Qdrant 向量库** + BGE）已被
+> [docs/10-rag-upgrade-spec.md](10-rag-upgrade-spec.md) 取代 —— **向量库切换为 ChromaDB**
+> （Docker 服务端 + `HttpClient`），检索升级为 **LlamaIndex + BGE + BM25 + RRF**。
+> 本文**作为历史记录保留**，不改写、不删除，含其**实测结果**（§6 语义 vs 词面 / 三路 Recall@3）
+> 与**如实记录的缺陷**（§7：**128 位 point id**，进程内模式不校验上界，**只在真 server 上
+> 以 400 暴露**——该复盘仍是有效教训）。当前契约以 **docs/10 为准**；Qdrant 的代码与
+> `deploy/qdrant` **保留在仓库中**（不删），但**本机容器已卸**、`rag_backend="qdrant"`
+> 不再是默认语义路（本机 `pytest` 会因此多 skip 3 个真服务端集成用例）。
+
 > 状态：**已拍板并实施**（2026-09-09，对齐 rag-implementation-plan.md R-1/R-2 的
 > Phase 2 路线：正式向量库 Qdrant + 本地语义 Embedding，经 `Embedder` provider 与
 > 索引工厂替换，**不改检索上层 / 工具契约**）。

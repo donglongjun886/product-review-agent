@@ -1,8 +1,10 @@
 # ============================================================================
 # ChromaDB 单机部署（本地开发 / RAG 的 HttpClient 远端模式）
 #
-# 定位：仓库 RAG 的向量库后端。Chroma 只承担「存向量 + 算余弦」，
-# 元数据过滤 / BM25 / 融合 / Top-K 排序仍在 Python 侧（同口径前提，见 docs/10）。
+# 定位：仓库 RAG 的向量库后端（docs/10 §0 拍板：向量库 = ChromaDB）。
+# 分工边界以 docs/10 §1/§3 为准 —— 注意 C2 拍板为「全量 LlamaIndex」，因此
+# **元数据过滤/融合不再全部留在 Python 侧**（向量路过滤经 MetadataFilters 下推到
+# Chroma，BM25 路仍在 Python 侧；这是 docs/10 §6-R2 已记录的口径分歧）。
 #
 # 机器适配（与 deploy/langfuse 同源约束）：
 #   registry-1.docker.io 直连超时，镜像须走国内镜像源拉取后 retag 成规范名
@@ -15,7 +17,8 @@
 # 镜像特点（实测）：Chroma 1.x 是 **Rust 内核**，镜像内**无 python / curl / wget**
 #   （Debian 13 + `chroma` CLI；entrypoint = `dumb-init -- chroma run /config.yaml`，
 #   持久路径取自镜像内 /config.yaml 的 `persist_path: "/data"`）→ healthcheck 只能用
-#   bash 的 /dev/tcp 发最小 HTTP 请求。
+#   bash 的 /dev/tcp 发最小 HTTP 请求。启动实测：冷启动 **5.5s** / restart **6.6s**
+#   转 healthy（见 README §「起停验」；**不是** 9 秒 —— 那是 deploy/qdrant 的数值）。
 # ============================================================================
 services:
   chroma:
