@@ -62,6 +62,12 @@ class EvalContext(BaseModel):
     RAG 世界参数（仅 tool_world="rag" 生效；默认 None → hybrid）：
     - ``rag_mode``：检索模式 "bm25" / "vector" / "hybrid" —— 三路对比实验用
       （R-6：不预设 Hybrid 优于单路，由 Evaluation 实验回答）。
+    - ``rag_backend``：RAG 索引后端（docs/10 §5）—— "local"（默认，行为不变）/
+      "qdrant" / "chroma"；``tool_world="rag"`` 时经 ``make_rag_world_tools``
+      透传给 ``pra.rag.factory``（缺省 "local" → 装配与改动前逐字节等价）。
+    - ``rag_backend_options``：后端专属装配参数的透传字典（默认 None = 不传任何选项
+      → 装配不变）—— 键名与 ``pra.rag.factory`` 构造参数逐字对应（如 chroma 的
+      ``collection_prefix``）；只影响索引装配，零判定逻辑改动。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -76,6 +82,14 @@ class EvalContext(BaseModel):
     rag_mode: Literal["bm25", "vector", "hybrid"] | None = Field(
         default=None,
         description="RAG 世界检索模式（tool_world='rag' 时生效；None → hybrid 0.5/0.5）",
+    )
+    rag_backend: Literal["local", "qdrant", "chroma"] = Field(
+        default="local",
+        description="RAG 世界索引后端（tool_world='rag' 时生效；默认 local = 既有实现）",
+    )
+    rag_backend_options: dict | None = Field(
+        default=None,
+        description="RAG 后端专属装配参数透传（None = 不传；键名同 pra.rag.factory 参数）",
     )
     evidence_thresholds: dict | None = Field(
         default=None,

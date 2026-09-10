@@ -514,7 +514,9 @@ def make_eval_world_tools():
     return tools
 
 
-def make_rag_world_tools(*, mode: str = "hybrid"):
+def make_rag_world_tools(
+    *, mode: str = "hybrid", backend: str = "local", backend_options: dict | None = None
+):
     """构造 **RAG 世界** 的 Agent 工具（评测 RAG 单独模式，R-4/R-6）。
 
     与 ``make_eval_world_tools`` 的差异只在两个"知识库检索"工具：
@@ -525,6 +527,16 @@ def make_rag_world_tools(*, mode: str = "hybrid"):
 
     :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid 0.5/0.5；R-6 不预设
         Hybrid 最优 —— 三路对比由 Evaluation 实验回答）。
+    :param backend: RAG 索引后端（docs/10 §5，**关键字参数，缺省 "local" 行为不变**）
+        —— 透传 ``pra.rag.factory.build_*_index(backend=...)``："local"（缺省，既有
+        numpy 实现）/ "qdrant" / "chroma"（ChromaDB + LlamaIndex；缺 ``rag`` extra
+        依赖时构造即抛，不静默降级）。**只影响索引装配，零判定逻辑改动**；后端专属
+        装配参数（如 chroma 的 ``chroma_client`` / ``chroma_ephemeral``）由调用方
+        按需另注入。
+    :param backend_options: 后端专属装配参数的透传字典（**关键字参数，缺省 None =
+        不传任何选项 → 装配与改动前逐字节等价**）—— 键名与 ``pra.rag.factory``
+        构造参数逐字对应（如 chroma 的 ``collection_prefix``），非法/未知键由 factory
+        直接抛错（不静默忽略）。
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index
@@ -538,12 +550,13 @@ def make_rag_world_tools(*, mode: str = "hybrid"):
     from pra.tools.policy_search.tool import PolicySearchTool
     from pra.tools.product.tool import InMemoryProductRepository, ProductTool
 
+    options = dict(backend_options or {})
     tools: list[Tool] = [
         ProductTool(repo=InMemoryProductRepository(EVAL_PRODUCTS)),
         ImageAnalysisTool(provider=MockImageAnalysisProvider(EVAL_IMAGE_MATCHES)),
         MerchantTool(repo=InMemoryMerchantRepository(EVAL_MERCHANTS)),
-        CaseSearchTool(index=build_case_index(mode=mode)),
-        PolicySearchTool(index=build_policy_index(mode=mode)),
+        CaseSearchTool(index=build_case_index(mode=mode, backend=backend, **options)),
+        PolicySearchTool(index=build_policy_index(mode=mode, backend=backend, **options)),
     ]
     return tools
 
@@ -1342,8 +1355,13 @@ class AgentScheme(SchemeRunner):
             tools = make_eval_world_tools()
         elif ctx.tool_world == "rag":
             # RAG 世界（R-4/R-6）：先例/政策检索注入真实 RAG 索引，检索模式可切换
-            # （EvalContext.rag_mode，默认 None → hybrid）—— 评测默认路径不动。
-            tools = make_rag_world_tools(mode=ctx.rag_mode or "hybrid")
+            # （EvalContext.rag_mode，默认 None → hybrid）、索引后端可切换
+            # （EvalContext.rag_backend，默认 "local" → 装配不变）—— 评测默认路径不动。
+            tools = make_rag_world_tools(
+                mode=ctx.rag_mode or "hybrid",
+                backend=ctx.rag_backend,
+                backend_options=ctx.rag_backend_options,
+            )
         if tools is not None and self._allowed_tools is not None:
             # 工具注册层裁剪（只保留允许子集；连同 plan 侧裁剪 = 完整装配裁剪）
             tools = [t for t in tools if t.name in self._allowed_tools]

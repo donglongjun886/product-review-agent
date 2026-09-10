@@ -7,6 +7,12 @@
     uv run python scripts/run_rag_eval.py --modes bm25 hybrid   # 只跑指定 RAG 模式
     uv run python scripts/run_rag_eval.py --data eval_data/v2/cases_v2.jsonl
 
+    # 后端切换（docs/10 §5；**缺省 local**，缺省路径输出与改动前逐字节一致）
+    uv run python scripts/run_rag_eval.py --backend chroma
+    # 人工标注 probe 的三模式 Recall@K 并排（默认关闭 → 缺省输出不变）
+    uv run python scripts/run_rag_eval.py --probe
+    uv run python scripts/run_rag_eval.py --backend chroma --probe-only
+
 语义（rag-implementation-plan.md R-4 / R-6 / M4）：
 - 评测**默认仍 InMemory**（回归不破坏）；本脚本是 RAG 单独模式入口 —— 对同一
   eval_data 分别以 ``tool_world="eval"``（InMemory）与 ``tool_world="rag"`` +
@@ -18,7 +24,17 @@
   3. 三检索模式并排（**不预设 Hybrid 优于单路 —— 如实呈现**）；
   4. 运行时证据级隔离抽查：RAG 世界实际引用的先例 ref_id 全部为 ``RAG_CASE_*``
      （无一引用 eval GT / InMemory 种子先例）。
-全链路确定性：无真 LLM / 无网络 / 顺序串行；同数据重跑逐字节可重放。
+- ``--probe`` 追加**检索层**报告（不跑 LLM/agent）：现有**人工标注 probe 集**在
+  bm25 / vector / hybrid 三模式下的 ``Recall@K``（默认 K=3），Policy KB 与 Case KB
+  并排。⚠️ 口径（docs/10 §5-4）：**并排输出、不预设任何模式最优**；分数**量纲不同**
+  （local hybrid = [0,1] 加权融合分；chroma hybrid = RRF 分 ``Σ1/(60+rank)``
+  ≈ 0.0167~0.0331）—— **不归一化、不跨模式/后端比大小、不把 RRF 分当相似度**。
+- ``--backend {local,chroma,qdrant}``（**缺省 local**）：同时作用于 agent A/B 的 RAG
+  臂与 ``--probe`` 报告。``local`` = 既有实现（调用面零改动）；``chroma`` = docs/10
+  §1/§3 的 ChromaDB(cosine) + LlamaIndex + BM25(jieba) + RRF（需 ``rag`` extra +
+  本机服务端 ``127.0.0.1:8001``）。
+全链路确定性：无真 LLM / 无 API key / 无 LLM 调用；``chroma`` 后端会连**本机**
+Chroma 服务端（其余后端零网络），且 probe 报告用**独占前缀**建库并在结束时删除。
 """
 
 from __future__ import annotations
@@ -26,14 +42,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import importlib.util
+import os
 import sys
+from pathlib import Path
+from typing import Protocol
 
 from pra.evaluation.harness.base import EvalContext
 from pra.evaluation.runner import EvaluationRunner
 
 MODES = ("bm25", "vector", "hybrid")
+BACKENDS = ("local", "chroma", "qdrant")
 DEFAULT_DATA = "eval_data/v1/cases_v1.jsonl"
 DIFF_HEAD = 12  # 差异明细打印条数上限
+PROBE_TOP_K = 3  # probe Recall@K 的 K（与 docs/10 §5-4 / phase2 demo 同口径）
+PROBE_SOURCE = "scripts/run_rag_phase2_demo.py"  # probe 集来源（复用，不新造）
+PROBE_COLLECTION_PREFIX = "pra_eval_probe"  # chroma probe 独占 collection 前缀
 
 
 def _decision_digest(records) -> str:
@@ -65,26 +89,238 @@ def _transition_label(r) -> str:
     return f"{r.decision}{extra}"
 
 
+async def _run_ab(configs: list[tuple[str, dict]], args: argparse.Namespace) -> dict[str, tuple]:
+    """跑 InMemory(eval) vs 各 (mode, backend) 的 RAG 臂，返回 label → (result, records, ctx)。
+
+    缺省 backend="local" 时 configs 与改动前逐字相同（多出的 ``rag_backend`` 键取
+    ``EvalContext`` 缺省值 "local"，装配结果不变）。
+    """
+    results: dict[str, tuple] = {}
+    for label, overrides in configs:
+        ctx = EvalContext(**overrides)
+        runner = EvaluationRunner(data_path=args.data, ctx=ctx)
+        result = await runner.run(
+            include=("agent",), smoke=args.smoke, smoke_limit=args.smoke_limit
+        )
+        records = result.records["agent"]
+        results[label] = (result, records, ctx)
+        print(_metrics_row(label, result, records))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 人工标注 probe 集（**复用** scripts/run_rag_phase2_demo.py 的 Part C，不新造 probe）
+# ---------------------------------------------------------------------------
+
+
+class _ProbeSource(Protocol):
+    """``scripts/run_rag_phase2_demo.py`` 里被复用的两个模块级常量（结构约定）。"""
+
+    _POLICY_PROBES: list[dict]
+    _CASE_PROBES: list[dict]
+
+
+def _load_probe_source() -> _ProbeSource:
+    """按路径加载 ``scripts/run_rag_phase2_demo.py``，只取它的人工标注 probe 集。
+
+    为什么 importlib 按路径加载：两脚本同级（``scripts/``）且仓库无 ``scripts`` 包 ——
+    按路径加载既不污染 ``sys.path``、也不依赖当前工作目录。**只读模块级常量，不执行
+    其 ``main``**（该模块 import 期无副作用：不建索引、不联网、不读环境变量、不下载模型）。
+    """
+    path = Path(__file__).resolve().parent / "run_rag_phase2_demo.py"
+    spec = importlib.util.spec_from_file_location("_pra_probe_source", path)
+    if spec is None or spec.loader is None:  # pragma: no cover —— 文件缺失即报错
+        raise RuntimeError(f"无法加载 probe 来源脚本: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def _search(index, kind: str, query: str, top_k: int) -> list:
+    """统一检索入口（与 tools 层契约同形）：policy 只查生效条款，case 无过滤。"""
+    from pra.tools.case_search.tool import CaseSearchFilters
+    from pra.tools.policy_search.tool import PolicySearchFilters
+
+    if kind == "policy":
+        return await index.search(query, PolicySearchFilters(), top_k, True)
+    return await index.search(query, CaseSearchFilters(), top_k)
+
+
+def _id_of(hit) -> str:
+    """policy 命中取 ``clause_id``；case 命中取 ``case_id``（两类 hit 属性名不同）。"""
+    return hit.clause_id if hasattr(hit, "clause_id") else hit.case_id
+
+
+def _score_of(hit) -> float | None:
+    """命中分：case 有 ``retrieval_score``；policy 契约**不含分**（返回 None）。"""
+    return getattr(hit, "retrieval_score", None)
+
+
+def _build_probe_index(backend: str, kind: str, mode: str, options: dict):
+    """按 (backend, kind, mode) 装配一个索引（每 combo 独立实例；缺省 = MockHashEmbedder）。"""
+    from pra.rag.factory import build_case_index, build_policy_index
+
+    build = build_policy_index if kind == "policy" else build_case_index
+    if backend == "local":
+        return build(mode=mode, **options)
+    return build(mode=mode, backend=backend, **options)
+
+
+async def _probe_report(
+    backend: str, modes: list[str], top_k: int, *, prefix: str, probe_only: bool = False
+) -> None:
+    """三模式 × 两 KB 的 probe Recall@K 并排报告（**不预设任何模式最优**）。
+
+    只打印实测命中数与分数**量纲**；「最优」「更好」等判定不出现在本报告 —— 不同
+    模式/后端的分数不可比（见报告尾部「分数口径」段）。
+    """
+    from pra.rag.chroma_backend import served_counters
+
+    probes_by_kind = (
+        ("policy", _load_probe_source()._POLICY_PROBES),
+        ("case", _load_probe_source()._CASE_PROBES),
+    )
+    options: dict = {}
+    if backend == "chroma":
+        # 独占前缀（绝不触碰共享服务端上别人的 collection）；报告结束即删。
+        options = {"collection_prefix": prefix}
+
+    print("\n" + "=" * 100)
+    print(f"人工标注 probe 集 · 三模式 Recall@{top_k} 并排（backend={backend}；不预设任何模式最优）")
+    print("=" * 100)
+    print(f"probe 来源（**复用，未新造**）: {PROBE_SOURCE} —— Part C 的 _POLICY_PROBES / _CASE_PROBES")
+    print("embedder = MockHashEmbedder（确定性、离线；**不是语义模型** —— 词面特征 hash）")
+    if backend == "chroma":
+        print(f"chroma collection 前缀 = {prefix}（本脚本独占，报告结束即删）")
+
+    for kind, probes in probes_by_kind:
+        kb = "Policy KB" if kind == "policy" else "Case KB"
+        corpus_size = 24 if kind == "policy" else 67
+        n_kw = sum(1 for p in probes if p["tag"] == "kw")
+        n_para = sum(1 for p in probes if p["tag"] == "para")
+        total_exp = sum(len(p["expected"]) for p in probes)
+        print("\n" + "-" * 100)
+        print(
+            f"{kb}（corpus {corpus_size} 条 / probe {len(probes)} 条 = kw {n_kw} + para {n_para} / "
+            f"expected 合计 {total_exp} 项）"
+        )
+        print("  Recall@K = Σ_q |Top-K ∩ expected(q)| / Σ_q |expected(q)|（item-level）")
+        retrieved: dict[str, int] = {m: 0 for m in modes}
+        score_lo: dict[str, float | None] = {m: None for m in modes}
+        score_hi: dict[str, float | None] = {m: None for m in modes}
+        for i, p in enumerate(probes, 1):
+            cells = []
+            for mode in modes:
+                index = _build_probe_index(backend, kind, mode, options)
+                hits = await _search(index, kind, p["query"], top_k)
+                ids = [_id_of(h) for h in hits]
+                poss = [ids.index(e) + 1 for e in p["expected"] if e in ids]
+                retrieved[mode] += len(poss)
+                for h in hits:
+                    s = _score_of(h)
+                    if s is None:
+                        continue
+                    score_lo[mode] = s if score_lo[mode] is None else min(score_lo[mode], s)
+                    score_hi[mode] = s if score_hi[mode] is None else max(score_hi[mode], s)
+                cells.append(
+                    f"{mode}={len(poss)}/{len(p['expected'])}@"
+                    + (f"{poss}" if poss else "-")
+                )
+            print(f"  [{i:>2}/{len(probes)}] [{p['tag']:<4}|{p['topic']}] {p['query']}")
+            print(f"        exp={p['expected']}  " + "  ".join(cells))
+        print(f"  ---- {kb} Recall@{top_k}（expected 合计 {total_exp}） ----")
+        for mode in modes:
+            hit_n = retrieved[mode]
+            pct = 100.0 * hit_n / total_exp if total_exp else 0.0
+            if score_lo[mode] is None:
+                scale = "分数：policy 契约不含分（不打印）"
+            else:
+                scale = f"分数区间 [{score_lo[mode]:.6f}, {score_hi[mode]:.6f}]"
+            print(f"    {mode:<7} Recall@{top_k} = {hit_n}/{total_exp} ({pct:5.1f}%)   {scale}")
+        print(
+            "  → 如实记录（**不排序、不判定最优**）: "
+            + "  ".join(f"{m}={retrieved[m]}/{total_exp}" for m in modes)
+            + f"  （probe {len(probes)} 条，小样本定向观测）"
+        )
+
+    # --- 分数口径（量纲差异必须同框声明；绝不归一化 / 绝不当相似度） ----------
+    print("\n" + "-" * 100)
+    print("分数口径（**量纲不可比 → 本报告不做任何归一化**）")
+    print("  - local 后端：hybrid = 0.5·norm(bm25) + 0.5·cos，量纲 [0,1]（加权融合分）；")
+    print("    bm25/vector 两列也是各自归一化分 —— 与 chroma 的分数**不是同一把尺**。")
+    print("  - chroma 后端：hybrid = **RRF 融合分** Σ 1/(60 + rank)（k=60），量纲 ≈ 0.0167~0.0331；")
+    print("    vector = 1 − Chroma cosine distance（余弦相似度）；bm25 = 候选集内 min-max 归一化 bm25s 分。")
+    print("  - ⚠️ RRF 分是**排名融合分，不是相似度、不是概率**；禁止跨模式/跨后端比大小。")
+    print("  - CaseHit.retrieval_score = 检索分（docs/10 §0 C1）；PolicyClauseHit 契约不含分。")
+
+    # --- 运行期自检（确定性证据 + 零 LLM + collection 清理） --------------------
+    print("\n" + "-" * 100)
+    print("probe 运行期自检")
+    print(f"  - backend={backend} modes={list(modes)} top_k={top_k} probe_only={probe_only}")
+    print(f"  - 本进程 chroma_backend 发出的 LLM 调用数（须为 0）: {served_counters()['llm_calls']}")
+    if backend == "chroma":
+        _cleanup_chroma_collections(prefix, label="probe")
+
+
+def _cleanup_chroma_collections(prefix: str, *, label: str) -> None:
+    """删除本脚本用 ``prefix`` 建的 collection（两个 KB × dim 256），并回读服务端列表。
+
+    服务端是**共享单实例**（AGENTS.md 运行约定）→ 本脚本只用独占前缀建库、用完即删，
+    绝不触碰别人的 collection。
+    """
+    from pra.rag.chroma_backend import delete_collection, make_chroma_client
+
+    for name in (f"{prefix}_policy_256", f"{prefix}_case_256"):
+        deleted = delete_collection(name)
+        print(f"  - [{label}] 清理 collection {name}: {'已删除' if deleted else '不存在'}")
+    names = [c.name for c in make_chroma_client().list_collections()]
+    print(f"  - [{label}] 清理后服务端 collection 列表: {names}")
+
+
 async def _main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     modes = list(args.modes)
-    configs: list[tuple[str, dict]] = [("InMemory(eval)", {})]
-    configs += [(f"RAG-{mode}", {"tool_world": "rag", "rag_mode": mode}) for mode in modes]
+    backend = args.backend
+    # 独占 collection 前缀（仅 chroma 用）：同一进程内 A/B 与 probe 共用 → 只建一套库。
+    prefix = f"{PROBE_COLLECTION_PREFIX}_{os.getpid()}"
 
     print("=" * 100)
     print("商品审核 Agent · RAG 世界 vs InMemory（agent 方案 · 决策序列 digest + 指标）")
     print("=" * 100)
     print(f"数据集: {args.data}（smoke={args.smoke}）| 世界: eval(InMemory) + rag×{len(modes)} 模式")
+    if backend != "local":
+        # **缺省（local）不打印这一行** —— 缺省路径输出与改动前逐字节一致（已 diff 验证）。
+        print(f"backend: {backend}（RAG 索引装配；chroma = docs/10 的 ChromaDB + LlamaIndex + RRF）")
+    if backend == "chroma":
+        print(f"chroma collection 前缀 = {prefix}（本脚本独占，本次运行结束即删）")
 
-    results: dict[str, tuple] = {}
-    for label, overrides in configs:
-        ctx = EvalContext(**overrides)
-        runner = EvaluationRunner(data_path=args.data, ctx=ctx)
-        result = await runner.run(include=("agent",), smoke=args.smoke, smoke_limit=args.smoke_limit)
-        records = result.records["agent"]
-        results[label] = (result, records, ctx)
-        print(_metrics_row(label, result, records))
+    if not args.probe_only:
+        configs: list[tuple[str, dict]] = [("InMemory(eval)", {})]
+        rag_overrides: dict = {"tool_world": "rag", "rag_backend": backend}
+        if backend == "chroma":
+            # 共享服务端上只用本脚本独占前缀（A/B 臂与 probe 共用同一套库）。
+            rag_overrides["rag_backend_options"] = {"collection_prefix": prefix}
+        configs += [
+            (f"RAG-{mode}", {**rag_overrides, "rag_mode": mode}) for mode in modes
+        ]
+        results = await _run_ab(configs, args)
+        _report_ab(results, modes)
+        if backend == "chroma":
+            # A/B 臂也用独占前缀建库 → 同样用完即删（共享服务端不留残渣）。
+            _cleanup_chroma_collections(prefix, label="agent-ab")
 
+    if args.probe:
+        await _probe_report(
+            backend, modes, args.probe_top_k, prefix=prefix, probe_only=args.probe_only
+        )
+
+    print("\n" + "=" * 100)
+    print("[OK] RAG 世界评测完成（确定性；RAG 接入后的结论边界说明见上方差异与指标）")
+    return 0
+
+
+def _report_ab(results: dict[str, tuple], modes: list[str]) -> None:
+    """A/B 报告（逐案差异 / 三路对比 / 证据来源 / R-4 隔离）—— 与改动前逐字一致。"""
     # --- InMemory vs RAG 逐案差异 + 三路对比 --------------------------------
     mem_result, mem_records, _ = results["InMemory(eval)"]
     mem_by_id = {r.eval_case_id: r for r in mem_records}
@@ -93,7 +329,7 @@ async def _main(argv: list[str] | None = None) -> int:
     print("\n" + "-" * 100)
     print("逐案决策差异（相对 InMemory(eval)）")
     for label in [f"RAG-{m}" for m in modes]:
-        result, records, _ctx = results[label]
+        _result, records, _ctx = results[label]
         diffs = []
         for r in records:
             base = mem_by_id[r.eval_case_id]
@@ -127,7 +363,7 @@ async def _main(argv: list[str] | None = None) -> int:
         f"{'distinct_case':>13} {'distinct_policy':>15}  样例 case refs"
     )
     for label in ["InMemory(eval)"] + [f"RAG-{m}" for m in modes]:
-        result, records, _ = results[label]
+        _result, records, _ = results[label]
         rejects = [r for r in records if r.decision == "REJECT"]
         pol_refs = {
             ev["ref_id"]
@@ -155,7 +391,7 @@ async def _main(argv: list[str] | None = None) -> int:
     print("\n" + "-" * 100)
     print("运行时证据级隔离抽查（RAG 世界引用 ref_id 前缀）")
     for label in [f"RAG-{m}" for m in modes]:
-        result, records, _ = results[label]
+        _result, records, _ = results[label]
         refs = set()
         for r in records:
             for ev in r.evidence:
@@ -167,10 +403,6 @@ async def _main(argv: list[str] | None = None) -> int:
         verdict = "PASS（RAG 世界仅引用 RAG_CASE_*/KB POLICY_*，无 eval GT / InMemory 先例）" if not bad else f"FAIL: {bad}"
         print(f"  {label}: CASE 引用 {len(case_refs)} 个（样例 {case_refs[:5]}…）| {verdict}")
 
-    print("\n" + "=" * 100)
-    print("[OK] RAG 世界评测完成（确定性；RAG 接入后的结论边界说明见上方差异与指标）")
-    return 0
-
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RAG 世界评测：InMemory vs RAG + 三模式对比")
@@ -179,7 +411,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="要跑的 RAG 检索模式（默认全三路）")
     parser.add_argument("--smoke", action="store_true", help="冒烟：只跑前 N 条（确定性）")
     parser.add_argument("--smoke-limit", type=int, default=10, help="smoke 上限（默认 10）")
-    return parser.parse_args(argv)
+    parser.add_argument("--backend", default="local", choices=list(BACKENDS),
+                        help="RAG 索引后端（默认 local = 既有实现，输出不变；chroma = docs/10）")
+    parser.add_argument("--probe", action="store_true",
+                        help=f"追加 probe 三模式 Recall@K 报告（probe 复用 {PROBE_SOURCE}）")
+    parser.add_argument("--probe-only", action="store_true",
+                        help="只跑 probe 报告（跳过 agent A/B）")
+    parser.add_argument("--probe-top-k", type=int, default=PROBE_TOP_K,
+                        help=f"probe Recall@K 的 K（默认 {PROBE_TOP_K}）")
+    args = parser.parse_args(argv)
+    if args.probe_only:
+        args.probe = True
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
