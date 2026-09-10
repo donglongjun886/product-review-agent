@@ -571,6 +571,16 @@ def _jieba_tokenizer():
     ``BM25Retriever`` 构造与 ``retrieve`` 两处都硬编码调用 ``bm25s.tokenize``，且**没有**
     tokenizer 注入点（0.8.0 实测），故只能在此上下文内完成索引与查询 —— 保证「索引分词」
     与「查询分词」是同一个分词器（否则词表不一致）。
+
+    🔴 **调用方必须写成 ``with _TOKENIZER_LOCK, _jieba_tokenizer():``（锁在前、补丁在后）**：
+    多个上下文管理器按「左→右 __enter__、右→左 __exit__」执行，若写成
+    ``with _jieba_tokenizer(), _TOKENIZER_LOCK:``，则打补丁在取锁**之前**、恢复在放锁
+    **之后** —— 临界区不覆盖补丁的安装/撤销，两个并发线程下必然出错（实测，R6）：
+    线程 B 会把「A 打的补丁」当成 ``original`` 存下，A 退出即恢复真身 → **B 在自以为的
+    jieba 上下文内用真分词器检索 jieba 建的索引**（实测
+    ``ValueError: The maximum token ID in the query (56) is higher than the number of
+    tokens in the index.``）；B 退出再把补丁写回 → ``bm25s.tokenize`` **进程级永久泄漏**。
+    锁在前则补丁窗口 ⊆ 持锁窗口，两线程的补丁窗口互不相交，save/restore 自然成栈。
     """
     import bm25s
 
@@ -934,7 +944,8 @@ def _make_bm25_retriever(ctx: _RetrievalContext, top_k: int) -> Any:
     （``title。text`` / ``summary``）**检索同一份文本** —— metadata 字面值
     （``case_id`` / ``risk_type`` 等）不再进入 BM25 词表（实测证据见返回报告 R7 段）。
     """
-    with _jieba_tokenizer(), _TOKENIZER_LOCK:
+    # ⚠️ 顺序不可颠倒：锁**在**补丁之前（见 :func:`_jieba_tokenizer` docstring，R6 实测）。
+    with _TOKENIZER_LOCK, _jieba_tokenizer():
         return ctx.llama["BM25Retriever"](
             nodes=list(ctx.nodes),
             similarity_top_k=min(top_k, len(ctx.nodes)),
@@ -1175,8 +1186,10 @@ class _ChromaIndexBase:
         原分词器，未登录词会拿到越界 token id →
         ``ValueError: The maximum token ID in the query (379) is higher than the number of
         tokens in the index.``（本模块首次实测即此错，见返回报告 §5）。
+
+        ⚠️ 顺序不可颠倒：锁**在**补丁之前（见 :func:`_jieba_tokenizer` docstring，R6 实测）。
         """
-        with _jieba_tokenizer(), _TOKENIZER_LOCK:
+        with _TOKENIZER_LOCK, _jieba_tokenizer():
             return retriever.retrieve(query_bundle)
 
     def _rank_vector(

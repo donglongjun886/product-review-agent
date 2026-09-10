@@ -41,7 +41,7 @@ Query
 | `rag/vectors.py`、`rag/retrieval.py` | ✅ 保留（local 后端与既有单测仍用） |
 | `rag/factory.py`、`build_tools(data_source, rag_backend)` | 🔧 扩展：新增 `rag_backend="chroma"` |
 | `rag/qdrant_index.py` | ⏸️ **暂留不删**（`rag_backend="qdrant"` 保持可用）。**注意状态差异**：代码与 `deploy/qdrant` **保留在仓库**，但**本机容器/镜像/数据卷已卸**（恢复 = `cd deploy/qdrant && docker compose up -d`，镜像走国内源约 30s）；因此 pytest 里 3 个 Qdrant 真服务端用例当前为 skip |
-| `scripts/run_rag_eval.py` | 🔧 扩展为三路/多后端对比 |
+| `scripts/run_rag_eval.py` | 🔧 扩展为三路/多后端对比；**chroma 臂缺省走 `EphemeralClient`（A/B 隔离，见 §6-R9b）**，`--chroma-client http` 才连本机服务端 |
 | `scripts/run_rag_phase2_demo.py` | ⏸️ 暂留（Qdrant Phase 2 演示，不删） |
 
 ## 3. 实测钉死的实现契约（**不要照抄网上示例**）
@@ -112,6 +112,9 @@ Query
   deprecated（只 warning、不生效），构造与检索两处硬编码 `bm25s.tokenize` → 只能受控替换
   `bm25s.tokenize`（jieba + 模块级锁）。**检索期也必须在同一上下文内**，否则首跑即
   `ValueError: The maximum token ID in the query (379) is higher than the number of tokens in the index.`
+  🔴 **且调用点必须写成 `with _TOKENIZER_LOCK, _jieba_tokenizer():`（锁在前、补丁在后）** ——
+  写成 `_jieba_tokenizer()` 在前会让补丁落在临界区之外，并发下必错（实测复现 + 修正 + 两道守卫
+  见 §6-R6）。
 - 用 `llama-index-core` + 3 个具体集成包（`vector-stores-chroma` / `retrievers-bm25` / `embeddings-fastembed`），**不装 `llama-index` 伞包**（伞包会拖进 `llama-index-llms-openai` / `embeddings-openai` 等本项目不用的 OpenAI 集成）。
 - 兼容性实测：`vector-stores-chroma` 要求 `chromadb>=0.5.17` → **兼容 1.5.9** ✅。
 - 待验证风险：`llama-index-core` 依赖 `nltk` —— **必须实测确认离线（无网）不触发数据下载**（我们不做句子切分，理论上不触发；需给证据）。
@@ -182,6 +185,9 @@ Query
 6. **回归零漂移**：`uv run pytest tests/ -q` 全绿；`run_regression.py`（v1/v2）**双 PASS**（RAG 不在默认评测路径，决策序列不得变）。
 7. **CI**：push 后 GitHub Actions success；`uv.lock` **必须保持规范源 `pypi.org`**（实测：用国内镜像 lock 会把 registry 写成镜像源 → 绝不允许提交，改完必须 `grep -c tuna uv.lock` = 0）。
 8. **真服务端**：`deploy/chroma` 起服务后，集成测试真跑通（落库点数 == corpus 行数；检索与 local 同口径）。
+   ⚠️ 该条由 `tests/test_rag_chroma_server.py` 负责（服务端未起则自动 skip）；**评测脚本的 chroma 臂
+   缺省走 `EphemeralClient`、不碰服务端**（A/B 隔离，见 §6-R9b），要跑服务端路径须显式
+   `--chroma-client http`。
 
 ## 6. 未决 / 风险（执行前必须处理）
 
@@ -200,9 +206,37 @@ Query
 
 **执行期新增（2026-09-10，SA-1 实测与主 agent 复查）**：
 
-- **R6（BM25 分词替换的健壮性，未解决）**：`bm25s.tokenize` 的受控替换 + 模块级锁**未做并发正确性实测**；
-  多线程/多进程场景下这是脆弱点（库无注入点所致）。可选出路：换用 lib 的其它注入路径、或直接包 `bm25s`
-  不用 LlamaIndex 的 retriever（会削弱「全量 LlamaIndex」）。**待拍板**。
+- **R6（BM25 分词替换的并发正确性）—— 已实测结清（2026-09-10）：竞态**复现**并最小修正 + 两道守卫**。
+  ``llama-index-retrievers-bm25 0.8.0`` 无 tokenizer 注入点 → 本模块只能**受控替换**
+  ``bm25s.tokenize``（模块级全局符号）并用 ``_TOKENIZER_LOCK`` 串行化。原判「未测」经本轮实测
+  升级为**真缺陷**：
+
+  - **根因（顺序倒置）**：两处调用点写成 ``with _jieba_tokenizer(), _TOKENIZER_LOCK:``。
+    Python 多上下文管理器是「左→右 ``__enter__``、右→左 ``__exit__``」⇒ 实际语义是
+    ``patch → 取锁 → … → 放锁 → restore``：**补丁的安装/撤销落在临界区之外**。
+  - **失效 A（在飞线程用错分词器）**：线程 B 在 A 持锁期间进入 ``_jieba_tokenizer()``，
+    把「A 打的补丁」当作 ``original`` 存下 → A 退出即恢复真身 → **B 在自以为的 jieba 上下文里
+    用真分词器检索 jieba 建的索引**，实测 ``ValueError: The maximum token ID in the query (56)
+    is higher than the number of tokens in the index.``（工具层不吞异常 → 直接冒泡）。
+  - **失效 B（进程级泄漏）**：B 退出再把 ``original``（= 补丁）写回 → ``bm25s.tokenize``
+    **被永久替换**，后续线程继续踩。
+  - **修正（最小、不换实现）**：调用点改为 ``with _TOKENIZER_LOCK, _jieba_tokenizer():``
+    （锁在前）⇒ 补丁窗口 ⊆ 持锁窗口 ⇒ 两线程补丁窗口互不相交，save/restore 自然成栈。
+    **未**改成「无全局状态的注入/封装」（不扩架构范围）。
+  - **两处调用点**：``_make_bm25_retriever``（建索引）、``Chroma*Index._bm25_retrieve``（查询）。
+  - **回归守卫（tests/test_rag_chroma.py 第 9 节，两闸）**：
+    ① 主闸（黑盒）8 线程并发 ``mode="bm25"`` 检索 → 无异常 + 每轮结果 == 单线程 golden
+    （id 序 + 6 位分）+ 结束后 ``bm25s.tokenize`` 复原为原符号；
+    ② 机制级定位工具：观测代理锁断言「取锁那一刻补丁**尚未**安装」。
+    **回退反证**：把顺序改回原样 → **两闸 3/3 运行全红**；修正后 3/3 全绿（另有独立压力探针：
+    修复前 8×15 轮**每次运行**都复现、修复后 0 异常）。
+  - ⚠️ **已验证边界（不得夸大）**：本实现**不是**「天然线程安全」—— 它仍是全局符号替换。
+    已验证的是「**同进程内本模块的两个调用点**在并发下互不污染、且不泄漏」；
+    **非本模块代码**若在持锁窗口内直接调 ``bm25s.tokenize``，仍会看到 jieba 替身
+    （本仓库无此调用者，已 grep 确认）。多进程各自独立模块状态，不受影响。
+  - **现实暴露面**：RAG **未接 HTTP 主流程**，故当前不是线上故障；一旦按「`build_tools("rag")`
+    接进 FastAPI」（同步端点跑在线程池里）即为间歇性真错 —— 这是本轮把它从「理论风险」升级为
+    「必修」的理由。
 - **R7（两路检索文本不一致）—— 已解决（用户拍板「裁剪为只索引正文」）**：实现改为在 `TextNode` 上设
   `excluded_embed_metadata_keys`（`BM25Retriever` 内部用 `MetadataMode.EMBED`），使 BM25 只索引正文
   （policy `title。text` / case `summary`），与向量路口径一致；并已实测该排除设置**随 `_node_content`
@@ -236,6 +270,19 @@ Query
   Case = local 6/4/**7** vs chroma 6/4/**6** → **两个 KB 上 hybrid 相对位置相反**，实证「不预设最优」。
   保守边界（写进报告）：8 条 probe、粒度 12.5%；用 MockHash **不是 BGE**，故 para 类失败**不得**解读为
   「语义检索不行」；A/B 上 chroma 臂 35 案决策 digest 与 InMemory/local 相同（probe 层差异未传导到决策）。
+- **R9b（A/B 隔离：chroma 臂的客户端）—— 已拍板并落地（2026-09-10）**：A/B（与 probe）的 chroma 臂
+  **缺省改走 `chromadb.EphemeralClient()`**（进程内内存库），新增 `--chroma-client {ephemeral,http}`
+  （缺省 `ephemeral`）；`http` = 本机 `127.0.0.1:8001` 服务端，仅该模式建库/清理（沿用独占前缀）。
+  - **理由**：A/B 每臂用**独立、临时**的库 → 不受上一次实验残留的 collection / 历史数据影响
+    （「同输入、独立环境、可重复运行」）；
+    且**不再要求本机起 Chroma 服务端**（实测：封掉 `chromadb.HttpClient` 后 `--backend chroma`
+    仍 exit 0 跑通；对照 `--chroma-client http` 在被封时按预期失败 —— 证明封禁真的生效）。
+  - **等价性实测**（2026-09-10，同口径同参）：两种客户端跑 16 条 probe × 3 模式 × 2 KB
+    + 4 组过滤组合 parity → **报告数据行 diff 为空（逐字节一致）**、vector parity 分差 `0.000e+00`；
+    `--backend chroma`（ephemeral）35 案 A/B 报告与 local 臂**逐字节一致**（digest `50351888fd8bd605`）。
+  - ⚠️ **口径**：`ephemeral` 与 `http` **不是同一份存储**（前者随进程消失），报告里已如实标注本次客户端；
+    **生产/普通 RAG 环境仍用服务端** —— 本开关只影响评测脚本；`http` 模式仍要求服务端在跑。
+    `--probe` **仍缺省关闭**（拍板：probe 属诊断能力，不改默认评测路径；缺省输出与改动前逐字节一致）。
 - **R10（🔴 已修复的真缺陷：vector 模式漏召回）—— 由测试套件挖出，主 agent 独立复现，SA-1 修复**：
   现象 = 结果变成 `local` 的**真子集**、最坏**为空**（policy `risk_type=[FALSE_CLAIM]`：local 3 / chroma **0**；
   case `risk_type=[IP]` k=30：25 / 14；甚至**无 store 过滤**时也会发生 —— policy brand 词 + `effective_only`

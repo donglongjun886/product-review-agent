@@ -137,31 +137,41 @@ uv run python scripts/run_rag_demo.py
 uv run python scripts/run_regression.py
 ```
 
-### RAG 语义路（可选：Qdrant + 本地 BGE embedding）
+### RAG 语义路（ChromaDB + LlamaIndex + BM25(jieba) + RRF）
 
 > **向量库已定为 ChromaDB**（docs/10 拍板，取代 Qdrant）：部署在
 > [`deploy/chroma`](deploy/chroma/README.md)，`docker compose up -d` 一条命令起服务
-> （仅绑 `127.0.0.1:8001`）；升级方案与实施契约见
+> （仅绑 `127.0.0.1:8001`）；实施契约与全部实测记录见
 > [docs/10-rag-upgrade-spec.md](docs/10-rag-upgrade-spec.md)。
-> ⚠️ **检索升级尚未实施** —— 下面这节描述的仍是**当前**可用路径（Qdrant + BGE），
-> Chroma 后端代码尚未落地；Qdrant 部署在迁移期暂留不删。
-
-默认 RAG 路径是**确定性 mock embedding**（词面 hash，无外部依赖、可逐字节回归）；语义路
-需额外依赖 + 本地模型缓存（首次联网下载 onnx 模型约 90MB）：
+> Chroma 后端（`rag_backend="chroma"`）**已落地**；默认后端仍是确定性的 `local`，
+> Qdrant 代码与部署在迁移期暂留不删。
 
 ```bash
 uv sync --extra rag
 
-# 三模式并排 + 「语义 vs 词面」同义改写对比 + 标注 probe 的 Recall@3（不预设 Hybrid 最优）
-uv run python scripts/run_rag_phase2_demo.py
-uv run python scripts/run_rag_phase2_demo.py --top-k 5 --mode hybrid
+# 三检索模式（bm25 / vector / hybrid）的 agent A/B 评测：chroma 臂缺省用**进程内
+# EphemeralClient**（每臂独立、无需本机服务端）；要跑服务端路径加 --chroma-client http
+uv run python scripts/run_rag_eval.py --backend chroma
+
+# 人工标注 probe 的三路 Recall@K 并排（--probe 缺省关闭：probe 属诊断能力，不改默认评测路径）
+uv run python scripts/run_rag_eval.py --backend chroma --probe
 ```
+
+默认 RAG 路径是**确定性 mock embedding**（词面 hash，无外部依赖、可逐字节回归）；语义路
+（BGE）需额外依赖 + 本地模型缓存（首次联网下载 onnx 模型约 90MB）。下面是**迁移期保留**的
+Qdrant Phase-2 演示脚本（Chroma 路的三模式演示与评测走上面的 `run_rag_eval.py`）：
 
 模型缓存目录用 `PRA_EMBED_CACHE_DIR` 指定（缺省走 fastembed 默认目录）；国内网络可先
 `export HF_ENDPOINT=https://hf-mirror.com`。**缓存缺失时脚本带指引退出、绝不静默回退 mock**。
 **结论边界**见 [docs/06](docs/06-rag-phase2-qdrant-bge.md) §5：单模型（bge-small-zh-v1.5）
 × 小语料（24/67 条）的定向演示与 probe 观测，非大规模评测；Qdrant 进程内模式非分布式部署；
 确定性回归基线恒以默认 mock 路径为准。
+
+```bash
+# 三模式并排 + 「语义 vs 词面」同义改写对比 + 标注 probe 的 Recall@3（不预设 Hybrid 最优）
+uv run python scripts/run_rag_phase2_demo.py
+uv run python scripts/run_rag_phase2_demo.py --top-k 5 --mode hybrid
+```
 
 默认走 qdrant-client **进程内模式**（`:memory:` / `path=`），**无需任何服务**。若要验证
 `url=` 远端 server 路径（生产叙事位），本仓库附带单机部署：

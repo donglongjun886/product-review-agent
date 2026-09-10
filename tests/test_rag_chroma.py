@@ -43,6 +43,16 @@
         「无信号乱码查询」**逐字节一致**，且该字面值的 BM25 **原始分恒 0**（正文查询作对照：原始分 > 0 且分数非平坦）。
      ⚠️ 反例字面值必须**token 级**不在正文里：``全类目`` / ``女鞋/运动鞋`` / ``箱包/女包`` 本来就出现在正文
      （命中是正确行为），``POLICY_5.3`` 会被 jieba 拆出单字符 ``'3'`` 命中「≥3 次」表述 —— 用例内会现场自检。
+7. **R6：BM25 分词器受控替换的并发正确性**（第 9 节，docs/10 §6-R6）。``llama-index-retrievers-bm25
+   0.8.0`` 无 tokenizer 注入点 → 本模块只能**受控替换** ``bm25s.tokenize``（模块级全局符号）并用
+   ``_TOKENIZER_LOCK`` 串行化；因此「补丁的安装/撤销是否被锁覆盖」是**必须实测**的性质：
+   - **主闸（黑盒）**：8 线程并发跑 ``mode="bm25"`` 检索 → 无异常、每轮结果 == 单线程 golden
+     （id 序 + 6 位分）、结束后 ``bm25s.tokenize`` **复原为原符号**（不泄漏）；
+   - **机制级定位工具**：观测代理锁断言「取锁那一刻补丁**尚未**安装」（补丁必须在锁内装）。
+   ⚠️ **不得**据此声称该实现「天然线程安全」—— 它仍是全局符号替换，**已验证边界**见 docs/10 §6-R6
+   （同进程内本模块的调用点互不干扰；非本模块代码在持锁窗口内直接调 ``bm25s.tokenize`` 仍会看到替身）。
+   实测（2026-09-10）：修复前 8×15 轮**每次运行**都复现（120 轮里 1 次 ``ValueError`` + 符号泄漏），
+   修复后 3/3 运行干净 —— 本套件的两道断言正是据此写的。
 
 **在 CI 上本文件整文件 skip（诚实标注，勿声称 CI 覆盖）**：顶层
 ``pytest.importorskip("chromadb")``，而 CI 只跑 ``uv sync --frozen``（**不装任何 extra**）
@@ -55,7 +65,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import threading
+from typing import Any, Self
 from uuid import uuid4
 
 import pytest
@@ -65,8 +77,13 @@ chromadb = pytest.importorskip(
     "chromadb",
     reason="未安装 chromadb（CI 只跑 uv sync --frozen，不装 rag extra）→ 整文件跳过；装上后：uv sync --extra rag",
 )
+bm25s = pytest.importorskip(
+    "bm25s",
+    reason="未安装 bm25s（llama-index-retrievers-bm25 的引擎，随 rag extra 装入）→ 整文件跳过",
+)
 
 from pra.domain.models import RiskType
+from pra.rag import chroma_backend
 from pra.rag.chroma_backend import (
     COLLECTION_NAME_TEMPLATE,
     ChromaCaseIndex,
@@ -106,6 +123,10 @@ _FALSE_CLAIM = RiskType.FALSE_CLAIM
 _EVASION = RiskType.EVASION_PATTERN
 
 _SCORE_TOL = 1e-6
+
+#: 进入任何检索之前的 ``bm25s.tokenize`` 原符号（R6：整个模块「受控替换」它，
+#: 用例断言跑完必须复原为这一份；本模块锁的观测代理也用它判别「补丁是否已安装」）。
+_REAL_BM25S_TOKENIZE = bm25s.tokenize
 
 
 # ---------------------------------------------------------------------------
@@ -1212,3 +1233,132 @@ async def test_build_tools_rag_backend_chroma_injects_chroma_index() -> None:
     assert type(tools[0]._repo).__name__ == "InMemoryProductRepository"
     hits = await tools[4]._index.search("无品牌高相似", CaseSearchFilters(), top_k=3)
     assert hits and all(str(h.case_id).startswith("RAG_CASE_") for h in hits)
+
+
+# ---------------------------------------------------------------------------
+# 9) R6：BM25 分词器受控替换的**并发正确性**（docs/10 §6-R6）
+# ---------------------------------------------------------------------------
+
+
+#: 并发规模：8 线程同时冲进临界区（barrier 对齐起点），每线程固定跑自己的 query。
+#: 实测（修复前）：8×15 轮下**每次运行**都能复现（120 轮里 1 次抛错 + 全局符号泄漏），
+#: 故本用例对「补丁顺序」有牙齿；修复后 3/3 运行 0 异常、无泄漏。
+_R6_THREADS = 8
+_R6_ROUNDS = 12
+
+
+class _PatchOrderProbe:
+    """``_TOKENIZER_LOCK`` 的观测代理：只记录「取锁那一刻补丁是否已安装」。
+
+    独占语义与 ``threading.RLock`` 完全一致（内部就是 RLock），只在 ``acquire`` 前记一笔
+    —— 用来把**顺序不变量**「补丁必须在锁内安装」写成可判别断言（机制级定位工具）。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        #: 每次取锁时 ``bm25s.tokenize`` 是否已被替换为 jieba 替身。
+        self.patched_at_acquire: list[bool] = []
+
+    def acquire(self, *args: Any, **kwargs: Any) -> bool:
+        self.patched_at_acquire.append(bm25s.tokenize is not _REAL_BM25S_TOKENIZE)
+        return self._lock.acquire(*args, **kwargs)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> Self:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+
+def _bm25_hits(index: Any, query: str, top_k: int) -> list[tuple[str, float]]:
+    """``mode="bm25"`` 的检索结果 → ``(case_id, retrieval_score)``（用于逐项对比）。
+
+    用 **case KB**：``CaseHit`` 契约带 ``retrieval_score``，而 ``PolicyClauseHit`` 按契约**不含分**
+    （docs/10 §5-4）→ 分数是判别「分词器被污染」的更强信号（id 序可能不变而分数漂移）。
+    """
+    hits = asyncio.run(index.search(query, CaseSearchFilters(), top_k))
+    return [(h.case_id, h.retrieval_score) for h in hits]
+
+
+def test_r6_bm25_tokenizer_patch_installed_under_lock() -> None:
+    """机制级：``bm25s.tokenize`` 的替换**必须在持锁窗口内**完成（R6 顺序不变量）。
+
+    断言「取锁那一刻补丁尚未安装」——若有人把调用点写回 ``with _jieba_tokenizer(), _TOKENIZER_LOCK:``
+    （补丁先于取锁），本用例立刻变红（实测：回退顺序 → ``patched_at_acquire`` 出现 ``True``）。
+    这是**定位工具**，不单独证明并发安全；真正的用户可见性质由
+    :func:`test_r6_concurrent_bm25_searches_do_not_pollute_tokenizer` 守住。
+    """
+    index = _case_chroma("bm25")
+    probe = _PatchOrderProbe()
+    original_lock = chroma_backend._TOKENIZER_LOCK
+    chroma_backend._TOKENIZER_LOCK = probe
+    try:
+        hits = _bm25_hits(index, "外观高度模仿知名品牌无授权", 5)
+    finally:
+        chroma_backend._TOKENIZER_LOCK = original_lock
+
+    assert hits, "空结果会让本用例失去意义（先确认检索真的跑了）"
+    # 两个调用点（建索引 / 检索）各取一次锁 → 两次都必须在「补丁未安装」时取到锁
+    assert probe.patched_at_acquire == [False, False], (
+        f"补丁先于取锁安装 → 临界区未覆盖补丁（R6）：{probe.patched_at_acquire}"
+    )
+    assert bm25s.tokenize is _REAL_BM25S_TOKENIZE, "检索结束后 bm25s.tokenize 必须已复原"
+
+
+def test_r6_concurrent_bm25_searches_do_not_pollute_tokenizer() -> None:
+    """主闸（黑盒）：8 线程并发跑 ``mode="bm25"`` 检索，**结果必须与单线程逐项一致**。
+
+    断言三件事（都是用户可见性质，不绑内部实现）：
+    ① 无异常 —— 补丁窗口错位时实测抛
+       ``ValueError: The maximum token ID in the query (…) is higher than the number of tokens in the index.``
+       （线程在自以为的 jieba 上下文里用了真分词器）；
+    ② 每线程每轮结果 == 该 query 的**单线程 golden**（id 序 + 6 位检索分）—— tokenizer 状态
+       被别的线程污染就会立刻表现为分数/名次漂移或异常；
+    ③ 全部线程结束后 ``bm25s.tokenize`` **复原为原符号** —— 错位时实测被 jieba 替身
+       **进程级永久替换**（泄漏）。
+
+    ⚠️ 如实标注（勿夸大）：本用例验证的是「**本实现 + 本模块锁**在并发下不互相污染」，
+    **不等于**该实现「天然线程安全」—— 全局符号替换仍是有代价的做法，边界见 docs/10 §6-R6。
+    """
+    index = _case_chroma("bm25")
+    queries = [
+        "无品牌高相似商家多次上架",
+        "外观高度模仿 相似度",
+        "规避 多次改标题 重上架",
+        "夸大宣传 功效 虚假",
+    ]
+    golden = {q: _bm25_hits(index, q, 5) for q in queries}
+    assert all(golden.values()), "golden 不得为空（否则本用例无法判别）"
+
+    errors: list[str] = []
+    mismatches: list[str] = []
+    barrier = threading.Barrier(_R6_THREADS)
+
+    def worker(tid: int) -> None:
+        query = queries[tid % len(queries)]
+        barrier.wait(timeout=30)  # 起点对齐 → 最大化临界区重叠
+        for rnd in range(_R6_ROUNDS):
+            try:
+                got = _bm25_hits(index, query, 5)
+            except Exception as exc:  # noqa: BLE001 —— 任何异常都算失败（要看到具体类型/文本）
+                errors.append(f"t{tid}r{rnd} {query!r}: {type(exc).__name__}: {exc}")
+                continue
+            if got != golden[query]:
+                mismatches.append(f"t{tid}r{rnd} {query!r}: {got} != {golden[query]}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(_R6_THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+
+    assert not errors, f"并发检索抛异常（{len(errors)} 次），前 3 条：{errors[:3]}"
+    assert not mismatches, f"并发结果与单线程 golden 不一致（{len(mismatches)} 次）：{mismatches[:3]}"
+    assert bm25s.tokenize is _REAL_BM25S_TOKENIZE, (
+        "并发结束后 bm25s.tokenize 未复原 → 全局符号泄漏（R6）"
+    )
+    assert served_counters()["llm_calls"] == 0

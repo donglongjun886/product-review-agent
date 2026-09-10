@@ -12,6 +12,8 @@
     # 人工标注 probe 的三模式 Recall@K 并排（默认关闭 → 缺省输出不变）
     uv run python scripts/run_rag_eval.py --probe
     uv run python scripts/run_rag_eval.py --backend chroma --probe-only
+    # chroma 臂改走本机服务端（默认是进程内 EphemeralClient，见下「A/B 隔离」）
+    uv run python scripts/run_rag_eval.py --backend chroma --chroma-client http
 
 语义（rag-implementation-plan.md R-4 / R-6 / M4）：
 - 评测**默认仍 InMemory**（回归不破坏）；本脚本是 RAG 单独模式入口 —— 对同一
@@ -32,10 +34,18 @@
   比大小、不把 RRF 分当相似度**。
 - ``--backend {local,chroma,qdrant}``（**缺省 local**）：同时作用于 agent A/B 的 RAG
   臂与 ``--probe`` 报告。``local`` = 既有实现（调用面零改动）；``chroma`` = docs/10
-  §1/§3 的 ChromaDB(cosine) + LlamaIndex + BM25(jieba) + RRF（需 ``rag`` extra +
-  本机服务端 ``127.0.0.1:8001``）。
-全链路确定性：无真 LLM / 无 API key / 无 LLM 调用；``chroma`` 后端会连**本机**
-Chroma 服务端（其余后端零网络），且 probe 报告用**独占前缀**建库并在结束时删除。
+  §1/§3 的 ChromaDB(cosine) + LlamaIndex + BM25(jieba) + RRF。
+- **A/B 隔离（``--chroma-client``，默认 ``ephemeral``）**：chroma 臂缺省用
+  ``chromadb.EphemeralClient()``（**进程内内存库**）—— 每个索引实例都是全新的库、随进程消失，
+  因此 A/B 的各臂之间**零状态传递**（不受上一次实验残留的 collection / 历史数据影响），
+  也**不再要求本机起 Chroma 服务端**（docs/10 §3 的 Docker 服务端只在 ``--chroma-client http``
+  时需要；那时用独占前缀建库并在结束前删除，因为服务端是**共享单实例**）。
+  ⚠️ **口径**：``ephemeral`` 与 ``http`` 实测**结果逐字节一致**（同口径 probe 报告 diff 为空、
+  vector parity 分差 0.000e+00，2026-09-10），但两者**不是同一份存储** ——
+  报告会如实标注本次用的客户端；**生产/普通 RAG 环境仍用服务端**（本开关只影响评测脚本）。
+全链路确定性：无真 LLM / 无 API key / 无 LLM 调用；``chroma`` 后端在 ``http`` 模式下会连
+**本机** Chroma 服务端（``ephemeral`` 与其它后端零网络），且 probe 报告在 ``http`` 模式下用
+**独占前缀**建库并在结束时删除。
 """
 
 from __future__ import annotations
@@ -54,6 +64,10 @@ from pra.evaluation.runner import EvaluationRunner
 
 MODES = ("bm25", "vector", "hybrid")
 BACKENDS = ("local", "chroma", "qdrant")
+#: chroma 臂的客户端选择（docs/10 §6-R9 / §5-8）：ephemeral = 进程内内存库（**默认**），
+#: http = 本机服务端。默认选 ephemeral 的理由 = **A/B 隔离**（见模块 docstring）。
+CHROMA_CLIENTS = ("ephemeral", "http")
+CHROMA_DEFAULT_PORT = 8001  # 与 pra.rag.chroma_backend 的服务端默认端口一致（宿主机侧）
 DEFAULT_DATA = "eval_data/v1/cases_v1.jsonl"
 DIFF_HEAD = 12  # 差异明细打印条数上限
 PROBE_TOP_K = 3  # probe Recall@K 的 K（与 docs/10 §5-4 / phase2 demo 同口径）
@@ -167,8 +181,32 @@ def _build_probe_index(backend: str, kind: str, mode: str, options: dict):
     return build(mode=mode, backend=backend, **options)
 
 
+def _chroma_options(args: argparse.Namespace, prefix: str) -> dict:
+    """chroma 臂的装配参数（缺省 **EphemeralClient**，见模块 docstring 「A/B 隔离」段）。
+
+    - ``--chroma-client ephemeral``（默认）：``chromadb.EphemeralClient()`` —— **进程内内存库**，
+      每次索引构造都是全新实例、随进程消失 → 评测臂之间**零状态传递**，且不需要本机服务端；
+    - ``--chroma-client http``：本机服务端 ``127.0.0.1:8001``（``docs/10 §3``），用独占
+      collection 前缀建库并在结束前删除（服务端是**共享单实例**，绝不碰别人的 collection）。
+
+    ``collection_prefix`` 两种模式都传：node id 由 ``hash(collection + row_key)`` 决定，
+    固定前缀 → 两次运行 id 稳定（确定性契约）。
+    """
+    if args.chroma_client == "http":
+        return {"collection_prefix": prefix}
+    return {"collection_prefix": prefix, "chroma_ephemeral": True}
+
+
+def _chroma_client_label(args: argparse.Namespace) -> str:
+    """报告里如实标注本次 chroma 臂用的客户端（ephemeral 不得被读成「真服务端」）。"""
+    if args.chroma_client == "http":
+        return f"HttpClient(127.0.0.1:{CHROMA_DEFAULT_PORT} 服务端)"
+    return "EphemeralClient(进程内内存库，随进程消失)"
+
+
 async def _probe_report(
-    backend: str, modes: list[str], top_k: int, *, prefix: str, probe_only: bool = False
+    backend: str, modes: list[str], top_k: int, *, chroma_options: dict,
+    client_label: str = "", probe_only: bool = False,
 ) -> None:
     """三模式 × 两 KB 的 probe Recall@K 并排报告（**不预设任何模式最优**）。
 
@@ -181,10 +219,7 @@ async def _probe_report(
         ("policy", _load_probe_source()._POLICY_PROBES),
         ("case", _load_probe_source()._CASE_PROBES),
     )
-    options: dict = {}
-    if backend == "chroma":
-        # 独占前缀（绝不触碰共享服务端上别人的 collection）；报告结束即删。
-        options = {"collection_prefix": prefix}
+    options: dict = dict(chroma_options) if backend == "chroma" else {}
 
     print("\n" + "=" * 100)
     print(f"人工标注 probe 集 · 三模式 Recall@{top_k} 并排（backend={backend}；不预设任何模式最优）")
@@ -192,7 +227,7 @@ async def _probe_report(
     print(f"probe 来源（**复用，未新造**）: {PROBE_SOURCE} —— Part C 的 _POLICY_PROBES / _CASE_PROBES")
     print("embedder = MockHashEmbedder（确定性、离线；**不是语义模型** —— 词面特征 hash）")
     if backend == "chroma":
-        print(f"chroma collection 前缀 = {prefix}（本脚本独占，报告结束即删）")
+        print(f"chroma 客户端 = {client_label}；collection 前缀 = {options.get('collection_prefix')}")
 
     for kind, probes in probes_by_kind:
         kb = "Policy KB" if kind == "policy" else "Case KB"
@@ -259,15 +294,19 @@ async def _probe_report(
     print("probe 运行期自检")
     print(f"  - backend={backend} modes={list(modes)} top_k={top_k} probe_only={probe_only}")
     print(f"  - 本进程 chroma_backend 发出的 LLM 调用数（须为 0）: {served_counters()['llm_calls']}")
-    if backend == "chroma":
-        _cleanup_chroma_collections(prefix, label="probe")
+    if backend == "chroma" and chroma_options.get("chroma_ephemeral"):
+        # EphemeralClient = 进程内内存库：**无需清理**（随进程消失），也不该去连服务端。
+        print("  - chroma 客户端 = EphemeralClient（进程内）→ 无需清理服务端；本进程结束即释放")
+    elif backend == "chroma":
+        _cleanup_chroma_collections(chroma_options["collection_prefix"], label="probe")
 
 
 def _cleanup_chroma_collections(prefix: str, *, label: str) -> None:
-    """删除本脚本用 ``prefix`` 建的 collection（两个 KB × dim 256），并回读服务端列表。
+    """删除本脚本用 ``prefix`` 在**服务端**建的 collection（两个 KB × dim 256），并回读服务端列表。
 
-    服务端是**共享单实例**（AGENTS.md 运行约定）→ 本脚本只用独占前缀建库、用完即删，
-    绝不触碰别人的 collection。
+    仅 ``--chroma-client http`` 需要：服务端是**共享单实例**（AGENTS.md 运行约定）→ 本脚本只用
+    独占前缀建库、用完即删，绝不触碰别人的 collection。``ephemeral`` 模式不调本函数
+    —— 内存库随进程消失，且**不应**为清理而去连服务端（那会重新引入 Docker 依赖）。
     """
     from pra.rag.chroma_backend import delete_collection, make_chroma_client
 
@@ -284,6 +323,8 @@ async def _main(argv: list[str] | None = None) -> int:
     backend = args.backend
     # 独占 collection 前缀（仅 chroma 用）：同一进程内 A/B 与 probe 共用 → 只建一套库。
     prefix = f"{PROBE_COLLECTION_PREFIX}_{os.getpid()}"
+    chroma_options = _chroma_options(args, prefix)
+    client_label = _chroma_client_label(args)
 
     print("=" * 100)
     print("商品审核 Agent · RAG 世界 vs InMemory（agent 方案 · 决策序列 digest + 指标）")
@@ -293,26 +334,27 @@ async def _main(argv: list[str] | None = None) -> int:
         # **缺省（local）不打印这一行** —— 缺省路径输出与改动前逐字节一致（已 diff 验证）。
         print(f"backend: {backend}（RAG 索引装配；chroma = docs/10 的 ChromaDB + LlamaIndex + RRF）")
     if backend == "chroma":
-        print(f"chroma collection 前缀 = {prefix}（本脚本独占，本次运行结束即删）")
+        print(f"chroma 客户端 = {client_label}；collection 前缀 = {prefix}")
 
     if not args.probe_only:
         configs: list[tuple[str, dict]] = [("InMemory(eval)", {})]
         rag_overrides: dict = {"tool_world": "rag", "rag_backend": backend}
         if backend == "chroma":
-            # 共享服务端上只用本脚本独占前缀（A/B 臂与 probe 共用同一套库）。
-            rag_overrides["rag_backend_options"] = {"collection_prefix": prefix}
+            # A/B 隔离：每臂独立装配（ephemeral 模式每实例一个全新内存库 → 零状态传递）。
+            rag_overrides["rag_backend_options"] = chroma_options
         configs += [
             (f"RAG-{mode}", {**rag_overrides, "rag_mode": mode}) for mode in modes
         ]
         results = await _run_ab(configs, args)
         _report_ab(results, modes)
-        if backend == "chroma":
-            # A/B 臂也用独占前缀建库 → 同样用完即删（共享服务端不留残渣）。
+        if backend == "chroma" and not chroma_options.get("chroma_ephemeral"):
+            # 仅 http 客户端需要在共享服务端上清理（ephemeral 随进程消失，不连服务端）。
             _cleanup_chroma_collections(prefix, label="agent-ab")
 
     if args.probe:
         await _probe_report(
-            backend, modes, args.probe_top_k, prefix=prefix, probe_only=args.probe_only
+            backend, modes, args.probe_top_k, chroma_options=chroma_options,
+            client_label=client_label, probe_only=args.probe_only,
         )
 
     print("\n" + "=" * 100)
@@ -414,6 +456,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--smoke-limit", type=int, default=10, help="smoke 上限（默认 10）")
     parser.add_argument("--backend", default="local", choices=list(BACKENDS),
                         help="RAG 索引后端（默认 local = 既有实现，输出不变；chroma = docs/10）")
+    parser.add_argument("--chroma-client", default=CHROMA_CLIENTS[0], choices=list(CHROMA_CLIENTS),
+                        help=("chroma 臂的客户端：ephemeral（默认）= 进程内内存库，每臂独立、"
+                              "无需本机服务端；http = 本机 127.0.0.1:8001 服务端（独占前缀建库、"
+                              "用完即删）"))
     parser.add_argument("--probe", action="store_true",
                         help=f"追加 probe 三模式 Recall@K 报告（probe 复用 {PROBE_SOURCE}）")
     parser.add_argument("--probe-only", action="store_true",
