@@ -1,0 +1,47 @@
+# ============================================================================
+# ChromaDB 单机部署（本地开发 / RAG 的 HttpClient 远端模式）
+#
+# 定位：仓库 RAG 的向量库后端。Chroma 只承担「存向量 + 算余弦」，
+# 元数据过滤 / BM25 / 融合 / Top-K 排序仍在 Python 侧（同口径前提，见 docs/10）。
+#
+# 机器适配（与 deploy/langfuse 同源约束）：
+#   registry-1.docker.io 直连超时，镜像须走国内镜像源拉取后 retag 成规范名
+#   （见 README.md「镜像拉取」）。compose 里只写规范名，不写源前缀。
+#
+# 端口：容器内 8000 → 宿主机 **127.0.0.1:8001**。
+#   **刻意不用 8000**：仓库自己的 FastAPI dev server 就占 8000（README「API 演示」），
+#   两者同时跑会撞端口。两端口都只绑 127.0.0.1 —— 仅本机可达，不对外暴露。
+#
+# 镜像特点（实测）：Chroma 1.x 是 **Rust 内核**，镜像内**无 python / curl / wget**
+#   （Debian 13 + `chroma` CLI；entrypoint = `dumb-init -- chroma run /config.yaml`，
+#   持久路径取自镜像内 /config.yaml 的 `persist_path: "/data"`）→ healthcheck 只能用
+#   bash 的 /dev/tcp 发最小 HTTP 请求。
+# ============================================================================
+services:
+  chroma:
+    image: chromadb/chroma:1.5.9
+    restart: always
+    ports:
+      - 127.0.0.1:8001:8000
+    volumes:
+      - chroma_data:/data
+    environment:
+      # 关闭匿名遥测（与仓库「默认不联网」基调一致）
+      ANONYMIZED_TELEMETRY: "False"
+      CHROMA_SERVER_HOST: 0.0.0.0
+      CHROMA_SERVER_HTTP_PORT: "8000"
+    healthcheck:
+      # 镜像内无 curl/wget/python → 用 bash /dev/tcp 发最小 HTTP 请求判 v2 heartbeat 200。
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/8000 && printf 'GET /api/v2/heartbeat HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q 200 <&3"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  chroma_data:
+    driver: local

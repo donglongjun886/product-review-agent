@@ -18,7 +18,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rag = ["qdrant-client", "fastembed"]
+# RAG 基建（docs/10 §0 拍板）：
+#   向量库 = ChromaDB（1.x，Docker 服务端 + HttpClient）
+#   RAG 框架 = LlamaIndex（C2 拍板「全量 LlamaIndex」——只装具体集成包，
+#     **不装 llama-index 伞包**，避免拖进本项目不用的 llms-openai / embeddings-openai）
+#   BM25 = 成熟引擎经 LlamaIndex BM25Retriever（引擎 = bm25s）+ jieba 中文分词
+#   embedding = BGE（fastembed/onnx）
+# 注：qdrant-client 迁移期暂留（非默认路径），去留待 docs/10 执行完成后定。
+rag = [
+    "chromadb",
+    "qdrant-client",
+    "fastembed",
+    "llama-index-core>=0.13,<0.15",
+    "llama-index-vector-stores-chroma>=0.6,<0.7",
+    "llama-index-retrievers-bm25>=0.8,<0.9",
+    "llama-index-embeddings-fastembed>=0.7,<0.8",
+    "jieba>=0.42,<0.43",
+]
 # 可观测性（docs/09）：只需 Langfuse Python SDK（v4，内部已带 OTel 依赖）。
 # **不引入 OTel 自动埋点/collector** —— 本项目只做"最小可演示观测闭环"，不铺 OTel 全家桶。
 observability = ["langfuse>=4.15,<5"]
