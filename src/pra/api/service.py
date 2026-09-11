@@ -8,8 +8,9 @@ run_id 语义：案件身份不进 AgentState，接入层映射为 LangGraph 线
 缺省自动生成 ``uuid4().hex`` —— 每请求独立线程，InMemorySaver 线程状态互不串扰（也可传可读
 形式如 ``RUN_{case_id}``）。图装配为懒加载 + 模块级缓存（``get_graph``），首次调用才
 ``build_agent_graph(tools=build_production_tools(), checkpointer=make_memory_checkpointer())``
-（生产工具世界：ProductTool 读 MySQL 商品表；scripted LLM 桩，无需 API key），图不挂在
-FastAPI app 上。单测不连库 —— ``tests/conftest.py`` 把生产装配钉回 InMemory 世界。
+（生产工具世界：商品与商家读 MySQL、案例与政策读真实 RAG；scripted LLM 桩，无需 API key），
+图不挂在 FastAPI app 上。单测不连库/不连 Chroma —— ``tests/conftest.py`` 把生产装配钉回
+InMemory 世界。
 
 并发：build_agent_graph / InMemorySaver 均为同步、无 I/O（不 await），同一事件循环内检查与赋值
 之间无协程切换点，故「先查缓存再构建」天然原子，无需加锁；未来换异步 Checkpointer
@@ -46,8 +47,8 @@ _graph: CompiledStateGraph | None = None
 def get_graph() -> CompiledStateGraph:
     """懒加载返回编译图单例（scripted LLM 桩 + 生产工具世界，无 API key）。
 
-    工具世界 = ``build_production_tools()``（ProductTool 读 MySQL 商品表，其余 5 工具与默认
-    世界同源）—— HTTP/生产入口读真库是刻意的：单测走 ``build_tools()`` 的 InMemory 世界，
+    工具世界 = ``build_production_tools()``（商品/商家读 MySQL，案例/政策读真实 RAG）——
+    HTTP/生产入口读真库是刻意的：单测走 ``build_tools()`` 的 InMemory 世界，
     ``tests/conftest.py`` 的 autouse fixture 把生产装配钉回 InMemory，故测试/CI 不连库。
 
     图实例与 FastAPI app 生命周期解耦 —— app 重建/热重载不影响已编译图；接真实 LLM / 外部

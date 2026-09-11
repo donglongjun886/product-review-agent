@@ -25,8 +25,8 @@ HTTP 接入（同步；MQ 异步 worker 为规划）—— POST /api/v1/reviews�
 ## 口径红线（读结论前必读）
 
 - **默认全链路 = scripted LLM 桩 + InMemory 世界 ⇒ 确定性可重放**（无真实 LLM、无网络）；scripted 路径下 **token=0 / latency≈0 / cost 为空**是真实情况，不填假值。
-- **RAG 未接 HTTP 主流程**：默认 `build_tools()` = memory 世界；真实 RAG 只在评测侧（`tool_world="rag"`）或显式装配下生效。
-- **6 个工具里 4 个是 InMemory/Mock 桩**（product / image_analysis / ocr / merchant），只有 `case_search` / `policy_search` 可切真实 RAG。
+- **默认 `build_tools()` 与评测世界 = InMemory 世界**（确定性可重放）；**生产 / HTTP 入口 `build_production_tools()` 读真库 + 真实 RAG**：商品/商家接 MySQL，案例/政策接真实 RAG（`rag_backend="chroma"` + BGE + hybrid，经 `Lazy*Index` **惰性构建**——首次检索才建库连 Chroma，不可用时记 warn failure、不静默回退种子）。
+- **6 个 Tool 的默认实现仍是 InMemory/Mock 桩**：`image_analysis` / `ocr` 未接真实视觉模型与 OCR 服务。
 - **README 不承载跑分数字**（会随数据集与模型迭代过期）：评测方法与口径以 [docs/02-evaluation.md](docs/02-evaluation.md) 为权威出处；Agent 高分须按「GT ≈ 审查员可判定函数、同口径耦合 + 种子数据」的边界解读，**不得**外推成「真实 LLM 能力」。
 - **真实 LLM 评测**仅 `scripts/run_evaluation_real.py`（需 API key、有费用、非确定性）。
 
@@ -53,7 +53,7 @@ uv run python scripts/demo_walkthrough.py
 uv run pytest tests/ -q     # 全确定性 mock：无网络 / 无 API key
 ```
 
-两类用例依赖外部条件、**不可用时自动 skip**：真库冒烟需本机 MySQL 可达；BGE 真模型 4 用例需模型缓存（`PRA_RAG2_MODEL_CACHE`，缺省仓库内 `.cache/model_cache`，缺失时整组跳过，绝不联网下载）。
+外部条件相关的用例**不可用时自动 skip**：真库冒烟需本机 MySQL 可达；BGE 真模型需模型缓存（`PRA_RAG2_MODEL_CACHE`，缺省仓库内 `.cache/model_cache`）；RAG 真链路 e2e 需 `--extra rag` + Chroma 服务端 + 模型缓存 —— 缺一即跳过，**绝不联网下载**。
 
 ### 起服务 + 受理一次审核
 
@@ -66,7 +66,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/reviews -H 'Content-Type: application/
 # → {"run_id": "<32-hex>", "review_decision": {"decision": "...", "risk_level": ..., "risk_type": [...], ...}}
 ```
 
-请求体 = `ProductReviewCase`，关键字段 `case_id` / `product`（`product_id` `title` `category` `images` …）/ `merchant_id` / `event_type` / `screening_signals`；完整契约见 `src/pra/domain/models.py`，执行器级演示（不经 HTTP）见 `scripts/demo_api.py`。服务端**受理即 Screening 三分流**：`COMPLEX` 走调查图并落库，`PASS` / `REJECT` 由规则直判落库（无 trace）；**落库需本机 MySQL 可达且已建表**。
+请求体 = `ProductReviewCase`，关键字段 `case_id` / `product`（`product_id` `title` `category` `images` …）/ `merchant_id` / `event_type` / `screening_signals`；完整契约见 `src/pra/domain/models.py`，执行器级演示（不经 HTTP）见 `scripts/demo_api.py`。服务端**受理即 Screening 三分流**：`COMPLEX` 走调查图并落库，`PASS` / `REJECT` 由规则直判落库（无 trace）；**落库需本机 MySQL 可达且已建表**；完整的政策 / 先例证据还需 `--extra rag` + Chroma 服务端（缺则相应工具调用记 warn failure，其余链路正常完成）。
 
 ### 落库（可选）
 
@@ -93,7 +93,7 @@ uv run python scripts/run_ablation.py                        # 方案级 / 组�
 
 ## RAG 检索（Policy KB / Case KB）
 
-默认后端是 **`local`**（numpy 内存索引 + `MockHashEmbedder`，确定性、无外部依赖）。装 `--extra rag` 后可切 **`rag_backend="chroma"`**：ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF，检索口径见 [docs/00-system-design.md](docs/00-system-design.md) 与 `src/pra/rag/chroma_backend.py` 的模块注释。Qdrant 的代码与 `deploy/qdrant` **迁移期保留**（本机容器已卸，`rag_backend="qdrant"` 仍可用）。
+默认后端是 **`local`**（numpy 内存索引 + `MockHashEmbedder`，确定性、无外部依赖）。装 `--extra rag` 后可切 **`rag_backend="chroma"`**：ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF，检索口径见 [docs/00-system-design.md](docs/00-system-design.md) 与 `src/pra/rag/chroma_backend.py` 的模块注释。**生产 / HTTP 入口已切真实 RAG**（`build_production_tools()` 装配 chroma + BGE + hybrid，经 `Lazy*Index` 惰性构建：首次检索才建库；缺 `--extra rag` / 服务端不可达 / 模型未缓存时该次工具调用记 warn failure，**不静默回退 InMemory 种子**）。Qdrant 的代码与 `deploy/qdrant` **迁移期保留**（本机容器已卸，`rag_backend="qdrant"` 仍可用）。
 
 ```bash
 uv run python scripts/run_rag_demo.py                          # 三模式（bm25/vector/hybrid）Top-K 检索演示

@@ -4,7 +4,9 @@
 REJECT/HUMAN_REVIEW 的**可引用依据**来源。
 
 ``PolicyIndex`` 是窄接口（政策库检索的查询面）；``InMemoryPolicyIndex`` 是 **Mock 默认实现**，
-只做版本有效性 + 元数据过滤与种子排序截断，**不做真实语义检索**。本工具不含业务判定：每个 hit
+只做版本有效性 + 元数据过滤与种子排序截断，**不做真实语义检索**。生产/HTTP 入口
+（``pra.tools.build_production_tools()``）注入真实 RAG 索引（chroma + BGE + hybrid，装配期
+惰性、首次检索才建库）；默认与评测世界仍是 ``InMemoryPolicyIndex``。本工具不含业务判定：每个 hit
 → 1 条 POLICY_REF 证据（``weight=0.9``、``ref_id=clause_id`` 必填），政策是否适用归 reevaluate/decide。
 """
 

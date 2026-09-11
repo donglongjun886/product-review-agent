@@ -408,12 +408,15 @@ class Tool(Protocol):
 
 ### 5.3 六个 Tool 的实现现状（重要边界）
 
-| Tool | 仓库现状（默认实现） |
-|---|---|
-| ProductTool / ImageAnalysisTool / OCRTool / MerchantTool | **InMemory / Mock 桩**（`InMemoryProductRepository` / `MockImageAnalysisProvider` / `MockOcrProvider` / `InMemoryMerchantRepository`），供确定性测试与演示；未接真实商品库、视觉模型、OCR 服务与商家画像 |
-| CaseSearchTool / PolicySearchTool | 默认 `InMemoryCaseIndex` / `InMemoryPolicyIndex`（种子语料）；装 `--extra rag` 后可切**真实 RAG**（`rag_backend="local"` / `"chroma"`） |
+| Tool | 默认实现（`build_tools()` / 评测世界） | 生产 / HTTP 入口（`build_production_tools()`） |
+|---|---|---|
+| ProductTool / MerchantTool | InMemory 种子（`InMemoryProductRepository` / `InMemoryMerchantRepository`） | 真库：`MySQLProductRepository`（`product/product_sku/product_image`）/ `MySQLMerchantRepository`（`merchant/merchant_event`） |
+| CaseSearchTool / PolicySearchTool | InMemory 种子（`InMemoryCaseIndex` / `InMemoryPolicyIndex`） | 真实 RAG（`rag_backend="chroma"` + `BgeEmbedder` + hybrid）；经 `Lazy*Index` **惰性构建**——装配期零 import/零 IO，首次检索才建库连 Chroma |
+| ImageAnalysisTool / OCRTool | Mock 桩（`MockImageAnalysisProvider` / `MockOcrProvider`） | 同左（未接真实视觉模型 / OCR 服务） |
 
-> 边界：**RAG 未接入 HTTP 主流程**——默认 `build_tools()` 走内存世界，真实检索只在评测侧（`tool_world="rag"`）或显式装配下生效。
+> 边界：**默认装配路径（`build_tools()` 与 `build_agent_graph()` 缺省）与两个评测世界仍是 InMemory**（评测确定性红线，CI 不连 MySQL / Chroma）；
+> 生产 / HTTP 入口读真库 + 真实 RAG。真链路不可用时（表不存在 / Chroma 不可达 / 未装 `--extra rag` / BGE 模型未缓存）在**首次工具调用**抛出带指引的错误，
+> 由工具层记 warn failure，**不静默回退 InMemory 种子**。
 
 ---
 
@@ -468,6 +471,7 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 - **默认后端仍是 `local`**（numpy 内存索引 + `MockHashEmbedder`，确定性、无外部依赖）；装 `--extra rag` 后可切 `rag_backend="chroma"`
   （LlamaIndex 装配 + ChromaDB + BGE）；`factory.py` 的 `backend` 取值为 `local | qdrant | chroma`。
+  生产 / HTTP 入口（`build_production_tools()`）即用 **chroma + BGE + hybrid**，但经 `Lazy*Index` 惰性构建（首次检索才建库）。
 - 🔴 **Chroma 建库必须显式 `space="cosine"`**：缺省是 `l2`，会让「相似度 = 1 − distance」**静默失效**；且对**已存在**的 l2 collection
   传 cosine 配置**不生效**——创建与复用两条路径都必须校验，不符即报错（不静默沿用）。
 - 🔴 **`ChromaVectorStore.query` 返回的分是 `exp(-distance)`，不是 `1 − distance`** → 向量取数走 Chroma 原生 `collection.query` 的 distance 自行换算。

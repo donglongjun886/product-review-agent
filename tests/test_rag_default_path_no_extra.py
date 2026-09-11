@@ -49,7 +49,7 @@ def installed(name):
 def main() -> dict:
     from pra.rag.corpus import load_cases, load_policies
     from pra.rag.factory import build_case_index, build_policy_index
-    from pra.tools import build_tools
+    from pra.tools import build_production_tools, build_tools
 
     policy_rows = load_policies()[0]
     case_rows = load_cases()[0]
@@ -57,6 +57,7 @@ def main() -> dict:
     case_index = build_case_index()              # 默认 backend="local"
     tools_memory = build_tools()                 # 默认 data_source="memory"
     tools_rag = build_tools("rag")               # 默认 rag_backend="local"
+    prod_tools = build_production_tools()        # 生产装配：惰性 RAG，装配期不得 import 后端
 
     async def search():
         from pra.tools.case_search.tool import CaseSearchFilters
@@ -85,6 +86,11 @@ def main() -> dict:
             type(tools_rag[4]._index).__name__,
             type(tools_rag[5]._index).__name__,
         ],
+        "prod_tool_index_types": [
+            type(prod_tools[4]._index).__name__,
+            type(prod_tools[5]._index).__name__,
+        ],
+        "prod_tool_built": [prod_tools[4]._index.is_built, prod_tools[5]._index.is_built],
         "tool_names": [t.name for t in tools_memory],
         "hits": hits,
     }
@@ -126,7 +132,8 @@ def _run_default_path_child() -> dict:
 
 
 def test_default_path_pulls_in_no_extra_dependencies() -> None:
-    """默认路径之后，``chromadb`` / ``llama_index`` / ``jieba`` / ``bm25s`` 不得进入 ``sys.modules``。"""
+    """默认路径**与生产装配**之后，``chromadb`` / ``llama_index`` / ``jieba`` / ``bm25s``
+    不得进入 ``sys.modules``（生产装配经 ``Lazy*Index`` 惰性构建，首次检索才拉起后端）。"""
     payload = _run_default_path_child()
     assert payload["forbidden_present"] == {}, (
         "默认路径引入了额外依赖（CI 上 chromadb/llama_index 根本没装 → 会 ImportError）："
@@ -141,6 +148,12 @@ def test_default_path_guard_is_not_vacuous() -> None:
     assert payload["case_type"] == "RagCaseIndex"
     assert payload["rag_tool_index_types"] == ["RagCaseIndex", "RagPolicyIndex"], (
         "build_tools('rag') 默认后端必须仍是 local（默认后端不变）"
+    )
+    assert payload["prod_tool_index_types"] == ["LazyCaseIndex", "LazyPolicyIndex"], (
+        "生产装配必须注入惰性 RAG 代理（装配期不建库/不 import 后端）"
+    )
+    assert payload["prod_tool_built"] == [False, False], (
+        "生产装配后索引必须尚未构建（首次检索才建）"
     )
     assert payload["policy_size"] == 24 and payload["case_size"] == 67
     assert payload["corpus_rows"] == [24, 67]

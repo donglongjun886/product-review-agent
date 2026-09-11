@@ -4,7 +4,9 @@
 **可引用依据**来源之一。
 
 ``CaseIndex`` 是窄接口（混合检索的查询面）；``InMemoryCaseIndex`` 是**Mock 默认实现**，只做
-元数据过滤 + 按种子 ``retrieval_score`` 排序截断，**不做真实语义检索**。本工具不含业务判定：
+元数据过滤 + 按种子 ``retrieval_score`` 排序截断，**不做真实语义检索**。生产/HTTP 入口
+（``pra.tools.build_production_tools()``）注入真实 RAG 索引（chroma + BGE + hybrid，装配期
+惰性、首次检索才建库）；默认与评测世界仍是 ``InMemoryCaseIndex``。本工具不含业务判定：
 每个 hit → 1 条 CASE_PRECEDENT 证据（``weight=retrieval_score``、``ref_id=case_id`` 必填）。
 
 ``retrieval_score`` 是**检索分，不是语义相似度**：``bm25``/``vector`` 模式下 = 该模式的

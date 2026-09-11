@@ -47,6 +47,18 @@ from pra.tools.merchant.tool import (
 _REAL_BUILD_PRODUCTION_TOOLS = build_production_tools
 
 
+def _inmemory_case_index():
+    from pra.tools.case_search.tool import InMemoryCaseIndex
+
+    return InMemoryCaseIndex()
+
+
+def _inmemory_policy_index():
+    from pra.tools.policy_search.tool import InMemoryPolicyIndex
+
+    return InMemoryPolicyIndex()
+
+
 # ---------------------------------------------------------------------------
 # 替身：假 session / 假 sessionmaker（形状与 async_sessionmaker 一致，可 async with）
 # ---------------------------------------------------------------------------
@@ -426,6 +438,11 @@ async def test_production_path_reads_merchant_history_from_mysql(monkeypatch):
     InMemory，前一半会立刻变红。
     """
     monkeypatch.setattr("pra.tools.build_production_tools", _REAL_BUILD_PRODUCTION_TOOLS)
+    # 本用例只验证 MySQL 链路：把生产装配的 RAG 侧钉回 InMemory 种子（scripted plan 分支 3 会调
+    # CaseSearch/PolicySearch，真实 RAG 在缺 rag extra / 模型缓存时会尝试联网下载模型而阻塞，
+    # 与「读真库商家」这一被测目标无关）。
+    monkeypatch.setattr("pra.tools._build_production_case_index", _inmemory_case_index)
+    monkeypatch.setattr("pra.tools._build_production_policy_index", _inmemory_policy_index)
     tag = uuid4().hex[:8]
     mysql_case_id, memory_case_id = f"PYTEST_MH_MYSQL_{tag}", f"PYTEST_MH_MEM_{tag}"
     try:
