@@ -65,6 +65,12 @@
 
 > HUMAN_REVIEW 期望案（Phase 2 起标注的 `SHOULD_ABSTAIN` 案，见 §4.4）**不强制占比**：每个 case 必须有明确 Ground Truth，**不为凑比例塞数据**（P-4）。
 
+> **数据集局限（2026-09-11 实测，如实声明）**：
+> - **单一标注者**：全部真值由生成器按与评测审查员同源的规则程序化标注（`annotation.labelers=["eval-phase2"]`），**无第二标注者交叉校验** → §3.3 同口径耦合的直接来源，只衡量实现一致性，不外推调查能力。
+> - **无可见内容重复案**：`_dedupe_visible_rows` 保证 v2 不存在只差 `product_id/version/listing_time` 的重复行（改前 18 组、改后 0 组，20 行标题后缀改写）；但标题核心词仍跨案复用（表观多样性局限，非重复案）。
+> - **`expected_tools` 空列表 = 未标注**（干净案、三方案一致 PASS），**不计入 Tool Selection 指标分母**，不得解读为「应调用 0 个工具」；「需调查才能判」的 AUTO 案已给非空期望（brand / category 空缺核验 30 案 = `ProductTool + MerchantTool`）。
+> - **真 LLM 对照仅 v1 35 案单次抽样**（acc 0.200 / human_review_rate 0.771）：只作「真实 LLM 链路已跑通」的证明，**不是模型水平**；未跑 v2、未重复采样（重复采样仅限小 subset 看稳定性）。
+
 ### 2.2 eval_case 结构化标签 schema（引用《00》§11.2，细化字段清单）
 
 文件格式建议：**JSONL，每行一条 eval_case**；版本由所在目录 / manifest 声明（见 2.3），不在每行重复全量元数据。

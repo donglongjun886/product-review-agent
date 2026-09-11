@@ -80,7 +80,10 @@ class EvalExpected(BaseModel):
     evidence: list[str] = Field(
         default_factory=list, description="证据类型标签（如 image_similarity>=0.85 / merchant_history>=5_removals）"
     )
-    expected_tools: list[str] = Field(default_factory=list, description="Agent 应调用的工具集合（Phase 2 Tool Selection 真值）")
+    expected_tools: list[str] = Field(
+        default_factory=list,
+        description="Agent 应调用的工具集合（Phase 2 Tool Selection 真值）；空列表 = 未标注工具期望的干净案，不计入 Tool Selection 分母 —— 不得解读为「应调用 0 个工具」",
+    )
     applicable_policy: list[str] = Field(default_factory=list, description="REJECT 案的政策依据（条款 ID 列表）")
 
     @model_validator(mode="after")

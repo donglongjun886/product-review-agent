@@ -26,6 +26,13 @@ COMPLEX/HUMAN（brand 空缺、仅 OCR 品牌词、需商家历史交叉），�
 evasion 10%；AUTO_DECIDABLE 为主（~85-90%），SHOULD_ABSTAIN ~10-15%，集中在
 boundary/evasion/multi-signal 以保证 abstention 指标有统计意义。
 
+去重与 ``expected_tools`` 语义：**可见输入不出现重复案** —— 标题词池相对 (类目, 品牌, 商家,
+事件, 图片) 组合偏小，两次抽样可能命中同一组合（只差自增的 version / listing_time），这类行
+由 ``_dedupe_visible_rows`` 换用未占用的干净后缀，避免同一条案在指标里重复计权。
+``expected_tools`` **空列表 = 未标注该案的调查工具期望**（干净案、三方案一致 PASS；不计入
+Tool Selection 指标分母），**不得解读为「应调用 0 个工具」**；「需调查才能判」的 AUTO 案必须
+给非空期望（brand / category 空缺核验 = ProductTool + MerchantTool）。
+
 世界事实锚点与 ``pra.evaluation.harness.agent_scheme`` 的 EVAL_* 种子同一份（生成器 import
 该常量集），保证每条 input 的 product_id / merchant_id / image URL / category 在 Agent 评测
 世界里可查到与标注一致的事实；真 RAG/商家库接入需扩 EVAL_* 种子并重新生成（manifest 记录
@@ -442,7 +449,7 @@ def b_brand_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
         note=("brand 空缺（Rule R-301/Single 均→HUMAN）但在库自有品牌可查 + "
               f"{_MERCHANT_TIER[a['mid']]}商家 → Agent 核验后 PASS —— 需调查才能判的 "
               "AUTO 案（评测核心观察对象）。"),
-        risk_level="NONE", risk_type=[], evidence=[], tools=[], policy=[],
+        risk_level="NONE", risk_type=[], evidence=[], tools=["ProductTool", "MerchantTool"], policy=[],
         seed_id=_pick(rng, _V1_SEED["brand_missing_verify"].get(cat, ["EC_0201"])),
         mutation="case.brand→None（在库 brand 可查）；Rule/Single COMPLEX→HUMAN，Agent 核验 PASS —— 需调查 AUTO 案",
     )
@@ -462,7 +469,7 @@ def b_cat_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
         reason=["agent_can_discover"],
         note=("category 空缺（Rule R-301/Single 均→HUMAN）但在库可核验 → Agent 核验 "
               "商品/商家后 PASS —— 需调查才能判的 AUTO 案。"),
-        risk_level="NONE", risk_type=[], evidence=[], tools=[], policy=[],
+        risk_level="NONE", risk_type=[], evidence=[], tools=["ProductTool", "MerchantTool"], policy=[],
         seed_id=_pick(rng, _V1_SEED["cat_missing_verify"].get(cat, ["EC_0204"])),
         mutation="case.category→空串（在库可查）；Rule/Single→HUMAN，Agent 核验 PASS —— 需调查 AUTO 案",
     )
@@ -839,6 +846,59 @@ def _scene_quota(total: int) -> dict[str, int]:
             "multi-signal": n_msi, "evasion": n_eva}
 
 
+def _visible_key(row: dict) -> str:
+    """**内容**指纹（标题/描述/类目/品牌/属性/图片/商家/事件）—— 去重判定用。
+
+    刻意不含 product_id / version / listing_time：前者是标识、后两者由 seq 自增，都不构成
+    内容差异；只差它们的多行在指标里就是同一条案被重复计权（表观多样性虚高）。
+    """
+    p = row["input"]["product"]
+    return json.dumps(
+        {
+            "t": p.get("title"),
+            "d": p.get("description"),
+            "c": p.get("category"),
+            "b": p.get("brand"),
+            "a": p.get("attributes"),
+            "img": p.get("images"),
+            "m": row["input"].get("merchant_id"),
+            "e": row["input"].get("event_type"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _dedupe_visible_rows(rows: list[dict]) -> int:
+    """改写重复行的标题后缀以消除「可见内容相同」的案（原地）；返回改写条数。
+
+    只动后缀、不动核心词与品牌前缀规则 → 「干净标题」前提与该案真值不变。候选（各干净后缀）
+    全部被占用时显式报错 —— 确定性 bug 不静默降级。
+    """
+    seen: set[str] = set()
+    rewritten = 0
+    for row in rows:
+        if _visible_key(row) not in seen:
+            seen.add(_visible_key(row))
+            continue
+        title = row["input"]["product"]["title"]
+        stem = title
+        for suffix in _CLEAN_SUFFIX:
+            if suffix and title.endswith(" " + suffix):
+                stem = title[: -(len(suffix) + 1)]
+                break
+        for cand in (f"{stem} {s}" for s in _CLEAN_SUFFIX if s):
+            row["input"]["product"]["title"] = cand
+            cand_key = _visible_key(row)
+            if cand_key not in seen:
+                seen.add(cand_key)
+                break
+        else:
+            raise ValueError(f"可见内容去重失败：{row.get('eval_case_id')} 候选后缀已全部占用")
+        rewritten += 1
+    return rewritten
+
+
 def generate(count: int, seed: int) -> list[dict]:
     """确定性生成 count 条 v2 case（scene 配额 + abstain 配额 + builder 权重分配）。
 
@@ -901,6 +961,7 @@ def generate(count: int, seed: int) -> list[dict]:
     for i, row in enumerate(final, start=1):  # eval_case_id 按最终文件序重排
         row["eval_case_id"] = f"EC_V2_{i:04d}"
         row["input"]["case_id"] = f"CASE_EC_V2_{i:04d}"
+    _dedupe_visible_rows(final)  # 只差 version/listing_time 的重复行换干净后缀
     return final
 
 

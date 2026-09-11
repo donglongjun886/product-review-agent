@@ -83,7 +83,9 @@ cp .env.example .env   # 填 DATABASE_URL=mysql+aiomysql://<user>:<pass>@127.0.0
 
 ## 评测
 
-评测方法与口径（三方案定义 / abstention 指标 / Ablation / Sweep / 里程碑与结论边界）以 [docs/02-evaluation.md](docs/02-evaluation.md) 为权威出处；README 不承载跑分数字。真实 LLM 对照（需 API key、有费用、非确定性）：`scripts/run_evaluation_real.py --limit 10`；凭据经 `--api-key` / `--base-url` 或 `.env` 的 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` 注入。
+评测方法与口径（三方案定义 / abstention 指标 / Ablation / Sweep / 里程碑与结论边界 / **数据集局限**）以 [docs/02-evaluation.md](docs/02-evaluation.md) 为权威出处；README 不承载跑分数字。真实 LLM 对照（需 API key、有费用、非确定性）：`scripts/run_evaluation_real.py --limit 10`；凭据经 `--api-key` / `--base-url` 或 `.env` 的 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` 注入。
+
+**评测覆盖边界**：真 LLM **只跑过 v1 35 案单次抽样**（仅证明「真实链路已跑通」，不是模型水平；未跑 v2、未重复采样）；评测集由**单一标注者**按与审查员同源的规则构造（无第二标注者交叉校验），故 scripted 高分只衡量实现一致性。
 
 ```bash
 uv run python scripts/run_evaluation.py                      # 三方案对比（默认 v1；--data 可切 v2）
