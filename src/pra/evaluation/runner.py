@@ -31,7 +31,9 @@ from pra.evaluation.metrics.abstention import (
     AbstentionMetrics,
     abstain_subset_of,
 )
+from pra.evaluation.metrics.agent import AgentMetricsBundle
 from pra.evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
+from pra.evaluation.metrics.engineering import EngineeringEvaluator, EngineeringMetrics
 
 __all__ = [
     "ALL_SCHEMES",
@@ -44,17 +46,23 @@ ALL_SCHEMES: tuple[str, ...] = ("rule", "single_call_llm", "agent")
 
 
 def expected_index(cases: list[EvalCase]) -> dict[str, dict]:
-    """由数据集构造 expected 索引：``{eval_case_id: {"decision", "scene", "abstain_label"}}``。
+    """由数据集构造 expected 索引：真值字段的**唯一**读取入口，指标层共享。
 
-    ``abstain_label`` 经 ``getattr`` 兼容读取（schema 未升级时 → None，等价全
-    AUTO_DECIDABLE）。``DecisionEvaluator`` 只消费 decision / scene，
-    ``AbstentionEvaluator`` 消费 abstain_label —— 两指标层共享同一索引。
+    键：``decision`` / ``scene`` / ``abstain_label``（业务与 abstention 指标）+
+    ``expected_tools`` / ``evidence`` / ``risk_type`` / ``risk_level``（Agent 级指标：
+    工具选择 / 证据充分性 / 推理正确性）。``abstain_label`` 经 ``getattr`` 兼容读取
+    （schema 未升级时 → None，等价全 AUTO_DECIDABLE）；缺字段的旧数据集取空列表/None，
+    指标层按"空真值不进分母"处理。
     """
     return {
         c.eval_case_id: {
             "decision": c.expected.decision,
             "scene": c.scene,
             "abstain_label": getattr(c.expected, "abstain_label", None),
+            "expected_tools": list(getattr(c.expected, "expected_tools", None) or []),
+            "evidence": list(getattr(c.expected, "evidence", None) or []),
+            "risk_type": list(getattr(c.expected, "risk_type", None) or []),
+            "risk_level": getattr(c.expected, "risk_level", None),
         }
         for c in cases
     }
@@ -81,6 +89,12 @@ class EvaluationResult(BaseModel):
     cost_summary: dict[str, dict] = Field(default_factory=dict)  # scheme → {llm_calls, tool_calls, tokens} 均值
     abstention: dict[str, AbstentionMetrics] = Field(default_factory=dict)  # scheme → 五指标（有 SHOULD 真值才计算）
     abstention_grouped: dict[str, dict[str, AbstentionMetrics]] = Field(default_factory=dict)  # scheme → scene → 五指标
+    agent_metrics: AgentMetricsBundle | None = Field(
+        default=None, description="Agent 级指标（工具选择/证据充分性/推理正确性/边际增益）；未跑 agent 方案时为 None"
+    )
+    engineering: dict[str, EngineeringMetrics] = Field(
+        default_factory=dict, description="scheme → 成本分布（均值/P50/P95）；延迟仅 real 臂进程内传入"
+    )
     has_should_abstain: bool = Field(
         default=False,
         description="数据集含 SHOULD_ABSTAIN/HUMAN 真值（Phase 2 三值口径）；v1 无 abstain 标签 → False",
@@ -155,6 +169,8 @@ class EvaluationRunner:
         cost_summary: dict[str, dict] = {}
         abstention: dict[str, AbstentionMetrics] = {}
         abstention_grouped: dict[str, dict[str, AbstentionMetrics]] = {}
+        agent_metrics: AgentMetricsBundle | None = None
+        engineering: dict[str, EngineeringMetrics] = {}
 
         for name, scheme in schemes.items():
             scheme_records: list[EvalRecord] = []
@@ -164,11 +180,16 @@ class EvaluationRunner:
             overall[name] = DecisionEvaluator.evaluate(scheme_records, exp)
             grouped[name] = DecisionEvaluator.evaluate_grouped(scheme_records, exp)
             cost_summary[name] = _cost_summary(scheme_records)
+            engineering[name] = EngineeringEvaluator.evaluate(scheme_records)
             if has_should:
                 # abstention 五指标接入主评测路径；与 DecisionEvaluator 共享同一
                 # expected 索引，不重复构造
                 abstention[name] = AbstentionEvaluator.evaluate(scheme_records, exp)
                 abstention_grouped[name] = AbstentionEvaluator.evaluate_grouped(scheme_records, exp)
+            if name == "agent":
+                # Agent 级指标只对 agent 有意义（rule/single 不调工具、无 tool_history），
+                # 算在别的方案上只会产出误导性的 0 值行。
+                agent_metrics = AgentMetricsBundle.evaluate(scheme_records, exp)
 
         return EvaluationResult(
             data_path=str(self.data_path) if self.data_path is not None else None,
@@ -182,6 +203,8 @@ class EvaluationRunner:
             cost_summary=cost_summary,
             abstention=abstention,
             abstention_grouped=abstention_grouped,
+            agent_metrics=agent_metrics,
+            engineering=engineering,
             has_should_abstain=has_should,
         )
 

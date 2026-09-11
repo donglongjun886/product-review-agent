@@ -160,6 +160,10 @@ def render_report(result: EvaluationResult) -> str:
         add(_overall_row(scheme, m, result.cost_summary.get(scheme, {})))
     if result.has_should_abstain and result.abstention:
         _render_abstention_section(add, result)
+    if result.agent_metrics is not None:
+        _render_agent_metrics_section(add, result)
+    if result.engineering:
+        _render_engineering_section(add, result)
 
     add("-" * 100)
     add("按 scene 分层  acc   prec  recall  fpr   fnr   hrr   auto    TP/FP/TN/FN")
@@ -241,6 +245,98 @@ def _render_abstention_section(add, result: EvaluationResult) -> None:
         )
     add("  （注: 决策指标行 hrr/auto 分母=二值真值 %d，与本区 hrr/autom 全量分母不同，勿混读）"
         % binary_n)
+
+
+def _render_agent_metrics_section(add, result: EvaluationResult) -> None:
+    """Agent 级指标渲染区（工具选择 / 证据充分性 / 推理正确性 / 边际增益）。
+
+    全部为**只读统计**：不改判定、不进任何既有指标分母。空真值案（未标注工具期望 /
+    干净案无期望证据 / 无期望 risk_type）一律不进分母，被排除的案数与无法映射的标签数
+    在行内显式给出（不静默丢弃）。推理正确性为**自动代理**（risk_type + risk_level），
+    不含人工复核理由。
+    """
+    am = result.agent_metrics
+    if am is None:  # 调用方已判空；本函数只做渲染
+        return
+    ts, es, rc, mg = am.tool_selection, am.evidence_sufficiency, am.reasoning_correctness, am.marginal_gain
+    add("-" * 100)
+    add("Agent 级指标（仅 agent；空真值案不进分母，被排除的案数行内显式给出）")
+    add("  工具选择: 覆盖口径 expected_tools ⊆ actual_tools（不把「调用少」混进准确性）")
+    add(
+        f"  tool_selection_accuracy = {_fmt(ts.tool_selection_accuracy)}   "
+        f"（{ts.covered_cases}/{ts.cases_with_expectation} 案；"
+        f"期望外调用案 {ts.redundant_cases}，期望外工具数 {ts.redundant_tool_calls}/{ts.actual_tool_calls}）"
+    )
+    add(
+        f"  redundant_tool_rate      = {_fmt(ts.redundant_tool_rate)}   "
+        "（有期望外调用的案占比；工具名去重口径）"
+    )
+    add("  证据充分性: 两栏分开（类型覆盖率 micro + REJECT 依据前置），不合成一个数")
+    add(
+        f"  evidence_type_coverage   = {_fmt(es.evidence_type_coverage)}   "
+        f"（{es.covered_expected_types}/{es.total_expected_types} 期望类型被命中；"
+        f"全命中案 {es.fully_covered_cases}/{es.cases_with_expected_evidence}）"
+    )
+    add(
+        f"  unmapped 期望标签 {es.unmapped_label_instances} 个实例、"
+        f"仅含未映射标签被剔除的案 {es.cases_excluded_unmapped_only}（缺口显式化，不硬猜映射）"
+    )
+    add(
+        f"  reject_evidence_gate_pass_rate = {_fmt(es.reject_evidence_gate_pass_rate)}   "
+        f"（预测 REJECT {es.reject_cases_pred_reject} 案中 {es.reject_cases_with_citable} 案"
+        "有可引用依据 = Gate 前置近似）"
+    )
+    add("  推理正确性（自动代理，不含人工复核理由）:")
+    add(
+        f"  risk_type_coverage       = {_fmt(rc.risk_type_coverage)}   "
+        f"（{rc.risk_type_covered_cases}/{rc.cases_with_expected_risk_type} 案 expected.risk_type ⊆ 输出）"
+    )
+    add(
+        f"  risk_level_agreement     = {_fmt(rc.risk_level_agreement)}   "
+        f"（{rc.risk_level_agreement_cases}/{rc.cases_with_expected_risk_level} 案 risk_level 与真值一致）"
+    )
+    add("  边际证据增益（无加权合成；只计 status==ok 的调用）:")
+    add(
+        f"  evidence_gain_rate       = {_fmt(mg.evidence_gain_rate)}   "
+        f"（{mg.calls_with_new_evidence}/{mg.ok_tool_calls} 调用带来新增证据；无增益调用 {mg.no_gain_calls}）"
+    )
+    add(
+        f"  decision_changed_rate    = {_fmt(mg.decision_changed_rate)}   "
+        f"（{mg.calls_decision_changed}/{mg.ok_tool_calls} 调用触发 Gate 判定翻转；"
+        f"新增证据引用合计 {mg.evidence_added_total}）"
+    )
+
+
+def _render_engineering_section(add, result: EvaluationResult) -> None:
+    """工程指标渲染区：各方案 调用次数 / token / 延迟 的均值与 P50/P95。
+
+    scripted 路径 ``tokens=0`` 是真实情况（桩不烧 token），如实显示；墙钟延迟**不落
+    EvalRecord**，只有 real 臂在进程内计时后传入（本节在主报告里通常为 "-"）。
+    """
+    add("-" * 100)
+    add("工程指标（分布；脚本路径 token 恒 0 为真实值，不伪造）")
+    add("  scheme           llm mean/p50/p95    tool mean/p50/p95    tok mean/p50/p95    latency(p50/p95)")
+    for scheme in ALL_SCHEMES:
+        e = result.engineering.get(scheme)
+        if e is None:
+            continue
+
+        def _triple(d):
+            return f"{_fmt(d.mean)}/{_fmt(d.p50)}/{_fmt(d.p95)}"
+
+        lat = "-" if e.latency_ms is None else f"{_fmt(e.latency_ms.p50)}/{_fmt(e.latency_ms.p95)}"
+        add(
+            "  ".join(
+                [
+                    f"{scheme:<16}",
+                    f"{_triple(e.llm_calls):<17}",
+                    f"{_triple(e.tool_calls):<20}",
+                    f"{_triple(e.tokens):<19}",
+                    lat,
+                ]
+            )
+        )
+    add("  （注: P50/P95 为 nearest-rank；延迟为 real 臂进程内墙钟，scripted 无此项）")
 
 
 def _decision_matrix(result: EvaluationResult, scheme: str) -> dict:

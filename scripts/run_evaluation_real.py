@@ -59,6 +59,7 @@ from pra.evaluation.harness.agent_scheme import (
 )
 from pra.evaluation.harness.base import EvalContext, EvalRecord
 from pra.evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
+from pra.evaluation.metrics.engineering import EngineeringEvaluator
 from pra.evaluation.runner import expected_index
 
 DEFAULT_DATA = "eval_data/v1"
@@ -183,17 +184,25 @@ async def _run_scheme_records(
     ctx: EvalContext,
     *,
     progress_prefix: str | None = None,
+    latencies_ms: list[float] | None = None,
 ) -> list[EvalRecord]:
-    """顺序串行跑一遍 scheme；progress_prefix 非 None 时逐条打印进度。"""
+    """顺序串行跑一遍 scheme；progress_prefix 非 None 时逐条打印进度。
+
+    ``latencies_ms`` 非 None 时逐案追加墙钟耗时 —— **只进渲染层**（real 臂的 P50/P95），
+    不写进 EvalRecord（评测 record 必须逐字节可重放，见 harness/base.py 口径）。
+    """
     records: list[EvalRecord] = []
     total = len(cases)
     for i, case in enumerate(cases, start=1):
         t0 = time.monotonic()
         rec = await scheme.run(case, ctx)
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if latencies_ms is not None:
+            latencies_ms.append(elapsed_ms)
         if progress_prefix is not None:
             print(
                 f"  [{i}/{total}] {case.eval_case_id:<9} → {rec.decision:<12} "
-                f"({time.monotonic() - t0:.1f}s)"
+                f"({elapsed_ms / 1000:.1f}s)"
             )
         records.append(rec)
     return records
@@ -264,7 +273,10 @@ async def run_comparison(
     scripted_records = await _run_scheme_records(scripted, cases, ctx)
     print("-" * 100)
     print(f"② real（{model_label} · 真实 LLM · 非确定性 · 逐案串行）")
-    real_records = await _run_scheme_records(real, cases, ctx, progress_prefix="real")
+    real_latencies_ms: list[float] = []
+    real_records = await _run_scheme_records(
+        real, cases, ctx, progress_prefix="real", latencies_ms=real_latencies_ms
+    )
 
     rows, disagree, by_scene = _compare_rows(cases, scripted_records, real_records, exp)
     scripted_metrics = DecisionEvaluator.evaluate(scripted_records, exp)
@@ -310,6 +322,12 @@ async def run_comparison(
         "real_cost": _cost_summary(real_records),
         "real_overrides": _overrides_summary(real_records),  # 渲染用
         "scripted_overrides": _overrides_summary(scripted_records),
+        # 工程指标：scripted 臂 token 恒 0（桩不烧 token）；延迟只在 real 臂有
+        # （进程内墙钟，不落 record —— 见 _run_scheme_records docstring）
+        "scripted_engineering": EngineeringEvaluator.evaluate(scripted_records),
+        "real_engineering": EngineeringEvaluator.evaluate(
+            real_records, latency_ms=real_latencies_ms
+        ),
     }
     return payload, extra
 
@@ -321,6 +339,11 @@ async def run_comparison(
 
 def _fmt(v) -> str:
     return "-" if v is None else f"{v:.3f}"
+
+
+def _fmt0(v) -> str:
+    """分布数值格式化（均值/P50/P95；None → "-"）。"""
+    return "-" if v is None else f"{v:g}"
 
 
 def _cost_summary(records: list[EvalRecord]) -> dict:
@@ -503,6 +526,28 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
         add(
             f"（上表两行均只覆盖二值真值案 {extra['scripted_metrics'].total} 条；"
             f"HUMAN_REVIEW 真值 {extra['truth_human']} 条被跳过）"
+        )
+
+    add("-" * 100)
+    add("工程指标（分布：均值/P50/P95；scripted token 恒 0 为真实值，延迟为 real 进程内墙钟、不落 record）:")
+    add("  scheme      llm_calls           tool_calls          tokens              latency_ms")
+    for label, key in (("scripted", "scripted_engineering"), ("real", "real_engineering")):
+        e = extra[key]
+
+        def _triple(d) -> str:
+            return f"{_fmt0(d.mean)}/{_fmt0(d.p50)}/{_fmt0(d.p95)}"
+
+        lat = "-" if e.latency_ms is None else f"{_fmt0(e.latency_ms.mean)}/{_fmt0(e.latency_ms.p50)}/{_fmt0(e.latency_ms.p95)}"
+        add(
+            "  ".join(
+                [
+                    f"  {label:<12}",
+                    f"{_triple(e.llm_calls):<20}",
+                    f"{_triple(e.tool_calls):<20}",
+                    f"{_triple(e.tokens):<20}",
+                    lat,
+                ]
+            )
         )
 
     add("-" * 100)

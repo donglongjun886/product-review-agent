@@ -187,8 +187,8 @@ src/pra/evaluation/
 ├── metrics/
 │   ├── business.py        # §4.1：Accuracy/Precision/Recall/FPR/FNR + human_review_rate/automation_coverage（DecisionMetrics/DecisionEvaluator；命名以 §4 为准，无 HRR 缩写）
 │   ├── abstention.py      # §4.4：abstention_rate/abstention_recall/wrong_auto_decision_rate（AbstentionMetrics/AbstentionEvaluator）
-│   ├── agent.py           # §4.2：Tool Selection Accuracy/Evidence Sufficiency/…/Budget Utilization —— **规划未实现**（本模块尚不存在）
-│   └── engineering.py     # §4.3：llm_calls/tool_calls/tokens/latency 均值与分位数 —— **规划未实现**（本模块尚不存在）
+│   ├── agent.py           # §4.2：Tool Selection Accuracy / Evidence Sufficiency / Reasoning Correctness / Marginal Evidence Gain（AgentMetricsBundle；Budget Utilization 未实现，见 §4.2）
+│   └── engineering.py     # §4.3：llm_calls/tool_calls/tokens（+real 臂 latency）的均值/P50/P95（EngineeringMetrics）
 ├── runner.py              # 数据集遍历 + 方案调度 + 结果汇总（EvaluationRunner/EvaluationResult，含 cost 均值）
 ├── ablation.py            # §6：Ablation（方案级 2a/2b/2c + 组件级；AblationRunner）
 ├── regression.py          # §8：确定性回归（baseline digest 记录与比对；RegressionReport）
@@ -206,8 +206,8 @@ scripts/
 > 契约标识符 `eval_case` / `SchemeRunner`×3 / `EvalRecord` / `metrics.business` 的语义不变；实现层实际使用的名字为
 > `EvalCase` / `RuleBaseline`·`SingleCallScheme`·`AgentScheme` / `EvalRecord` / `metrics.business`
 > （`DecisionEvaluator` / `AbstentionEvaluator`），另有 `EvaluationRunner`（`runner.py`）、`AblationRunner`（`ablation.py`）等。
-> **不得引入与本节平行的新抽象命名**；`§4.2/§4.3` 的 agent / engineering 指标（`metrics/agent.py`、`metrics/engineering.py`）
-> **属规划项、尚未实现**，落地时按本节与 §4.2/§4.3 口径补。
+> **不得引入与本节平行的新抽象命名**；`§4.2/§4.3` 的 agent / engineering 指标已落
+> `metrics/agent.py` / `metrics/engineering.py`（口径见 §4.2/§4.3 的实现状态注）。
 
 SchemeRunner 契约（伪代码；实现者照此写，不强求框架）：
 
@@ -278,8 +278,13 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ### 4.2 Agent 指标（仅 agent scheme 有意义）
 
-> ⚠️ **本节指标为规划口径，代码尚未实现**（`src/pra/evaluation/` 内无对应实现；§3.5 目录树
-> 已将 `metrics/agent.py` 标为「规划未实现」）——表中「计算口径」是设计约定，不是当前产出。
+> **实现状态（2026-09-11）**：Tool Selection / Evidence Sufficiency / Reasoning Correctness /
+> Marginal Evidence Gain 已落 `metrics/agent.py`（只读统计，不参与判定；**空真值不进分母** ——
+> `expected_tools=[]` / `expected.evidence=[]` / `expected.risk_type=[]` 的案被排除，案数与无法
+> 映射的期望标签数在报告行内显式给出）。口径细节：覆盖口径 `expected_tools ⊆ actual_tools`，
+> 「调用少」另立 `redundant_tool_rate`；证据覆盖按**可映射标签**计算（不硬猜映射）；推理正确性是
+> **自动代理**（无人工第二标注者）。**`Budget Utilization` 未实现** —— `EvalRecord` 不含预算上限
+> （评测侧可为预算覆盖实验改上限，硬算会失真），占用率请用 `cost` 与跑分时的预算配置共同解读。
 
 | 指标 | 计算口径（建议） | 取数字段 | 备注 |
 |---|---|---|---|
@@ -287,12 +292,16 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | Evidence Sufficiency | ① expected.evidence 的**证据类型**被实际 evidence 覆盖比例；② REJECT 案是否满足 REJECT Gate 前置（有可引用依据 `CITABLE_TYPES`、无关键矛盾） | expected.evidence × evidence | 精确公式〔细化待定：实现者可自行收敛〕 |
 | Reasoning Correctness | 结论对但推理错：risk_type 命中率（expected.risk_type ⊆ 输出）+ risk_level 档位一致 + 抽样人工复核结构化理由 | risk_type/risk_level/trace | 自动化近似无法全覆盖 → 抽样人工复核子集（标注） |
 | Marginal Evidence Gain / Investigation Efficiency | 逐 tool_call 记 `after_confidence−before_confidence` 与 `evidence_added` 非空、`decision_changed`；效率 = Σ(新增证据数 + 决策翻转权重) / 有效 Tool Calls | trace.tool_call_history 边际增益 4 字段（`src/pra/agent/state.py`） | 暴露"为调查而调查"；加权口径〔细化待定：实现者可自行收敛〕 |
-| Budget Utilization | 四组占用率：llm_calls/tool_calls/tokens/latency 各 ÷ 上限（10/15/40000/30000），报均值与分布 | cost + decision_json.budget_used | 证明 Budget 是 Guardrail 非目标（《00》§10.3/§11.3） |
+| Budget Utilization | 四组占用率：llm_calls/tool_calls/tokens/latency 各 ÷ 上限（10/15/40000/30000），报均值与分布（**未实现**，见本节实现状态注） | cost + decision_json.budget_used | 证明 Budget 是 Guardrail 非目标（《00》§10.3/§11.3） |
 
 ### 4.3 工程指标（成本与效率，三方案同口径）
 
-> ⚠️ 同 §4.2：**规划口径，尚未实现**（`metrics/engineering.py` 为规划件）；当前报告中的
-> 成本信息来自 `cost` 字段的均值直出，不含本节设想的分位数/占用率分布。
+> **实现状态（2026-09-11）**：已落 `metrics/engineering.py` —— 每方案报 llm_calls / tool_calls /
+> tokens 的均值、P50、P95、max（nearest-rank，无插值）。两条如实口径：①scripted 路径
+> `tokens=0` 是真实情况（确定性桩不烧 token），报告如实显示、**不伪造估算值**；②**墙钟延迟不落
+> `EvalRecord`**（评测逐字节可重放红线），仅 real 臂在进程内计时后传入其报告，故主评测报告的延迟
+> 一栏为 `-`。**未实现**：按 scene 分层的分布（只报每方案总体分布）与单 Case 成本折算（需要价目表，
+> 当前只有 token 量）。
 
 - LLM Calls（平均/P95）、Tool Calls（平均/P95）、Token Usage、P50/P95 Latency、单 Case 成本。
 - 一律报**分位数与分布**（不只均值），用于回答"Agent 贵在哪、是否值得"（《00》§11.3）；按 scene 分层报。

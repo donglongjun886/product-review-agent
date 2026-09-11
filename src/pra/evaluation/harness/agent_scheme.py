@@ -1414,5 +1414,17 @@ class AgentScheme(SchemeRunner):
                 "budget_hit_dim": _budget_hit_dim_from_snapshot(budget),
                 "hypothesis_trace": trace,
                 "tool_history_count": len(history),
+                # 边际增益审计字段透传（tools_node 的记录原样带出，指标层只读）：
+                # 只保留统计需要的四项，避免把整段 args/result 复制进 record。
+                "tool_history": [
+                    {
+                        "tool": h.get("tool"),
+                        "status": h.get("status"),
+                        "evidence_added": list(h.get("evidence_added") or []),
+                        "decision_changed": bool(h.get("decision_changed")),
+                    }
+                    for h in history
+                    if isinstance(h, dict)
+                ],
             },
         )
