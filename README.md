@@ -25,7 +25,7 @@ HTTP 接入（同步；MQ 异步 worker 为规划）—— POST /api/v1/reviews�
 ## 口径红线（读结论前必读）
 
 - **默认全链路 = scripted LLM 桩 + InMemory 世界 ⇒ 确定性可重放**（无真实 LLM、无网络）；scripted 路径下 **token=0 / latency≈0 / cost 为空**是真实情况，不填假值。
-- **默认 `build_tools()` 与评测世界 = InMemory 世界**（确定性可重放）；**生产 / HTTP 入口 `build_production_tools()` 读真库 + 真实 RAG**：商品/商家接 MySQL，案例/政策接真实 RAG（`rag_backend="chroma"` + BGE + hybrid，经 `Lazy*Index` **惰性构建**——首次检索才建库连 Chroma，不可用时记 warn failure、不静默回退种子）。
+- **默认 `build_tools()` 与评测世界 = InMemory 世界**（确定性可重放；**评测世界是 5 个工具，比生产少一个 `OCRTool`**，口径见 [docs/02-evaluation.md](docs/02-evaluation.md) §7.2）；**生产 / HTTP 入口 `build_production_tools()` 读真库 + 真实 RAG**：商品/商家接 MySQL，案例/政策接真实 RAG（`rag_backend="chroma"` + BGE + hybrid，经 `Lazy*Index` **惰性构建**——首次检索才建库连 Chroma，不可用时记 warn failure、不静默回退种子）。
 - **6 个 Tool 的默认实现仍是 InMemory/Mock 桩**：`image_analysis` / `ocr` 未接真实视觉模型与 OCR 服务。
 - **README 不承载跑分数字**（会随数据集与模型迭代过期）：评测方法与口径以 [docs/02-evaluation.md](docs/02-evaluation.md) 为权威出处；Agent 高分须按「GT ≈ 审查员可判定函数、同口径耦合 + 种子数据」的边界解读，**不得**外推成「真实 LLM 能力」。
 - **真实 LLM 评测**仅 `scripts/run_evaluation_real.py`（需 API key、有费用、非确定性）。
