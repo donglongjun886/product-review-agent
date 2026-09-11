@@ -148,6 +148,7 @@ def render_report(result: EvaluationResult) -> str:
     add("      不可外推为真实 LLM 能力（理由见上一行同口径耦合）")
     add("    - real 对照（v1 35 案 real 单次抽样）: acc 0.200 / human_review_rate 0.771，")
     add("      27/35 转人工由确定性 Gate 归因（R3_BUDGET_EXHAUSTED×19 / R3_HYPOTHESES_INDISTINGUISHABLE×7）")
+    add("      —— 该抽样早于 Gate 语义重构，其中归因码已移除（仅作历史对照）")
     add("      —— 与 scripted 高分方向相反（同口径耦合只会高估一致性，real 未调优首跑则大幅保守转人工）；"
         "该抽样仅验证链路，非模型固定水平")
 

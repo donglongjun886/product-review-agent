@@ -236,10 +236,10 @@ Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的�
 - **不使用 `MessagesState`**：四个 LLM 节点每次调用都从 state 重新组装 prompt，不累积 message 历史——可序列化、token 可预算、重放确定；
   单次调用内部的对话（含 schema 重试的修正提示）只存在于该次节点调用内，随 `review_trace` 落库。
 - **数量上限用 schema 约束**（`src/pra/agent/guardrails/schemas.py`）：假设 ≤5、调查队列 ≤8、单轮计划工具 ≤3（Pydantic `max_length` 字面约束，
-  无独立常量）；高优先假设阈值为 `HIGH_PRIOR_THRESHOLD = 0.3`（`guardrails/gate.py`），**只用于 PASS/REJECT Gate 的「高优先」口径**，不参与收敛判定。
+  无独立常量）；`HIGH_PRIOR_THRESHOLD = 0.3`（`guardrails/gate.py`）**只用于人工队列排序/展示**，两道 Gate 与收敛判定都不消费它。
 - **LLM 步失败降级**（`guardrails/llm_shell.py`）：Pydantic schema 校验失败自动重试 **1 次**（把校验错误回喂修正），仍失败则该节点返回降级结果并置
   `degraded=True`，后续 LLM 节点不再调用 LLM（只做必要透传），统一按「证据不足」路由到 decide，由确定性 overlay 产出 `HUMAN_REVIEW`（硬规则命中除外）。
-- **假设生命周期**：`PENDING → SUPPORTED / REFUTED / UNRESOLVED`（`UNRESOLVED` = 已查证但未能证实也未证伪，与「还没查」区分，导向 HUMAN_REVIEW）；
+- **假设生命周期**：`PENDING → SUPPORTED / REFUTED / UNRESOLVED`（`UNRESOLVED` = 已查证但未能证实也未证伪，与「还没查」区分）；假设状态**只引导调查与留痕**，终裁由证据事实决定（§7.2），不由假设状态推导；
   hypothesize 只在入口执行 1 次，运行中新出现的假设由 reevaluate 追加。
 
 ---
@@ -276,7 +276,7 @@ Decision（充分 → PASS/REJECT/HUMAN_REVIEW；不足 → 回到 Plan 或转�
 | 4. Multi-source Investigation | `tools` 节点（6 个 Tool） | 商品/图片/OCR/商家/案例/政策 |
 | 5. RAG | `case_search` / `policy_search` 两个 Tool | 在 `tools` 节点内调用 |
 | 6. Evidence Synthesis | `reevaluate` 节点 | LLM 依据新证据更新假设 posterior |
-| 7. Uncertainty / Abstention | `decide` 节点 + 确定性 Decision Gate | 证据不足 / Gate 不通过（含 decision_confidence<0.7、关键矛盾、关键 Tool 失败、预算耗尽）→ HUMAN_REVIEW（§7.2） |
+| 7. Uncertainty / Abstention | `decide` 节点 + 确定性 Decision Gate | required 测量维度未覆盖（可补救）/ 维度不可测 / 阳性不足以自动拒绝 / Gate 不通过（含 decision_confidence<0.7、关键矛盾、关键 Tool 失败、预算耗尽、降级）→ HUMAN_REVIEW（§7.2） |
 | 8. Cost / Latency Budget | 条件边的确定性 `budget_check` | 超限 → 直接路由到转人工 |
 
 **StateGraph 草图：**
@@ -361,10 +361,10 @@ app = graph.compile(checkpointer=make_memory_checkpointer())  # MVP：InMemorySa
 
 | 节点 | 契约要点 |
 |---|---|
-| `hypothesize` | 入口执行 1 次；读商品事实 + 机审信号，产出「初始假设集（须含 ≥1 条低风险/无违规假设，作为 PASS Gate 的可证伪对象）+ 初始调查队列」 |
+| `hypothesize` | 入口执行 1 次；读商品事实 + 机审信号，产出「初始假设集（允许少提，不强制产出"正常假设"）+ 初始调查队列」 |
 | `plan` | 每轮输出「下一步验证哪条假设、调哪个工具、为什么」（≤3 条/轮）；没有值得做的动作时输出 conclude，直接转 decide |
 | `tools` | 确定性执行：按工具名 + 参数分发，做结果反序列化与证据去重合并（不消耗 LLM）；单批调用按上限截断 |
-| `reevaluate` | 依据新证据更新假设 posterior 与状态、可追加新假设；证据不足且预算未超 → 回 plan，否则转 decide |
+| `reevaluate` | 依据新证据更新假设 posterior 与状态、可追加新假设；证据不足且预算未超 → 回 plan，否则转 decide（`posterior`/`status` 只用于引导调查与留痕，**不参与终裁**，见 §7.2） |
 | `decide` | LLM 只产出 `DecisionProposal`（提案），随后由确定性 overlay 按 §7.2 顺序收口，改判与归因码写入 `overrides` |
 
 - **重复动作防护**：plan 若反复提议同一调用 → 去重 guardrail 第 2 次即清空计划并视同 conclude，不存在"空转烧预算"的死循环。
@@ -504,13 +504,13 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 | 概念 | 一句话定义 | 说明 |
 |---|---|---|
 | **decision_confidence** | 对"自动决策（不放人工）"的安全性把握 —— **安全门槛量，不是模型判"是否违规"的真实概率** | 输出 `ReviewDecision.decision_confidence` 即此值；只回答"如果自动判，判错风险够不够低"，不回答"风险有多高" |
-| **risk_level / risk confidence** | 风险本身的高低（LOW/MEDIUM/HIGH）与风险强度（如最高支持假设的 posterior） | **独立于决策结论**：HIGH risk + 证据不足 = HUMAN_REVIEW，不是 REJECT（见 §7.5） |
+| **risk_level / risk confidence** | 风险本身的高低（LOW/MEDIUM/HIGH）与风险强度（如最高支持假设的 posterior） | **仅供展示与人工队列排序**，独立于决策结论：HIGH risk + 证据不足 = HUMAN_REVIEW，不是 REJECT（见 §7.5） |
 
 | 决策 | 语义 | 触发条件（概要，完整 Gate 见 §7.2） |
 |---|---|---|
-| **PASS** | 放行 | **PASS Gate**：高优先风险假设全部被**充分证据**证伪 AND 关键证据完整 AND 无未解决关键矛盾 |
-| **REJECT** | 违规，拒绝上架 | **REJECT Gate**：高风险假设成立 AND 证据充分 AND 存在明确政策依据 AND `decision_confidence ≥ 0.7` AND 无关键矛盾 |
-| **HUMAN_REVIEW** | 转人工（克制地 abstain） | 不满足任一自动 Gate：证据不足 / 关键证据冲突 / 政策无法确定 / 多个风险假设无法区分 / REJECT 而 `decision_confidence < 0.7` / 关键 Tool 失败致证据缺失 / Budget Exhausted |
+| **PASS** | 放行 | **PASS Gate**（全读事实通道）：无维度匹配的**阳性证据** AND 无**规则侧阳性**（R-102/R-302）AND 本案 required 测量维度**全覆盖**（无 NOT_MEASURED / UNMEASURABLE）AND 无关键工具失败 AND 无关键矛盾 |
+| **REJECT** | 违规，拒绝上架 | **REJECT Gate**：证据链中存在与风险维度匹配的**硬阳性**（强相似 ≥0.85 / Logo / 商家行为脏且本 listing 有外观信号 / R-302 规避词命中）AND 存在带 `ref_id` 的可引用依据 AND `decision_confidence ≥ 0.7` AND 无关键矛盾 |
+| **HUMAN_REVIEW** | 转人工（克制地 abstain） | 不满足任一自动 Gate，或命中弃权清单：必需测量维度缺失（可补救）/ 维度在本环境不可测 / 阳性不足以自动拒绝 / 关键证据冲突 / 关键 Tool 失败 / Budget Exhausted / 任一步降级 |
 
 ### 7.2 决策规则（确定性兜底：LLM 只"提案"，Gate 做最终校验）
 
@@ -523,26 +523,32 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
    - 调查中发现黑名单品牌 / 硬违规 → 强制 `REJECT`。
    - 即便 LLM 说 PASS，只要硬规则命中，以 REJECT 为准（防止漏放）。
 2. **REJECT Gate**：可自动 REJECT 当且仅当 **全部满足**：
-   - 存在指向违规的**高风险假设成立**（SUPPORTED 且风险类型明确）；
-   - 证据**充分**（覆盖关键疑点，无关键 Tool 失败导致的证据缺失）；
-   - 存在**明确政策依据**——至少一条证据指向明确政策条款或高度相似先例（**防止误伤商家**，过审拒审也是资损/商誉损失）；
-   - **证据维度一致性**：先例只能佐证**相同证据维度**，不能把历史案例事实迁移为当前案件事实——外观/视觉相似类结论须由视觉测量证据（IMAGE_SIMILARITY ≥0.70 / IMAGE_LOGO）直接支撑，政策/先例引用不可替代（确定性拦截，归因码 `R3_VISUAL_CLAIM_UNSUPPORTED`：声称维度与证据维度错配 → 转人工）；
-   - `decision_confidence ≥ 0.7`（**安全门槛**，非模型真实概率，验证集校准，见 §7.4/§7.6）；
+   - 存在**足以授权自动拒绝的阳性**（`measurements.reject_positive_dims`）：本 listing 直接测量的硬阳性（IMAGE_SIMILARITY ≥0.85 / IMAGE_LOGO），或**商家行为脏且有本 listing 外观信号佐证**（弱相似 ≥0.70 亦算），或平台规则命中**规避词**（R-302，文本自证）；
+   - 存在**可引用依据**——至少一条带 `ref_id` 的政策条款或高度相似先例证据（**防止误伤商家**，过审拒审也是资损/商誉损失）；
+   - `decision_confidence ≥ 0.7`（**安全门槛**，非模型真实概率，见 §7.4/§7.6）；
    - 无**关键矛盾**（如相似度极高但商家历史干净）。
+
+   > 说明：**弱相似（0.70~0.85）不算硬阳性**——单独不足以自动拒绝（历史上正是高置信误杀的来源），
+   > 其应然处置是与"商品事实"维度交叉，在库不可核验时该维度落 NOT_MEASURED、案件自然转人工；
+   > **"仅商家行为脏"也不授权自动拒绝**——商家画像是针对该商家的统计，不能当作本 listing 违规的确证
+   > （reviewer 语义：疑似规避但图/文本无确证 → 克制转人工），R-102 品牌词同理只阻塞 PASS。
+   > 两道 Gate **不读 LLM 生成量**（`prior` / `posterior` / `Hypothesis.status` / `evidence_for` /
+   > 提案里的 `confidence`）；`proposal` 只决定走哪道 Gate，以及非判定性的展示字段。
 3. **HUMAN_REVIEW 触发条件（abstention）**——下列**任一**成立即转人工（即便 LLM 提案为 PASS/REJECT）：
-   - 证据不足：无法通过 PASS/REJECT Gate 的"证据充分/证伪充分"要求；
-   - **关键证据冲突**：决定性证据互相矛盾；
-   - 政策无法确定：无适用政策条款、政策模糊或相互冲突；
-   - **多个风险假设无法区分**：几条互斥的风险假设都被部分支持，无法确定哪条成立；
-   - 拟自动 REJECT 但 `decision_confidence < 0.7`；
-   - **关键 Tool 失败**导致证据缺失（如 ImageAnalysis 调用失败且无法重试）；
+   - **关键测量缺口**：required 维度中本环境**可测却没测**（归因码 `R3_MEASUREMENT_MISSING`，属**可补救**缺口 → 路由先回环补测）；
+   - **维度不可测**：required 维度在本环境**没有可用测量来源**（`R3_DIMENSION_UNMEASURABLE`，重跑无用、不回环）；
+   - **阳性不足以自动拒绝**：只有弱信号 / 仅商家画像 / 无可引用依据（`R3_POSITIVE_INSUFFICIENT`）；
+   - **关键证据冲突**（`R3_EVIDENCE_CONFLICT`）：决定性证据互相矛盾；
+   - **关键 Tool 失败**导致证据缺失（`R3_KEY_TOOL_FAILED`，如 ImageAnalysis 调用失败且无法重试）；
    - 预算耗尽（Budget Exhausted，§8.1）→ 带上已收集的部分证据转人工；
-   - 新型风险 / 无先例（novel risk）。
+   - 任一步降级（`R5_DEGRADED_OR_FAILED_STEP`）；
+   - PASS 提案过不了 PASS Gate（`R4_PASS_GATE_FAIL`）/ REJECT 提案过不了 REJECT Gate（`R2_REJECT_GATE_FAIL`）。
 4. **PASS Gate**：可自动 PASS 当且仅当 **全部满足**：
-   - 所有**高优先风险假设**被**充分证据证伪**（REFUTED 且有可引用反驳证据；不是"没查到风险"）；
-   - **关键证据完整**（对应疑点均已调查，无关键缺失）；
-   - 无**未解决的关键矛盾**。
-   - 区分"证明无风险"（可 PASS）与"没查到风险"（应 HUMAN_REVIEW）。
+   - 无任何维度匹配的**阳性证据**（含仅商家画像）；
+   - 无**规则侧阳性**：R-102 品牌词 / R-302 规避词命中（确定性规则层即时求值）→ 阻塞 PASS；
+   - 本案 **required 测量维度全部覆盖**，且结论为阴性 —— required 由**案件可观测事实**导出（商品/商家/文本恒必需，带图案件另有外观维度；实现见 `src/pra/agent/guardrails/measurements.py`），**不由 LLM 的 plan 或假设决定**；
+   - 无关键 Tool 失败、无关键矛盾。
+   - 三态的意义：`MEASUREMENT` 证据承载"测过（含**阴性**）"；`NOT_MEASURED` / `UNMEASURABLE` **不是证据**，由 Gate 用"required × 证据存在性 × 环境能力"推导 —— 不为"缺席"造证据，从而保住区分"证明无风险"（可 PASS）与"没查到风险"（应 HUMAN_REVIEW）。
 
 ### 7.3 风险类型受控词表（v1）
 
@@ -560,12 +566,14 @@ FIELD_CONFLICT        商品字段信息冲突
 - **`decision_confidence`**（输出 `ReviewDecision.decision_confidence`，即安全门槛）不是 LLM 拍脑袋的数字，也不是"违规概率"，而是**确定性函数**（可解释、可单测），可作为自动决策是否安全的一个计算来源：
 
   ```
-  decision_confidence = f(最高支持假设 posterior, 证据链完整性, 是否存在可引用依据, 证据是否矛盾)
+  decision_confidence = 0.40*coverage + 0.30*strength + 0.20*citation + 0.10 - 0.20*conflict
   ```
 
+  `coverage` = required 维度的覆盖比例；`strength` = 各已覆盖维度**决定性证据**的平均强度（有阳性取阳性最大，否则取阴性测量的可信度）；`citation` = 是否存在带 `ref_id` 的可引用依据；`conflict` = 是否命中关键矛盾。**四项全部来自证据事实，不读 LLM 的 `posterior`**；系数为结构性给定、未用任何数据集拟合，阈值 0.7 亦未动。
+
   它只回答"如果自动判（PASS/REJECT），判错风险是否足够低"——**自动 REJECT 的安全门槛是 0.7**（§7.2-2 / §7.6），低于门槛 → 转人工。
-- **risk confidence / risk_level** 与决策结论**分离**：风险强度由最高支持假设的 `posterior`（见 `hypothesis_trace`）与 `risk_level` 表达；它回答"风险有多高"，**不**单独决定 PASS/REJECT（HIGH risk + 证据不足 → HUMAN_REVIEW，见 §7.5）。
-- Abstention（克制转人工）的判断落点是 **Decision Gate**（§7.2）：`decision_confidence < 0.7` 只约束**自动 REJECT 侧**；PASS 侧由 PASS Gate 判定（高优先假设充分证伪 + 关键证据完整 + 无关键矛盾），**不以低风险置信度转人工**——干净商品低风险置信是正常态，不是 abstention 信号。
+- **risk confidence / risk_level** 与决策结论**分离**：风险强度由最高支持假设的 `posterior`（见 `hypothesis_trace`）与 `risk_level` 表达，**只用于展示与人工队列排序**；它回答"风险有多高"，**不**参与路由或 Gate 判定（HIGH risk + 证据不足 → HUMAN_REVIEW，见 §7.5）。
+- Abstention（克制转人工）的判断落点是 **Decision Gate**（§7.2）：`decision_confidence < 0.7` 只约束**自动 REJECT 侧**；PASS 侧由 PASS Gate 判定（无阳性 + 无规则阳性 + required 维度全覆盖且阴性 + 无关键失败/矛盾），**不以低风险置信度转人工**——干净商品低风险置信是正常态，不是 abstention 信号。
 
 ### 7.5 risk_level ≠ decision（不参与路由）
 

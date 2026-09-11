@@ -424,6 +424,8 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > 实证 scripted 高分含「标注-审查员同口径」耦合，real 显著更保守且暴露 1 例无视觉证据的幻觉性
 > SUPPORTED 误杀（EC_0007）。**该抽样只验证链路与暴露迭代方向，不代表模型固定水平**；剩余为
 > prompt/约束迭代（禁重复假设、外观类假设须引用 IMAGE_SIMILARITY），LLM-as-a-Judge 按需。
+> **以上为 Gate 语义重构前的历史记录**：其中 `R3_HYPOTHESES_INDISTINGUISHABLE` 等归因码已随重构移除，
+> 当时的"外观类假设须引用 IMAGE_SIMILARITY"由 prompt 约束，现由事实侧 Gate 承担（见 §13）。
 
 > **最终主线**：**Rule Baseline → Single-call LLM → Multi-step Agent → Ablation → Abstention → Threshold Sweep → Regression**。
 > Smoke 集（≤10 条 demo case）先行验证 loader/harness/EvalRecord 链路，不混入正式统计（§2.3）。
@@ -789,7 +791,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 | 项 | 重构前 | 重构后 |
 |---|---|---|
-| pytest | 566 passed, 4 skipped | **576 passed, 4 skipped** |
+| pytest | 566 passed, 4 skipped | **582 passed, 4 skipped** |
 | ruff | 118 | **112** |
 | scripted v2 agent（§11 口径） | 0.964 / 1.000 / 1.000 / FPR 0 / FNR 0 / hrr 0.036 / 140-0-124-0 | **完全一致**（含混淆矩阵） |
 | scripted v2 **逐案决策变化** | — | **0 / 320** |
