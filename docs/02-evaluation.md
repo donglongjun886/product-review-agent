@@ -366,9 +366,9 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 ### 5.3 校准结果回写（2026-09-09 Q4 拍板 (b) 修订）
 
 - **当前 sweep 只观测评测确定性审查员的读证据视图，不写回生产常量**（tools_node quality_filter /
-  gate 强档未被 sweep 观测过——把选点写进生产属于"写进未测层级"，禁止）。旧版"回写《00》§7.6 /
-  注入下沉到生产常量读取点并补
-  中间相似度带数据后**才可启用（另行立项）。
+  gate 强档未被 sweep 观测过——把选点写进生产属于"写进未测层级"，禁止）。旧版"回写生产常量表 +
+  同步修订 eval_case 标签阈值口径"的回写流程**仅在注入下沉到生产常量读取点、并补齐中间相似度带
+  数据后才可启用**（另行立项）。
 - sweep 结论（曲线/选点）作为**评测内部实验记录**，附 §5.1 数据带限制注后，可与 docs §8 一并引用。
 - 报告必须附 **sweep 曲线**而不是只报最终点（《00》§11.5 精神：证明阈值是"选"出来的，不是拍脑袋
   ——在当前数据带下曲线近平，如实呈现并注明限制）。
@@ -501,3 +501,108 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
   qdrant-client 进程内模式不校验上界，**只在真 server 上以 400 暴露**（复盘见 `src/pra/rag/qdrant_index.py`）。
 - 修复（截为 u64）后：真 server 落库 **24 / 67 点**，与 `local` 后端 top3 逐条一致。
 - 该路线**已被 ChromaDB 取代**，此处数字仅作历史对照。
+
+---
+
+## 11. 封板结果表（v2 320 案；2026-09-11 重放）
+
+> **本节是 v2 三方案结果的唯一权威快照**，全部数字由当前 `main` 代码**重放**产生，非历史引用：
+> 代码 `3e21516`（`src/` `tests/` `eval_data/` 无未提交改动）+ 数据集 `eval_data/v2/cases_v2.jsonl`（320 案）。
+> 重放命令：`uv run python scripts/run_evaluation.py --data eval_data/v2/cases_v2.jsonl`（§11.1/11.2/11.5）、
+> `uv run python scripts/run_error_analysis.py --data eval_data/v2/cases_v2.jsonl`（§11.3/11.4）、
+> `uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl` → **REGRESSION PASS**
+> （决策序列与 `eval_data/v2/regression_baseline.json` 一致，digest `387a345c…`）。
+> 指标**口径定义**见 §4.1/§4.2/§4.4；本节只承载该口径下的最终数值，两者冲突时以 §4 定口径、以本节记数。
+
+### 11.1 主结果（业务分母 = 二值真值 274：PASS 134 / REJECT 140）
+
+| Strategy | Accuracy | Precision | Recall | FPR | FNR | 漏放 | 误杀 | LLM 调用/案 | Tool 调用/案 | tokens/案 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Rule baseline | 0.380 | –（无 REJECT） | 0.000 | 0.000 | 1.000 | 22 | 0 | 0.000 | 0.000 | 0.000 |
+| Single-call LLM | 0.518 | 1.000 | 0.633 | 0.000 | 0.367 | 22 | 0 | 1.000 | 0.000 | 0.000 |
+| **Agent** | **0.964** | **1.000** | **1.000** | **0.000** | **0.000** | **0** | **0** | 6.790 | 5.090 | 0.000 |
+
+> 口径：Accuracy 分母 = 274，**预测 HUMAN_REVIEW 计为错**；Precision/Recall/FPR/FNR 只在自动判出
+> （pred ∈ {PASS,REJECT}）子集上计算——预测 HUMAN 不入其分母（HUMAN 不当第三真值类，§4.1 口径注）。
+> 漏放 = truth REJECT ∧ pred PASS；误杀 = truth PASS ∧ pred REJECT。
+> tokens = 0 是 scripted 桩路径的真实值（不伪造，§4.5/§10.3）。
+
+### 11.2 转人工 / abstention（分母：全量 320；AUTO_DECIDABLE 274 / SHOULD_ABSTAIN 46）
+
+| Strategy | human_review_rate | automation_coverage | abstention_rate | abstention_recall | wrong_auto_decision_rate |
+|---|---:|---:|---:|---:|---:|
+| Rule | 0.606 | 0.394 | 0.540 | 1.000 | 0.175 |
+| Single-call LLM | 0.487 | 0.512 | 0.401 | 1.000 | 0.134 |
+| **Agent** | **0.175** | **0.825** | **0.036** | **1.000** | **0.000** |
+
+> 本节 human_review_rate / automation_coverage 分母为**全量 320**，与 §11.1 的 274 分母**不同**，勿混读
+> （§4.4 核心口径：自动化率必须与 FPR/FNR/wrong_auto_decision_rate 并读）。
+
+### 11.3 三分类混淆矩阵（行 = pred，列 = truth；对角线即命中，含 HUMAN 真值）
+
+| Rule | PASS | REJECT | HUMAN |
+|---|---:|---:|---:|
+| PASS | 104 | 22 | 0 |
+| REJECT | 0 | 0 | 0 |
+| HUMAN_REVIEW | 30 | 118 | 46 |
+
+| Single-call LLM | PASS | REJECT | HUMAN |
+|---|---:|---:|---:|
+| PASS | 104 | 22 | 0 |
+| REJECT | 0 | 38 | 0 |
+| HUMAN_REVIEW | 30 | 80 | 46 |
+
+| **Agent** | PASS | REJECT | HUMAN |
+|---|---:|---:|---:|
+| PASS | **124** | 0 | 0 |
+| REJECT | 0 | **140** | 0 |
+| HUMAN_REVIEW | 10 | 0 | **46** |
+
+> 对角线命中 rule 150/320、single_call_llm 188/320、agent 310/320。**该全量三分类口径不参与方案排名**
+> ——它会把"多转人工"算成命中，读排名只看 §11.1（§4.1 口径注）。
+
+### 11.4 决策迁移与 Agent 剩余失败（仅二值真值 274 案）
+
+| baseline → Agent | 修好 | 其中从转人工修回 | 其中从判反修回 | 退步 | 同错 | 同对 |
+|---|---:|---:|---:|---:|---:|---:|
+| Rule → Agent | **170** | 148 | 22 | 10 | 0 | 94 |
+| Single-call → Agent | **132** | 110 | 22 | 10 | 0 | 132 |
+
+> **Agent 剩余失败合计 10/320**，全部为 `scene=boundary`、`truth=PASS`、`pred=HUMAN_REVIEW`（过度保守）：
+> `EC_V2_0275` `EC_V2_0279` `EC_V2_0283` `EC_V2_0287` `EC_V2_0289` `EC_V2_0290` `EC_V2_0291`
+> `EC_V2_0292` `EC_V2_0293` `EC_V2_0294`。
+> 其中 **0 漏放（truth REJECT 未自动放行）、0 误杀、0 该转人工却自动终裁**；10 例"退步"即这 10 例。
+
+### 11.5 Agent 级指标与成本分布（仅 agent 臂；空真值不进分母）
+
+| 指标 | 值 | 计数 |
+|---|---|---|
+| Tool Selection Accuracy（覆盖口径 `expected_tools ⊆ actual_tools`） | 0.870 | 188/216 案 |
+| redundant_tool_rate（有期望外调用的案占比） | 0.222 | 期望外调用案 48 |
+| Evidence Type Coverage（micro） | 1.000 | 345/345 期望类型 |
+| REJECT 依据前置（可引用依据近似） | 1.000 | 140/140 预测 REJECT 案 |
+| risk_type_coverage | 1.000 | 140/140 案 |
+| risk_level_agreement | 0.775 | 248/320 案 |
+| evidence_gain_rate（带来新增证据的调用占比） | 0.910 | 1380/1516 调用 |
+| decision_changed_rate（触发 Gate 判定翻转） | 0.100 | 152/1516 调用 |
+
+> 成本分布（均值/P50/P95）：LLM 调用 6.790/7.000/10.000；Tool 调用 5.090/5.000/6.000；tokens 0.000/0.000/0.000
+> （脚本路径恒 0 为真实值）。延迟仅 real 臂进程内墙钟，scripted 无此项。
+> 未实现的 Agent 级口径（Budget Utilization、按 scene 分层分布、单案成本折算）见 §4.2 实现状态注。
+> 未映射期望标签 98 个实例、仅含未映射标签被剔除的案 10（缺口显式化，不硬猜映射）。
+
+### 11.6 封板结论与对外表述边界
+
+- **Agent 的增益集中在复杂案型**：`violation` recall 0.000（Rule）→ 0.594（Single-call）→ **1.000**；
+  `multi-signal` / `evasion` 上 Rule 与 Single-call 均 0.000 → Agent **1.000**；`boundary` 0.571 → **0.857**；
+  `normal` 三方案均已 1.000（Agent 的收益不来自简单案）。
+- **代价与收益同框**：Agent 6.790 LLM + 5.090 Tool 调用/案，换得转人工率 0.606 → **0.175**、
+  自动化覆盖率 0.394 → **0.825**、`wrong_auto_decision_rate` 0.175/0.134 → **0.000**。
+- **结论边界（必须同框引用）**：本表为 **scripted 桩 + InMemory 种子世界**（衡量实现一致性与工作流，
+  §3.4/§7.2）；real LLM 仅 v1 35 案**单次抽样**（acc 0.200 / human_review_rate 0.771，§8 Phase 3 注），
+  未跑 v2、未重复采样；真值由**单一标注者**按与审查员同源规则构造，SHOULD_ABSTAIN 无对抗负例
+  → 不得读成真实 LLM 能力，也不得外推为线上成绩。
+- **封板判定**：本表 + §11.4 归因 + 回归守护（`tests/test_regression_v2.py`）构成 P0 全集；
+  Ablation / Sweep / real 冒烟为 P1（不做不影响 eval 完整性）；P2 不做项见 §5.3、§4.2、§7.2
+  与 README「当前实现边界」。**此后除非 §11 的任一输入改变（数据集 / 判定逻辑 / 指标口径 / RAG 组件），
+  不再重跑这三条命令。**
