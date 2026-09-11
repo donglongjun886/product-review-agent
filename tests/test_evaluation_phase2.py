@@ -1,21 +1,13 @@
-"""Evaluation Phase 2 测试（B 面：代码能力扩展）—— Abstention / Ablation / Sweep / Regression。
+"""Evaluation Phase 2 测试：Abstention / Ablation / Sweep / Regression 四组。
 
-覆盖（对齐 docs/02-evaluation.md §4.4/§5/§6/§8）：
-1. ``test_abstention_*``：AbstentionEvaluator 五指标在手工可算小样本上数值正确
-   （含 SHOULD_ABSTAIN 被自动不进 wrong_auto_decision_rate 的互斥口径、分母 0 → None、
-   Phase 1 老数据无 abstain_label → abstention_recall None）；
-2. ``test_ablation_*``：
-   - 方案级 2b vs 2a："预塞政策文本能命中"的案上决策不同（仅 2b 才 REJECT，2a HUMAN）；
-   - 组件级：allowed_tools 装配裁剪后 tool_calls_actual 不含被裁工具，且 -ImageTool
-     在强视觉案上决策改变（EC_0401 REJECT→HUMAN）；
-3. ``test_sweep_*``：同一数据两档阈值跑出不同 metrics（min_sim 0.70 vs 0.85 → EC_0303
-   REJECT→HUMAN）；相似度 0.72 在 min_sim=0.70 可见/0.75 不可见、strong=0.70 算强/
-   0.85 不算 —— 断言阈值参数穿透评估路径；
-4. ``test_regression_*``：篡改 mock 记录后比对失败（regression 能抓到漂移）；
-   真实跑 v1 集两次 → PASS（快照 digest 一致）。
+- ``test_abstention_*``：五指标在手工可算小样本上数值正确（SHOULD_ABSTAIN 被自动
+  只表现为 recall 缺口、不进 wrong_auto；分母 0 → None；老数据无 abstain_label 兼容）；
+- ``test_ablation_*``：方案级 2b vs 2a 在"预塞政策文本能命中"的案上决策不同；组件级
+  裁剪 allowed_tools 后 tool_calls_actual 不含被裁工具且强视觉案决策改变；
+- ``test_sweep_*``：阈值参数确实穿透评估路径（min_sim 0.70 vs 0.85 改变 EC_0303 决策）；
+- ``test_regression_*``：篡改记录后比对失败，真实跑 v1 集两次 digest 一致。
 
-全程离线：无网络、无真 LLM；被测对象全部确定性。测试用数据全部来自
-eval_data/v1（只读）；基线快照一律写 tmp_path，不碰评测数据目录。
+全程离线确定性；测试数据来自 eval_data/v1（只读），基线快照一律写 tmp_path。
 """
 
 from __future__ import annotations
@@ -56,11 +48,6 @@ def _cases_by_id() -> dict[str, EvalCase]:
 async def _run_scheme(scheme, case: EvalCase, ctx: EvalContext) -> EvalRecord:
     """await 单个 scheme.run —— 供 async 测试复用（pytest-asyncio auto 模式驱动）。"""
     return await scheme.run(case, ctx)
-
-
-# ---------------------------------------------------------------------------
-# 1) AbstentionEvaluator 五指标（docs §4.4）
-# ---------------------------------------------------------------------------
 
 
 def test_abstention_five_metrics_hand_calculated() -> None:
@@ -110,8 +97,7 @@ def test_abstention_sho_auto_not_counted_in_wrong_auto() -> None:
 
 
 def test_abstention_zero_denominator_none_and_phase1_compat() -> None:
-    """Phase 1 老数据（无 abstain_label、真值仅 PASS/REJECT）→ 全按 AUTO_DECIDABLE；
-    SHOULD 子集为空 → abstention_recall None（报告 '-'）；wrong_auto 退化为自动终裁错误率。"""
+    """Phase 1 老数据（无 abstain_label、真值仅 PASS/REJECT）→ 全按 AUTO_DECIDABLE；SHOULD 子集为空 → abstention_recall None（报告 '-'）；wrong_auto 退化为自动终裁错误率。"""
     records = [
         _make_record("p1", "PASS"),
         _make_record("r1", "REJECT"),
@@ -144,14 +130,8 @@ def test_abstention_label_missing_but_human_truth_inferred() -> None:
     assert m.wrong_auto_decision_rate is None  # AUTO 案数 0
 
 
-# ---------------------------------------------------------------------------
-# 2) Ablation —— 方案级 2b vs 2a（docs §3.3/§6）
-# ---------------------------------------------------------------------------
-
-
 async def test_single_call_2b_beats_2a_on_decisive_policy() -> None:
-    """OCR 弱证据案：2a（Raw Input）→ HUMAN（置信不足转人工）；
-    2b（预塞命中本案的自动拒绝判例文本）→ REJECT —— 仅当 RAG 文本命中时决策不同。"""
+    """OCR 弱证据案：2a（Raw Input）→ HUMAN（置信不足转人工）；2b（预塞命中本案的自动拒绝判例文本）→ REJECT —— 仅当 RAG 文本命中时决策不同。"""
     from pra.domain.models import ProductImage, ProductInfo
 
     # 复用 EC_0406 的真实基础输入形状（标题无规避词），但把图片 OCR 换成命中"复刻"
@@ -204,8 +184,7 @@ def test_rag_context_from_eval_world_has_no_expected_answer() -> None:
 
 
 async def test_component_ablation_cuts_tool_registration_and_calls() -> None:
-    """组件级：allowed_tools 装配裁剪 → 图工具注册与 plan 都不含被裁工具，
-    tool_calls_actual 不含被裁工具；强视觉案去掉 ImageTool 后决策改变（差异归因）。"""
+    """组件级：allowed_tools 装配裁剪 → 图工具注册与 plan 都不含被裁工具，tool_calls_actual 不含被裁工具；强视觉案去掉 ImageTool 后决策改变（差异归因）。"""
     cases = _cases_by_id()
     ctx = EvalContext()
     ec0401 = cases["EC_0401"]
@@ -230,14 +209,8 @@ async def test_component_ablation_cuts_tool_registration_and_calls() -> None:
     assert rec_no_case.decision in _DECISION_SET
 
 
-# ---------------------------------------------------------------------------
-# 3) Sweep —— 阈值参数确实穿透评估路径（docs §5）
-# ---------------------------------------------------------------------------
-
-
 def test_sweep_threshold_penetrates_sim_stats() -> None:
-    """白盒：相似度 0.72 在 min_sim=0.70 时可见、0.75 时不可见；
-    strong=0.70 时算强相似、0.85 时不算 —— sweep 档位直达相似度分档读取路径。"""
+    """白盒：相似度 0.72 在 min_sim=0.70 时可见、0.75 时不可见；strong=0.70 时算强相似、0.85 时不算 —— sweep 档位直达相似度分档读取路径。"""
     evs = [{"type": "IMAGE_SIMILARITY", "weight": 0.72}]
     from pra.evaluation.harness import agent_scheme as A
 
@@ -250,8 +223,7 @@ def test_sweep_threshold_penetrates_sim_stats() -> None:
 
 
 async def test_sweep_min_sim_changes_agent_decision_and_metrics() -> None:
-    """同一（真实）数据两档阈值跑出不同 agent metrics：min_sim 0.85 抬证据下限 →
-    EC_0303（弱相似 0.73 + 脏商家）由 REJECT 转 HUMAN（弱视觉证据被挡）—— 阈值穿透到决策。"""
+    """同一（真实）数据两档阈值跑出不同 agent metrics：min_sim 0.85 抬证据下限 → EC_0303（弱相似 0.73 + 脏商家）由 REJECT 转 HUMAN（弱视觉证据被挡）—— 阈值穿透到决策。"""
     cases = _cases_by_id()
     weak_case = cases["EC_0303"]
     ctx_lo = EvalContext(evidence_thresholds={"min_sim": 0.70, "strong": 0.85})
@@ -261,7 +233,6 @@ async def test_sweep_min_sim_changes_agent_decision_and_metrics() -> None:
     assert r_lo.decision == "REJECT"
     assert r_hi.decision == "HUMAN_REVIEW"
 
-    # 同一小数据集 + 两档 ctx → 总体 metrics 不同（agent 的 human_review_rate 上升）
     trio = [cases["EC_0303"], cases["EC_0202"], cases["EC_0001"]]
     res_lo = await EvaluationRunner(ctx=ctx_lo).run(cases=trio, include=("agent",))
     res_hi = await EvaluationRunner(ctx=ctx_hi).run(cases=trio, include=("agent",))
@@ -272,8 +243,7 @@ async def test_sweep_min_sim_changes_agent_decision_and_metrics() -> None:
 
 
 async def test_sweep_runner_grid_rows_rule_single_flat_agent_moves() -> None:
-    """ThresholdSweepRunner：min_sim 全网格跑同一个小数据集 ——
-    rule / single_call_llm 对阈值不敏感（行恒定，如实报告）；agent 在 min_sim≥0.75 后变。"""
+    """ThresholdSweepRunner：min_sim 全网格跑同一个小数据集 —— rule / single_call_llm 对阈值不敏感（行恒定）；agent 在 min_sim≥0.75 后变。"""
     cases = [c for c in load_dataset(DATA_PATH) if c.eval_case_id in ("EC_0303", "EC_0202", "EC_0001")]
     runner = ThresholdSweepRunner(data_path=str(DATA_PATH))
     result = await runner.run(
@@ -294,11 +264,6 @@ async def test_sweep_runner_grid_rows_rule_single_flat_agent_moves() -> None:
     assert any(p.thresholds["min_sim"] == pytest.approx(0.75) for p in result.points)
 
 
-# ---------------------------------------------------------------------------
-# 4) Regression —— 防静默行为漂移（docs §8）
-# ---------------------------------------------------------------------------
-
-
 def test_regression_tampered_record_fails() -> None:
     """篡改一条记录后快照 digest/序列不匹配 → FAIL（regression 能抓到漂移）。"""
     cases = [c for c in load_dataset(DATA_PATH)][:4]
@@ -308,7 +273,6 @@ def test_regression_tampered_record_fails() -> None:
         "agent": [_make_record(c.eval_case_id, "PASS") for c in cases],
     }
     baseline = snapshot_from_records(cases, records)
-    # 篡改：把 agent 第二条决策翻成 HUMAN_REVIEW
     tampered = {
         "format_version": 1,
         "data_hint": "x",
@@ -332,21 +296,18 @@ def test_regression_tampered_record_fails() -> None:
 
 
 def test_regression_subset_compare_and_missing_scheme() -> None:
-    """基线只录两方案、当前只跑子集 → 同决策 PASS（子集比对不误报）；
-    当前含基线未录的方案 → FAIL（提示重录）。"""
+    """基线只录两方案、当前只跑子集 → 同决策 PASS（子集比对不误报）；当前含基线未录的方案 → FAIL（提示重录）。"""
     cases = [c for c in load_dataset(DATA_PATH)][:3]
     base_records = {
         "rule": [_make_record(c.eval_case_id, "PASS") for c in cases],
         "single_call_llm": [_make_record(c.eval_case_id, "PASS") for c in cases],
     }
     baseline = snapshot_from_records(cases, base_records, scheme_order=("rule", "single_call_llm"))
-    # 子集当前快照（仅 single_call_llm，决策一致）→ PASS
     subset_records = {
         "single_call_llm": [_make_record(c.eval_case_id, "PASS") for c in cases]
     }
     current = snapshot_from_records(cases, subset_records, scheme_order=("single_call_llm",))
     assert compare_snapshots(current, baseline).ok is True
-    # 当前含基线没录的方案（agent）→ FAIL 提示重录
     extra_records = {
         "agent": [_make_record(c.eval_case_id, "PASS") for c in cases],
         "single_call_llm": [_make_record(c.eval_case_id, "PASS") for c in cases],

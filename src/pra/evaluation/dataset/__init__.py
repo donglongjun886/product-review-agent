@@ -1,4 +1,4 @@
-# 评测集：EvalCase schema + JSONL loader（Phase 1 最小闭环）
+# 评测集：EvalCase schema + JSONL loader。
 from pra.evaluation.dataset.loader import (
     load_dataset,
     load_manifest,

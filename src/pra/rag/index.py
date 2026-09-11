@@ -1,20 +1,12 @@
-"""真实 PolicyIndex / CaseIndex 实现（rag/index.py）—— 替换 InMemory 的注入点。
+"""真实 PolicyIndex / CaseIndex 实现 —— 替换 InMemory 的注入点。
 
-对齐工具契约（tools/{policy_search,case_search}/tool.py 的 Protocol），**Tool 层零改动**：
-- ``RagPolicyIndex`` 实现 ``PolicyIndex.search(query, filters, top_k, effective_only)``，
-  返回 ``list[PolicyClauseHit]``（与 InMemoryPolicyIndex 同型，可 model_validate）；
-- ``RagCaseIndex`` 实现 ``CaseIndex.search(query, filters, top_k)``，
-  返回 ``list[CaseHit]``（retrieval_score 为检索期分：bm25/vector 归一化分或 hybrid 的 RRF 分，同 InMemory 的种子检索分
-  语义 —— 排序 + 证据 weight 用）。
+``RagPolicyIndex`` / ``RagCaseIndex`` 分别实现 tools 层 Policy / Case 检索 Protocol；返回的检索
+分供排序与证据 weight 用，不是语义相似度。与 InMemory 的差异：query **参与匹配** —— 元数据过滤
+（category / risk_type / status，语义与 InMemory 对齐）→ 三模式打分 → Top-K；embedding 经
+``Embedder`` provider 注入（缺省确定性 mock）。
 
-与 InMemory 的差异（这正是 RAG 的意义）：query **参与匹配** —— 元数据过滤
-（category/risk_type/status，语义与 InMemory 对齐）→ 三模式打分（bm25 / vector /
-hybrid，可切换）→ Top-K。embedding 经 ``Embedder`` provider 注入（MVP =
-MockHashEmbedder，确定性 mock；Phase 2 换本地模型 + Qdrant 不动本类接口）。
-
-构造约定：``rows`` 为 corpus 记录（dict 或 schema 模型均可，构造期强校验）；
-检索文本（policy：title+text；case：summary）与 embedding/BM25 在构造期一次性
-建好（确定性、离线）。搜索是确定性纯计算（async 包装以对齐工具 Protocol）。
+构造期强校验 ``rows``（dict 或 schema 模型均可），检索文本与 embedding/BM25 一次性建好；搜索是
+确定性纯计算。
 """
 
 from __future__ import annotations
@@ -49,7 +41,7 @@ def _validate_mode(mode: str) -> RetrievalMode:
 
 
 def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
-    """rows（dict 或 record 模型）→ 强校验的 record 列表（构造期防脏数据）。"""
+
     out: list[Any] = []
     for row in rows:
         out.append(record_type.model_validate(row) if isinstance(row, dict) else row)
@@ -60,7 +52,6 @@ def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
 
 
 class RagPolicyIndex:
-    """PolicyIndex 的真实实现：版本/元数据过滤 + 三模式检索（Policy KB）。"""
 
     def __init__(
         self,
@@ -84,7 +75,6 @@ class RagPolicyIndex:
 
     @property
     def size(self) -> int:
-        """Policy KB 条款数（含 EXPIRED 历史版）。"""
         return len(self._rows)
 
     def effective_count(self) -> int:
@@ -97,7 +87,6 @@ class RagPolicyIndex:
         top_k: int,
         effective_only: bool,
     ) -> list[PolicyClauseHit]:
-        """检索当前政策条款（query 参与匹配；语义与 InMemory 对齐，见模块 docstring）。"""
         candidates: list[int] = []
         for i, r in enumerate(self._rows):
             if effective_only and r.status != "EFFECTIVE":
@@ -128,7 +117,6 @@ class RagPolicyIndex:
 
 
 class RagCaseIndex:
-    """CaseIndex 的真实实现：元数据过滤 + 三模式检索（Case KB，先例）。"""
 
     def __init__(
         self,
@@ -150,7 +138,6 @@ class RagCaseIndex:
 
     @property
     def size(self) -> int:
-        """Case KB 先例数。"""
         return len(self._rows)
 
     async def search(

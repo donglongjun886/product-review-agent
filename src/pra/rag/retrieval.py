@@ -1,21 +1,15 @@
-"""检索编排（rag/retrieval.py）—— 三模式打分 + 融合 + Top-K（确定性）。
+"""检索编排 —— 三模式打分 + 融合 + Top-K（确定性）。
 
-对应《00》§6.3 / rag-implementation-plan.md §4.3 的检索流程（MVP 无模型 reranker，
-R-6 拍板）：
+1. **元数据过滤先行**（category / risk_type / status）：由调用方在入参前完成 —— 本模块只对
+   **候选文档位**打分与排序；
+2. **三模式打分**（``bm25`` | ``vector`` | ``hybrid``，不预设谁优）：bm25 = 自写 Okapi BM25
+   原始分；vector = query 与 doc embedding 的余弦；hybrid = ``w_bm25 · norm(bm25) +
+   w_vec · cosine``（默认 0.5 : 0.5）；
+3. **Top-K**：融合分降序截断（同分按 corpus 原序，无随机）。
 
-1. **元数据过滤先行**（category / risk_type / status 等）：由调用方（rag/index.py）
-   在入参前完成 —— 本模块只对**候选文档位**做打分与排序；
-2. **三模式打分**（mode="bm25" | "vector" | "hybrid"，可切换、不预设谁优）：
-   - bm25：自写 Okapi BM25（rag/bm25.py）原始分；
-   - vector：query embedding 与 doc embedding 的余弦（rag/vectors.py）；
-   - hybrid：归一化加权融合 —— 默认权重 BM25:Vector = 0.5 : 0.5（可配），
-     ``fused = w_bm25 · norm(bm25) + w_vec · cosine``；
-3. **Top-K**：融合分降序截断（确定性 tie-break：同分按 corpus 原序，无随机）。
-
-归一化口径：bm25 原始分在**候选集内 min-max 到 [0,1]**（候选全集 = 1.0，空/等值集
-= 1.0 防除零）—— 保证三模式分数同量纲、可并排比较；vector 余弦天然 [0,1]。
-返回元素带 ``score``（该模式最终分，0~1）与 ``details``（bm25_raw / bm25_norm /
-vector / fused 原始值，供报告与调试）—— case 索引据此写 ``CaseHit.retrieval_score``（docs/10 §0 C1：检索分，非语义相似度）。
+归一化口径：bm25 原始分在**候选集内 min-max 到 [0,1]**（空/等值集 → 全 1.0 防除零），保证三
+模式同量纲；vector 余弦天然 [0,1]。返回元素带 ``score``（最终分）与 ``details``（各路原始值）；
+case 索引据此写 ``CaseHit.retrieval_score``（检索分，非语义相似度）。
 """
 
 from __future__ import annotations
@@ -43,7 +37,6 @@ DEFAULT_WEIGHTS: tuple[float, float] = (0.5, 0.5)  # (w_bm25, w_vector)
 
 
 def normalize_minmax(scores: list[float]) -> list[float]:
-    """min-max 归一化到 [0,1]；空/全等值集 → 全 1.0（无区分度时给满分的确定性约定）。"""
     if not scores:
         return []
     lo, hi = min(scores), max(scores)
@@ -61,9 +54,8 @@ def fuse_scores(
 ) -> list[float]:
     """BM25 分与向量分加权融合（hybrid 路）。
 
-    输入长度须一致；``normalize=True`` 先把 bm25 分 min-max 归一化（向量分要求已
-    在 [0,1]，如余弦）再融合。权重默认 0.5/0.5；改权重的单测在 tests/test_rag.py
-    （构造两极值验证权重生效，R-6：不预设 Hybrid 最优，权重是实验变量）。
+    输入长度须一致；``normalize=True`` 先把 bm25 分 min-max 归一化（向量分要求已在 [0,1]，
+    如余弦）再融合。
     """
     if len(bm25_scores) != len(vector_scores):
         raise ValueError(
@@ -76,7 +68,6 @@ def fuse_scores(
 
 @dataclass
 class RankedHit:
-    """单条排序结果：corpus 行索引 + 最终分（0~1）+ 三路分解值（报告/调试用）。"""
 
     index: int
     score: float
@@ -97,11 +88,11 @@ def rank_documents(
 ) -> list[RankedHit]:
     """对候选文档打分并返回 Top-K（三模式可切换；确定性无随机）。
 
-    :param texts: 与 ``bm25`` 对齐的全库检索文本（取子集喂给 candidate 索引）。
-    :param candidates: 候选文档**行索引**（元数据过滤后的子集）；None = 全库。
-    :param top_k: 截断数（>=1）。
-    :param doc_vectors: 可选预计算 doc 向量（与 texts 对齐）；None → 本函数按需 embed。
+    :param texts: 与 ``bm25`` 对齐的全库检索文本。:param candidates: 候选文档**行索引**，
+        None = 全库。:param top_k: 截断数（>=1）。:param doc_vectors: 可选预计算 doc 向量，
+        None → 本函数按需 embed。
     """
+
     if mode not in MODES:
         raise ValueError(f"未知检索模式: {mode!r}（可选: {list(MODES)}）")
     idxs = list(range(bm25.doc_count)) if candidates is None else list(candidates)

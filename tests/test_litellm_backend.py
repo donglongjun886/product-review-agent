@@ -1,29 +1,17 @@
-"""Phase 3（real LLM）mock 单测 —— LiteLLMBackend + llm_prompts 渲染层。
+"""real LLM 路径的 mock 单测 —— LiteLLMBackend + llm_prompts 渲染层。
 
 无网络、无 API key、不依赖 .env：所有 litellm 调用都被 monkeypatch 到
 ``litellm.acompletion`` 的本地替身；真实调用留 scripts/run_evaluation_real.py 人工实测。
 
-覆盖分组：
-- A. LiteLLMBackend 直接测：构造（model/name/api_key 来源）/ tools 目录提取 /
-  mock acompletion 成功路径（content/tokens/kwargs）/ mock 网络失败 → LLMBackendError /
-  _clean_json_text 三态 / 未知 node 不触发调用 / call_structured_llm 全链路重试闭环；
-- B. llm_prompts 渲染纯测：四个节点 system prompt 关键词 / user prompt 人读上下文
-  （无裸 __STATE__ 泄漏）/ 空 state 防御 / json_schema 的 enum/必填要点；
-- C. 确定性回归守护：import pra.agent.litellm_backend 不拉起 litellm（延迟 import 是
-  "测试无网络"的前提 —— litellm 被 import 时会尝试拉远程 cost map）。
+覆盖：构造（model/name/api_key 来源）/ tools 目录提取 / acompletion 成功路径
+（content/tokens/kwargs）/ 网络失败 → ``LLMBackendError`` / ``_clean_json_text`` 三态 /
+未知 node 不触发调用 / ``call_structured_llm`` 全链路重试闭环 / 四节点 prompt 渲染
+（无裸 ``__STATE__`` / 空 state 防御 / schema 枚举与必填）/ 延迟 import 不拉起 litellm。
 
-实现约定（与 src 一致）：顶部 ``from __future__ import annotations``；import 一律
-``pra.*``；中文注释；asyncio_mode="auto"（pytest-asyncio），``async def test_*`` 直接
-写即可。backend 注入的恢复：本仓库 conftest.py 的 autouse fixture
-``_reset_llm_backend`` 已对 ``llm_shell._backend`` / ``_default_backend`` 前后快照还原，
-本文件仍对 set_llm_backend 的测试加 try/finally 双保险。
-
-网络自检说明（本文件如何保证不烧 key / 不走真实调用）：
-- 不 mock litellm 模块整体 import：litellm_backend 是**延迟 import** litellm，测试只需
-  monkeypatch ``litellm.acompletion`` 属性 —— 在 import litellm（进程内首次）前设置
-  ``LITELLM_LOCAL_MODEL_COST_MAP=True`` 关闭 litellm 启动时拉取远程 cost map 的联网；
-- 每个触发 complete 的测试都先 monkeypatch acompletion（耗尽即 pytest.fail 哨兵，防
-  "多出的真实调用"）；无 key / 未知 node 路径在 litellm import 之前就抛 LLMBackendError。
+不烧 key：只 monkeypatch ``litellm.acompletion`` 属性（不 mock 整个模块 import）；每个触发
+complete 的测试都打上「耗尽即 pytest.fail」的哨兵；无 key / 未知 node 在 litellm import 之前
+就抛 ``LLMBackendError``。backend 注入由 conftest.py 的 autouse fixture ``_reset_llm_backend``
+快照还原，本文件另加 try/finally 双保险。
 """
 
 from __future__ import annotations
@@ -54,9 +42,8 @@ from pra.agent.llm_prompts import (
 # litellm 被 import 时默认会尝试拉远程 model cost map（联网、慢）；关掉它保证测试进程
 # 全程离线 —— 本文件首个 import litellm 发生在测试函数内（延迟 import，同 src 惯例）。
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-
 # ---------------------------------------------------------------------------
-# 测试数据（手写 dict 状态 —— 与 nodes/*.py _build_messages 的 __STATE__ JSON 同构，
+# 测试数据（手写 dict state —— 与 nodes/*.py _build_messages 的 __STATE__ JSON 同构，
 # 但不用 domain 对象：LiteLLMBackend 只解析 __STATE__ JSON，喂 dict 即可）
 # ---------------------------------------------------------------------------
 
@@ -144,9 +131,7 @@ _SIMPLE_SCHEMA = {
     "required": ["decision"],
 }
 
-# ---------------------------------------------------------------------------
 # litellm.acompletion 替身（本文件所有真实 litellm 调用都被它替换）
-# ---------------------------------------------------------------------------
 
 
 def _make_fake_acompletion(contents: list, tokens: int = 7, finish_reason: str = "stop"):
@@ -154,7 +139,7 @@ def _make_fake_acompletion(contents: list, tokens: int = 7, finish_reason: str =
 
     ``contents`` 为逐个返回的 content 文本列表；耗尽后再被调用 → pytest.fail
     （哨兵：说明存在未 mock 的真实调用泄漏）。记录 ``calls`` = 每次的 kwargs/messages。
-    ``finish_reason`` 为每次响应的 finish_reason（"stop"/"length"；P2-15 截断测试用）。
+    ``finish_reason`` 为每次响应的 finish_reason（"stop"/"length"；截断测试用）。
     """
 
     queue = list(contents)
@@ -192,8 +177,7 @@ def _patch_acompletion(monkeypatch, contents: list, tokens: int = 7, finish_reas
 
 
 # ---------------------------------------------------------------------------
-# A. LiteLLMBackend 直接测
-# ---------------------------------------------------------------------------
+# A. LiteLLMBackend 直接测# ---------------------------------------------------------------------------
 
 
 def test_constructor_default_model_and_name_format():
@@ -241,7 +225,6 @@ async def test_no_api_key_constructor_ok_first_complete_raises(monkeypatch):
 
 def test_tool_catalog_extracted_from_tool_objects():
     """tools 目录提取：name/description/args_schema；无 name 的坏工具被跳过。"""
-
     class _ImgArgs(BaseModel):
         image_url: str = Field(description="待比对的图片 URL")
         top_k: int = Field(default=3, description="返回前 k 张相似图")
@@ -321,7 +304,6 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
 
 async def test_complete_network_failure_raises_llm_backend_error(monkeypatch):
     """mock 网络失败：acompletion 抛任意异常 → complete 抛 LLMBackendError（非裸异常）。"""
-
     async def boom_acompletion(**kwargs):
         raise TimeoutError("connection reset by peer")
 
@@ -338,7 +320,7 @@ async def test_complete_network_failure_raises_llm_backend_error(monkeypatch):
 
 
 def test_clean_json_text_three_states():
-    """_clean_json_text 三态：干净 JSON 原样 / 围栏+杂文本截首{到末} / 无 { 原样返回。"""
+    """``_clean_json_text`` 三态：干净 JSON 原样 / 围栏+杂文本截首{到末} / 无 { 原样返回。"""
     backend = LiteLLMBackend(api_key="sk-test")  # 静态方法，实例/类调用皆可
     # 1) 干净 JSON 原样返回
     clean = '{"decision": "PASS", "confidence": 0.9}'
@@ -373,10 +355,8 @@ async def test_unknown_node_raises_without_calling_litellm(monkeypatch):
 async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypatch):
     """全链路重试闭环：第 1 次非法 JSON → 修正提示回喂 → 第 2 次合法 → 成功。
 
-    验证 LiteLLMBackend（真实渲染路径）+ llm_shell 的"校验失败重试 1 次"协作：
-    修正提示被 _collect_feedbacks 收进 user 尾部回喂模型，不破坏重试。
-    P2-15：回喂内容必须含**第 1 次非法输出原文**（模型第 2 次能"看到"自己上一版
-    输出去修正），不只是 ValidationError 文本。
+    验证 LiteLLMBackend（真实渲染路径）+ llm_shell 的「校验失败重试 1 次」协作。回喂内容必须含
+    **第 1 次非法输出原文**（模型第 2 次能「看到」自己上一版输出去修正），不只是 ValidationError。
     """
     fake = _patch_acompletion(monkeypatch, contents=[_SCHEMA_BAD, plan_conclude_json()])
     backend = LiteLLMBackend(api_key="sk-test")
@@ -410,9 +390,8 @@ async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypat
 async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeypatch):
     """第 1 次 mock 网络失败（transport 类）→ 退避后原样重试 → 第 2 次成功恢复。
 
-    P2-15：transport 失败没有可"修正"的输出 —— 第 2 次请求**不追加 schema 修正
-    文案**（不再误导模型"你的输出不满足 Schema"，实为网络超时），user 与第 1 次
-    完全一致（纯重试）。
+    transport 失败没有可「修正」的输出 —— 第 2 次请求**不追加 schema 修正文案**（不误导模型
+    「你的输出不满足 Schema」，实为网络超时），user 与第 1 次完全一致（纯重试）。
     """
     import litellm
 
@@ -449,7 +428,7 @@ async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeyp
     assert outcome.error is None
     assert outcome.tokens == 7  # 第 1 次后端异常不计 tokens
 
-    # P2-15：transport 重试不加 schema 修正文案 —— 两次请求的 user 内容一致（纯重试）
+    # transport 重试不加 schema 修正文案 —— 两次请求的 user 内容一致（纯重试）
     first_user = fake_acompletion.calls[0][1]["content"]
     second_user = fake_acompletion.calls[1][1]["content"]
     assert second_user == first_user
@@ -458,7 +437,7 @@ async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeyp
 
 
 async def test_backend_complete_marks_truncated_on_finish_reason_length(monkeypatch):
-    """P2-15：finish_reason=="length" → ``LLMResponse.truncated=True``（供 shell 分类）。"""
+    """``finish_reason=="length"`` → ``LLMResponse.truncated=True``（供 shell 分类）。"""
     fake = _patch_acompletion(monkeypatch, contents=['{"partial": "json'], finish_reason="length")
     backend = LiteLLMBackend(api_key="sk-test")
     resp = await backend.complete(
@@ -476,9 +455,9 @@ async def test_backend_complete_marks_truncated_on_finish_reason_length(monkeypa
 
 
 async def test_call_structured_llm_truncated_invalid_output_not_retried(monkeypatch):
-    """P2-15：截断（finish_reason=length）且校验失败 → **不重试**（attempts=1 降级）。
+    """截断（finish_reason=length）且校验失败 → **不重试**（attempts=1 降级）。
 
-    只 mock 一次响应：若 shell 仍按"普通 schema 校验失败"重试 → 哨兵 pytest.fail
+    只 mock 一次响应：若 shell 仍按「普通 schema 校验失败」重试 → 哨兵 pytest.fail
     拦截第二次 acompletion（省一次大概率无效的全量调用）。
     """
     fake = _patch_acompletion(
@@ -501,7 +480,7 @@ async def test_call_structured_llm_truncated_invalid_output_not_retried(monkeypa
 
 
 async def test_call_structured_llm_truncated_but_valid_content_succeeds(monkeypatch):
-    """P2-15：截断但内容恰好合法 → 照常成功（attempts=1，不浪费）。"""
+    """截断但内容恰好合法 → 照常成功（attempts=1，不浪费）。"""
     fake = _patch_acompletion(
         monkeypatch, contents=[plan_conclude_json()], finish_reason="length"
     )
@@ -540,10 +519,7 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
     assert len(fake.calls) == 2
 
 
-# ---------------------------------------------------------------------------
 # B. llm_prompts 渲染纯测
-# ---------------------------------------------------------------------------
-
 
 def test_build_system_prompt_keywords_for_all_four_nodes():
     """四个节点的 system prompt 均非空且含关键约束关键词（稳定子串）。"""
@@ -714,18 +690,15 @@ def test_build_user_prompt_schema_enum_and_required_fields():
     assert "risk_type（可选）" in text
 
 
-# ---------------------------------------------------------------------------
 # C. 确定性回归守护（无网络 / 无 key）
-# ---------------------------------------------------------------------------
-
 
 def test_import_backend_does_not_pull_litellm():
     """import pra.agent.litellm_backend 不 import litellm（延迟 import 契约守护）。
 
-    本仓库 .venv 里 litellm 1.100.0 被 import 时会尝试拉远程 model cost map（联网）：
-    若有人把 litellm_backend 的 ``import litellm`` 提到模块顶层，会让每个测试收集期都
-    产生网络请求 —— 本测试用**全新子进程**验证模块 import 不拉起 litellm
-    （子进程隔离保证与 pytest 进程内是否已 import litellm 无关）。
+    litellm 1.100.0 被 import 时会尝试拉远程 model cost map（联网）：若有人把
+    litellm_backend 的 ``import litellm`` 提到模块顶层，每个测试收集期都会产生网络请求 ——
+    本测试用**全新子进程**验证模块 import 不拉起 litellm（子进程隔离与 pytest 进程内是否已
+    import litellm 无关）。
     """
     repo_src = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"

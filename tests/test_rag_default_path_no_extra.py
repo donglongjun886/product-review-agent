@@ -1,21 +1,17 @@
-"""默认路径「零额外依赖」契约测试（tests/test_rag_default_path_no_extra.py）—— **CI 上恒跑**。
+"""默认路径「零额外依赖」契约测试 —— CI 上恒跑。
 
-**为什么必须有它**（docs/10 §5-5）：RAG 换成 Chroma + LlamaIndex + bm25s + jieba 之后，
-本项目最要紧的一条承诺是「**不装 extra 也能用**」—— 默认路径（``build_policy_index()`` /
-``build_case_index()`` / ``build_tools()``）必须仍是 ``local`` 后端，绝不因为新增 backend
-开关而把 chromadb / llama-index / jieba / bm25s 拉进 ``sys.modules``。CI 只跑
-``uv sync --frozen``（**不装任何 extra**），所以：
+契约：默认路径 ``build_policy_index()`` / ``build_case_index()`` / ``build_tools()`` 必须仍是
+``local`` 后端，绝不因为新增 backend 开关把 ``chromadb`` / ``llama_index`` / ``jieba`` /
+``bm25s`` 拉进 ``sys.modules``。
 
-**诚实标注（不得声称「CI 覆盖了 chroma」）**：
-- ``tests/test_rag_chroma.py`` / ``tests/test_rag_chroma_server.py`` 顶层
-  ``pytest.importorskip("chromadb")`` → 在 CI 上**整文件 skip**（chromadb 不在依赖里），
-  且真服务端集成用例还额外依赖本机 Docker 服务；**这两份文件在 CI 上不执行任何一行断言**；
-- 因此 CI 上真正跑得动的 RAG 守护只有本文件（+ ``tests/test_rag_qdrant_point_id.py``
-  的纯 Python u64 契约）。
+为什么这是 CI 上唯一跑得动的 RAG 守护：CI 只跑 ``uv sync --frozen``（不装任何 extra），
+而 ``tests/test_rag_chroma.py`` / ``tests/test_rag_chroma_server.py`` 顶层
+``pytest.importorskip("chromadb")`` → 整文件 skip，在 CI 上不执行任何一行断言
+（故不得声称「CI 覆盖了 chroma」）。
 
-**断言为什么用子进程**：pytest 单进程里其它测试文件（或在开发机上）可能已经
-``import chromadb`` → 进程内 ``sys.modules`` 检查会变成**永真/永假的空断言**。子进程是
-**全新解释器**：先跑默认路径，再检查 ``sys.modules``，断言才是真的（不是 vacuous）。
+断言为什么用子进程：同进程里别的测试文件可能已经 ``import chromadb``，进程内查
+``sys.modules`` 会变成永真/永假的空断言。子进程是全新解释器：先跑默认路径，再查
+``sys.modules``，断言才不是 vacuous。
 """
 
 from __future__ import annotations
@@ -104,8 +100,6 @@ _CHILD_SCRIPT = (
 
 
 def _module_installed(name: str) -> bool:
-    """该模块在本环境是否可导入（``find_spec`` 直接抛时按不可导入处理 —— 残缺安装/自定义
-    ``meta_path`` finder 会出现这种情况，不能让它把用例变成 error）。"""
     import importlib.util
 
     try:
@@ -115,7 +109,7 @@ def _module_installed(name: str) -> bool:
 
 
 def _run_default_path_child() -> dict:
-    """在**全新解释器**里跑默认装配路径并取回证据（子进程 stdout 最后一行 JSON）。"""
+    # 全新解释器；子进程 stdout 最后一行回传证据 JSON
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD_SCRIPT],
         capture_output=True,
@@ -132,13 +126,7 @@ def _run_default_path_child() -> dict:
 
 
 def test_default_path_pulls_in_no_extra_dependencies() -> None:
-    """默认 ``build_policy_index()`` / ``build_case_index()`` / ``build_tools()`` 之后，
-    ``chromadb`` / ``llama_index`` / ``jieba`` / ``bm25s`` **不得进入 ``sys.modules``**（docs/10 §5-5）。
-
-    这是「不装 extra 也能用」这条公开承诺唯一的 CI 可执行守护：默认路径一旦有人不小心把
-    ``chroma_backend``（或它依赖的 jieba/bm25s）提到模块顶层 import，本用例立刻变红 ——
-    而真 chroma 用例在 CI 上是 skip 的，抓不到。
-    """
+    """默认路径之后，``chromadb`` / ``llama_index`` / ``jieba`` / ``bm25s`` 不得进入 ``sys.modules``。"""
     payload = _run_default_path_child()
     assert payload["forbidden_present"] == {}, (
         "默认路径引入了额外依赖（CI 上 chromadb/llama_index 根本没装 → 会 ImportError）："
@@ -147,17 +135,12 @@ def test_default_path_pulls_in_no_extra_dependencies() -> None:
 
 
 def test_default_path_guard_is_not_vacuous() -> None:
-    """反「空断言」守卫：默认路径必须**真的建了索引并检索出结果**。
-
-    若上面的用例只证明「什么东西都没跑」，那它守不住任何东西 —— 故这里断言默认装配的
-    实际产物：local 实现类型、corpus 行数（24/67）、生效条款数、6 个工具名、以及经
-    ``build_tools("rag")``（默认 local 后端）真的检索到 ``RAG_CASE_`` 命中。
-    """
+    """反「空断言」守卫：默认路径必须真的建了索引并检索出结果（24/67 行、21 条生效条款、6 个工具）。"""
     payload = _run_default_path_child()
     assert payload["policy_type"] == "RagPolicyIndex"
     assert payload["case_type"] == "RagCaseIndex"
     assert payload["rag_tool_index_types"] == ["RagCaseIndex", "RagPolicyIndex"], (
-        "build_tools('rag') 默认后端必须仍是 local（docs/10 §2：默认后端不变）"
+        "build_tools('rag') 默认后端必须仍是 local（默认后端不变）"
     )
     assert payload["policy_size"] == 24 and payload["case_size"] == 67
     assert payload["corpus_rows"] == [24, 67]
@@ -170,13 +153,8 @@ def test_default_path_guard_is_not_vacuous() -> None:
 
 
 def test_default_index_path_stays_local_in_process() -> None:
-    """进程内兜底（CI 恒跑、不依赖任何 extra）：默认实现的**类型**没被 backend 开关换掉。
-
-    ``build_policy_index()`` / ``build_case_index()`` 缺省仍是 ``Rag*Index``（numpy 余弦 +
-    自写 BM25）—— 与 chroma / qdrant 分支**同签名不同实现**；这条保证 v1/v2 回归的
-    digest 零变化（docs/10 §2 / §5-6）。本用例只做类型与行为断言，**不**碰 ``sys.modules``
-    （同进程里别的测试文件可能已经 import 过 chromadb，那样的断言会是假的）。
-    """
+    """进程内兜底（不依赖任何 extra）：默认实现的类型没被 backend 开关换掉，保证 v1/v2 回归
+    digest 零变化；不碰 ``sys.modules``（同进程里别的测试可能已 import 过 chromadb）。"""
     import asyncio
 
     from pra.rag.corpus import load_cases, load_policies
@@ -205,12 +183,6 @@ def test_default_index_path_stays_local_in_process() -> None:
 
 @pytest.mark.parametrize("module_name", _FORBIDDEN_TOP_LEVEL)
 def test_extra_module_really_exists_when_installed(module_name: str) -> None:
-    """反证「默认路径没 import 它」不是空话：装了 extra 的环境里，**显式 import 必须成功**。
-
-    如果某个模块在本机根本没装，那「不在 ``sys.modules``」就是废话（CI 上正是如此）。
-    本用例在**装了 extra 的开发机**上给出反证（``import chromadb`` 等确实可用 → 子进程
-    用例抓到的「未引入」是真结果）；CI 上如实 skip（docs/10 §5-5 的诚实要求）。
-    """
     if not _module_installed(module_name):
         pytest.skip(f"{module_name} 未安装（CI 只跑 uv sync --frozen，不装 extra）→ 无法给出反证")
 

@@ -1,27 +1,19 @@
-"""build_rag_corpus.py —— 确定性生成 RAG 知识库数据（Policy KB / Case KB） + 自检。
+"""确定性生成 RAG 知识库数据（Policy KB / Case KB）并自检。
 
-用途（rag-implementation-plan.md R-3/R-4/R-5）：
-- 生成 ``src/pra/rag/corpus/policies.json`` 与 ``cases.json``（静态、git 入库、可评审；
-  幂等：同输入重跑产出逐字节一致，已存在文件将被覆盖）；
-- 内置**隔离自检**（红线 R-4）：Case KB 的 case_id 与 eval_data/v1 + v2 全部
-  case 标识（eval_case_id / input.case_id / lineage.seed_case_id）断言**无交集**，
-  违反即非零退出 —— 防"检索到 eval GT = 评测作弊"。
+产物 ``src/pra/rag/corpus/policies.json`` 与 ``cases.json``：静态、git 入库、可评审；
+幂等（同输入重跑逐字节一致），已存在文件会被覆盖。
 
-数据来源（与 schema.py docstring 同口径）：
-- Policy KB：**手写** 24 条款（品牌/IP、虚假宣传/功效、类目准入与标识、规避行为、
-  处置与复核五族；其中 3 条 EXPIRED 历史版测版本过滤；编号有意避开 eval mock
-  世界的 POLICY_3.2/4.1/5.2，避免跨世界引用混淆）；
-- Case KB：手写种子 26 条（demo 剧情 P_88231/M_5512 同源**改写** + 合成各案型）
-  + 程序化变体 42 条（固定 seed，随机源 ``random.Random`` 全程确定性）；
-  case_id 统一前缀 ``RAG_CASE_``（与 eval 的 EC_*/EC_V2_*/CASE_EC_* 无交集）；
-  剧情不与任何 eval 违规案一一对应。
+隔离不变量：Case KB 的 case_id 与 eval_data/v1 + v2 的全部 case 标识（eval_case_id /
+input.case_id / lineage.seed_case_id）无交集，否则非零退出 —— 防「检索到 eval GT = 作弊」。
 
-用法::
+数据：Policy KB 手写 24 条款（品牌/IP、虚假宣传、类目准入与标识、规避行为、处置与复核
+五族，3 条 EXPIRED 测版本过滤，编号避开 eval mock 世界的 POLICY_3.2/4.1/5.2）；Case KB =
+手写种子 26 条（demo 剧情 P_88231/M_5512 改写 + 合成案型）+ 程序化变体 42 条（固定 seed，
+``random.Random`` 确定性，case_id 前缀 ``RAG_CASE_``，与 eval 的 EC_*/EC_V2_*/CASE_EC_*
+无交集，剧情不与任何 eval 违规案对应）。
 
-    uv run python scripts/build_rag_corpus.py            # 生成 + 校验 + 隔离自检
-    uv run python scripts/build_rag_corpus.py --no-write  # 只自检（不覆盖文件）
-
-退出码 0 = 生成成功且自检通过；非零 = 自检失败（见输出）。
+用法：``uv run python scripts/build_rag_corpus.py``（生成 + 校验 + 隔离自检）；
+``--no-write`` 只自检不覆盖文件。退出码 0 = 生成成功且自检通过，非零 = 自检失败。
 """
 
 from __future__ import annotations
@@ -44,15 +36,13 @@ EVAL_FILES = [
     REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl",
 ]
 
-GEN_SEED = 20260908  # 程序化变体的固定 seed（勿改 —— 改了 corpus 即变）
-VARIANTS_TARGET = 42  # 程序化变体条数（确定性）
+GEN_SEED = 20260908  # 勿改 —— 改了 corpus 即变
+VARIANTS_TARGET = 42
 
-# ---------------------------------------------------------------------------
-# Policy KB —— 手写（来源与隔离声明见模块 docstring；编号避开 eval mock 世界 id）
-# ---------------------------------------------------------------------------
+# Policy KB —— 手写
 
 _POLICY_ROWS: list[dict] = [
-    # ---- 1.x 品牌 / 知识产权（POTENTIAL_IP_RISK）----
+    # ---- 1.x 品牌 / 知识产权 ----
     {
         "policy_id": "POLICY_1.1", "version": 1,
         "clause_id": "POLICY_1.1_v1_c1", "title": "仿冒商品禁售（旧版）",
@@ -109,7 +99,7 @@ _POLICY_ROWS: list[dict] = [
         "category": "服装/卫衣", "risk_type": ["POTENTIAL_IP_RISK"],
         "status": "EFFECTIVE", "effective_date": "2024-06-01",
     },
-    # ---- 2.x 虚假宣传 / 功效夸大（FALSE_CLAIM）----
+    # ---- 2.x 虚假宣传 / 功效夸大 ----
     {
         "policy_id": "POLICY_2.1", "version": 1,
         "clause_id": "POLICY_2.1_v1_c1", "title": "功效夸大禁止（旧版）",
@@ -138,7 +128,7 @@ _POLICY_ROWS: list[dict] = [
         "category": "全类目", "risk_type": ["FALSE_CLAIM", "FIELD_CONFLICT"],
         "status": "EFFECTIVE", "effective_date": "2024-02-01",
     },
-    # ---- 3.x 类目准入 / 材质标识（FIELD_CONFLICT）----
+    # ---- 3.x 类目准入 / 材质标识 ----
     {
         "policy_id": "POLICY_3.1", "version": 1,
         "clause_id": "POLICY_3.1_v1_c1", "title": "鞋类真皮标识凭证",
@@ -167,7 +157,7 @@ _POLICY_ROWS: list[dict] = [
         "category": "全类目", "risk_type": ["FIELD_CONFLICT"],
         "status": "EFFECTIVE", "effective_date": "2024-01-01",
     },
-    # ---- 4.x 规避行为（EVASION_PATTERN）----
+    # ---- 4.x 规避行为 ----
     {
         "policy_id": "POLICY_4.2", "version": 1,
         "clause_id": "POLICY_4.2_v1_c1", "title": "改标题重上架（旧版）",
@@ -227,12 +217,10 @@ _POLICY_ROWS: list[dict] = [
     },
 ]
 
-# ---------------------------------------------------------------------------
-# Case KB —— 手写种子（demo 改写 + 合成案型；不来自 eval GT）
-# ---------------------------------------------------------------------------
+# Case KB —— 手写种子（demo 改写 + 合成案型，不来自 eval GT）
 
 _CASE_SEEDS: list[dict] = [
-    # demo 剧情改写（P_88231 / M_5512 同源：无品牌复古跑鞋 + 强相似 + 脏商家；改写非照抄）
+    # demo 剧情改写（P_88231 / M_5512 同源：无品牌复古跑鞋 + 强相似 + 脏商家）
     {
         "category": "女鞋/运动鞋", "decision": "REJECT", "risk_level": "HIGH",
         "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
@@ -418,9 +406,7 @@ _CASE_SEEDS: list[dict] = [
     },
 ]
 
-# ---------------------------------------------------------------------------
-# Case KB —— 程序化变体（固定 seed；文本模板按案型组装，天然与 eval GT 剧情不同源）
-# ---------------------------------------------------------------------------
+# Case KB —— 程序化变体（固定 seed；模板按案型组装，与 eval GT 剧情不同源）
 
 _CATS = ("女鞋/运动鞋", "箱包/女包", "服装/卫衣")
 
@@ -432,7 +418,7 @@ _GOODS = {
 
 
 def _gen_variants(seed: int, target: int) -> list[dict]:
-    """程序化变体：按案型模板确定性组装（random.Random(seed) —— 跨进程可重放）。"""
+    """程序化变体：``random.Random(seed)`` 确定性组装，跨进程可重放。"""
     rng = random.Random(seed)
     rows: list[dict] = []
     pattern_idx = 0
@@ -443,7 +429,7 @@ def _gen_variants(seed: int, target: int) -> list[dict]:
         goods = _GOODS[category]
         item = goods[rng.randrange(len(goods))]
 
-        if pattern == 0:  # IP 强模仿 + 规避史
+        if pattern == 0:
             sim = round(rng.uniform(0.85, 0.97), 2)
             rem = rng.randint(3, 9)
             rel = rng.randint(3, 6)
@@ -458,7 +444,7 @@ def _gen_variants(seed: int, target: int) -> list[dict]:
                 "key_evidence": [f"image_similarity>={sim}", f"merchant_removals={rem}"],
                 "policy_refs": ["POLICY_1.4", "POLICY_1.5", "POLICY_1.6", "POLICY_4.2"],
             })
-        elif pattern == 1:  # 弱相似边界：按商家历史分 PASS/HUMAN
+        elif pattern == 1:
             sim = round(rng.uniform(0.7, 0.84), 2)
             rem = rng.randint(0, 4)
             if rem >= 3:
@@ -474,7 +460,7 @@ def _gen_variants(seed: int, target: int) -> list[dict]:
                 "key_evidence": [f"image_similarity={sim}", f"merchant_removals={rem}"],
                 "policy_refs": ["POLICY_1.4", "POLICY_1.5", "POLICY_1.6", "POLICY_5.3"],
             })
-        elif pattern == 2:  # 虚假/功效宣称（无报告）
+        elif pattern == 2:
             claim = rng.choice([
                 "增高 3cm", "抗菌 90 天", "自发热保暖", "磁疗促进循环", "防紫外线 50+",
             ])
@@ -485,7 +471,7 @@ def _gen_variants(seed: int, target: int) -> list[dict]:
                 "key_evidence": ["claim_no_report"],
                 "policy_refs": ["POLICY_2.1", "POLICY_2.2"],
             })
-        elif pattern == 3:  # 干净自有品牌（PASS）
+        elif pattern == 3:
             summary = f"自有品牌{item}，无相似外观、无风险词、无规避史，商家信用良好，正常放行"
             rows.append({
                 "category": category, "decision": "PASS", "risk_level": "NONE",
@@ -493,7 +479,7 @@ def _gen_variants(seed: int, target: int) -> list[dict]:
                 "key_evidence": ["image_similarity=0.0", "merchant_clean"],
                 "policy_refs": [],
             })
-        else:  # 纯规避（商品干净）
+        else:
             rem = rng.randint(3, 7)
             summary = f"{item}曾因轻微违规被下架，商家 {rem} 次改标题/换图重上架，实质商品未变，判定系统性规避"
             rows.append({
@@ -505,9 +491,7 @@ def _gen_variants(seed: int, target: int) -> list[dict]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # 装配 + 自检
-# ---------------------------------------------------------------------------
 
 
 def _finalize_cases(curated: list[dict], variants: list[dict]) -> list[dict]:
@@ -525,7 +509,7 @@ def _finalize_cases(curated: list[dict], variants: list[dict]) -> list[dict]:
 
 
 def _eval_case_ids() -> set[str]:
-    """eval_data/v1 + v2 全部 case 标识（红线 R-4 自检用）。"""
+    """eval_data/v1 + v2 全部 case 标识（隔离自检用）。"""
     ids: set[str] = set()
     for path in EVAL_FILES:
         if not path.exists():
@@ -601,11 +585,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     policy_env, case_env = build()
 
-    # 1) schema 强校验（Pydantic 信封模型）
+    # schema 强校验（Pydantic 信封模型）
     PolicyCorpus.model_validate(policy_env)
     CaseCorpus.model_validate(case_env)
 
-    # 2) 隔离自检（红线 R-4）
+    # 隔离自检
     case_ids = {r["case_id"] for r in case_env["cases"]}
     ok, overlap = _isolation_check(case_ids)
 

@@ -1,18 +1,13 @@
-"""RAG MVP 测试（tests/test_rag.py）—— M1~M4 全链路验收（rag-implementation-plan.md §6）。
+"""RAG 检索层验收测试：corpus 完整性 / 命中 / 过滤 / 三模式 / 确定性 / 装配 / 评测。
 
-覆盖（任务书口径）：
-1. 数据完整性：Policy KB / Case KB 校验通过、规模区间、≥2 EXPIRED；
-   **隔离红线（R-4）**：Case KB case_id 与 eval_data/v1 + v2 全部 case 标识无交集
-   （脚本自检 + 本测试双重断言，防评测作弊）；
-2. 检索命中：验收 §6.1/§6.2 —— policy/case 关键 query 命中目标条款/先例；
-3. 版本过滤：effective_only=True 不含 EXPIRED / False 含；
-4. 元数据过滤：category（含 全类目 匹配语义）与 risk_type 过滤生效；
-5. 三模式可切换 + hybrid 融合权重单测（构造两极值验证权重生效，R-6）；
-6. 确定性：同 corpus+query 两次检索一致；HashEmbedder 同输入同输出、维度固定；
-7. build_tools("memory") 行为不变（抽查；rag 注入点抽查）；
-8. RAG 世界评测可跑通；默认 InMemory 回归不受影响（agent 决策序列 vs 基线一致）。
+覆盖：Policy KB 与 Case KB 规模与唯一性校验、≥2 条 EXPIRED；**隔离红线**：Case KB 的
+case_id 与 eval_data v1+v2 全部 case 标识（含 InMemory 种子先例）无交集，防评测作弊；
+关键 query 命中目标条款/先例；``effective_only`` 与 category（含「全类目」匹配语义）/
+risk_type 过滤；bm25/vector/hybrid 三模式可切换与 hybrid 融合权重；同 corpus+query
+两次检索一致、HashEmbedder 同输入同输出且维度固定；``build_tools`` 的 memory 默认
+不变与 rag 注入点；RAG 世界评测可跑通且默认 InMemory 回归不破。
 
-约定与现有 tests 一致：确定性、无网络、无真 LLM、不写评测数据目录。
+确定性、无网络、无真 LLM、不写评测数据目录。
 """
 
 from __future__ import annotations
@@ -70,11 +65,6 @@ def _eval_case_ids() -> set[str]:
     return ids
 
 
-# ---------------------------------------------------------------------------
-# 1) 数据完整性 + 隔离红线（R-4）
-# ---------------------------------------------------------------------------
-
-
 def test_corpus_data_integrity() -> None:
     policies, pmeta = load_policies()
     cases, cmeta = load_cases()
@@ -95,7 +85,7 @@ def test_corpus_data_integrity() -> None:
 
 
 def test_case_kb_isolated_from_eval_gt() -> None:
-    """红线 R-4：Case KB 与 eval GT 严格隔离（防检索到 GT = 评测作弊）。"""
+    """Case KB 与 eval GT 严格隔离（防检索到 GT = 评测作弊）。"""
     cases, _ = load_cases()
     kb_ids = {c.case_id for c in cases}
     eval_ids = _eval_case_ids()
@@ -104,11 +94,6 @@ def test_case_kb_isolated_from_eval_gt() -> None:
     assert not overlap, f"Case KB 与 eval GT case_id 有交集（红线违反）: {sorted(overlap)[:10]}"
     # InMemory 种子先例 id 亦不得混入（CASE_1832/0911/2033/2120 等）
     assert kb_ids.isdisjoint({r["case_id"] for r in EVAL_PRECEDENTS})
-
-
-# ---------------------------------------------------------------------------
-# 2) 检索命中（验收 §6.1 / §6.2）
-# ---------------------------------------------------------------------------
 
 
 async def test_policy_retrieval_hits_ip_clause() -> None:
@@ -145,11 +130,6 @@ async def test_case_retrieval_hits_relevant_precedent() -> None:
     assert all(0.0 <= h.retrieval_score <= 1.0 for h in hits)
 
 
-# ---------------------------------------------------------------------------
-# 3) 版本有效性过滤
-# ---------------------------------------------------------------------------
-
-
 async def test_version_filter_effective_only() -> None:
     idx = build_policy_index()
     query = "永久去皱 根治脚气 功效夸大"  # 命中 POLICY_2.1 v1(EXPIRED 旧版) 文案
@@ -162,11 +142,6 @@ async def test_version_filter_effective_only() -> None:
         "effective_only=True 不应含任何 EXPIRED"
     )
     assert not any(h.policy_id == "POLICY_2.1" and h.version == 1 for h in effective)
-
-
-# ---------------------------------------------------------------------------
-# 4) 元数据过滤（category 含 全类目 匹配语义 / risk_type）
-# ---------------------------------------------------------------------------
 
 
 async def test_category_filter_includes_full_category() -> None:
@@ -209,11 +184,6 @@ async def test_risk_type_filter() -> None:
     assert all(RiskType.POTENTIAL_IP_RISK in h.risk_type for h in c_hits)
 
 
-# ---------------------------------------------------------------------------
-# 5) 三模式可切换 + hybrid 融合单测（R-6）
-# ---------------------------------------------------------------------------
-
-
 async def test_three_modes_switchable() -> None:
     q_policy = "外观高度模仿知名品牌无授权"
     q_case = _SHOE_CASE_QUERY
@@ -243,11 +213,6 @@ def test_hybrid_fusion_weights_effective() -> None:
     # 归一化口径：等值集 → 全 1（确定性约定）
     assert normalize_minmax([2.0, 2.0]) == [1.0, 1.0]
     assert normalize_minmax([1.0, 3.0]) == [0.0, 1.0]
-
-
-# ---------------------------------------------------------------------------
-# 6) 确定性（同输入同输出 / 维度固定）
-# ---------------------------------------------------------------------------
 
 
 async def test_retrieval_deterministic() -> None:
@@ -284,10 +249,6 @@ def test_mock_hash_embedder_deterministic_and_fixed_dim() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# 7) build_tools 装配：memory 默认逐字节不变 / rag 注入点
-# ---------------------------------------------------------------------------
-
 _EXPECTED_TOOLS = [
     "ProductTool",
     "ImageAnalysisTool",
@@ -315,15 +276,8 @@ def test_build_tools_rag_injection() -> None:
     assert type(rag[5]._index).__name__ == "RagPolicyIndex"
     # 其余 4 工具不受影响（事实世界仍 InMemory）
     assert type(rag[0]._repo).__name__ == "InMemoryProductRepository"
-    # rag 工具经 RAG 索引检索（query 参与匹配）
     assert isinstance(rag[5]._index, RagPolicyIndex)
-    # 工具可正常构造（延迟 import 无循环）
     assert rag[4].name == "CaseSearchTool" and rag[5].name == "PolicySearchTool"
-
-
-# ---------------------------------------------------------------------------
-# 8) RAG 世界评测可跑通；默认 InMemory 回归不受影响
-# ---------------------------------------------------------------------------
 
 
 async def test_rag_world_eval_runs_and_default_regression_intact() -> None:

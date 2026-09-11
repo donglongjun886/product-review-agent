@@ -1,32 +1,21 @@
-"""run_evaluation.py —— Evaluation Phase 1 三方案对比跑分入口。
+"""Evaluation 三方案（rule / single_call_llm / agent）对比跑分入口。
 
-用法::
+``--data`` 指定评测集（默认 v1）、``--schemes`` 选方案子集（默认全三方案）、``--smoke`` /
+``--smoke-limit`` 跑确定性子集、``--abstain-threshold`` 改 Single-call REJECT 候选转人工的
+置信门槛（默认 0.7）。全链路确定性：无真 LLM / 无网络 / 无随机；退出码 0 = 全部 case 跑通
+（任何 scheme 抛异常 → 非零退出并打印 traceback，供 CI 捕获）。
 
-    uv run python scripts/run_evaluation.py                 # 默认全三方案 + 全量数据
-    uv run python scripts/run_evaluation.py --smoke         # 冒烟（≤10 条）
-    uv run python scripts/run_evaluation.py --schemes rule agent
-    uv run python scripts/run_evaluation.py --data <path> --smoke-limit 5
-    uv run python scripts/run_evaluation.py --experiment prompt-v2 --langfuse
-    uv run python scripts/run_evaluation.py --tag round:1 --tag llm:scripted --langfuse
+观测开关（只影响观测，不改判定与 metrics）：
 
-全链路确定性：无真 LLM / 无网络 / 无随机；退出码 0 = 全部 case 跑通（任何 scheme
-抛异常 → 非零退出并打印 traceback，供 CI 捕获）。
+- ``--experiment NAME``：实验版本名 → ``PRA_LANGFUSE_EXPERIMENT``，是评测 root trace 的
+  ``version`` 与 trace_id 派生键，必须在跑评测之前设好；缺省取该环境变量，再缺省 ``baseline``；
+- ``--session ID``：``PRA_LANGFUSE_SESSION``，缺省自动 ``eval-<UTC>-<4hex>``，整轮 trace 聚成
+  一个 session，UI 按 session 过滤即「这一轮评测的全部案件」；
+- ``--tag TAG``（可重复）：额外标签，仅打印在最终报告行，不进 EvalContext / 不改 metrics；
+- ``--langfuse``：显式开启观测 —— 无凭据 / SDK 未装时只提示并照常跑完（绝不因观测失败中断
+  评测），生效时跑前打印 experiment/session，收尾 ``flush_tracer()`` 一次。
 
-**观测开关（docs/09 §5；不改判定、不改 metrics）**：
-
-- ``--experiment NAME``：实验版本名 —— 写进 ``PRA_LANGFUSE_EXPERIMENT``（评测 root trace
-  的 ``version`` 与 trace_id 派生键，须在跑评测**之前**设好），缺省取该环境变量、
-  再缺省 ``baseline``；
-- ``--session ID``：会话分组（``PRA_LANGFUSE_SESSION``），缺省自动 ``eval-<UTC>-<4hex>``
-  → 整轮 trace 聚成一个 session，UI 按 session 过滤即"这一轮评测的全部案件"；
-- ``--tag TAG``（可重复）：额外标签，**仅打印在最终报告行**（不进 EvalContext / 不改 metrics）；
-- ``--langfuse``：显式开启观测的意图声明 —— 无凭据 / SDK 未装时只提示并照常跑完
-  （**绝不因观测失败中断评测**）；观测确实生效时跑前打印 experiment/session，收尾
-  ``flush_tracer()`` 一次。**所有观测输出都挂在该开关下**：不传它时 stdout 与改动前
-  逐字节一致（即便 `.env` 已配凭据，埋点仍按 S3/S4 既有语义生效，本 CLI 只是不宣告）。
-
-**默认路径不变**：不加新参数时 stdout 与加这些参数之前**逐字节一致**（NullTracer 全程
-no-op、零网络）。
+不传 ``--langfuse`` 时 stdout 与加这些参数之前逐字节一致（NullTracer 全程 no-op、零网络）。
 """
 
 from __future__ import annotations
@@ -118,12 +107,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # 观测开关辅助（只读环境变量 / 只打印；绝不参与判定与 metrics）
 # --------------------------------------------------------------------------------------
 
-
 def _configure_experiment(name: str | None) -> str:
     """把实验版本名写进 ``PRA_LANGFUSE_EXPERIMENT`` 并返回生效值。
 
-    ``AgentScheme`` 在构造 trace_id 时读该环境变量（``uuid5(experiment:case:agent)``），
-    因此必须在跑评测**之前**设好。缺省取环境变量，再缺省 ``baseline``。
+    ``AgentScheme`` 构造 trace_id 时读该环境变量（``uuid5(experiment:case:agent)``），
+    因此必须在跑评测之前设好。缺省取环境变量，再缺省 ``baseline``。
     """
     if name is None:
         current = (os.environ.get("PRA_LANGFUSE_EXPERIMENT") or "").strip()
@@ -137,8 +125,8 @@ def _configure_experiment(name: str | None) -> str:
 def _configure_session(name: str | None) -> str:
     """把会话 ID 写进 ``PRA_LANGFUSE_SESSION`` 并返回生效值。
 
-    未显式指定且环境变量为空 → 自动 ``eval-<UTC 时间戳>-<4 位随机>``（整轮 trace 一个
-    session）。仅影响观测关联字段，不影响判定 / metrics。
+    未显式指定且环境变量为空 → 自动 ``eval-<UTC 时间戳>-<4 位随机>``。仅影响观测关联
+    字段，不影响判定 / metrics。
     """
     resolved = (name or "").strip() or (os.environ.get("PRA_LANGFUSE_SESSION") or "").strip()
     if not resolved:
@@ -161,14 +149,12 @@ def _langfuse_host() -> str:
 def _announce_observability(
     *, want_langfuse: bool, experiment: str, session: str
 ) -> bool:
-    """跑前打印观测状态，返回"观测实际生效"与否（纯提示，不改评测行为）。
+    """跑前打印观测状态，返回「观测实际生效」与否（纯提示，不改评测行为）。
 
-    - 传了 ``--langfuse`` 且观测**确实生效** → 打印 experiment / session（``--langfuse``
-      是显式开关，一切观测输出都挂在它下面 —— 不加参数时 stdout 与改动前**逐字节一致**）；
-    - 传了 ``--langfuse`` 但未生效（无凭据 / SDK 未装 / 显式关闭）→ 打印 ``NullTracer``
-      原因 + 启用方式后**继续跑**（评测必须能跑，绝不因观测中断）；
-    - 未传 ``--langfuse`` → **不打印任何东西**（默认路径零噪音；即便 `.env` 配了凭据，
-      埋点仍按 S3/S4 既有语义生效，只是本 CLI 不额外宣告）。
+    - 传了 ``--langfuse`` 且观测生效 → 打印 experiment / session / host；
+    - 传了但未生效（无凭据 / SDK 未装 / 显式关闭）→ 打印 ``NullTracer`` 原因 + 启用
+      方式后继续跑（绝不因观测中断评测）；
+    - 未传 → 不打印任何东西（默认路径零噪音）。
     """
     if not want_langfuse:
         return False

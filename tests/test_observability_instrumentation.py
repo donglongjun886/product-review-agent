@@ -1,26 +1,14 @@
-"""S3 埋点测试 —— LLM generation（llm_shell）+ Tool span（tools_node）逐次记录。
+"""LLM generation / tool span 埋点的逐次记录测试：假 tracer 经 ``set_tracer`` 注入。
 
-用**假 tracer**（记录用的 `_FakeTracer` / `_FakeObs`，写法参考
-`tests/test_observability_tracing.py`）经 `pra.observability.tracing.set_tracer`
-注入，断言 docs/09 §3 的埋点位置与内容：
+断言 7 组行为：成功调用 → 1 个 generation（model/input/output/latency_ms）；
+schema 校验失败重试 → 2 个 generation（**最关键**：埋点在内层 ``backend.complete``
+外层，而非 ``call_structured_llm`` 外壳）；后端异常 → ``record_error`` 且
+``LLMCallOutcome`` 语义不变（attempts=2 / tokens=0）；``tools_node`` 成功与异常各记
+1 个 tool span，latency 复用审计 record 的值；无 tracer 注入 → ``NullTracer`` 行为不变；
+usage 透出（默认 None、多次尝试按键累加、litellm 提取三键、scripted 桩不伪造）。
 
-1. 一次成功的 ``call_structured_llm`` → **1 个 generation**（model / input / output /
-   latency_ms）；
-2. **schema 校验失败重试 → 2 个 generation**（本阶段最关键断言：埋点在内层
-   ``backend.complete`` 外层，而不是 ``call_structured_llm`` 外壳）；
-3. 后端抛异常 → 该 generation 收到 ``record_error``，且 ``LLMCallOutcome`` 与既有
-   行为一致（attempts=2 / error 文本 / tokens=0）；
-4. ``tools_node`` 成功调用 → 1 个 tool span（input=args、output 含 evidence、
-   metadata.latency_ms 复用既有值）；
-5. 工具异常（infra 重试后仍失败）→ tool span 收到 ``record_error``（原有 error record
-   与 warn failure 逻辑不变）；
-6. 默认路径（无 tracer 注入）→ ``NullTracer``，两条链路跑通且行为不变；
-7. token usage 透出：``LLMResponse.usage`` / ``LLMCallOutcome.usage`` 默认 None、
-   多次尝试按键累加、litellm 后端从假 usage 对象提取三键（**不联网**）、scripted 桩
-   usage=None（**不伪造**）。
-
-隔离：每个用到 tracer 的测试都经 ``_fake_tracer`` fixture 注入并在结束时
-``set_tracer(None)`` 复原；LLM 后端注入由 tests/conftest.py 的 autouse fixture 还原。
+隔离：用到 tracer 的测试经 ``_fake_tracer`` 注入并在结束时 ``set_tracer(None)``
+复原；LLM 后端由 tests/conftest.py 的 autouse fixture 还原。全程不联网。
 """
 
 from __future__ import annotations
@@ -56,14 +44,7 @@ _MESSAGES = [{"role": "system", "content": "sys"}, {"role": "user", "content": "
 _SCHEMA_BAD = '{"next_action": "SOMETHING_ELSE", "tools": []}'
 
 
-# --------------------------------------------------------------------------------------
-# 假 tracer / 假 observation（只记录，不联网、不 import SDK）
-# --------------------------------------------------------------------------------------
-
-
 class _FakeObs:
-    """假 observation：分别记录 update / record_error 调用。"""
-
     def __init__(self) -> None:
         self.updates: list[dict[str, Any]] = []
         self.errors: list[BaseException] = []
@@ -89,7 +70,7 @@ class _FakeCM:
 
 
 class _FakeTracer:
-    """假 tracer：记录每次观测的创建参数 + 对应 observation。"""
+    """假 tracer：记录每次观测的创建参数 + 对应 observation（只记录，不联网、不 import SDK）。"""
 
     enabled = True
 
@@ -108,8 +89,7 @@ class _FakeTracer:
         model_parameters: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> _FakeCM:
-        # input 快照：llm_shell 的 work_messages 是同一个 list 对象（重试时会被追加
-        # 修正提示），这里存创建时刻的内容 —— 与"本次真实请求发出去的内容"一致。
+        # input 快照：``work_messages`` 是同一个 list（重试会追加修正提示），存创建时刻的内容。
         snapshot = list(input) if isinstance(input, list) else input
         self.generations.append(
             {
@@ -156,9 +136,7 @@ def fake_tracer() -> Any:
         T.set_tracer(None)
 
 
-# --------------------------------------------------------------------------------------
 # 假 Tool（协议：name/description/args_model/call；tools_node 另需 to_evidence）
-# --------------------------------------------------------------------------------------
 
 
 class _EchoArgs(ToolArgs):
@@ -213,11 +191,6 @@ def _tools_state(*, tool: str = "EchoTool", args: dict | None = None) -> dict:
 _CONFIG = {"configurable": {"thread_id": "run-obs-test"}}
 
 
-# --------------------------------------------------------------------------------------
-# 1-3. LLM generation 埋点
-# --------------------------------------------------------------------------------------
-
-
 async def test_success_records_one_generation_with_model_input_output_latency(fake_tracer) -> None:
     """一次成功调用 → 1 个 generation：name=llm.{node}、model=后端自报、input/output/latency。"""
     backend = SequenceBackend(contents=[plan_conclude_json()], tokens=5)
@@ -227,9 +200,7 @@ async def test_success_records_one_generation_with_model_input_output_latency(fa
         OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
     )
 
-    # 业务行为不变
     assert outcome.model is not None and outcome.attempts == 1 and outcome.error is None
-    # 观测：恰好 1 个 generation
     assert len(fake_tracer.generations) == 1
     gen = fake_tracer.generations[0]
     assert gen["name"] == "llm.plan"
@@ -262,14 +233,12 @@ async def test_schema_retry_records_two_generations(fake_tracer) -> None:
         OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
     )
 
-    # 业务行为不变：重试 1 次后成功
     assert outcome.model is not None
     assert outcome.attempts == 2
     assert outcome.error is None
     assert outcome.tokens == 10
     assert len(backend.calls) == 2  # 两次真实后端调用
 
-    # 观测：两次真实调用 = 两个 generation（关键断言）
     assert len(fake_tracer.generations) == 2
     assert [g["metadata"]["attempt"] for g in fake_tracer.generations] == [1, 2]
     assert [g["name"] for g in fake_tracer.generations] == ["llm.plan", "llm.plan"]
@@ -279,7 +248,6 @@ async def test_schema_retry_records_two_generations(fake_tracer) -> None:
     # 第 1 次（非法输出）也如实记录：output = 后端原始返回文本
     assert obs_first.updates[0]["output"] == _SCHEMA_BAD
     assert obs_first.updates[0]["metadata"]["attempt"] == 1
-    # 第 2 次（修正后）记录合法输出
     assert obs_second.updates[0]["output"] == plan_conclude_json()
     assert obs_second.updates[0]["metadata"]["attempt"] == 2
     # schema 校验失败不是 transport 失败 → 不该有 record_error
@@ -307,7 +275,6 @@ async def test_backend_exception_records_error_and_outcome_unchanged(fake_tracer
     assert outcome.error == "injected backend failure"
     assert outcome.tokens == 0
 
-    # 观测：两次真实调用各一条 generation，均 record_error、均无 output
     assert len(fake_tracer.generations) == 2
     for obs in fake_tracer.generation_obs:
         assert len(obs.errors) == 1
@@ -331,11 +298,6 @@ async def test_transport_retry_then_success_records_two_generations(fake_tracer)
     assert fake_tracer.generation_obs[1].updates[0]["output"] == plan_conclude_json()
 
 
-# --------------------------------------------------------------------------------------
-# 4-5. Tool span 埋点
-# --------------------------------------------------------------------------------------
-
-
 async def test_tools_node_success_records_one_tool_span(fake_tracer) -> None:
     """一次成功工具调用 → 1 个 tool span（input=args、output 含 evidence、latency 复用）。"""
     tool = _EchoTool()
@@ -343,7 +305,6 @@ async def test_tools_node_success_records_one_tool_span(fake_tracer) -> None:
 
     out = await node(_tools_state(), _CONFIG)
 
-    # 业务行为不变
     record = out["tool_call_history"][0]
     assert record["status"] == "ok"
     assert record["evidence_added"] == ["PRODUCT_FACT brand=null"]
@@ -380,7 +341,6 @@ async def test_tools_node_exception_records_error_on_tool_span(fake_tracer) -> N
     assert out["failures"][0]["severity"] == "warn"  # SEV_WARN 常量值
     assert out["budget"].tool_calls == 1
 
-    # 观测：一次逻辑调用 = 1 个 tool span，收到 record_error
     assert len(fake_tracer.tool_spans) == 1
     obs = fake_tracer.tool_obs[0]
     assert len(obs.errors) == 1
@@ -422,11 +382,6 @@ async def test_tools_node_multiple_calls_record_one_span_each(fake_tracer) -> No
     assert [s["metadata"]["seq"] for s in fake_tracer.tool_spans] == [1, 2]
 
 
-# --------------------------------------------------------------------------------------
-# 6. 默认路径（无 tracer 注入）—— NullTracer，行为不变
-# --------------------------------------------------------------------------------------
-
-
 async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) -> None:
     """无 tracer 注入 → get_tracer() 是 NullTracer；两条链路跑通且行为不变。"""
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
@@ -436,7 +391,6 @@ async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) 
     try:
         assert isinstance(T.get_tracer(), T.NullTracer)
 
-        # LLM 链路（默认 NullTracer + 假后端）
         backend = SequenceBackend(contents=[plan_conclude_json()], tokens=3)
         set_llm_backend(backend)
         outcome = await call_structured_llm(
@@ -445,7 +399,6 @@ async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) 
         assert outcome.model is not None and outcome.attempts == 1
         assert outcome.tokens == 3
 
-        # 工具链路（默认 NullTracer）
         tool = _EchoTool()
         out = await make_tools_node([tool])(_tools_state(), _CONFIG)
         assert tool.calls == 1
@@ -456,11 +409,6 @@ async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) 
         assert "langfuse" not in sys.modules
     finally:
         T.set_tracer(None)
-
-
-# --------------------------------------------------------------------------------------
-# 7. token usage 透出（向后兼容的可选字段）
-# --------------------------------------------------------------------------------------
 
 
 def test_usage_fields_default_to_none() -> None:

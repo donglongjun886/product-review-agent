@@ -1,66 +1,40 @@
-"""plan 输出确定性去重（01 §4.3，防重复调用死循环的兜底之一）。
+"""plan 输出确定性去重：不靠 prompt 承诺、靠 Python 兜底，防重复调用死循环。
 
-plan（LLM）可能因重试/上下文不清重复建议**已执行成功**的工具调用；不靠 prompt
-承诺，靠确定性 Python 兜底（01 §4.3）：``dedup_pending`` 在 tools_node 消费
-``pending_tool_calls`` 前清洗 ——
+plan（LLM）可能因重试/上下文不清重复建议**已执行成功**的调用。``dedup_pending``
+在 tools_node 消费 ``pending_tool_calls`` 前清洗：
 
-- **已执行集合** = ``state["tool_call_history"]`` 中 ``status == "ok"`` 的
-  ``(tool, canonical_args(args))``；曾 ``status == "error"`` 的 (tool, args)
-  **不进**已执行集合 → 允许重试（01 §4.3：error 保留，重试 1 次窗口）；
-  ``skipped`` 状态（本 guardrail 自产）也不进已执行集合。
-- 对 planned 逐条单趟扫描，**同轮内先自去重**（同一 (tool, canonical) 保留先出现，
-  后现重复静默丢弃 —— 该 (tool, args) 的去向已由首个出现记录，不再重复产审计行）；
-  命中已执行 → 从 cleaned 剔除并**进 skipped**（保留，供审计：status="skipped",
-  reason="duplicate"，latency_ms/tokens 为 0 —— 未真实执行不记账）。
-- skipped 元素 shape 固定：
-  ``{"seq", "tool", "args", "status": "skipped", "reason": "duplicate",
-    "latency_ms": 0, "tokens": 0}``；``seq`` 从 ``len(state["tool_call_history"]) + 1``
-  起**顺延递增**（与 tools_node 的调用审计 seq 体系一致 —— 循环三保险之一
-  dedup 截断后，路由 ④ 见 pending 为空即转 decide，见 graph-mvp-contracts §6.2 /
-  01 §4.3）。实现对齐 docs/01-agent-loop.md §4.3。
-
-``canonical_args``：args 的 canonical 序列化 —— ``json.dumps(args, sort_keys=True,
-default=str)``（key 排序 + 非 JSON 原生类型按 str 规整，01 §4.3"key 排序 + 类型规整"；
-对同一参数图恒同串 → 可确定性比对）。
+- **已执行集合** = ``tool_call_history`` 中 ``status == "ok"`` 的
+  ``(tool, canonical_args(args))``；``error``（允许重试 1 次）与 ``skipped`` 不进
+  该集合。
+- planned 逐条单趟扫描，**同轮内先自去重**（同一 (tool, canonical) 保留先出现的，
+  后现的静默丢弃，不再重复产审计行）；命中已执行 → 从 cleaned 剔除并**进 skipped**
+  （未真实执行，latency_ms/tokens 为 0）。
+- skipped 元素 shape 固定为 ``{"seq", "tool", "args", "status": "skipped",
+  "reason": "duplicate", "latency_ms": 0, "tokens": 0}``；``seq`` 从
+  ``len(tool_call_history) + 1`` 起顺延递增，与 tools_node 的审计 seq 体系一致。
+  dedup 截断后 pending 为空，路由即转 decide。
 """
 
 from __future__ import annotations
 
 import json
 
-# ---------------------------------------------------------------------------
-# 参数 canonical 序列化
-# ---------------------------------------------------------------------------
-
 
 def canonical_args(args: dict) -> str:
-    """args 的 canonical 序列化指纹：key 排序 + 非 JSON 原生类型按 ``str`` 规整。
-
-    ``None``/空按 ``{}`` 处理，保证与历史 record 里 ``args: {}`` 可比。输入对象不变。
-    """
+    """args 的 canonical 序列化指纹：key 排序 + 非 JSON 原生类型按 ``str`` 规整。"""
     return json.dumps(args if args is not None else {}, sort_keys=True, default=str)
-
-
-# ---------------------------------------------------------------------------
-# pending_tool_calls 去重
-# ---------------------------------------------------------------------------
 
 
 def dedup_pending(state: dict, planned: list[dict]) -> tuple[list[dict], list[dict]]:
     """清洗 plan 输出（planned）→ ``(cleaned, skipped)``。
 
-    - ``cleaned``：保留先出现、且未命中已执行集合的调用（原 dict 浅拷贝、保序）——
-      tools_node 据此执行；
-    - ``skipped``：命中"已执行成功"的调用审计行（shape 见模块 docstring）——
-      已带 ``seq``，tools_node 直接并入 ``tool_call_history`` 后从其后 seq 续号。
-
-    防御：``tool_call_history`` 缺失/None 按空处理；planned 缺失/None → 空结果；
-    planned 内非 dict 元素跳过；元素缺 tool/args 按空串/{} 归一（PlanOutput 保证
-    必有，仅防御）。已 error 的 (tool, args) 不进已执行集合 → 允许重试。
+    ``cleaned`` 是未命中已执行集合的调用（原 dict 浅拷贝、保序）；``skipped`` 是命中
+    「已执行成功」的审计行（shape 见模块 docstring）。history/planned 缺失或 None 按
+    空处理，planned 内非 dict 跳过。
     """
     history = state.get("tool_call_history") if isinstance(state, dict) else None
     history = history or []
-    # 已执行集合：只认 status=="ok"（error/skipped 均不拦，error 允许重试 1 次）
+    # 只认 status=="ok"（error 允许重试 1 次、skipped 不拦）
     executed: set[tuple] = set()
     for rec in history:
         if isinstance(rec, dict) and rec.get("status") == "ok":
@@ -68,8 +42,8 @@ def dedup_pending(state: dict, planned: list[dict]) -> tuple[list[dict], list[di
 
     cleaned: list[dict] = []
     skipped: list[dict] = []
-    seen_round: set[tuple] = set()  # 同轮内已决断的 (tool, canonical) —— 自去重
-    seq = len(history) + 1  # 审计 seq 从 history 尾顺延（与 tools_node 体系一致）
+    seen_round: set[tuple] = set()  # 同轮内已决断的 (tool, canonical)
+    seq = len(history) + 1  # 审计 seq 从 history 尾顺延
 
     for call in planned or []:
         if not isinstance(call, dict):
@@ -78,10 +52,10 @@ def dedup_pending(state: dict, planned: list[dict]) -> tuple[list[dict], list[di
         raw_args = call.get("args")
         key = (tool, canonical_args(raw_args))
         if key in seen_round:
-            continue  # 同轮重复：先出现已决断，静默丢弃（不再产重复审计行）
+            continue  # 同轮重复：先出现已决断，静默丢弃
         seen_round.add(key)
         if key in executed:
-            # 已执行成功 → 不重跑，产出审计行（供"为什么没执行"回溯）
+            # 已执行成功 → 不重跑，产出审计行
             skipped.append(
                 {
                     "seq": seq,
@@ -95,6 +69,6 @@ def dedup_pending(state: dict, planned: list[dict]) -> tuple[list[dict], list[di
             )
             seq += 1
         else:
-            cleaned.append(dict(call))  # 保留（含 reason/priority 等原键；浅拷贝防别名）
+            cleaned.append(dict(call))  # 浅拷贝防别名，保留 reason/priority 等原键
 
     return cleaned, skipped

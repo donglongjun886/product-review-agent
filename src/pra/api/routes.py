@@ -1,27 +1,18 @@
-"""API 路由层 —— HTTP 接入面的端点装配（总链路 A·1「HTTP 接入」节点；00 §15 api 目录）。
+"""HTTP 路由层 —— 端点装配。
 
-端点：
-- ``POST /api/v1/reviews``：受理一次审核案件 —— 请求体即 domain ``ProductReviewCase``
-  （extra="forbid"，字段即 OpenAPI 文档，见 schemas.py 说明），调用
-  ``persist_service.process_review`` **受理即分流**：先做 Screening 三分流
-  （``pra.screening.engine.triage``）—— COMPLEX 走 ``run_and_persist`` 同步执行完整
-  调查图**并落库**；PASS/REJECT 走 ``run_screening_direct`` 规则直判**并落库**
-  （五表：review_case/review_run/review_trace/review_evidence/review_result，见
-  pra/infra/persist_service.py），随后按同构 ``ReviewRunResult`` 形状返回
-  （HTTP 200）——**HTTP 响应形状与切换前一致**（run_id + review_decision），现有
-  TestClient 断言不受影响。错误语义：
-  - 请求体不合法（缺字段/未知字段/类型错）→ FastAPI 校验层自动 422（不进本路由）；
-  - triage/图执行/落库异常 → 统一捕获转 ``HTTPException 500``：detail 为**固定人读
-    文案**（仅附异常类型短名，供排障），**绝不拼 str(exc)/堆栈** —— 防 SQLAlchemy
-    等内部异常把 SQL/表列名/绑定值片段外泄；完整异常与堆栈只进 ``logger.exception``。
-- ``GET /api/v1/health``：存活探针，返回 ``{"status": "ok"}``（负载均衡/容器健康检查用）。
+``POST /api/v1/reviews``：请求体即 domain ``ProductReviewCase``（``extra="forbid"``），经
+``persist_service.process_review`` 受理即分流 —— COMPLEX 走 ``run_and_persist`` 执行调查图并
+落库，PASS/REJECT 走 ``run_screening_direct`` 规则直判并落库（表：review_case / review_run /
+review_trace / review_evidence / review_result；直判路径无 review_trace 行），再按
+``ReviewRunResult`` 形状返回 HTTP 200。
 
-演进路径（2026-09 接线说明）：原 ``service.run_review``（纯执行、不落库）**保留**，
-供无 DB 场景 / 单测 / 未来 MQ worker 消费复用 —— 本端点已切到
-``persist_service.process_review``（triage 分流 + 执行 + 落库闭环）；MQ/worker 化后本
-路由退化为**受理口**（校验 + 投 ``product_review_request`` topic + 立即返回受理回执），
-真正执行移交给消费同一落库入口的 worker（persist_service.py docstring 演进说明）——
-届时本文件新增查询/回调端点，POST 语义与响应信封同步调整。
+错误语义：请求体不合法由 FastAPI 校验层自动 422；triage/图执行/落库异常统一转
+``HTTPException 500``，detail 为固定人读文案（仅附异常类型短名）。**绝不拼 str(exc) 或
+堆栈** —— 防 SQLAlchemy 等内部异常把 SQL/表列名/绑定值外泄；完整异常与堆栈只进
+``logger.exception``。
+
+``GET /api/v1/health`` 存活探针返回 ``{"status": "ok"}``；``service.run_review``（纯执行、
+不落库）保留供无 DB 场景与单测复用。
 """
 
 from __future__ import annotations
@@ -49,15 +40,13 @@ __all__ = ["router"]
     tags=["reviews"],
 )
 async def create_review(case: ProductReviewCase) -> ReviewRunResult:
-    """POST /api/v1/reviews —— 总链路 A·1 主端点（受理即分流 → 接入 → 落库闭环）。
+    """POST /api/v1/reviews —— 受理即分流，执行并落库后返回最终裁决。
 
-    请求体 = ``ProductReviewCase``（P_88231/M_5512 等真实案件快照）。受理后先做
-    Screening 三分流：verdict=COMPLEX → 执行调查图并落库（Agent run）；PASS/REJECT →
-    规则直判落库（SCREENING_DIRECT run，确定性终裁，不再进 Agent）。随后按原响应形状
-    返回 ``ReviewRunResult{run_id, review_decision}``（HTTP 形状不变；额外落库的
-    review_case.triage_result / review_run / result / trace / evidence 行不对 HTTP
-    暴露）。run_id 未在 body 中提供（它属运行上下文而非案件事实），由
-    ``process_review`` 各分支自动生成 uuid4 hex（Agent 路径 = LangGraph thread_id，O-6）。
+    COMPLEX 执行调查图（Agent run）；PASS/REJECT 规则直判（SCREENING_DIRECT run，
+    确定性终裁，不再进 Agent）。响应固定为 ``ReviewRunResult{run_id,
+    review_decision}``；额外落库的 review_case.triage_result 与 run/result/trace/
+    evidence 行不对 HTTP 暴露。run_id 属运行上下文而非案件事实，请求体不提供，由
+    ``process_review`` 各分支生成 uuid4 hex（Agent 路径 = LangGraph thread_id）。
     """
     try:
         summary = await process_review(case)

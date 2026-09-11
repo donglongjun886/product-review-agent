@@ -1,47 +1,28 @@
-"""run_rag_phase2_demo.py —— RAG Phase 2 Demo（BGE 真语义 Embedding + Qdrant 进程内向量库）。
+"""RAG Phase 2 演示（BGE 真语义 Embedding + Qdrant 进程内向量库）。
 
-Phase 2 验证脚本（docs/06-rag-phase2-qdrant-bge.md §4 验收 / §5 边界）：把 MVP 的
-确定性 mock embedding（词面 hash，非语义）换成 ``BgeEmbedder``（BAAI/bge-small-zh-v1.5
-@ fastembed/onnxruntime，dim 512）+ ``QdrantPolicyIndex/QdrantCaseIndex``（qdrant-client
-进程内模式），回答 docs/06 §0 的唯一增量问题：替换缝零改动上层？词面检索不到的
-同义改写 query 语义检索能否命中？BM25 / Vector / Hybrid 三路真实对比如何（不预设）。
+把 MVP 的确定性 mock embedding（词面 hash，非语义）换成 ``BgeEmbedder``
+（BAAI/bge-small-zh-v1.5 @ fastembed/onnxruntime，dim 512）+
+``QdrantPolicyIndex/QdrantCaseIndex``（qdrant-client 进程内模式），验证替换缝零改动上层、
+词面检索不到的同义改写 query 语义检索能否命中。**Qdrant 容器已卸（不再部署），本脚本保留作
+历史演示**；默认检索路径与此无关。
 
-用法::
+用法：``export HF_ENDPOINT=https://hf-mirror.com`` 与
+``export PRA_RAG2_MODEL_CACHE=<fastembed 缓存根目录>``（含 fast-*/ 或 models--*/onnx）后跑
+``python scripts/run_rag_phase2_demo.py``；``--top-k`` 换 Top-K（默认 3）、``--mode`` 只跑
+单一模式、``--location :memory:`` 用 qdrant 进程内（默认）、``--no-probe`` 跳过 Part C、
+``--model-cache <dir>`` 显式给缓存。模型未缓存 / 未装依赖时优雅退出并提示
+``uv sync --extra rag``（含 fastembed / qdrant-client）。
 
-    # 模型已缓存（离线）时直接跑：
-    export HF_ENDPOINT=https://hf-mirror.com
-    export PRA_RAG2_MODEL_CACHE=<fastembed 缓存根目录>     # 含 fast-*/ 或 models--*/onnx
-    python scripts/run_rag_phase2_demo.py                  # 默认：三模式并排 + Part A~D
-    python scripts/run_rag_phase2_demo.py --top-k 5        # 换 Top-K（默认 3）
-    python scripts/run_rag_phase2_demo.py --mode bm25      # 只看单一模式
-    python scripts/run_rag_phase2_demo.py --location :memory:   # qdrant 进程内（默认）
-    python scripts/run_rag_phase2_demo.py --no-probe       # 跳过 Part C probe
-    python scripts/run_rag_phase2_demo.py --model-cache <dir>   # 显式给缓存（缺省读 env）
+展示内容：Part A = 固定 query 集 × 三模式 × Top-K 并排（政策/先例各 4 条）；Part B = 语义 vs
+词面（为 2 政策条款 + 2 先例各写一条同义改写 query，用 ``pra.rag.bm25.tokenize`` 程序化验证
+与目标文本的 token 交集，看目标是否进 Top-K）；Part C = 人工标注 probe 三路 Recall@3
+（keyword 与同义改写各半，不预设 Hybrid 最优）；Part D = 经 PolicySearchTool / CaseSearchTool
+注入 qdrant 索引打印证据 type / ref_id / weight（tools 层零改动验证）。
 
-    # 模型未缓存/未装依赖时优雅退出，并提示：
-    #   uv sync --extra rag          （需含 fastembed / qdrant-client）
-    #   export HF_ENDPOINT=https://hf-mirror.com 后首次联网下载 onnx 模型
-
-展示内容：
-- Part A：run_rag_demo 固定 query 集 × 三模式 × Top-K 并排（政策/先例各 4 条，抄自
-  run_rag_demo 的验收 query 集，不 import 脚本）；
-- Part B（核心叙事）：语义 vs 词面 —— 为 2 个政策条款 + 2 个先例各写一条**同义改写**
-  query（与目标检索文本几乎零共享 token，用 ``pra.rag.bm25.tokenize`` 程序化验证交集），
-  对比 bm25-only / vector-only / hybrid 三路下目标是否进 Top-K（进 = 命中）；
-- Part C：Policy KB / Case KB 各 ~8 条人工标注 expected ids 的 probe query（覆盖
-  品牌仿冒 / 规避词 / 虚假宣传 / 材质 / 类目准入 / 商家史 / 规避等主题，keyword 与
-  同义改写各半），程序化算 bm25 / vector / hybrid 三路 Recall@3 —— 不预设 Hybrid 最优；
-- Part D：经 PolicySearchTool / CaseSearchTool 注入 qdrant 索引跑 1 条 query，打印
-  证据 type / ref_id / weight（与 MVP 同引用格式，tools 层零改动验证）。
-
-确定性口径（docs/06 §2.2 / §5）：
-- 同进程内 BGE 同输入 ``embed`` 逐位相等；跨进程/平台浮点尾差不入逐字节契约。
-- qdrant 默认 ``:memory:`` 每次运行全新实例；打分/排序 tie-break 在 Python 侧
-  （6 位取整 → 分降序、corpus 原序 idx 升序），不信任 qdrant 同分点顺序。
-- 固定 corpus / query / probe，两次运行输出应逐行一致（脚本以两次运行 diff 自检）。
-- 结论边界：单模型（bge-small-zh-v1.5）× 单语料（24/67 条）的定向演示与 probe 观测，
-  非大规模评测；qdrant 进程内非分布式（远端 server 未实测）；确定性回归恒以默认
-  mock 路径（backend="local"）为准。
+确定性：同进程内 BGE 同输入 ``embed`` 逐位相等（跨进程/平台浮点尾差不入逐字节契约）；qdrant
+默认 ``:memory:`` 每次运行全新实例；打分/排序 tie-break 在 Python 侧（6 位取整 → 分降序、
+corpus 原序 idx 升序），不信任 qdrant 同分点顺序；固定 corpus/query/probe，两次运行输出应逐行
+一致。确定性回归恒以默认 mock 路径（``backend="local"``）为准。
 """
 
 from __future__ import annotations
@@ -76,25 +57,24 @@ CACHE_HINT = "https://hf-mirror.com"
 # 固定 query / 目标 / probe 数据（全手工标注；确定性数据不随运行变化）
 # ---------------------------------------------------------------------------
 
-# Part A：与 run_rag_demo.py 的验收 query 集一致（抄写内容，不 import 脚本）。
+# Part A：与 run_rag_demo.py 的 query 集一致（抄写内容，不 import 脚本）。
 _POLICY_QUERIES = [
-    "外观高度模仿知名品牌，无授权",  # 验收 §6.1：IP 条款命中
+    "外观高度模仿知名品牌，无授权",  # 期望命中 IP 条款
     "标题含复刻高仿原单 仿冒来源词",
     "无依据功效夸大 增高磁疗 虚假宣传",
     "改标题重上架规避审核 商家多次",
 ]
 
 _CASE_QUERIES = [
-    "无品牌 + 高相似 + 商家多次上架",  # 验收 §6.2：对应先例命中
+    "无品牌 + 高相似 + 商家多次上架",  # 期望命中对应先例
     "外观高度模仿品牌 换图规避重上架",
     "功效宣传无检测报告 虚假宣称",
     "材质标真皮实为PU 字段冲突",
 ]
 
 # Part B：语义 vs 词面 定向目标（2 条款 + 2 先例）。
-# 每条目标配一条**同义改写** query：改写用词刻意避开目标检索文本的高信号词，使
-# bm25（词面 bigram）漏检；语义命中由 BGE 生效与否决定 —— 交集用 bm25.tokenize
-# 程序化验证并打印，不依赖人工断言。
+# 每条目标配一条同义改写 query：用词刻意避开目标文本的高信号词，使 bm25（词面
+# bigram）漏检；语义命中由 BGE 生效与否决定 —— 交集用 bm25.tokenize 程序化验证。
 _POLICY_SEMANTIC_TARGETS = [
     {
         "clause_id": "POLICY_1.4_v1_c1",
@@ -125,9 +105,8 @@ _CASE_SEMANTIC_TARGETS = [
     },
 ]
 
-# Part C：probe 三路 Recall@3 —— 每条 query 人工标注应命中（expected）1~2 个 id。
-# tag: kw=词面友好（BM25 应命中）；para=同义改写（需语义；BM25 大概率漏）—— 混编避免
-# 单一口径给 Hybrid 注水，最终数字如实呈现不预设。
+# Part C：probe 三路 Recall@3 —— 每条 query 人工标注应命中的 expected id（1~2 个）。
+# tag: kw = 词面友好（BM25 应命中）；para = 同义改写（需语义，BM25 大概率漏）。
 _POLICY_PROBES = [
     {
         "query": "标题带“原单”“复刻”“高仿”“A货”等暗示仿冒来源的词",
@@ -249,7 +228,7 @@ def _clip_long(text: str, n: int = 84) -> str:
 
 
 def _id_of(hit) -> str:
-    """policy 命中取 clause_id；case 命中取 case_id（两类 hit 的 id 属性名不同）。"""
+    """policy 命中取 clause_id；case 命中取 case_id。"""
     return hit.clause_id if hasattr(hit, "clause_id") else hit.case_id
 
 
@@ -263,7 +242,7 @@ def _mode_tag(mode: str) -> str:
 
 
 class _IndexPool:
-    """缓存 (kind, mode) → qdrant 索引；全部索引共享同一个 BgeEmbedder。"""
+    """缓存 (kind, mode) → qdrant 索引；全部共享同一个 BgeEmbedder。"""
 
     def __init__(self, embedder: BgeEmbedder, location: str) -> None:
         self._embedder = embedder
@@ -284,7 +263,7 @@ class _IndexPool:
 
 
 async def _search(index: object, kind: str, query: str, top_k: int) -> list:
-    """统一检索入口：policy 只查生效条款、无元数据过滤；case 无过滤。"""
+    """统一检索入口：policy 只查生效条款；case 无过滤。"""
     if kind == "policy":
         return await index.search(  # type: ignore[union-attr]
             query, PolicySearchFilters(), top_k=top_k, effective_only=True
@@ -413,7 +392,7 @@ async def _part_c(
     for mode in modes:
         pct = 100.0 * retrieved[mode] / total_exp if total_exp else 0.0
         print(f"    {_mode_tag(mode)} Recall@{top_k} = {retrieved[mode]}/{total_exp} ({pct:.1f}%)")
-    # 如实解读（不预设）：打印数字间的相对关系
+    # 如实解读：只打印数字间的相对关系，不判定最优
     vals = {m: retrieved[m] for m in modes}
     print(f"  → 解读（如实，不预设）: "
           f"bm25={vals['bm25']} vector={vals['vector']} hybrid={vals['hybrid']} "
@@ -422,7 +401,7 @@ async def _part_c(
 
 
 async def _part_d(pool: _IndexPool) -> None:
-    """真实 Tool 注入 qdrant 索引 → Evidence 引用（与 MVP 同格式，验证 tools 层零改动）。"""
+    """真实 Tool 注入 qdrant 索引 → Evidence 引用（与 MVP 同格式）。"""
     print("\n▶ Part D 证据引用（PolicySearchTool / CaseSearchTool 注入 qdrant 索引 → Evidence）")
     ctx = ToolContext(run_id="rag-phase2-demo", case_id="DEMO_RAG_PH2_0001", budget=Budget())
     policy_tool = PolicySearchTool(index=pool.get("policy", "hybrid"))  # type: ignore[arg-type]
@@ -440,7 +419,7 @@ async def _part_d(pool: _IndexPool) -> None:
 
 
 def _print_boundaries() -> None:
-    print("\n▶ 结论边界（docs/06-rag-phase2-qdrant-bge.md §5 口径，如实标注勿当能力承诺）")
+    print("\n▶ 结论边界（如实标注，勿当能力承诺）")
     print("  - 语义质量 = 单模型（BAAI/bge-small-zh-v1.5）× 单语料（Policy 24 条 / Case 67 条）的")
     print("    定向演示与 probe 观测，非大规模评测；换模型/语料结果会变。")
     print("  - Qdrant 进程内模式（:memory:）= 真 Qdrant API 但非分布式部署；远端 server 未实测")
@@ -466,7 +445,7 @@ def _resolve_model_cache(model_cache: str | None) -> str:
 
 
 def _ensure_model_ready(cache_dir: str) -> BgeEmbedder:
-    """模型就绪预检：fastembed 可 import + 磁盘缓存命中。未就绪 → 带指引退出（绝不静默回退 mock）。"""
+    """模型就绪预检：fastembed 可 import + 磁盘缓存命中；未就绪则带指引退出。"""
     embedder = BgeEmbedder(cache_dir=cache_dir)
     if not embedder.available():
         print(
@@ -491,7 +470,7 @@ def _ensure_model_ready(cache_dir: str) -> BgeEmbedder:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="RAG Phase 2 Demo：BGE 真语义 Embedding + Qdrant 进程内向量库（docs/06）"
+        description="RAG Phase 2 Demo：BGE 真语义 Embedding + Qdrant 进程内向量库（遗留演示；向量库已换 ChromaDB）"
     )
     parser.add_argument("--top-k", type=int, default=3, help="每路 Top-K（默认 3）")
     parser.add_argument(

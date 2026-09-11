@@ -1,4 +1,4 @@
-"""run_rag_demo.py —— RAG 检索 Demo（真实 Policy/Case KB · 三模式并排）。
+"""RAG 检索 Demo（真实 Policy/Case KB · 三模式并排）。
 
 用法::
 
@@ -6,12 +6,10 @@
     uv run python scripts/run_rag_demo.py --query "..."   # 追加自定义 query
     uv run python scripts/run_rag_demo.py --top-k 5
 
-展示内容：
-1. 固定 query 集在 BM25 / Vector / Hybrid 三模式下的 Policy / Case Top-K 命中
-   （mode 可切换，R-6：不预设 Hybrid 最优 —— 报告如实并排，由 Evaluation 实验回答）；
-2. 经真实 Tool（PolicySearchTool / CaseSearchTool 注入 RAG 索引）检索后生成的
-   证据引用（POLICY_REF weight=0.9 / ref_id=clause_id；CASE_PRECEDENT
-   weight=retrieval_score / ref_id=case_id —— 与 InMemory 世界同一引用格式）。
+展示固定 query 集在 BM25 / Vector / Hybrid 三模式下的 Policy / Case Top-K 命中（并排如实
+展示，不预设 Hybrid 最优），以及经真实 Tool（PolicySearchTool / CaseSearchTool 注入 RAG
+索引）检索后的证据引用：``POLICY_REF`` weight=0.9 / ref_id=clause_id，``CASE_PRECEDENT``
+weight=retrieval_score / ref_id=case_id —— 与 InMemory 世界同一引用格式。
 
 全链路确定性：无网络、无真 LLM、固定 corpus + mock embedding；同输入可重放。
 """
@@ -39,14 +37,14 @@ from pra.tools.policy_search.tool import (
 MODES = ("bm25", "vector", "hybrid")
 
 _POLICY_QUERIES = [
-    "外观高度模仿知名品牌，无授权",  # 验收 §6.1：IP 条款命中
+    "外观高度模仿知名品牌，无授权",  # 期望命中 IP 条款
     "标题含复刻高仿原单 仿冒来源词",
     "无依据功效夸大 增高磁疗 虚假宣传",
     "改标题重上架规避审核 商家多次",
 ]
 
 _CASE_QUERIES = [
-    "无品牌 + 高相似 + 商家多次上架",  # 验收 §6.2：对应先例命中
+    "无品牌 + 高相似 + 商家多次上架",  # 期望命中对应先例
     "外观高度模仿品牌 换图规避重上架",
     "功效宣传无检测报告 虚假宣称",
     "材质标真皮实为PU 字段冲突",

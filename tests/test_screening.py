@@ -1,14 +1,11 @@
-"""Screening 三分流（pra/screening/** + persist_service.process_review）单测 —— 不连真库。
+"""Screening 三分流（``pra/screening/**`` + ``persist_service.process_review``）单测 —— 不连真库。
 
-覆盖（任务书新增 + 修复补测 + Q-1 拍板 B）：
-- ``triage`` 纯函数：PASS（brand/类目明确 + 干净）/ COMPLEX（brand/类目空缺 ——
-  含 brand=None+高危类目、brand=""、brand=None+非高危类目、类目空缺；EVASION_TERMS
-  命中；BRAND_TERMS 品牌词命中 —— Q-1 拍板 B 交 Agent 调查，含大小写不敏感、词
-  边界）/ REJECT（仅注入黑名单 R-101 直判）/
-  REJECT 优先于 COMPLEX / hits 收集顺序 / 空 rules → ValueError / 注入 rules；
-- ``rule_evidence`` 证据形状（RULE_HIT / ScreeningRuleEngine / weight=1.0 / extra）；
-- ``process_review`` 分支（COMPLEX → run_and_persist 且携带 RULE_HIT evidence；
-  PASS/REJECT → run_screening_direct）—— monkeypatch persist 层假函数，不触真库。
+覆盖：``triage`` 纯函数（PASS / COMPLEX / REJECT 与命中收集顺序、空 rules 抛
+ValueError）；``rule_evidence`` 证据形状；``process_review`` 分支（COMPLEX →
+``run_and_persist`` 且携带 RULE_HIT evidence，PASS/REJECT → ``run_screening_direct``）。
+
+三分流口径：brand/类目空缺、规避词、品牌词命中一律 COMPLEX 交 Agent 调查；只有注入
+黑名单命中才确定性 REJECT，且 REJECT 优先于 COMPLEX。
 """
 
 from __future__ import annotations
@@ -31,10 +28,6 @@ from pra.screening.engine import RuleHit, rule_evidence, triage
 from pra.screening.rule_engine import terms
 from pra.screening.rule_engine.rules import DEFAULT_RULES, Rule
 
-# ---------------------------------------------------------------------------
-# case 工厂
-# ---------------------------------------------------------------------------
-
 
 def _case(
     *,
@@ -44,7 +37,6 @@ def _case(
     description: str,
     category: str,
 ) -> ProductReviewCase:
-    """构造最小合法 case（可定制 brand/title/description/category）。"""
     product = ProductInfo(
         product_id=f"P_{case_id}",
         title=title,
@@ -150,11 +142,6 @@ _COMPLEX_MULTI_HIT_NONRISK = _case(  # 多命中 COMPLEX：brand 空缺(R-301) +
 )
 
 
-# ---------------------------------------------------------------------------
-# triage：PASS / COMPLEX / REJECT
-# ---------------------------------------------------------------------------
-
-
 def test_triage_pass_clean_case():
     """brand 明确 + 标题/描述干净 + 类目非高危 → PASS（确定性放行，零命中）。"""
     t = triage(_CLEAN)
@@ -188,7 +175,7 @@ def test_triage_reject_blacklisted_brand(monkeypatch):
 
 
 def test_triage_brand_term_in_title_is_complex():
-    """标题含 BRAND_TERMS（NIKE）→ COMPLEX 交 Agent（Q-1 拍板 B），不再 REJECT。"""
+    """标题含 BRAND_TERMS（NIKE）→ COMPLEX 交 Agent，不再 REJECT。"""
     t = triage(_COMPLEX_BRANDTERM)
     assert t.verdict == "COMPLEX"
     assert [h.rule_id for h in t.hits] == ["R-102", "R-301"]  # 品牌词 + brand 空缺
@@ -196,7 +183,7 @@ def test_triage_brand_term_in_title_is_complex():
 
 
 def test_triage_brand_term_matching_brand_is_complex():
-    """Q-1 拍板 B：brand=NIKE（未上黑名单）+ 标题含 NIKE —— 标题品牌词不能证明真品
+    """brand=NIKE（未上黑名单）+ 标题含 NIKE —— 标题品牌词不能证明真品
     （官方店/授权或仿冒皆可能）→ COMPLEX，绝不 REJECT 直判。"""
     case = _case(
         case_id="CASE_BRAND_TITLE_SAME",
@@ -251,12 +238,12 @@ def test_triage_r102_lv_adjacent_to_chinese_still_hits_complex():
 
 def test_triage_reject_priority_over_complex(monkeypatch):
     """REJECT 优先于 COMPLEX：R-101（黑名单 REJECT）+ R-102（品牌词 COMPLEX）同轮
-    → 终裁 REJECT（Q-1 只下调 R-102 动作，R-101 黑名单仍确定性终裁，不被稀释）。"""
+    → 终裁 REJECT（R-102 只下调为 COMPLEX，R-101 黑名单仍确定性终裁，不被稀释）。"""
     monkeypatch.setattr(terms, "BLACKLISTED_BRANDS", frozenset({"NIKE"}))
     case = _case(
         case_id="CASE_REJECT_PRIORITY",
         brand="NIKE",  # R-101 黑名单 REJECT
-        title="NIKE 新款复古跑鞋",  # R-102 品牌词 → COMPLEX（Q-1 拍板 B）
+        title="NIKE 新款复古跑鞋",  # R-102 品牌词 → COMPLEX
         description="舒适运动。",
         category="女鞋/运动鞋",
     )
@@ -278,11 +265,6 @@ def test_triage_hits_collected_in_rule_order():
     assert t.verdict == "COMPLEX"  # 无 REJECT 命中（默认黑名单空）→ COMPLEX
     assert [h.rule_id for h in t.hits] == ["R-102", "R-301", "R-302"]
     assert "同款" in t.hits[2].detail and "复刻" in t.hits[2].detail
-
-
-# ---------------------------------------------------------------------------
-# triage：空 / 注入 rules
-# ---------------------------------------------------------------------------
 
 
 def test_triage_empty_rules_raises():
@@ -332,14 +314,9 @@ def test_triage_injected_rules_custom():
 
 def test_default_rules_declaration_order():
     """DEFAULT_RULES 声明序与动作（kind）收敛：R-101 黑名单 = REJECT；R-102 品牌词 =
-    COMPLEX（Q-1 拍板 B）；R-301/302 = COMPLEX。"""
+    COMPLEX；R-301/302 = COMPLEX。"""
     assert [r.rule_id for r in DEFAULT_RULES] == ["R-101", "R-102", "R-301", "R-302"]
     assert [r.kind for r in DEFAULT_RULES] == ["REJECT", "COMPLEX", "COMPLEX", "COMPLEX"]
-
-
-# ---------------------------------------------------------------------------
-# rule_evidence
-# ---------------------------------------------------------------------------
 
 
 def test_rule_evidence_shape():
@@ -352,11 +329,6 @@ def test_rule_evidence_shape():
     assert ev.weight == 1.0
     assert ev.ref_id is None
     assert ev.extra == {"rule_id": "R-102"}
-
-
-# ---------------------------------------------------------------------------
-# process_review：COMPLEX → run_and_persist；PASS/REJECT → run_screening_direct
-# ---------------------------------------------------------------------------
 
 
 def _fake_graph_decision() -> ReviewDecision:
@@ -436,7 +408,7 @@ async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
     assert all(e.type == "RULE_HIT" and e.source == "ScreeningRuleEngine"
                for e in evs2)
 
-    # 品牌词命中（Q-1 拍板 B）：R-102 单命中 → COMPLEX 进 Agent 且转发 R-102 evidence
+    # 品牌词命中：R-102 单命中 → COMPLEX 进 Agent 且转发 R-102 evidence
     await ps.process_review(_LV_REAL_BRAND_TERM, run_id="RUN_CMPLX_LV")
     assert seen["run_id"] == "RUN_CMPLX_LV"
     evs3 = seen["extra_evidence"]

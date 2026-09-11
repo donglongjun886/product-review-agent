@@ -1,23 +1,15 @@
-"""demo_langfuse_trace.py —— 真实案件跑一遍 Agent 并给出 Langfuse trace 链接（演示/证据）。
+"""真实案件跑一遍 Agent 并给出 Langfuse trace 链接（演示 / 端到端证据）。
 
-用途：面试演示与端到端证据 —— 走 **HTTP 主流程同一入口** ``pra.api.service.run_review``
-跑一个真实案件（默认复古运动鞋 ``P_88231`` / 商家 ``M_5512``，与 README 快速开始、
-``scripts/demo_walkthrough.py`` 同源构造，但本脚本**自包含**、不 import 其内部函数），
-跑完打印 ``run_id`` / ``trace_id`` / 决策值与 UI 链接 ``{LANGFUSE_HOST}/project/<projectId>/traces/{trace_id}``（v4 路由）。
+走 HTTP 主流程同一入口 ``pra.api.service.run_review``，案件默认复古运动鞋 ``P_88231`` / 商家
+``M_5512``，与 README 快速开始、``scripts/demo_walkthrough.py`` 同源构造，但本脚本自包含、
+不 import 其内部函数。跑完打印 ``run_id`` / ``trace_id`` / 决策值与 UI 链接
+``{LANGFUSE_HOST}/project/<projectId>/traces/{trace_id}``（v4 路由）。
 
-**无凭据 / SDK 未装时的行为（刻意如此，docs/09 §2）**：打印
-``tracing disabled (NullTracer: <reason>)`` + 如何启用，**仍然照常跑完 Agent 并打印决策**
-（证明观测关闭时业务不受影响），退出码 **0**。
+``run_id`` 为 32-hex（``uuid4().hex``）→ ``trace_id_from_run_id`` 原样返回 → Langfuse trace
+与 MySQL ``review_run.run_id`` 一一对应；``--run-id`` 可复现同一条 trace。
 
-``run_id`` 为 32-hex（``uuid4().hex``）→ ``trace_id_from_run_id`` 原样返回 → Langfuse
-trace 与 MySQL ``review_run.run_id`` 一一对应；``--run-id`` 可复现同一条 trace。
-
-只依赖标准库 + 项目内模块；不联网（除非凭据已配置且 SDK 已装）。
-
-用法::
-
-    uv run python scripts/demo_langfuse_trace.py
-    uv run python scripts/demo_langfuse_trace.py --run-id RUN_CASE_1
+无凭据 / SDK 未装时打印 ``tracing disabled (NullTracer: <reason>)`` 与启用方式，仍照常跑完
+Agent 并打印决策，退出码 0。只依赖标准库 + 项目内模块；不联网（除非凭据已配置且 SDK 已装）。
 """
 
 from __future__ import annotations
@@ -53,8 +45,8 @@ DEFAULT_LANGFUSE_HOST = "http://localhost:3000"
 def build_demo_case() -> ProductReviewCase:
     """构造真实案件（复古运动鞋 P_88231 / M_5512 / NEW_LISTING）。
 
-    与 README 快速开始、``demo_walkthrough.build_demo_case`` 同口径（品牌空缺 + 复古
-    风格词 + 四路机审信号 PASS），但**本脚本自包含**，不 import 其内部函数。
+    与 README 快速开始、``demo_walkthrough.build_demo_case`` 同口径（品牌空缺 +
+    复古风格词 + 四路机审信号 PASS），但本脚本自包含。
     """
     product = ProductInfo(
         product_id="P_88231",
@@ -83,7 +75,7 @@ def build_demo_case() -> ProductReviewCase:
 
 
 def _langfuse_host() -> str:
-    """Langfuse UI 地址（环境变量 > ``Settings``（读 .env）> 缺省）；异常绝不抛。"""
+    """Langfuse UI 地址：环境变量 > ``Settings``（读 .env）> 缺省；异常绝不抛。"""
     try:
         from pra.observability.tracing import _env_or_settings
 
@@ -92,7 +84,7 @@ def _langfuse_host() -> str:
         return DEFAULT_LANGFUSE_HOST
 
 
-#: 项目 id（v4 UI 路由需要）；与 `deploy/langfuse/.env` 的 `LANGFUSE_INIT_PROJECT_ID` 一致。
+#: 项目 id（v4 UI 路由需要）。
 DEFAULT_PROJECT_ID = "pra-local"
 
 
@@ -112,8 +104,8 @@ def _project_id() -> str:
 def _ui_url(trace_id: str) -> str:
     """Langfuse **v4** UI 链接。
 
-    v3 短链 ``/trace/<id>`` 在 v4 渲染为 notFound（200 但空页）；实测正确路由为
-    ``/project/<projectId>/traces/<traceId>``（docs/09 §6.1）。
+    v3 短链 ``/trace/<id>`` 在 v4 渲染为 notFound（200 但空页），实测正确路由是
+    ``/project/<projectId>/traces/<traceId>``。
     """
     return f"{_langfuse_host().rstrip('/')}/project/{_project_id()}/traces/{trace_id}"
 
@@ -130,7 +122,7 @@ def _tracing_state() -> tuple[bool, str]:
 
 
 def _has_credentials() -> bool:
-    """凭据是否已配置（只用于 UI 链接旁提示语的措辞；异常绝不抛）。"""
+    """凭据是否已配置（只用于 UI 链接旁提示语的措辞）。"""
     try:
         from pra.observability.tracing import _env_or_settings
 
@@ -155,7 +147,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def main(argv: list[str] | None = None) -> int:
-    """跑一个真实案件 → 打印关联信息与决策 → flush；退出码恒 0（观测关闭也照跑）。"""
+    """跑案件 → 打印关联信息与决策 → flush；退出码恒 0。"""
     args = _parse_args(argv)
     case = build_demo_case()
     run_id = args.run_id or uuid4().hex

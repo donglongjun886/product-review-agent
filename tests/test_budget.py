@@ -1,7 +1,7 @@
-"""预算护栏（guardrails/budget.py）单测 —— 四维 >= 语义、记账不可变、快照补 latency。
+"""预算护栏（guardrails/budget.py）单测：四维 >= 语义、记账不可变、快照补 latency。
 
-阈值语义（§8.1/T-7）：**达到上限即视为超限**（>=，Guardrail 上界）；超限返回首个
-超限维度名，未超限返回 None。
+阈值语义：**达到上限即视为超限**（>=，Guardrail 上界）；超限返回首个超限维度名，
+未超限返回 None。
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def test_latency_naive_start_time_treated_utc():
 
 
 def test_first_exceeded_dimension_wins():
-    """多维同时超限 → 返回**首个**（固定顺序 LLM→TOOL→TOKENS→LATENCY）。"""
+    """多维同时超限 → 返回首个（固定顺序 LLM→TOOL→TOKENS→LATENCY）。"""
     b = Budget(llm_calls=12, tool_calls=20, tokens=999999)
     assert budget_exceeded(b) == DIM_LLM_CALLS
 

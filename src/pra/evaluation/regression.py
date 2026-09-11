@@ -1,27 +1,22 @@
-"""Regression —— Phase 1 确定性重放断言的可复用扩展（evaluation/regression.py，docs §8）。
+"""确定性重放回归：三方案决策序列 vs 基线快照。
 
-目的：后续任何改动（screening 修正 / RAG / LLM 接入）若改变三方案在 Phase 1 集上的
-决策 → 回归报错，防静默行为漂移。机制：
+目的：任何改动（screening 修正 / RAG / LLM 接入）若改变三方案在 v1 集上的决策就报错，
+防静默行为漂移。机制：对 eval_data/v1 跑 rule / single_call_llm / agent（确定性脚本
+模式），把每条 EvalRecord 的 decision 序列做规范化序列化 + sha256 digest，连同
+eval_case_id 序与各 scheme 决策列表存基线快照 JSON（首次运行生成，之后比对）；
+重跑重算 digest 与序列比对 → ``REGRESSION PASS / FAIL``（退出码 0/1；报告含差异
+scheme 与首个差异 case）。
 
-- 对 eval_data/v1（Phase 1 集）跑 rule / single_call_llm / agent 三方案（确定性脚本模式）；
-- 把每条 EvalRecord 的 (scheme 有序) decision 序列做**规范化序列化 + sha256 digest**，
-  连同 eval_case_id 序、每 scheme 决策列表一起存**基线快照** JSON
-  （``eval_data/v1/regression_baseline.json`` —— 首次运行生成，之后比对）；
-- 再次运行时重算 digest 与决策序列，与基线比对 → ``REGRESSION PASS / FAIL``
-  （退出码 0/1；报告含差异 scheme 与首个差异 case —— 逐字节重放断言是它的超集，
-  此处口径 = 决策序列 hash + 序列本体，任务书口径）。
+快照另含确定性元数据（format_version / data_hint / 总案数）供人读，比对只依据
+``digest`` 与各 scheme 决策序列。
 
-快照含确定性元数据（format_version / data_hint / 总案数）供人读，比对只依据
-``digest`` 与各 scheme 决策序列 —— 同数据重跑 digest 必然一致。
+**digest 边界（如实声明）**：``canonical_digest`` 只覆盖 **case_id 序 + 决策串**，
+**不锁 case 内容**（标题/证据文本等输入不在 payload 内）—— 本回归是**决策漂移守护**，
+不是数据守护：手改 case 输入而决策不变时 digest 不报。要锁 case 内容需另加内容级
+digest（v2 内容锁目前缺失，正是该边界另一侧的缺口）。
 
-**digest 边界（如实声明）**：``digest`` 只覆盖 **case_id 序 + 决策串**（见
-``canonical_digest``），**不锁 case 内容**（标题/证据文本等输入不在 payload 内）。
-因此本回归是**决策漂移守护**，不是数据守护：手改 case 输入而三方案决策不变时，
-digest 不报 —— 这是设计意图（回归答的是"行为有没有漂移"），不是缺陷；若要锁 case
-内容本身，需另加内容级 digest（域 B P1-1 的 v2 内容锁缺失正是该边界另一侧的缺口）。
-
-本模块不写 eval_data 之外的任何东西；默认基线路径只在 scripts/run_regression.py 中
-声明（可由 --baseline 覆盖；测试一律用 tmp_path，不污染评测数据目录）。
+本模块不写 eval_data 之外的任何东西；默认基线路径由 scripts/run_regression.py 声明
+（可由 --baseline 覆盖；测试一律用 tmp_path，不污染评测数据目录）。
 """
 
 from __future__ import annotations
@@ -55,10 +50,10 @@ def _canonical_json(obj) -> str:
 
 
 def canonical_digest(per_case_ids: list[str], decisions: dict[str, list[str]]) -> str:
-    """(case 序, scheme→决策序列) → sha256（deterministic digest）。
+    """(case 序, scheme→决策序列) → sha256（确定性 digest）。
 
-    边界：payload **只含 case_id 序 + 决策串，不含任何 case 内容** → digest 是
-    决策漂移守护而非数据守护（手改 case 输入、决策不变时不报；见模块 docstring）。
+    payload 只含 case_id 序 + 决策串，不含任何 case 内容 → digest 是决策漂移守护
+    而非数据守护（手改 case 输入、决策不变时不报）。
     """
     payload = _canonical_json({"per_case_ids": per_case_ids, "decisions": decisions})
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -73,8 +68,8 @@ def snapshot_from_records(
 ) -> dict:
     """由数据集 + 各 scheme records 构造基线快照 dict（确定性；可 JSON 落盘）。
 
-    records_by_scheme 的每份 records 必须按 case 行序对齐（评测 runner 保证）；
-    决策序列 = 每 case 的 record.decision（三分类字符串，逐条转录）。
+    每份 records 必须按 case 行序与 cases 对齐（runner 保证）；决策序列 = 每 case 的
+    ``record.decision`` 逐条转录。
     """
     per_case_ids = [c.eval_case_id for c in cases]
     decisions: dict[str, list[str]] = {}
@@ -121,7 +116,7 @@ async def compute_current_snapshot(
     """跑指定数据集的指定方案（rule/single_call_llm/agent），返回当前快照 dict。
 
     快照确定性：case 行序即遍历序、方案顺序串行、EvalRecord 无墙钟字段 →
-    同数据重跑 digest 逐字节一致。由 scripts/run_regression.py（--record / 首次）落盘，
+    同数据重跑 digest 逐字节一致。由 scripts/run_regression.py 落盘，
     也是"真实跑两次 → PASS"单测的复用入口。
     """
     from pra.evaluation.harness.agent_scheme import AgentScheme
@@ -164,9 +159,9 @@ def compare_snapshots(current: dict, baseline: dict) -> RegressionReport:
     """当前快照 vs 基线：逐 scheme 决策序列 + digest 比对 → 报告（PASS/FAIL）。
 
     比对口径 = **当前运行声明的 scheme 集合**（current["scheme_order"]）：基线里同名的
-    方案逐案比对；当前比基线多出的方案（基线未记录）→ FAIL 提示重录；基线比当前多的
-    方案不参与（子集比对 —— 用 --schemes 跑回归时不会因少跑了某方案而误报）。
-    digest 亦按该公共口径重算（基线存储 digest 按其录制时的方案集，直接比会误报）。
+    方案逐案比对；当前比基线多出的方案 → FAIL 提示重录；基线比当前多的方案不参与
+    （子集比对 —— 少跑某方案时不会误报）。digest 亦按该公共口径重算（基线存储的 digest
+    按其录制时的方案集，直接比会误报）。
     """
     _baseline_validate(baseline)
     cur_ids = list(current.get("per_case_ids") or [])
@@ -270,8 +265,7 @@ async def run_regression(
 ) -> RegressionReport:
     """跑当前数据集的指定方案并与基线比对（基线须已存在，格式不兼容即报错）。
 
-    :raises ValueError: 基线缺失 / 快照格式不兼容。首次基线由脚本侧
-        （``--record`` 或基线缺失时）调 ``compute_current_snapshot`` + ``write_baseline``。
+    :raises ValueError: 基线缺失 / 快照格式不兼容。
     """
     baseline_file = Path(baseline_path)
     if not baseline_file.exists():

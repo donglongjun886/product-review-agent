@@ -1,43 +1,34 @@
-"""AbstentionEvaluator —— HUMAN_REVIEW / abstention 五指标（metrics/abstention.py）。
+"""HUMAN_REVIEW / abstention 五指标：AbstentionEvaluator。
 
-对齐 docs/02-evaluation.md §4.4（P-3 已拍板）的 Phase 2 abstention 语义。命名权威：
-**全代码统一用五个全名，不用 HRR 缩写**：``human_review_rate`` / ``automation_coverage``
-/ ``abstention_rate`` / ``abstention_recall`` / ``wrong_auto_decision_rate``。
+命名权威：**全代码统一用五个全名，不用缩写**：``human_review_rate`` /
+``automation_coverage`` / ``abstention_rate`` / ``abstention_recall`` /
+``wrong_auto_decision_rate``。
 
-消费对（每 case 一条）：
-- expected（来自 EvalCase）：``decision``（PASS/REJECT/HUMAN_REVIEW）+ ``abstain_label``
-  （AUTO_DECIDABLE / SHOULD_ABSTAIN；缺省 None = 兼容 Phase 1，等价 AUTO_DECIDABLE）；
+消费每 case 一对：
+- expected：``decision`` + ``abstain_label``（None = 等价 AUTO_DECIDABLE）；
 - EvalRecord.decision ∈ {PASS, REJECT, HUMAN_REVIEW}。
 
-真值子集语义（契约口径）：
-- ``AUTO_DECIDABLE``（expected PASS/REJECT，本可自动判）——评价"自动决策是否正确安全"；
-- ``SHOULD_ABSTAIN``（expected HUMAN_REVIEW，应转人工）——评价"该转人工的克制地转了"。
-  ``abstain_label`` 缺失时按 expected.decision == HUMAN_REVIEW 推断 SHOULD_ABSTAIN
-  （防 A 面 schema 升级滞后），否则一律 AUTO_DECIDABLE —— 老数据照常可跑。
+真值子集语义：``AUTO_DECIDABLE``（本可自动判）评价"自动决策是否正确安全"；
+``SHOULD_ABSTAIN``（应转人工）评价"该转人工的克制地转了"。``abstain_label``
+缺失时按 decision == HUMAN_REVIEW 推断 SHOULD_ABSTAIN（防 schema 升级滞后），
+其余一律 AUTO_DECIDABLE。
 
-五指标口径（分子/分母，互斥关系见下）：
-- ``human_review_rate`` = pred HUMAN / 全部（人工占用，含 Rule 的 COMPLEX 映射等）；
+五指标：
+- ``human_review_rate`` = pred HUMAN / 全部（人工占用）；
 - ``automation_coverage`` = pred ∈ {PASS,REJECT} / 全部 = 1 − human_review_rate；
-- ``abstention_rate`` = AUTO_DECIDABLE 案中 pred HUMAN / AUTO_DECIDABLE 案数
-  （"本该自动判却转人工"的**过度保守 abstention**，越高越保守）；
-- ``abstention_recall`` = SHOULD_ABSTAIN 案中 pred HUMAN / SHOULD_ABSTAIN 案数
-  （"该转人工的克制地转了"）；其中被自动终裁的 SHOULD_ABSTAIN 案（漏转人工）即
-  **危险误自动**，是 abstention_recall 的分子缺口；
-- ``wrong_auto_decision_rate`` = （AUTO_DECIDABLE 案中自动终裁 pred∈{PASS,REJECT} 且
-  与真值不符）/（AUTO_DECIDABLE 案中自动终裁数）——安全/准确侧。
+- ``abstention_rate`` = AUTO_DECIDABLE 案中 pred HUMAN 占比（过度保守，越高越保守）；
+- ``abstention_recall`` = SHOULD_ABSTAIN 案中 pred HUMAN 占比；被自动终裁的
+  SHOULD_ABSTAIN 案即**危险误自动**，是它的分子缺口；
+- ``wrong_auto_decision_rate`` = AUTO_DECIDABLE 案中自动终裁且与真值不符 / 同案中
+  自动终裁数。
 
-**口径互斥（加注，勿漂移）**：SHOULD_ABSTAIN 案被自动终裁**不进**
-``wrong_auto_decision_rate``（其真值是 HUMAN_REVIEW，无从谈"自动判对/判错"；那个危险
-由 ``abstention_recall`` 的分子缺口承接）——因此两个指标的计数子集不相交：
-``wrong_auto_decision_rate`` 只在 AUTO_DECIDABLE × 自动终裁上计数，
-``abstention_recall`` 只在 SHOULD_ABSTAIN 上计数。同理 SH..-HUMAN 进 abstention_recall
-分子、AUTO..-HUMAN 进 abstention_rate 分子 —— 一个 (case, record) 对只落一个指标桶。
+**口径互斥（勿漂移）**：SHOULD_ABSTAIN 被自动终裁**不进**
+``wrong_auto_decision_rate``（其真值是 HUMAN_REVIEW，无从谈自动判对/判错，该危险由
+``abstention_recall`` 分子缺口承接）—— 一个 (case, record) 对只落一个指标桶。
 
-分母为 0 的比率返回 None（与 metrics/business.py 同风格，报告显示 "-"，不硬造 0/∞）。
-Phase 1 老数据（无 abstain_label）→ 全部按 AUTO_DECIDABLE：
-``abstention_recall`` 分母 0 → None（报告 "-"），``wrong_auto_decision_rate`` 退化为
-"Phase 1 自动终裁错误率"（与 business.py 的 accuracy 互补口径），abstention_rate
-退化为"Phase 1 过度转人工率"。
+分母为 0 的比率返回 None（报告显示 "-"，不硬造 0/∞）。v1 老数据全按
+AUTO_DECIDABLE：``abstention_recall`` 分母 0 → None，另两项退化为 v1 口径的
+自动终裁错误率 / 过度转人工率。
 """
 
 from __future__ import annotations
@@ -58,7 +49,7 @@ _DECISION_SET = {"PASS", "REJECT", "HUMAN_REVIEW"}
 class AbstentionMetrics(BaseModel):
     """Abstention 五指标 + 各子集计数（None = 分母为 0，未定义）。
 
-    计数命名与 §4.4 桶一一对应，报告/单测可直接核对分子分母。
+    计数与指标桶一一对应，报告/单测可直接核对分子分母。
     """
 
     total: int = Field(description="全部案数")

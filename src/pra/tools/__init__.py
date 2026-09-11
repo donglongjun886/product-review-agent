@@ -1,9 +1,8 @@
-# 6 个 Tool + ToolRegistry + 统一 Tool 接口
-# 契约层（tools/base.py）：统一接口与注册骨架，不接具体实现。
-# 6 个具体 Tool 在各子包实现（product / image_analysis / ocr / merchant /
-# case_search / policy_search），每个子包一个 tool.py，构造时默认注入各自的
-# InMemory/Mock 数据源（依赖倒置：真实 MySQL/向量库/OCR 服务在 infra 阶段接入，
-# 实现同一 Repository/Provider/Index 接口后注入即可，工具本体零改动）。
+# 6 个 Tool + ToolRegistry + 统一 Tool 接口。
+# tools/base.py 是契约层（统一接口与注册骨架）；6 个具体 Tool 在各子包实现
+# （product / image_analysis / ocr / merchant / case_search / policy_search），每个子包
+# 一个 tool.py，构造时默认注入各自的 InMemory/Mock 数据源（依赖倒置：真实 MySQL /
+# 向量库 / OCR 服务实现同一 Repository/Provider/Index 接口后注入即可，工具本体零改动）。
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -20,35 +19,19 @@ def build_tools(
     *,
     rag_backend_options: dict[str, Any] | None = None,
 ) -> list[Tool]:
-    """组装并返回 6 个调查工具（默认注入 InMemory/Mock 数据源，开箱可测）。
+    """组装并返回 6 个调查工具（默认注入 InMemory/Mock 数据源）。
 
-    :param data_source: 数据源开关（rag-implementation-plan.md R-3 拍板）——
-        ``"memory"``（默认）= 现有 6 工具 InMemory 种子世界（**逐字节不变**，回归
-        不破坏）；``"rag"`` = CaseSearchTool / PolicySearchTool 注入真实 RAG 索引
-        （Policy KB / Case KB，确定性 mock embedding + BM25 + 余弦，三模式可切），
-        其余 4 工具（product/image/ocr/merchant）仍为 InMemory 事实世界。
-        RAG 索引经 ``pra.rag.factory`` **延迟 import**（防 pra.tools 导入期拉起
-        pra.rag → 循环依赖风险；默认 memory 路径零额外 import）。
-    :param rag_backend: RAG 检索后端开关（docs/06 §2.3 / docs/10 §2 扩展，仅
-        ``data_source="rag"`` 生效）——``"local"``（默认）= 既有
-        RagPolicyIndex/RagCaseIndex（内存 numpy 余弦，**行为不变**）；``"qdrant"`` =
-        QdrantPolicyIndex/QdrantCaseIndex；``"chroma"`` = ChromaPolicyIndex/
-        ChromaCaseIndex（ChromaDB + LlamaIndex：VectorRetriever / BM25Retriever(jieba) /
-        QueryFusionRetriever-RRF）。后两者均经 factory **延迟 import**，缺依赖时构造抛
-        ``RuntimeError`` 提示 ``uv sync --extra rag``；无对应依赖的环境默认路径不受影响。
-    :param rag_embedder: RAG 检索 embedder（默认 None → factory 内部缺省
-        ``MockHashEmbedder``）——chroma / qdrant 后端也可离线单测（mock embedder）；
-        Phase 2 换真实本地模型（如 BGE）时由此注入。
-    :param rag_backend_options: 后端专属装配参数的透传字典（默认 None = 不传）。
-        用于 chroma 后端注入 ``chroma_client`` / ``chroma_ephemeral`` / ``chroma_host`` /
-        ``chroma_port``（测试用 ``EphemeralClient`` 离线跑）或 qdrant 后端注入
-        ``qdrant_client`` / ``location``；键名与 ``pra.rag.factory`` 构造参数**逐字对应**，
-        未给键一律走 factory 自身缺省（默认路径行为不变）。
+    :param data_source: ``"memory"``（默认）= 6 工具 InMemory 种子世界；``"rag"`` =
+        CaseSearchTool / PolicySearchTool 注入真实 RAG 索引，其余 4 工具仍为 InMemory 事实世界。
+        RAG 索引经 ``pra.rag.factory`` **延迟 import**（默认 memory 路径零额外 import）。
+    :param rag_backend: 仅 ``data_source="rag"`` 生效 —— ``"local"``（默认）/ ``"qdrant"`` /
+        ``"chroma"``；后两者经 factory **延迟 import**，缺依赖时抛 ``RuntimeError``。
+    :param rag_embedder: RAG 检索 embedder（默认 None → factory 缺省 ``MockHashEmbedder``）。
+    :param rag_backend_options: 后端专属装配参数透传字典；键名与 ``pra.rag.factory`` 参数
+        **逐字对应**，未给键走 factory 缺省。
 
-    每个工具类可用作结构性 ``Tool``（name/description/async call），后续
-    tools_node 阶段经 ``ToolRegistry.register`` 注册。真实数据源替换示例：
-    ``ProductTool(repo=MySQLProductRepository(session))`` —— 由 infra 阶段接线，
-    本函数保持不变即可（或届时改为按配置注入）。
+    每个工具类可用作结构性 ``Tool``，经 ``ToolRegistry.register`` 注册后由 tools_node 调度；
+    替换真实数据源只需换构造入参，本函数保持不变。
     """
     # 延迟 import：避免 pra.tools 包导入期拉起全部子包（防循环/省启动）。
     from .case_search.tool import CaseSearchTool

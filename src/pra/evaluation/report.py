@@ -1,27 +1,19 @@
-"""Console Report（evaluation/report.py）—— 总体 + 按 scene 分层的纯文本报告。
+"""Console Report：总体 + 按 scene 分层的纯文本报告。
 
-只做格式化（无文件 IO；``print_report`` 打印 stdout，供 scripts/run_evaluation.py
-与 CI 日志使用）。口径说明随报告输出（docs/02-evaluation.md §8 M4"附结论边界标注"
-的轻量版），见 render_report 内的"口径注记"块与模块 docstring：
+只做格式化（无文件 IO；``print_report`` 打印 stdout）。口径说明随报告输出：
+数据集分布（实际分布由 loader 统计，防 manifest 漂移）；工具数据源 = InMemory 种子、
+LLM = 确定性桩；输出空间对齐：Rule COMPLEX→HUMAN_REVIEW、Single-call conf<门槛的
+REJECT→HUMAN。
 
-- 数据集版本/分布（实际分布由 loader 统计，防 manifest 漂移）；
-- 工具数据源 = InMemory 种子世界；LLM = 确定性桩（边界标注，见 agent_scheme）；
-- 三分类输出空间对齐映射：Rule COMPLEX→HUMAN_REVIEW；Single-call conf<门槛的
-  REJECT→HUMAN（见 single_call_scheme / metrics.business 各自注明）；
-- **分母口径随数据版本分叉（P1-2/P2-4 透明化，不改计算）**：
-  - Phase 2 v2（真值含 HUMAN_REVIEW/SHOULD_ABSTAIN）：决策指标行（acc/prec/recall/
-    fpr/fnr/hrr/auto）= **二值真值**（PASS+REJECT）分母；abstention 五指标行 =
-    **全量**分母（§4.4 human_review_rate/automation_coverage）—— 头行与分层行
-    同步列出三值分布与两套分母；
-  - Phase 1 v1（真值仅 PASS/REJECT、无 abstain 标签）：两套分母重合（= 全量），
-    abstention 五指标区不渲染，仅注记"v1 无 abstain 标签（Phase 1 兼容口径）"。
-- Accuracy 口径：预测 HUMAN_REVIEW 计为"未命中业务真值"（判错：入分母不入
-  (TP+TN) 分子）；Precision/Recall/FPR/FNR 只在自动判出子集上计算；
-- v1 screening 词表现状：BLACKLISTED_BRANDS 为空 → Rule baseline 无自动 REJECT
-  （品牌词/规避词/空缺一律 COMPLEX → 评测映射 HUMAN_REVIEW）—— 如实呈现，非缺陷。
+**分母口径随数据版本分叉（透明化，不改计算）**：v2（真值含 HUMAN_REVIEW /
+SHOULD_ABSTAIN）时决策指标行取二值真值（PASS+REJECT）分母，abstention 五指标行取全量
+分母，头行同步列出三值分布与两套分母；v1（无 abstain 标签）两套分母重合，abstention 区
+不渲染。Accuracy：pred HUMAN_REVIEW 记为判错（入分母不入 (TP+TN) 分子）；
+Precision/Recall/FPR/FNR 只在自动判出子集上计算。
 
-结论边界块含「标注-审查员同口径耦合」声明与 Phase 3 real 实测对照（双向解读：
-同口径耦合高估一致性、工具覆盖有限低估真实上限；real 抽样与 scripted 高分方向相反）。
+v1 词表现状：``BLACKLISTED_BRANDS`` 为空 → Rule baseline 无自动 REJECT（品牌词/规避词/
+空缺一律 COMPLEX），如实呈现，非缺陷。结论边界块含「标注-审查员同口径耦合」声明与 real
+实测对照（同口径耦合高估一致性、工具覆盖有限低估真实上限）。
 """
 
 from __future__ import annotations
@@ -154,7 +146,7 @@ def render_report(result: EvaluationResult) -> str:
         "SHOULD 无负例）")
     add("      → scripted 高分含「标注-审查员同口径」耦合，主要衡量实现一致性而非调查能力；")
     add("      不可外推为真实 LLM 能力（README「评测与结论」/ docs/02 §3.4/§7.2/§8）")
-    add("    - real 对照（docs/02 §8 Phase 3 已执行；v1 35 案 real 单次抽样）: acc 0.200 / HRR 0.771，")
+    add("    - real 对照（docs/02 §8 Phase 3 已执行；v1 35 案 real 单次抽样）: acc 0.200 / human_review_rate 0.771，")
     add("      27/35 转人工由确定性 Gate 归因（R3_BUDGET_EXHAUSTED×19 / R3_HYPOTHESES_INDISTINGUISHABLE×7）")
     add("      —— 与 scripted 高分方向相反（同口径耦合只会高估一致性，real 未调优首跑则大幅保守转人工）；"
         "该抽样仅验证链路，非模型固定水平")
@@ -209,14 +201,13 @@ def render_report(result: EvaluationResult) -> str:
 
 
 def _render_abstention_section(add, result: EvaluationResult) -> None:
-    """P1-3：abstention 五指标渲染区（仅数据集含 SHOULD_ABSTAIN 真值—— v2 三值口径）。
+    """abstention 五指标渲染区（仅数据集含 SHOULD_ABSTAIN 真值时）。
 
-    口径（docs/02 §4.4；与 ablation report 同源）——分母 = 全量：
-      human_review_rate = pred HUMAN / 全部；automation_coverage = 1 − human_review_rate；
-      abstention_rate = AUTO_DECIDABLE 案中 pred HUMAN（过度保守）；
-      abstention_recall = SHOULD_ABSTAIN 案中 pred HUMAN（该转人工的召回，越高越克制）；
-      wrong_auto_decision_rate = AUTO_DECIDABLE 自动终裁中的错误占比。
-    与决策指标行的区别：hrr/auto 在业务层 = pred HUMAN / 二值真值（见上节分母注记）。
+    分母 = 全量：``human_review_rate`` = pred HUMAN / 全部；``automation_coverage`` =
+    1 − human_review_rate；``abstention_rate`` = AUTO_DECIDABLE 案中 pred HUMAN
+    （过度保守）；``abstention_recall`` = SHOULD_ABSTAIN 案中 pred HUMAN（越高越克制）；
+    ``wrong_auto_decision_rate`` = AUTO_DECIDABLE 自动终裁中的错误占比。
+    与决策指标行的区别：决策行的 hrr/auto 以二值真值为分母（见上节分母注记）。
     """
     auto_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "AUTO_DECIDABLE")
     should_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "SHOULD_ABSTAIN")

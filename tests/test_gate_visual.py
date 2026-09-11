@@ -1,22 +1,19 @@
-"""R3_VISUAL_CLAIM_UNSUPPORTED —— 外观/视觉声称无视觉证据的确定性 Gate 单测。
+"""R3_VISUAL_CLAIM_UNSUPPORTED 单测：外观/视觉声称但无视觉证据时 Gate 判弃权。
 
-固化 docs/05-visual-similarity-gate-proposal.md §4.3 测试点与拍板 V-1~V-11：
-a) EC_0007 形态（SUPPORTED 外观假设 + 政策/先例、无视觉证据）→ 命中新 R3 码，
-   REJECT 提案被 abstention 拦成 HUMAN_REVIEW；
-b) IMAGE_SIMILARITY weight=0.72（普通档即算"有视觉证据"，V-3）→ 不命中（放行语义）；
-c) weight=0.65（<0.70，防御注入：gate 只读 weight、不依赖 extra.strong）→ 命中；
-d) 任一 IMAGE_LOGO → 存在性满足（V-9）→ 不命中；
-e) OCR_TEXT / CASE_PRECEDENT / POLICY_REF / PRODUCT_FACT / MERCHANT_HISTORY
-   一律不算视觉证据 → 命中（V-2）；
-f) 非外观维度假设（事实/品牌/商家行为/文本声称类）不受影响；
-g) 外观类但非 SUPPORTED（REFUTED/UNRESOLVED/PENDING）或非高优先 → 不命中；
-h) 谓词只读：执行后 state 的 hypotheses/evidence 零变化（V-7 甲案纪律）；
-i) PASS 侧不受影响（全 REFUTED，外观词仅现于 statement/evidence_against）；
-j) 与既有 R3 码（R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE）共存：
-   多码全量收集、顺序固定。
-另：关键词表与 llm_prompts 例句同源（V-5 同步契约）；负向句 SUPPORTED 的高优先
-假设命中（V-8 误伤容忍度：只作用于 REJECT 风险侧，安全侧，PASS 侧不受影响）；
-0.70/0.69 存在性边界；空态安全 False。
+命中条件：SUPPORTED 且高优先的外观假设；证据里没有任何视觉证据。
+判定 = REJECT 提案被 abstention 拦成 HUMAN_REVIEW。
+
+存在性判定（与命中相反）：
+- ``IMAGE_SIMILARITY`` weight ≥ 0.70 即算有视觉证据（gate 只读 weight，不依赖 ``extra.strong``：
+  weight=0.65 即使 extra 声称 strong 也不放行）；边界 0.70 存在 / 0.69 不存在；
+- 任一 ``IMAGE_LOGO`` 即满足存在性，与置信无关；
+- ``OCR_TEXT`` / ``CASE_PRECEDENT`` / ``POLICY_REF`` / ``PRODUCT_FACT`` / ``MERCHANT_HISTORY``
+  一律不算视觉证据；
+- 非外观维度假设、非 SUPPORTED 或低 prior、空态 → 不命中（安全 False）。
+
+其他纪律：谓词只读，执行前后 hypotheses/evidence 零变化；PASS 侧不受影响；命中时与
+R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE 多码全量收集、顺序固定；
+关键词表与 llm_prompts 例句同源；负向句 SUPPORTED 照样命中（误判代价在 REJECT 侧）。
 全部确定性、无网络、无 API key。
 """
 
@@ -37,12 +34,12 @@ from pra.agent.guardrails.gate import (
 from pra.agent.guardrails.schemas import DecisionProposal
 from pra.domain.models import Budget, Decision, Evidence, HypothesisStatus
 
-# EC_0007 形态假设句（docs/05 §1.1）与对照句
+# EC_0007 形态假设句与对照句
 _VISUAL = "外观与经典小白鞋高度相似"
-_NEG_VISUAL = "外观与品牌款明显不同"  # 负向句异常态（V-8 守卫，命中属安全侧）
+_NEG_VISUAL = "外观与品牌款明显不同"  # 负向句异常态（命中属安全侧）
 _BEHAVIOR = "商家系统性类似上架行为"
 _BRAND_EVASION = "刻意规避品牌识别（品牌字段空缺）"
-_TEXT_CLAIM = "商品标题含某品牌字样（OCR 检出）"  # V-2：文本声称不属本拦截面
+_TEXT_CLAIM = "商品标题含某品牌字样（OCR 检出）"  # 文本声称不属本拦截面
 
 
 def _proposal(decision: str = "REJECT", risk_level: str = "HIGH") -> DecisionProposal:
@@ -79,7 +76,7 @@ def _supported_state(
     evidence: list[Evidence] | None = None,
     posterior: float = 0.9,
 ) -> dict:
-    """高优先（默认）SUPPORTED 视觉假设 + 证据的完整 state 骨架（含 overlay 必需键）。"""
+    # 高优先（默认）SUPPORTED 视觉假设 + 证据的完整 state 骨架（含 overlay 必需键）
     return {
         "hypotheses": [
             hp("H1", statement=statement, prior=prior, posterior=posterior, status=status,
@@ -93,22 +90,19 @@ def _supported_state(
     }
 
 
-# ---------------------------------------------------------------------------
-# 谓词层：a)~g) 命中/不命中 + 边界
-# ---------------------------------------------------------------------------
+# 谓词层：命中/不命中 + 边界
 
 
 def test_a_visual_supported_without_visual_evidence_hits():
-    """a) EC_0007 形态：SUPPORTED 外观假设 + 政策/先例、无任何视觉证据 → 命中。"""
     st = _supported_state(evidence=[_policy_ref(), _precedent()])
     assert visual_claim_unsupported(st) is True
     assert R3_VISUAL_CLAIM_UNSUPPORTED in gate._abstention_codes(st)
 
 
 def test_a_overlay_reject_intercepted_to_human():
-    """a-overlay：该形态改动前能过 REJECT Gate（dc=0.77 等），现被 abstention 拦成 HUMAN。"""
     st = _supported_state(evidence=[_policy_ref(), _precedent()])
     dc = gate.finalize_decision_confidence(st)
+    # 该形态改判前能过 REJECT Gate（dc=0.77），现被 abstention 拦成 HUMAN
     assert gate.reject_gate(st, dc) is True  # 证明拦截点确在 abstention（改动前会自动 REJECT）
     final = run_decision_overlay(st, _proposal("REJECT", "HIGH"))
     assert final.decision == Decision.HUMAN_REVIEW
@@ -116,7 +110,6 @@ def test_a_overlay_reject_intercepted_to_human():
 
 
 def test_b_similarity_072_present_not_hit():
-    """b) IMAGE_SIMILARITY weight=0.72（≥0.70 普通档）→ 存在视觉证据 → 不命中，REJECT 放行。"""
     sim = ev("IMAGE_SIMILARITY", value="similarity=0.72, match=某品牌经典鞋款", weight=0.72,
              ref_id="img1", extra={"similarity": 0.72, "strong": False})
     st = _supported_state(evidence=[_policy_ref(), _precedent(), sim])
@@ -127,7 +120,6 @@ def test_b_similarity_072_present_not_hit():
 
 
 def test_c_similarity_065_below_threshold_hits():
-    """c) IMAGE_SIMILARITY weight=0.65（<0.70，防御注入）→ 不算存在 → 命中。"""
     weak = ev("IMAGE_SIMILARITY", value="similarity=0.65, match=疑似", weight=0.65,
               ref_id="img1", extra={"similarity": 0.65, "strong": False})
     st = _supported_state(evidence=[_policy_ref(), _precedent(), weak])
@@ -136,7 +128,6 @@ def test_c_similarity_065_below_threshold_hits():
 
 
 def test_d_image_logo_satisfies_presence():
-    """d) 任一 IMAGE_LOGO → 存在性满足（V-9），即便置信不高。"""
     logo = ev("IMAGE_LOGO", value="logo=某品牌, conf=0.60", weight=0.6, ref_id="img2")
     st = _supported_state(evidence=[_policy_ref(), _precedent(), logo])
     assert visual_evidence_present(st["evidence"]) is True
@@ -144,7 +135,6 @@ def test_d_image_logo_satisfies_presence():
 
 
 def test_e_ocr_precedent_policy_are_not_visual():
-    """e) 仅 OCR_TEXT + 先例 + 政策（再加商品/商家史）→ 仍无视觉证据 → 命中（V-2）。"""
     base = [_policy_ref(), _precedent(), _ocr()]
     assert visual_claim_unsupported(_supported_state(evidence=base)) is True
     richer = base + [
@@ -156,7 +146,6 @@ def test_e_ocr_precedent_policy_are_not_visual():
 
 
 def test_f_non_visual_dimensions_untouched():
-    """f) 事实/品牌/商家行为/文本声称类 SUPPORTED 假设不受影响。"""
     for statement in (_BEHAVIOR, _BRAND_EVASION, _TEXT_CLAIM):
         st = _supported_state(statement=statement, evidence=[_policy_ref(), _precedent(), _ocr()])
         assert gate._looks_visual_claim(statement) is False
@@ -164,7 +153,6 @@ def test_f_non_visual_dimensions_untouched():
 
 
 def test_g_non_supported_or_low_prior_not_hit():
-    """g) 外观类但 REFUTED/UNRESOLVED/PENDING、或 SUPPORTED 低 prior → 不命中。"""
     for status in (HypothesisStatus.REFUTED, HypothesisStatus.UNRESOLVED,
                    HypothesisStatus.PENDING):
         st = _supported_state(status=status, evidence=[_policy_ref(), _ocr()])
@@ -173,13 +161,10 @@ def test_g_non_supported_or_low_prior_not_hit():
     assert visual_claim_unsupported(low) is False
 
 
-# ---------------------------------------------------------------------------
 # 只读纪律 / PASS 侧 / 共存 / 边界
-# ---------------------------------------------------------------------------
 
 
 def test_h_predicate_read_only():
-    """h) 谓词执行前后 hypotheses/evidence 零变化（V-7 甲案：gate 只读 state）。"""
     st = _supported_state(evidence=[_policy_ref(), _precedent(), _ocr()])
     before = ([h.model_dump() for h in st["hypotheses"]],
               [e.model_dump() for e in st["evidence"]])
@@ -191,7 +176,6 @@ def test_h_predicate_read_only():
 
 
 def test_i_pass_side_unaffected():
-    """i) 全高优先 REFUTED（外观词仅现于 statement/evidence_against）→ 不命中且 PASS 采纳。"""
     st = {
         "hypotheses": [
             hp("H1", statement=_VISUAL, prior=0.5, status=HypothesisStatus.REFUTED,
@@ -213,7 +197,6 @@ def test_i_pass_side_unaffected():
 
 
 def test_j_coexists_with_policy_uncertain():
-    """j1) 与 R3_POLICY_UNCERTAIN 并列：多码全量收集、顺序固定（policy 先、visual 后）。"""
     st = _supported_state(evidence=[_ocr()])  # 无 POLICY_REF → policy_indeterminate 亦命中
     assert gate.policy_indeterminate(st) is True
     assert gate._abstention_codes(st) == [R3_POLICY_UNCERTAIN, R3_VISUAL_CLAIM_UNSUPPORTED]
@@ -223,7 +206,6 @@ def test_j_coexists_with_policy_uncertain():
 
 
 def test_j_coexists_with_indistinguishable():
-    """j2) 与 R3_HYPOTHESES_INDISTINGUISHABLE 并列：两 SUPPORTED 视觉假设同组证据。"""
     st = {
         "hypotheses": [
             hp("H1", statement=_VISUAL, prior=0.5, status=HypothesisStatus.SUPPORTED,
@@ -245,7 +227,6 @@ def test_j_coexists_with_indistinguishable():
 
 
 def test_evidence_presence_boundaries_and_empty():
-    """存在性边界：0.70 即存在 / 0.69 不算 / IMAGE_LOGO 恒存在 / 空证据不存在。"""
     assert visual_evidence_present(
         [ev("IMAGE_SIMILARITY", value="s", weight=0.70, ref_id="i")]) is True
     assert visual_evidence_present(
@@ -257,7 +238,6 @@ def test_evidence_presence_boundaries_and_empty():
 
 
 def test_empty_state_safe():
-    """空/缺失 hypotheses、evidence → 谓词安全 False，abstention 不新增码。"""
     assert visual_claim_unsupported({}) is False
     assert visual_claim_unsupported({"hypotheses": [], "evidence": []}) is False
     st = {"budget": Budget(), "hypotheses": None, "evidence": None,
@@ -269,7 +249,7 @@ def test_empty_state_safe():
 @pytest.mark.parametrize(
     ("statement", "expected"),
     [
-        # llm_prompts reevaluate 第 8 条例句逐字镜像（V-5 同步契约）
+        # llm_prompts reevaluate 第 8 条例句逐字镜像（同步契约）
         ("外观与某品牌款外观相似", True),
         ("外观与经典小白鞋高度相似", True),
         ("与品牌款同款外观", True),
@@ -281,7 +261,7 @@ def test_empty_state_safe():
         ("配色与图案照搬某品牌", True),
         ("刻意规避品牌识别", False),
         ("商家系统性类似上架行为", False),
-        ("商品标题含某品牌字样（OCR 检出）", False),  # V-2：文本声称不拦
+        ("商品标题含某品牌字样（OCR 检出）", False),  # 文本声称不拦
     ],
 )
 def test_keyword_dimension_classification(statement: str, expected: bool):
@@ -289,8 +269,6 @@ def test_keyword_dimension_classification(statement: str, expected: bool):
 
 
 def test_negative_sentence_supported_hits_by_design():
-    """V-8：负向句异常态（SUPPORTED 高优先）命中 —— 误判代价在安全侧（多转人工），
-    PASS 侧不受影响（PASS 案无 SUPPORTED 假设，见 test_i）。"""
     st = _supported_state(statement=_NEG_VISUAL, evidence=[_policy_ref(), _precedent()])
     assert visual_claim_unsupported(st) is True
     final = run_decision_overlay(st, _proposal("REJECT", "HIGH"))

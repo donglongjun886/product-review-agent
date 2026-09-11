@@ -1,13 +1,11 @@
-"""`pra.observability` 适配层测试 —— Null Object / 确定性采样 / SDK 接线（无网络、无 SDK）。
+"""`pra.observability` 适配层测试：Null Object、确定性采样、LangfuseTracer 接线。
 
-覆盖（docs/09 §3 的"不变式"）：
-
-1. 无凭据 → `NullTracer`，且**不 import** `langfuse`；
-2. `PRA_LANGFUSE_ENABLED=0` → 即使有凭据也 no-op；
-3. `NullTracer` 全部方法可用且无副作用（含异常路径）；
-4. 采样判定确定性（同 key 同结果）与边界（0 / 1）；
-5. `LangfuseTracer` 用**假 client** 验证：trace_context 传参、as_type、update/record_error、
-   采样抑制、异常吞掉（观测失败不影响业务）；
+不联网、不依赖 langfuse SDK：SDK 路径一律用假 client 验证。覆盖：
+1. 无凭据 → `NullTracer`，且不 import `langfuse`（惰性 import）；
+2. `PRA_LANGFUSE_ENABLED=0` → 有凭据也 no-op；
+3. `NullTracer` 四类埋点全可用、无副作用；
+4. 采样确定性（同 key 同结果）与边界（≤0 关 / ≥1 开）；
+5. `LangfuseTracer` 的 trace_context、as_type、update/record_error、采样抑制、异常吞掉；
 6. 进程级单例 `get_tracer` / `set_tracer`。
 """
 
@@ -23,16 +21,11 @@ from pra.observability import tracing as T
 from pra.observability.langfuse_backend import LangfuseTracer, build_langfuse_tracer
 
 
-# --------------------------------------------------------------------------------------
-# 1. 默认路径：无凭据 → NullTracer 且不拉起 SDK
-# --------------------------------------------------------------------------------------
-
-
 def test_no_credentials_returns_null_tracer_without_importing_sdk(monkeypatch) -> None:
-    """无凭据 → NullTracer；且 `langfuse` 模块不被 import（默认路径零 SDK 依赖）。
+    """无凭据 → NullTracer，且不 import `langfuse`。
 
-    用 monkeypatch 切断 `_env_or_settings`（配置来源含仓库根 `.env`）—— 否则开发机
-    真配了 Langfuse 时本用例会看到「已配置」而非「无凭据」，与用例意图不符。
+    用 monkeypatch 切断 `_env_or_settings`：配置来源含仓库根 `.env`，否则开发机真配了
+    Langfuse 时本用例会看到「已配置」而非「无凭据」，与用例意图不符。
     """
     monkeypatch.setattr(T, "_env_or_settings", lambda *a, **k: None)
     monkeypatch.delitem(sys.modules, "langfuse", raising=False)
@@ -46,7 +39,6 @@ def test_no_credentials_returns_null_tracer_without_importing_sdk(monkeypatch) -
 
 
 def test_enabled_flag_off_disables_even_with_credentials(monkeypatch) -> None:
-    """`PRA_LANGFUSE_ENABLED=0` → 即便凭据齐全也 no-op（一键关闭观测）。"""
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-x")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-x")
     monkeypatch.setenv("PRA_LANGFUSE_ENABLED", "0")
@@ -57,13 +49,7 @@ def test_enabled_flag_off_disables_even_with_credentials(monkeypatch) -> None:
     assert "ENABLED" in tracer.reason
 
 
-# --------------------------------------------------------------------------------------
-# 2. NullTracer 行为：全 no-op、不抛、可用于四个埋点
-# --------------------------------------------------------------------------------------
-
-
 def test_null_tracer_is_noop_for_all_observation_types() -> None:
-    """NullTracer 的四类埋点均可用且无副作用（业务侧无需分支）。"""
     tracer = T.NullTracer("test")
     ctx = T.TraceContext(
         trace_id="0af7651916cd43dd8448eb211c80319c",
@@ -88,20 +74,13 @@ def test_null_tracer_is_noop_for_all_observation_types() -> None:
 
 
 def test_null_observation_swallows_errors() -> None:
-    """`NullTracer` 的 `record_error` 不抛（观测旁路）。"""
     tracer = T.NullTracer()
     with tracer.node_span("x") as obs:
         obs.record_error(ValueError("ignored"))
 
 
-# --------------------------------------------------------------------------------------
-# 3. 确定性采样
-# --------------------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("sample,expected", [(0.0, False), (-1.0, False), (1.0, True), (2.0, True)])
 def test_should_sample_boundaries(sample: float, expected: bool) -> None:
-    """采样边界：<=0 恒关、>=1 恒开。"""
     assert T.should_sample("trace-1", sample) is expected
 
 
@@ -117,14 +96,7 @@ def test_should_sample_is_deterministic() -> None:
     assert 0.15 < ratio < 0.5, ratio
 
 
-# --------------------------------------------------------------------------------------
-# 4. LangfuseTracer（假 client，验证接线正确性）
-# --------------------------------------------------------------------------------------
-
-
 class _FakeObs:
-    """假 observation：记录 update 调用。"""
-
     def __init__(self) -> None:
         self.updates: list[dict[str, Any]] = []
 
@@ -133,8 +105,6 @@ class _FakeObs:
 
 
 class _FakeCM:
-    """假上下文管理器（`start_as_current_observation` 的返回）。"""
-
     def __init__(self, obs: _FakeObs) -> None:
         self.obs = obs
 
@@ -146,8 +116,6 @@ class _FakeCM:
 
 
 class _FakePropagate:
-    """假 `propagate_attributes`：记录属性并在退出时归还。"""
-
     def __init__(self, sink: list[dict[str, Any]]) -> None:
         self._sink = sink
 
@@ -165,8 +133,6 @@ class _FakePropagate:
 
 
 class _FakeClient:
-    """假 Langfuse client：记录每次观测创建参数。"""
-
     def __init__(self, *, raise_on_start: bool = False) -> None:
         self.calls: list[dict[str, Any]] = []
         self.observations: list[_FakeObs] = []
@@ -193,7 +159,6 @@ def _tracer(client: _FakeClient, sample: float = 1.0) -> LangfuseTracer:
 
 
 def test_langfuse_tracer_maps_root_and_propagates_attributes() -> None:
-    """root span：显式 trace_id 经 trace_context 传入 + trace 级属性下发。"""
     client = _FakeClient()
     ctx = T.TraceContext(
         trace_id="0af7651916cd43dd8448eb211c80319c",
@@ -308,18 +273,12 @@ def test_langfuse_tracer_never_raises_when_sdk_fails() -> None:
     reason="本机已装 langfuse SDK（observability extra）—— 该用例只验证未安装路径",
 )
 def test_build_langfuse_tracer_without_sdk_returns_null_tracer() -> None:
-    """未安装 SDK（CI/默认）→ NullTracer，且给出安装提示。"""
     tracer = build_langfuse_tracer(
         public_key="pk", secret_key="sk", host="http://localhost:3000"
     )
 
     assert isinstance(tracer, T.NullTracer)
     assert "SDK" in tracer.reason or "not installed" in tracer.reason
-
-
-# --------------------------------------------------------------------------------------
-# 5. 进程级单例
-# --------------------------------------------------------------------------------------
 
 
 def test_get_tracer_caches_and_set_tracer_resets(monkeypatch) -> None:
@@ -329,7 +288,7 @@ def test_get_tracer_caches_and_set_tracer_resets(monkeypatch) -> None:
     T.set_tracer(None)
 
     first = T.get_tracer()
-    assert first is T.get_tracer()  # 缓存同一实例
+    assert first is T.get_tracer()
     assert isinstance(first, T.NullTracer)
 
     fake = T.NullTracer("injected")
@@ -337,11 +296,6 @@ def test_get_tracer_caches_and_set_tracer_resets(monkeypatch) -> None:
     assert T.get_tracer() is fake
 
     T.set_tracer(None)  # 复原，避免影响其他测试
-
-
-# --------------------------------------------------------------------------------------
-# 6. 回归护栏：业务异常必须原样传播（S2 首版真实缺陷 —— 生成器内 `except: yield`）
-# --------------------------------------------------------------------------------------
 
 
 class _BadExitCM:
@@ -358,8 +312,6 @@ class _BadExitCM:
 
 
 class _BadExitClient:
-    """假 client：所有观测都用会抛异常的 CM。"""
-
     def start_as_current_observation(self, **kwargs: Any) -> _BadExitCM:
         return _BadExitCM(_FakeObs())
 
@@ -390,7 +342,6 @@ def test_trace_root_business_exception_wins_over_sdk_exit_failure() -> None:
 
 
 def test_node_span_and_generation_propagate_business_exception() -> None:
-    """node span / generation / tool span 同样不得吞业务异常。"""
     tracer = _tracer(_FakeClient())
 
     with pytest.raises(KeyError), tracer.node_span("plan"):
@@ -407,14 +358,7 @@ def test_node_span_and_generation_propagate_business_exception() -> None:
         raise RuntimeError("tool failed")
 
 
-# --------------------------------------------------------------------------------------
-# 7. 配置来源：真实环境变量 > Settings（仓库根 .env）
-# --------------------------------------------------------------------------------------
-
-
 class _FakeSettings:
-    """假 Settings：只提供可观测性相关字段。"""
-
     pra_langfuse_experiment = "prompt-v2"
     pra_langfuse_session = "eval-run-1"
     langfuse_public_key = "pk-lf-from-env-file"
@@ -436,7 +380,7 @@ def test_config_falls_back_to_settings_env_file(monkeypatch) -> None:
 
 
 def test_real_env_var_beats_settings(monkeypatch) -> None:
-    """真实环境变量优先级高于 .env（与 pydantic-settings 语义一致）。"""
+    """真实环境变量优先级高于 `.env`（配置来源顺序）。"""
     monkeypatch.setenv("PRA_LANGFUSE_EXPERIMENT", "rag-v1")
     monkeypatch.setattr("pra.infra.db.Settings", lambda *a, **k: _FakeSettings())
 
@@ -453,5 +397,5 @@ def test_settings_failure_is_silent(monkeypatch) -> None:
     monkeypatch.setattr("pra.infra.db.Settings", _boom)
 
     assert T._env_or_settings("PRA_LANGFUSE_EXPERIMENT", "pra_langfuse_experiment") is None
-    assert T.experiment_name() == "baseline"  # 回落缺省
+    assert T.experiment_name() == "baseline"
     assert T.session_id() is None

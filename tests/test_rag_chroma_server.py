@@ -1,29 +1,23 @@
-"""真 Chroma 服务端集成测试（tests/test_rag_chroma_server.py）—— 服务端不可达时**整文件 skip**。
+"""真 Chroma 服务端集成测试 —— 服务端不可达时整文件 skip。
 
-**为什么必须有它**：``tests/test_rag_chroma.py`` 只覆盖 ``EphemeralClient``（进程内内存库）。
-内存库与真服务端（Rust 内核 + HttpClient）的差异**不是「仅连接串差异」**—— 本仓已吃过这类
-亏（docs/06 §7：Qdrant ``point id`` 上界缺陷在进程内模式全绿、只在真 server 炸）。故这里把
-真服务端路径钉住：**建库 → 全量 upsert → 服务端点数校验 → 检索与 local 同口径**。
-
-覆盖点（docs/10 §5-8「真服务端」验收）：
+内存库（``EphemeralClient``）与真服务端的差异不只是连接串：Qdrant ``point id`` 上界缺陷
+就曾在进程内模式全绿、只在真 server 炸。本文件钉住真服务端路径：建库 → 全量 upsert →
+服务端点数校验 → 检索与 local 同口径。覆盖点：
 
 1. ``build_*_index(backend="chroma", chroma_host=…, chroma_port=…)`` 的 ``HttpClient`` 分支真连上；
-2. **点数落在服务端**（24 policy / 67 case）—— 用**另开的** client 读 ``collection.count()``，
-   防「本地假象」；
-3. **vector 模式与 local 同序同 id**（§5-1 第一行；组合选「过滤可完整下推」的那批，理由见
-   docs/10 §3 与 ``tests/test_rag_chroma.py`` 第 6 节的实测偏差），case 侧另断言 R-4 隔离；
-4. 用的是 ``configuration={"hnsw": {"space": "cosine"}}`` 建库（服务端回读配置断言）；
-5. 清理：``collection_prefix`` 带 uuid4 后缀 → 测试**自建自删**，且在 ``finally`` 中断言
-   「本前缀库已清空」+「测试前就存在的**别人的**库一个都没少」（服务端是共享单实例，
-   遗留库不少 —— 绝不动非本次创建的 collection）。
+2. 点数落在服务端（24 policy / 67 case）—— 用另开的 client 读 ``collection.count()``，防本地假象；
+3. vector 模式与 local 同序同 id（组合含过滤），case 侧另断言 R-4 隔离；
+4. 建库用 ``configuration={"hnsw": {"space": "cosine"}}``：服务端缺省 ``l2``，会让
+   「相似度 = 1 − distance」静默失效 → 回读配置断言；
+5. ``collection_prefix`` 带 uuid4 后缀 → 自建自删；``finally`` 中断言本前缀库已清空，
+   且测试前就存在的别人的库一个都没少（服务端是共享单实例，绝不动非本次创建的 collection）。
 
-跳过代价（诚实标注）：服务端未起时本文件**整文件 skip 而非失败**；CI 只跑
-``uv sync --frozen``（不装任何 extra）→ 本文件在 CI 上必然不执行。CI 上真正跑得动的守护是
-``tests/test_rag_default_path_no_extra.py``（docs/10 §5-5）。
+服务端未起时整文件 skip；CI 只跑 ``uv sync --frozen``（不装 extra）→ 必然不执行，
+CI 上真正跑得动的守护是 ``tests/test_rag_default_path_no_extra.py``。
 
-服务端起法：``cd deploy/chroma && docker compose up -d``（仅绑 ``127.0.0.1:8001``，容器内 8000；
-``/api/v1`` 已废弃返回 410，只用 ``/api/v2``）。URL 可用环境变量 ``PRA_CHROMA_URL`` 覆盖
-（默认 ``http://127.0.0.1:8001``）。embedder 一律 ``MockHashEmbedder``（确定性、零模型下载）。
+起服务：``cd deploy/chroma && docker compose up -d``（仅绑 ``127.0.0.1:8001``，容器内 8000；
+``/api/v1`` 已废弃返回 410，只用 ``/api/v2``）。URL 可用 ``PRA_CHROMA_URL`` 覆盖；
+embedder 一律 ``MockHashEmbedder``（确定性、零模型下载）。
 """
 
 from __future__ import annotations
@@ -88,19 +82,17 @@ pytestmark = pytest.mark.skipif(
 
 
 def _prefix(tag: str) -> str:
-    """本次测试专用 collection 前缀（uuid 后缀 → 与遗留库/并发运行互不干扰）。"""
+    # uuid 后缀 → 与遗留库/并发运行互不干扰
     return f"pytest_srv_{tag}_{uuid4().hex[:8]}"
 
 
 def _names_with_prefix(client: object, prefix: str) -> list[str]:
-    """服务端当前存在的、属于本测试前缀的 collection 名（用于清理与清理断言）。"""
     return sorted(
         c.name for c in client.list_collections() if c.name.startswith(prefix)  # type: ignore[attr-defined]
     )
 
 
 def _all_names(client: object) -> set[str]:
-    """服务端当前全部 collection 名（用于「不动别人的库」断言）。"""
     return {c.name for c in client.list_collections()}  # type: ignore[attr-defined]
 
 
@@ -111,14 +103,8 @@ def _delete_mine(client: object, prefix: str) -> None:
 
 
 async def test_chroma_policy_index_against_real_server() -> None:
-    """policy KB 经真 Chroma 服务端建库 upsert + 检索与 local 同口径（vector 模式）。
-
-    覆盖点：① factory 的 ``chroma_host``/``chroma_port`` 分支真连上服务端；② 24 个 node
-    **落在服务端**（换一个 client 连接读 ``collection.count()``）；③ 服务端 collection 的
-    向量空间回读为 cosine（docs/10 §3 硬要求）；④ vector 模式命中序/id 与 local 逐条一致
-    —— 组合**含过滤**：无过滤、``effective_only=True``、``risk_type``（后者正是修复前会
-    漏召回的那类，修复后由「精确候选 id 集 + 覆盖率自检」在真服务端同样保证完整）。
-    """
+    """① ``chroma_host``/``chroma_port`` 分支真连上；② 24 个 node 落在服务端；③ 向量空间回读
+    cosine；④ vector 命中序/id 与 local 一致（组合含过滤，``risk_type`` 是修复前漏召回的那类）。"""
     prefix = _prefix("policy")
     # 独立连接（走被测的 make_chroma_client 装配路径）：读的是服务端真实状态
     reader = make_chroma_client(host=_HOST, port=_PORT)
@@ -169,11 +155,6 @@ async def test_chroma_policy_index_against_real_server() -> None:
 
 
 async def test_chroma_case_index_against_real_server() -> None:
-    """case KB 同上一路：真服务端 67 node 落库 + vector 同口径 + R-4 隔离。
-
-    case 侧 category 走**精确匹配**下推（与 Python 谓词等价），故 category 组合上
-    vector 的「同序同 id」在真服务端也应成立；``retrieval_score`` 允许 float32 尾差 ≤1e-6。
-    """
     prefix = _prefix("case")
     reader = make_chroma_client(host=_HOST, port=_PORT)
     before = _all_names(reader)
@@ -222,11 +203,7 @@ async def test_chroma_case_index_against_real_server() -> None:
 
 
 async def test_chroma_server_reuses_same_prefix_collection_idempotently() -> None:
-    """同前缀再次构造 → **复用**服务端 collection（幂等 upsert，不产生重复点）。
-
-    这条覆盖真服务端的 ``get_collection`` 复用路径（内存库上覆盖不到同一条 RPC 语义），
-    并断言复用后点数仍 == corpus 行数（重复 upsert 不得翻倍）。
-    """
+    """同前缀再次构造 → 复用服务端 collection（幂等 upsert，点不翻倍）。"""
     prefix = _prefix("reuse")
     reader = make_chroma_client(host=_HOST, port=_PORT)
     before = _all_names(reader)

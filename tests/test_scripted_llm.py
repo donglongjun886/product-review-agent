@@ -1,8 +1,7 @@
 """确定性走查桩（pra/agent/scripted_llm.py）单测。
 
-- 确定性：同 (node, __STATE__) → 输出字节一致（可重放）；
-- 走查剧本：各 node 输出都能过对应 OutputModel.model_validate_json（schema 强校验），
-  关键字段与 §4.3 剧本一致；
+- 确定性：同 (node, ``__STATE__``) → 输出字节一致（可重放）；
+- 剧本：各 node 输出都能过对应 OutputModel 的 ``model_validate_json``（schema 强校验）；
 - 未知 node → 抛 LLMBackendError（供降级路径测试）；
 - 幂等：同证据集重复 reevaluate（应用一次后）不再产出重复更新。
 """
@@ -50,7 +49,6 @@ def _queue(question: str = "外观是否与某知名品牌款高度相似？", s
 
 
 async def test_deterministic_output_bytes_equal():
-    """同 (node, __STATE__) → 字节一致（同输入恒同输出，eval 可重放）。"""
     backend = ScriptedLLMBackend()
     payload = {
         "hypotheses": [h.model_dump(mode="json") for h in _pending_hypotheses()],
@@ -64,7 +62,6 @@ async def test_deterministic_output_bytes_equal():
 
 
 async def test_hypothesize_script_passes_schema():
-    """hypothesize 剧本：4 假设 + 2 队列，Schema 强校验通过。"""
     backend = ScriptedLLMBackend()
     resp = await backend.complete(node="hypothesize",
                                   messages=hypothesize_messages({"case": make_case()}),
@@ -78,7 +75,7 @@ async def test_hypothesize_script_passes_schema():
 
 
 async def test_plan_script_passes_schema_and_branches():
-    """plan 剧本四分支：无外观证据 → call_tools(ImageAnalysisTool)；五类证据齐 → conclude。"""
+    """plan 剧本：无外观证据 → call_tools(ImageAnalysisTool)；五类证据齐 → conclude。"""
     backend = ScriptedLLMBackend()
     case = make_case()
 
@@ -112,7 +109,6 @@ async def test_plan_script_passes_schema_and_branches():
 
 
 async def test_reevaluate_script_passes_schema():
-    """reevaluate 剧本按证据 flags 更新 H1(REFUTED)/H2(SUPPORTED)，Schema 强校验。"""
     backend = ScriptedLLMBackend()
     state = {
         "hypotheses": _pending_hypotheses(),
@@ -135,7 +131,6 @@ async def test_reevaluate_script_passes_schema():
 
 
 async def test_reevaluate_idempotent_after_apply():
-    """幂等：同证据集下，应用一次脚本结果后再 reevaluate 不再产出重复更新。"""
     backend = ScriptedLLMBackend()
     state1 = {
         "hypotheses": _pending_hypotheses(),
@@ -174,7 +169,7 @@ async def test_reevaluate_idempotent_after_apply():
 
 
 async def test_decide_script_passes_schema():
-    """decide 剧本：固定 HUMAN_REVIEW 提案，Schema 强校验（§4.3 原文）。"""
+    """decide 剧本：固定 HUMAN_REVIEW 提案，Schema 强校验。"""
     backend = ScriptedLLMBackend()
     state = {
         "hypotheses": [hp("H2", prior=0.4, posterior=0.91,
@@ -204,7 +199,7 @@ async def test_unknown_node_raises_llm_backend_error():
 
 
 async def test_empty_state_fallback_hypothesize_plan_conclude():
-    """缺 __STATE__（空事实兜底）：hypothesize 仍产固定假设；plan 无图可查 → conclude。"""
+    """缺 ``__STATE__``（空事实兜底）：hypothesize 仍产固定假设；plan 无图可查 → conclude。"""
     backend = ScriptedLLMBackend()
     hyp = HypothesizeOutput.model_validate_json(
         (await backend.complete(node="hypothesize", messages=[], json_schema={})).content
@@ -218,7 +213,6 @@ async def test_empty_state_fallback_hypothesize_plan_conclude():
 
 
 async def test_default_backend_name_and_instance_shape():
-    """桩实例名与无状态性（多次 complete 不引入实例可变状态）。"""
     backend = ScriptedLLMBackend()
     assert backend.name == "scripted-walkthrough"
     a = await backend.complete(node="hypothesize", messages=[], json_schema={})

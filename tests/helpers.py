@@ -1,7 +1,6 @@
-"""共享测试构造件 —— 领域对象工厂 + LLMBackend 测试替身 + 常用 state 骨架。
+"""共享测试构造件：领域对象工厂 + LLMBackend 测试替身 + 常用 state 骨架。
 
-仅被 tests/* 引用；不是测试文件（文件名不含 test_ 前缀），pytest 不收集。
-语法/import 约定与 src 一致：顶部 ``from __future__ import annotations``；import 一律 pra.*。
+仅被 tests/* 引用；文件名不含 test_ 前缀，pytest 不收集。
 """
 
 from __future__ import annotations
@@ -23,9 +22,7 @@ from pra.domain.models import (
 )
 
 
-# ---------------------------------------------------------------------------
 # domain 对象工厂
-# ---------------------------------------------------------------------------
 
 
 def ev(
@@ -37,7 +34,7 @@ def ev(
     ref_id: str | None = None,
     extra: dict | None = None,
 ) -> Evidence:
-    """构造一条 Evidence（extra 复制为新 dict，防测试间共享引用）。"""
+    # extra 复制为新 dict，防测试间共享引用
     return Evidence(
         type=type_,
         source=source,
@@ -58,7 +55,6 @@ def hp(
     evidence_against: list[str] | None = None,
     statement: str | None = None,
 ) -> Hypothesis:
-    """构造一条 Hypothesis（默认 PENDING，prior 可低于 0.3 用于收敛/高优先口径测试）。"""
     return Hypothesis(
         id=id_,
         statement=statement or f"statement-{id_}",
@@ -78,7 +74,7 @@ def make_case(
     merchant_id: str = "M_TEST",
     version: int = 3,
 ) -> ProductReviewCase:
-    """构造最小合法 ProductReviewCase（默认 brand=None —— 不误触 R1 黑名单）。"""
+    # 默认 brand=None 不误触 R1 黑名单
     product = ProductInfo(
         product_id=product_id,
         title="复古跑鞋",
@@ -103,14 +99,11 @@ def make_case(
     )
 
 
-# ---------------------------------------------------------------------------
 # 常用 state 骨架（确定性纯函数/节点测试复用）
-# ---------------------------------------------------------------------------
 
 
 def dc_anchor_state() -> dict:
-    """走查锚点 state：5 条证据（含 citable POLICY_REF/CASE_PRECEDENT）+ H2 SUPPORTED
-    posterior=0.91 → finalize_decision_confidence == 0.87；无矛盾（商家不干净）。"""
+    """锚点 state：5 条证据（含 citable POLICY_REF/CASE_PRECEDENT）+ H2 SUPPORTED posterior=0.91。"""
     hypotheses = [
         hp("H1", prior=0.5, status=HypothesisStatus.REFUTED, posterior=0.05,
            evidence_against=["IMAGE_SIMILARITY similarity=0.42, match=某品牌条纹运动鞋"]),
@@ -146,7 +139,6 @@ def dc_anchor_state() -> dict:
 
 
 def budget_exhausted_state() -> dict:
-    """预算超限 state：llm_calls 恰好触顶（10/10，>= 语义即超限）。"""
     return {
         "hypotheses": [],
         "evidence": [],
@@ -157,9 +149,7 @@ def budget_exhausted_state() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # LLMBackend 测试替身（实现 pra.agent.guardrails.llm_shell.LLMBackend Protocol）
-# ---------------------------------------------------------------------------
 
 _PLAN_CONCLUDE = {"next_action": "conclude", "tools": [], "rationale": "test"}
 
@@ -171,9 +161,7 @@ def json_dumps(obj) -> str:
 def plan_conclude_json() -> str:
     return json_dumps(_PLAN_CONCLUDE)
 
-
 def hypothesize_json() -> str:
-    """hypothesize 合法输出（2 假设 + 1 队列），供节点成功路径测试。"""
     return json_dumps(
         {
             "hypotheses": [
@@ -187,7 +175,6 @@ def hypothesize_json() -> str:
 
 
 def reevaluate_json() -> str:
-    """reevaluate 合法输出：更新 H1 + 队列置 DONE + 新增 1 假设 H3（续号）。"""
     return json_dumps(
         {
             "hypothesis_updates": [
@@ -209,7 +196,6 @@ def reevaluate_json() -> str:
 
 
 def decide_reject_json() -> str:
-    """decide 合法 REJECT 提案（配合 dc_anchor_state 应过 REJECT Gate 被采纳）。"""
     return json_dumps(
         {
             "decision": "REJECT",
@@ -238,11 +224,7 @@ def decide_human_json() -> str:
 
 
 class SequenceBackend:
-    """逐个返回预设 content 的替身；耗尽后抛 LLMBackendError。记录每次收到 messages 副本。
-
-    ``contents`` 元素为 JSON 字符串（返回该串）或 None（表示该次抛后端异常）。
-    """
-
+    # contents 元素为 JSON 字符串（返回该串）或 None（该次抛后端异常）；calls 记录每次 messages 副本
     name = "test-sequence"
 
     def __init__(self, contents: list, tokens: int = 7) -> None:
@@ -261,8 +243,6 @@ class SequenceBackend:
 
 
 class AlwaysRaiseBackend:
-    """每次 complete 都抛 LLMBackendError（后端故障路径）。"""
-
     name = "test-always-raise"
 
     def __init__(self) -> None:
@@ -274,8 +254,6 @@ class AlwaysRaiseBackend:
 
 
 class NodePayloadBackend:
-    """按 node 名返回预设 payload 的替身（节点成功路径注入）。"""
-
     name = "test-node-payload"
 
     def __init__(self, payloads: dict | None = None) -> None:

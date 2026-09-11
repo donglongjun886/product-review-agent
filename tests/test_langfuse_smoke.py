@@ -1,25 +1,16 @@
-"""tests/test_langfuse_smoke.py —— ``scripts/langfuse_smoke.py`` 的离线单元测试。
+"""``scripts/langfuse_smoke.py`` 的离线单元测试。
 
-**全部不联网、不依赖 langfuse SDK**（当前主 venv 未装，属 optional extra）。
-回读口径按 **Langfuse v4 观测列表**（``{"data": [...]}``）构造假 payload —— 服务端
-``events_only`` 模式下 v3 的 ``/api/public/traces`` 已 404（实测，见脚本 docstring）：
+**全部不联网、不依赖 langfuse SDK**（当前主 venv 未装，属 optional extra）。回读口径按
+**Langfuse v4 观测列表**（``{"data": [...]}``）构造假 payload —— 服务端 ``events_only``
+模式下 v3 的 ``/api/public/traces`` 已 404，回读只能用 v4 端点。
+- 无凭据 → ``main([])`` 退出码 0 并提示怎么启用（``PRA_LANGFUSE_ENABLED=0`` 同分支）；
+  ``--trace-id`` 非法 → 退出码 2；参数解析 + v4 回读 URL（**fields= 必须带**，否则 v4 不返回
+  model/usageDetails）；Basic Auth 头；假 ``urlopen`` 捕获 URL/认证头/超时与 HTTP 错误映射。
+- 回读轮询：空 data 重试 / 始终为空 → ``None`` + notes / 返回最全的一份；``_verify_trace_*``
+  能指出具体差异；``_observation_tree_*`` 按 ``parentObservationId`` 缩进且 **root 以
+  ``isRootObservation`` 为准**（v4 的 root 带幽灵父 id）；main 的 PASS/FAIL/不可达三条路径。
 
-1. ``test_main_disabled_without_credentials``：无凭据 → ``main([])`` 返回 0，stdout 含
-   ``tracing disabled`` 与 ``uv sync --extra observability`` 启用提示（CI 友好契约）；
-2. ``test_main_rejects_bad_trace_id``：``--trace-id`` 非法 → 退出码 2（且不碰 tracer）；
-3. ``test_trace_id_and_url_helpers`` / ``test_observations_url_carries_fields``：
-   ``--trace-id`` 参数解析 + v4 回读 URL（traceId / limit / **fields=** 齐全）；
-4. ``test_auth_header_is_basic_base64``：Basic Auth 头 = ``base64(public_key:secret_key)``；
-5. ``test_api_get_builds_url_and_authorization``：假 ``urlopen`` 捕获 URL / 认证头 / 超时
-   （用例内不发真实 HTTP）；
-6. ``test_verify_trace_*``：断言清单在正常 v4 payload 上全通过、在缺字段时能指出具体差异；
-7. ``test_observation_tree_*``：树按 ``parentObservationId`` 缩进，**root 以
-   ``isRootObservation`` 为准**（v4 的 root 带幽灵父 id）；
-8. ``test_fetch_trace_*``：轮询语义（空 data 重试、始终为空 → ``None`` + notes）；
-9. ``test_main_*``：main 的 PASS / FAIL / 不可达三条路径（注入假 tracer + 假 urlopen）。
-
-脚本在 ``scripts/``（非包）→ 与 ``tests/test_evaluation_dataset_v2.py`` 同款 importlib
-按路径加载，只取纯函数与 ``main``，不执行模块级副作用。
+脚本在 ``scripts/``（非包）→ 走 importlib 按路径加载，只取纯函数与 ``main``。
 """
 
 from __future__ import annotations
@@ -78,10 +69,7 @@ def no_credentials(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(key, raising=False)
 
 
-# ---------------------------------------------------------------------------
 # 0) v4 假 payload（与实测形状一致）
-# ---------------------------------------------------------------------------
-
 #: 与真实 v4 响应一致的观测列表（root 的 parentObservationId 是**幽灵 id**）。
 _GHOST_PARENT = "5f378a385f1a15a3"
 
@@ -145,10 +133,7 @@ def _sample_payload(trace_id: str) -> dict[str, Any]:
     return {"data": _sample_observations(trace_id), "meta": {}}
 
 
-# ---------------------------------------------------------------------------
 # 1) 无凭据 → 退出码 0 + 启用提示（不联网）
-# ---------------------------------------------------------------------------
-
 
 def test_main_disabled_without_credentials(smoke, no_credentials, capsys) -> None:
     rc = smoke.main([])
@@ -172,9 +157,7 @@ def test_main_disabled_with_explicit_disable_flag(smoke, no_credentials, monkeyp
     assert "PRA_LANGFUSE_ENABLED=0" in out
 
 
-# ---------------------------------------------------------------------------
 # 2) 参数解析 + v4 回读 URL
-# ---------------------------------------------------------------------------
 
 
 def test_main_rejects_bad_trace_id(smoke, no_credentials, capsys) -> None:
@@ -239,9 +222,7 @@ def test_observations_from_payload_requires_v4_shape(smoke) -> None:
     assert smoke._observations_from_payload({"data": [{"id": "a"}, "junk"]}) == [{"id": "a"}]
 
 
-# ---------------------------------------------------------------------------
 # 3) 认证头 + _api_get 的 URL / header 构造（假 urlopen，不发真实 HTTP）
-# ---------------------------------------------------------------------------
 
 
 def test_auth_header_is_basic_base64(smoke) -> None:
@@ -308,9 +289,7 @@ def test_api_get_maps_http_error(smoke, monkeypatch) -> None:
     assert error and "404" in error
 
 
-# ---------------------------------------------------------------------------
 # 4) 回读轮询
-# ---------------------------------------------------------------------------
 
 
 def test_fetch_trace_polls_until_observations_visible(smoke, monkeypatch, capsys) -> None:
@@ -366,9 +345,7 @@ def test_fetch_trace_keeps_best_partial_payload(smoke, monkeypatch) -> None:
     assert observations is not None and len(observations) == 3
 
 
-# ---------------------------------------------------------------------------
 # 5) 回读断言清单 + observation 树
-# ---------------------------------------------------------------------------
 
 
 def test_verify_trace_passes_on_full_payload(smoke) -> None:
@@ -484,9 +461,7 @@ def test_observation_tree_handles_orphans_and_empty(smoke) -> None:
     assert smoke._observation_tree(orphan) == ["- orphan [SPAN]  id=x"]
 
 
-# ---------------------------------------------------------------------------
 # 6) main 正常路径（注入假 tracer + 假 urlopen；依旧不发真实 HTTP）
-# ---------------------------------------------------------------------------
 
 
 class _FakeObservation:

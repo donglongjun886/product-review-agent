@@ -1,37 +1,17 @@
-"""Embedding Provider（rag/embedder.py）—— Embedder 抽象 + 确定性 mock 实现。
+"""Embedding Provider —— ``Embedder`` 抽象 + 确定性 mock 实现。
 
-定位（对齐 rag-implementation-plan.md R-2，**诚实标注，勿包装**）：
+``Embedder`` Protocol 只有 ``embed(text) -> list[float]`` 一个方法；上层检索只依赖这个窄接口。
 
-- ``Embedder`` Protocol：``embed(text) -> list[float]`` —— 上层检索（rag/retrieval.py
-  与 rag/index.py）只依赖该窄接口；Phase 2 换本地模型（如 BGE）+ Qdrant 时，
-  provider 替换即可，RAG 上层检索代码不动。
-- ``MockHashEmbedder``：**确定性 mock（hash 特征），不是语义检索**。同输入同输出、
-  离线、维度固定 —— 用途仅是：验证「query/doc → 向量 → 余弦 → 混合融合」链路
-  通与评测可重放。文档/查询向量刻画的是**词面特征**（CJK 字符 bigram / 拉丁词，
-  与 bm25.tokenize 同口径 → bm25 与 vector 两路在词面层可比），**不承诺**语义
-  相似（"增高鞋"与"瘦身鞋"是否相似不由此向量保证）——语义质量留 Phase 2
-  本地 embedding 模型验证，勿把 hash 结果当语义相似度解读。
+``MockHashEmbedder``：**确定性 mock，不是语义检索**。同输入同输出、离线、维度固定；向量刻画
+的是**词面特征**（CJK 字符 bigram / 拉丁词，与 ``bm25.tokenize`` 同口径），**不承诺**语义相似，
+只用于验证「query/doc → 向量 → 余弦 → 融合」链路与评测可重放。特征哈希用 ``hashlib.sha256``
+而非内置 ``hash()``（后者受 PYTHONHASHSEED 影响会跨进程漂移，破坏逐字节重放）。
 
-确定性：特征哈希用 ``hashlib.sha256``（非内置 ``hash()`` —— 后者受
-PYTHONHASHSEED 影响会跨进程漂移，破坏评测逐字节重放）。维度默认 256（常量
-``MOCK_DIM``）。向量为词特征计数（counts），cosine 见 rag/vectors.py。
-
-Phase 2 真语义 provider（``BgeEmbedder`` = BAAI/bge-small-zh-v1.5 @ fastembed/
-onnxruntime，dim 512）—— **诚实标注，勿包装**：
-
-- mock 与真模型**不可混算**（词面 hash 256 维 vs 语义 512 维，语义口径不同）：
-  真模型不可用（fastembed 缺失 / 模型未缓存 / 下载失败）时 ``BgeEmbedder.embed``
-  **显式抛带指引的 RuntimeError，或由调用方经 ``model_ready()`` 显式降级 ——
-  绝不静默回退 mock**（docs/06 P2-2 红线）。
-- 懒加载 + 离线守卫：``BgeEmbedder()`` 构造期不 import fastembed、不联网、不下载；
-  首次 ``embed()`` 才 import 并（必要时）下载模型 —— huggingface.co 被墙时需设
-  ``HF_ENDPOINT`` 镜像（如 ``https://hf-mirror.com``）。``available()`` 只判能否
-  import（不触发下载）；``model_ready()`` 只读磁盘判模型文件是否已缓存（测试
-  skip 与 demo 预检用）。
-- 确定性口径：真模型**同进程**同模型同输入 ``embed`` 逐位相等；**跨进程/平台浮点
-  尾差不纳入逐字节契约** —— 确定性回归基线恒以默认 mock 路径为准（docs/06 §2.2/§5）。
-- v1 未引入 BGE 检索指令：``Embedder.embed`` 单入口不区分 doc/query，bge-zh
-  query instruction 排后续（docs/06 P2-6）。
+``BgeEmbedder``：真语义 provider（BAAI/bge-small-zh-v1.5 @ fastembed/onnxruntime，dim 512）。
+与 mock **不可混算**（词面 hash 256 维 vs 语义 512 维）。真模型不可用（fastembed 缺失 / 模型
+未缓存 / 下载失败）时**显式抛带指引的 RuntimeError，绝不静默回退 mock**。构造期不 import
+fastembed、不联网、不下载，首次 ``embed()`` 才加载；同进程同输入逐位相等，跨进程浮点尾差不纳入
+逐字节契约。
 """
 
 from __future__ import annotations
@@ -50,19 +30,17 @@ __all__ = [
     "BgeEmbedder",
 ]
 
-MOCK_DIM = 256  # mock 特征维度（Phase 2 换真实模型后由其自身决定维度）
+MOCK_DIM = 256  # mock 特征维度（换真实模型后由其自身决定维度）
 
 
 class Embedder(Protocol):
-    """文本 → 定长向量的 provider 窄接口（Phase 2 本地模型的替换位）。"""
 
     def embed(self, text: str) -> list[float]:
-        """对一段文本编码为定长 float 向量（离线确定性）。"""
         ...
 
 
 class MockHashEmbedder:
-    """确定性 mock embedding：词特征哈希到固定维度（模块 docstring 口径）。
+    """确定性 mock embedding：词特征哈希到固定维度。
 
     :param dim: 特征维度（默认 256）；同输入同输出、跨进程稳定。
     """
@@ -73,40 +51,31 @@ class MockHashEmbedder:
         self.dim = dim
 
     def _feature_index(self, token: str) -> int:
-        """token → [0, dim) 稳定哈希位（sha256 前缀 8 字节 mod dim）。"""
         digest = hashlib.sha256(token.encode("utf-8")).digest()[:8]
         return int.from_bytes(digest, "big") % self.dim
 
     def embed(self, text: str) -> list[float]:
-        """词特征计数向量（词面层；语义质量不承诺，见模块 docstring）。"""
         vec = [0.0] * self.dim
         for tok in tokenize(text):
             vec[self._feature_index(tok)] += 1.0
         return vec
 
 
-# ---------------------------------------------------------------------------
-# Phase 2 真语义 provider（docs/06 §2.2 契约）—— 只追加，不改动上方既有实现。
-# 懒加载红线：本模块顶层不 import fastembed；构造不联网/不下载；首次 embed 才加载。
-# ---------------------------------------------------------------------------
+# --- 真语义 provider（懒加载：顶层不 import fastembed；构造不联网/不下载）---
 
 BGE_DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
 # fastembed 官方支持模型（dim 512，onnx ~90MB）。注意其模型描述把 HF 源仓库映射到
-# Qdrant 官方 ONNX 仓库（Qdrant/bge-small-zh-v1.5），见 fastembed onnx_embedding.py。
+# Qdrant 官方 ONNX 仓库（Qdrant/bge-small-zh-v1.5）。
 BGE_DIM = 512
 
 
 class BgeEmbedder:
     """真语义 embedding provider —— BAAI/bge-small-zh-v1.5 @ fastembed/onnxruntime。
 
-    实现既有 ``Embedder`` Protocol（``embed(text) -> list[float]``），供 RAG Phase 2
-    索引（Qdrant / local）替换 ``MockHashEmbedder`` 使用。行为口径见模块 docstring
-    （与 mock 不可混算、懒加载 + 离线守卫、确定性边界、v1 无检索指令 P2-6）。
+    实现 ``Embedder`` Protocol（与 mock 不可混算、懒加载 + 离线守卫、确定性边界、无检索指令）。
 
-    :param model_name: fastembed 支持的模型名；默认 ``BGE_DEFAULT_MODEL``；空串抛
-        ValueError。非默认模型时 ``dim`` 仍按本类常量返回 512（本类面向 bge-small-zh）。
-    :param cache_dir: 模型缓存目录；为空时依次回退环境变量 ``PRA_EMBED_CACHE_DIR``
-        → None（None 表示 fastembed 默认缓存目录，见 ``model_ready`` 的探测说明）。
+    :param model_name: fastembed 支持的模型名；默认 ``BGE_DEFAULT_MODEL``；空串抛 ValueError。
+    :param cache_dir: 模型缓存目录；为空时回退 ``PRA_EMBED_CACHE_DIR`` → None（fastembed 默认）。
     """
 
     #: 首次 embed 成功后缓存的 fastembed ``TextEmbedding`` 实例（懒加载；None = 未加载）。
@@ -126,12 +95,10 @@ class BgeEmbedder:
 
     @property
     def dim(self) -> int:
-        """本 provider 的向量维度（BGE-small-zh = 512）。"""
         return BGE_DIM
 
     @classmethod
     def available(cls) -> bool:
-        """能否 import fastembed（try/except；**不触发模型下载/联网**）。"""
         try:
             import fastembed  # noqa: F401
         except Exception:
@@ -143,9 +110,8 @@ class BgeEmbedder:
         """cache_dir=None 时 fastembed 实际可能使用的默认缓存根目录（只读，不创建）。
 
         覆盖 fastembed 0.8 的解析链（环境变量 ``FASTEMBED_CACHE_PATH`` → 系统临时目录
-        ``<tmp>/fastembed_cache``，见 fastembed ``define_cache_dir``）与历史/文档默认
-        ``~/.cache/fastembed``（docs/06 P2-2 与任务口径），避免版本默认目录差异造成
-        ``model_ready`` 误判；全部为只读探测。
+        ``<tmp>/fastembed_cache``）与历史默认 ``~/.cache/fastembed``，避免版本默认目录差异
+        造成 ``model_ready`` 误判；全部为只读探测。
         """
         import os
         import tempfile
@@ -170,10 +136,9 @@ class BgeEmbedder:
         cache_dir（为空时按 :meth:`_default_cache_bases`）下任一位置存在 ``*.onnx``：
 
         - ``<根>/models--<model_name 的 / 换成 -->/…``（fastembed/HF 快照布局）；
-        - 默认模型另探测 ``models--Qdrant--bge-small-zh-v1.5``（fastembed 0.8 对该
-          模型的 HF 源仓库为 Qdrant 官方 ONNX 仓库）；
-        - ``<根>/fast-<模型名最后一段>/``（fastembed GCS tar 落盘布局，本机实测缓存
-          即此布局：``model_cache/fast-bge-small-zh-v1.5/model_optimized.onnx``）。
+        - 默认模型另探测 ``models--Qdrant--bge-small-zh-v1.5``（fastembed 0.8 对该模型的
+          HF 源仓库为 Qdrant 官方 ONNX 仓库）；
+        - ``<根>/fast-<模型名最后一段>/``（fastembed GCS tar 落盘布局）。
         """
         from pathlib import Path
 
@@ -203,10 +168,9 @@ class BgeEmbedder:
         """懒加载：import fastembed 并实例化 ``TextEmbedding``（首次可能联网下载）。
 
         失败（fastembed 缺失 / 模型下载失败 / 加载失败）一律抛**带指引的 RuntimeError**
-        —— 提示 ``uv sync --extra rag`` 与 ``HF_ENDPOINT`` 镜像设置；**绝不静默回退
-        mock**。磁盘已缓存（``model_ready()`` 为真）时以 ``local_files_only=True``
-        实例化：只读本地加载、离线可用；未缓存时交给 fastembed 尝试下载（失败再转
-        RuntimeError）。
+        —— 提示 ``uv sync --extra rag`` 与 ``HF_ENDPOINT`` 镜像设置；**绝不静默回退 mock**。
+        磁盘已缓存（``model_ready()`` 为真）时以 ``local_files_only=True`` 实例化：只读本地
+        加载、离线可用。
         """
         try:
             from fastembed import TextEmbedding
@@ -235,11 +199,10 @@ class BgeEmbedder:
             ) from exc
 
     def embed(self, text: str) -> list[float]:
-        """对一段文本编码为 512 维 float 列表（真语义；确定性口径见模块 docstring）。
+        """对一段文本编码为 512 维 float 列表（真语义）。
 
         首次调用才 import fastembed 并加载模型（懒加载），后续复用同一实例；编码走
-        fastembed 批量接口（``list(model.embed([text]))[0]``），numpy 数组转纯
-        Python ``float`` 列表（对齐 ``Embedder`` Protocol）。
+        fastembed 批量接口，numpy 数组转纯 Python ``float`` 列表（对齐 ``Embedder`` Protocol）。
         """
         if self._model is None:
             self._model = self._load_model()

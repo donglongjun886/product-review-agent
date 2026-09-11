@@ -1,24 +1,13 @@
-"""run_regression.py —— Evaluation 决策序列 Regression（docs/02-evaluation.md §8 里程碑）。
+"""决策序列 Regression：对评测集跑三方案，把 EvalRecord 决策序列 hash 与基线快照比对。
 
-用途：对评测集跑 rule / single_call_llm / agent 三方案，把 EvalRecord 决策序列 hash
-与**已记录的基线快照**比对 —— 后续任何改动（screening 修正 / RAG / LLM 接入）若改变
-三方案在该集上的决策 → 回归报错（退出码 1），防静默行为漂移。
+任何改动（screening 修正 / RAG / LLM 接入）若改变三方案在该集上的决策 → 回归报错（退出码
+1），防静默行为漂移。支持 v1（Phase 1，35 案）与 v2（Phase 2 正式集，320 案）两条路径；
+v2 基线 ``eval_data/v2/regression_baseline.json`` 由确定性跑分录制、git 入库（见
+tests/test_regression_v2.py 的守护断言）。``--data`` 给 v1/v2 键或显式 JSONL 路径，
+``--record`` 强制重录基线，``--baseline`` 覆盖基线路径，``--schemes`` 选回归方案子集。
 
-支持 v1（Phase 1 兼容口径，35 案）与 v2（Phase 2 正式集 320 案）两条回归路径
-（v2 基线 ``eval_data/v2/regression_baseline.json`` 由确定性跑分录制、git 入库，
-见 tests/test_regression_v2.py 的守护断言）：:
-
-    uv run python scripts/run_regression.py                   # v1：比对（基线缺失 → 自动记录并 PASS）
-    uv run python scripts/run_regression.py --data v2         # v2：比对（同样自动记录兜底）
-    uv run python scripts/run_regression.py --record          # 强制重录 v1 基线（升级/有意变更后）
-    uv run python scripts/run_regression.py --record --data v2  # 强制重录 v2 基线
-    uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl  # 显式数据路径亦可
-    uv run python scripts/run_regression.py --baseline <path>  # 自定义基线路径（覆盖推断）
-
-基线快照默认存 ``<数据目录>/regression_baseline.json``（``eval_data/v1/…`` 与
-``eval_data/v2/…``；--baseline 覆盖）。首次运行（基线不存在）自动记录并报告
-"RECORDED"；之后比对报 REGRESSION PASS/FAIL。
-退出码：PASS=0 / FAIL=1 / 异常=非零（脚本内部 raise 后由 main 转非零）。
+基线默认存 ``<数据目录>/regression_baseline.json``；首次运行（基线不存在）自动记录并报
+"RECORDED"，之后比对报 REGRESSION PASS/FAIL。退出码：PASS=0 / FAIL=1 / 异常=非零。
 """
 
 from __future__ import annotations
@@ -36,7 +25,7 @@ from pra.evaluation.regression import (
 )
 
 DEFAULT_DATA = "eval_data/v1/cases_v1.jsonl"
-# 已知数据集（键 → (数据 JSONL, 基线 JSON)）：--data 可给键（v1/v2）或显式 JSONL 路径
+# 已知数据集（键 → (数据 JSONL, 基线 JSON)）：--data 可给键（v1/v2）或显式路径
 KNOWN_DATASETS: dict[str, tuple[str, str]] = {
     "v1": (
         "eval_data/v1/cases_v1.jsonl",
@@ -50,10 +39,10 @@ KNOWN_DATASETS: dict[str, tuple[str, str]] = {
 
 
 def _resolve_dataset(data_arg: str) -> tuple[str, str]:
-    """把 --data 参数解析为 (数据 JSONL 路径, 推断基线路径)。
+    """把 --data 解析为 (数据 JSONL 路径, 推断基线路径)。
 
     已知键（v1/v2）→ 键内 (data, baseline)；显式 JSONL 路径 → 基线取同目录
-    ``regression_baseline.json``（与键布局一致，防"指 v2 数据却比 v1 基线"的误用）。
+    ``regression_baseline.json``，防「指 v2 数据却比 v1 基线」。
     """
     if data_arg in KNOWN_DATASETS:
         return KNOWN_DATASETS[data_arg]
@@ -94,7 +83,7 @@ async def _main(argv: list[str] | None = None) -> int:
     data_path, baseline_default = _resolve_dataset(args.data)
     baseline_file = Path(args.baseline) if args.baseline else Path(baseline_default)
     schemes = tuple(args.schemes)
-    label = Path(data_path).parent.name  # v1 / v2（输出明确标数据集）
+    label = Path(data_path).parent.name  # v1 / v2（输出标明数据集）
 
     record = args.record or not baseline_file.exists()
     if record:

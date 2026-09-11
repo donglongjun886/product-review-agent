@@ -1,29 +1,15 @@
-"""Qdrant 后端索引测试（tests/test_rag_qdrant.py）—— Phase 2 同构等价与装配开关。
+"""Qdrant 后端索引测试：与 local 同构等价、协议形状、装配开关、collection 生命周期。
 
-对齐 docs/06-rag-phase2-qdrant-bge.md §2.1/§2.3/§4 验收 3/6：
-1. **同构等价（核心）**：同一 corpus rows + 同一 embedder（MockHash）下，qdrant 与
-   local（Rag*Index）两索引的 ``search`` 返回**同序同 id**；case 的 retrieval_score
-   允许 ulp 级浮点尾差（qdrant COSINE 存 float32 vs 纯 Python float64 余弦，
-   实测偏差 ~1e-8；个别恰好跨 6 位取整边界时显示差 ≤1e-6 → 断言 ``abs <= 1e-6``）。
-   mode 覆盖 hybrid / vector / bm25。
-2. 确定性：同索引同 query 两次调用结果相等（同输入同输出）。
-3. 协议形状：返回 PolicyClauseHit / CaseHit、retrieval_score ∈ [0,1]、Top-K ≤ top_k。
-4. 隔离（R-4）：真实 Case KB 命中 case_id 均为 RAG_CASE_ 前缀。
-5. 元数据/版本过滤语义与 local 逐条一致（EXPIRED 排除 / 全类目命中 / category /
-   risk_type 交叠）。
-6. 装配开关：factory ``backend="qdrant"`` 与 ``build_tools(rag_backend="qdrant")``
-   注入 Qdrant*Index（离线可用：embedder 一律 MockHashEmbedder）；
-   collection 复用/维度校验、本地持久 ``path=`` 模式。
-7. qdrant client 生命周期：每测试自建 ``QdrantClient(":memory:")`` 注入（或默认
-   location=":memory:" 自建），collection 名冲突用独立 collection_prefix / 新 client。
+核心：同一 corpus rows + 同一 MockHashEmbedder 下，qdrant 与 local（``Rag*Index``）的
+``search`` 返回同序同 id（mode 覆盖 hybrid/vector/bm25）。case 的 ``retrieval_score``
+允许 ulp 尾差 —— Qdrant COSINE 存 float32 vs 本地 float64 余弦，实测 ~1e-8，跨 6 位
+取整边界时 ≤1e-6，故断言 ``round(abs(diff), 9) <= 1e-6``。另覆盖：确定性重放、协议
+形状、Case KB 命中均为 RAG_CASE_ 前缀、过滤语义与 local 逐条一致、qdrant 装配开关、
+collection 复用与维度校验、本地持久 ``path=`` 模式。
 
-**point id 取值域（u64）不在这里**：本文件顶层 ``importorskip("qdrant_client")``，而 CI
-只跑 ``uv sync --frozen``（不装 extra）→ 整文件在 CI 上 skip。故该契约放
-``tests/test_rag_qdrant_point_id.py``（**不依赖 qdrant-client，任何环境恒跑**）——
-进程内模式不校验 id 上界，128 位实现曾在本文件全绿、只在真 server 炸。
-
-约定与现有 tests 一致：**零网络、零模型下载**（qdrant 进程内模式 + MockHash），
-embedder 一律 MockHashEmbedder；无 qdrant-client 环境整文件 skip（importorskip）。
+顶层 ``importorskip("qdrant_client")`` 而 CI 只跑 ``uv sync --frozen``（不装 extra）→
+整文件在 CI 上 skip。point id（u64）契约放在不依赖 qdrant-client 的文件里：进程内模式
+不校验 id 上界，128 位实现曾在本文件全绿、只在真 server 炸。全程零网络、零模型下载。
 """
 
 from __future__ import annotations
@@ -108,11 +94,6 @@ def _case_qdrant(mode: str) -> QdrantCaseIndex:
     )
 
 
-# ---------------------------------------------------------------------------
-# 1) 同构等价（核心）：qdrant ≡ local —— 同 id 同序；score 允许 1e-6 ulp 尾差
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("mode", ["hybrid", "vector", "bm25"])
 async def test_policy_qdrant_equivalent_to_local(mode: str) -> None:
     local = _policy_local(mode)
@@ -140,17 +121,11 @@ async def test_case_qdrant_equivalent_to_local(mode: str) -> None:
             f"case mode={mode} q={query!r} filters={filters}: qdrant 与 local 命中序/id 不一致"
         )
         # Qdrant COSINE 存 float32 vs 本地纯 Python float64 余弦 → 允许 ulp 尾差
-        # （实测 ~1e-8；个别恰跨 6 位取整边界时显示差 = 相邻两位小数 ≈1e-6，docs/06
-        # §2.1 同构口径）。两值均已 6 位取整：diff 先 round 清二进制表示 ulp 再断 ≤1e-6。
+        # （实测 ~1e-8；跨 6 位取整边界时 ≈1e-6）。两值均已 6 位取整：先 round 清 ulp 再断 ≤1e-6。
         for a, b in zip(lh, qh):
             assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= 1e-6, (
                 a.case_id, a.retrieval_score, b.retrieval_score
             )
-
-
-# ---------------------------------------------------------------------------
-# 2) 确定性 + 3) 协议形状 + 4) 隔离
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("mode", ["hybrid", "vector", "bm25"])
@@ -193,11 +168,9 @@ def test_qdrant_missing_client_raises_runtime_error(monkeypatch) -> None:
 async def test_qdrant_hit_types_and_topk_shape() -> None:
     p_idx = _policy_qdrant("hybrid")
     c_idx = _case_qdrant("hybrid")
-    # policy 协议形状：PolicyClauseHit、Top-K ≤ top_k
     ph = await p_idx.search("仿冒 外观模仿", PolicySearchFilters(), top_k=3, effective_only=True)
     assert ph and all(isinstance(h, PolicyClauseHit) for h in ph)
     assert len(ph) <= 3
-    # case 协议形状：CaseHit、retrieval_score ∈ [0,1]、Top-K ≤ top_k
     ch = await c_idx.search("无品牌高相似", CaseSearchFilters(), top_k=10)
     assert ch and all(isinstance(h, CaseHit) for h in ch)
     assert len(ch) <= 10
@@ -205,16 +178,11 @@ async def test_qdrant_hit_types_and_topk_shape() -> None:
 
 
 async def test_qdrant_case_kb_isolation_rag_prefix() -> None:
-    """隔离红线 R-4：真实 Case KB 命中 case_id 均为 RAG_CASE_ 前缀。"""
+    """隔离红线：真实 Case KB 命中 case_id 均为 RAG_CASE_ 前缀。"""
     idx = _case_qdrant("hybrid")
     hits = await idx.search("仿冒 外观高度模仿 无品牌", CaseSearchFilters(), top_k=10)
     assert hits
     assert all(str(h.case_id).startswith("RAG_CASE_") for h in hits)
-
-
-# ---------------------------------------------------------------------------
-# 5) 元数据/版本过滤语义（与 local 逐条一致，直接对 qdrant 索引断言行为）
-# ---------------------------------------------------------------------------
 
 
 async def test_qdrant_policy_version_and_category_semantics() -> None:
@@ -261,11 +229,6 @@ async def test_qdrant_case_metadata_semantics() -> None:
     assert none == []
 
 
-# ---------------------------------------------------------------------------
-# 6) 装配开关：factory backend + build_tools rag_backend 透传
-# ---------------------------------------------------------------------------
-
-
 def test_factory_default_backend_is_local_unchanged() -> None:
     """backend 缺省 local：与改动前逐字节等价（仍返回 Rag*Index，未拉起 qdrant 路径）。"""
     assert isinstance(build_policy_index(rows=POLICY_ROWS), RagPolicyIndex)
@@ -299,11 +262,6 @@ async def test_build_tools_rag_backend_qdrant_injects_qdrant_index() -> None:
     assert hits and all(str(h.case_id).startswith("RAG_CASE_") for h in hits)
 
 
-# ---------------------------------------------------------------------------
-# 7) collection 生命周期：复用 / 维度校验 / 本地持久 path= 模式
-# ---------------------------------------------------------------------------
-
-
 def test_qdrant_collection_reuse_same_client_same_dim() -> None:
     """同 client + 同 prefix：已存在 collection（dim 一致）复用之——两次构造不报错。"""
     client = qdrant_client.QdrantClient(":memory:")
@@ -333,7 +291,7 @@ def test_qdrant_collection_dim_mismatch_raises() -> None:
 
 
 async def test_qdrant_local_persistence_path_mode(tmp_path) -> None:
-    """``location=<目录>`` = qdrant path= 本地持久模式（原生支持，docs/06 P2-3）。"""
+    """``location=<目录>`` = qdrant path= 本地持久模式（原生支持）。"""
     loc = tmp_path / "kb"
     idx = QdrantPolicyIndex(
         POLICY_ROWS,

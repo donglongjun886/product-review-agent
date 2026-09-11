@@ -1,12 +1,7 @@
-"""API 装配层 —— FastAPI 应用工厂（总链路 A·1「HTTP 接入」节点；00 §15 api 目录）。
+"""FastAPI 应用工厂 —— 只装配应用壳（元信息 + 路由），不持有图/DB 等重对象。
 
-``create_app()`` 只负责**应用壳**：标题/OpenAPI 描述 + 挂载路由（routes.router）。
-编译图**不挂在 app 上** —— 调查执行所需的图单例由 service 模块级懒加载持有
-（service.get_graph），app 与图生命周期解耦：app 热重载/多 worker 各自独立 build 一次，
-互不阻塞；测试可直接 ``create_app()`` 起 TestClient，无需触碰图缓存。
-
-模块级 ``app = create_app()`` 仅为 ``uvicorn pra.api.app:app --reload`` 提供现成实例
-（见 scripts/demo_api.py docstring 的启动示例）；生产/测试建议显式 ``create_app()``。
+调查图单例由 ``pra.api.service`` 模块级懒加载持有，与 app 生命周期解耦：热重载或
+多 worker 各自独立 build 一次，测试可直接 ``create_app()`` 起 TestClient。
 """
 
 from __future__ import annotations
@@ -36,5 +31,5 @@ def create_app() -> FastAPI:
     return application
 
 
-# uvicorn 入口实例：`uv run uvicorn pra.api.app:app --reload`（见 scripts/demo_api.py）。
+# uvicorn 入口实例：`uv run uvicorn pra.api.app:app --reload`。
 app = create_app()

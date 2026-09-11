@@ -1,24 +1,12 @@
-"""领域模型 —— 复杂风险调查 Agent 的**数据契约层**。
+"""领域模型 —— 复杂风险调查 Agent 的数据契约层。
 
-本模块承载三类业务对象，对应 docs/00-system-design.md 的不同章节：
+三类业务对象：输入事实快照（``ProductReviewCase`` → ``ProductInfo`` / ``SkuInfo`` /
+``ProductImage`` / ``ScreeningSignal``）、运行中状态（``Hypothesis`` / ``Evidence`` /
+``Budget`` / ``BudgetLimits``）、输出裁决（``ReviewDecision``：三分类 + 证据链 + 假设轨迹 +
+预算快照）。
 
-1. **输入事实快照**（§2.1）：``ProductReviewCase`` → ``ProductInfo`` / ``SkuInfo`` /
-   ``ProductImage`` / ``ScreeningSignal``。它是机审链路上游投递来的"商品事实",
-   回答"Agent 面对的是什么"。
-2. **运行中状态对象**（§2.2 / §3 / §7）：``Hypothesis``（假设验证器视角的核心）、
-   ``Evidence``（结论依据）、``Budget`` / ``BudgetLimits``（成本/延迟护栏，§8.1）。
-3. **输出裁决**（§2.2）：``ReviewDecision`` —— 三分类 + 证据链 + 假设轨迹 + 预算快照，
-   回答"为什么这么判"，可回溯、可审计。
-
-约定（契约性代码的边界）：
-
-- **只声明结构与取值约束**（枚举受控词表、必填/可选、取值范围），
-  **不含任何业务/决策逻辑**（预算超限判断、假设后验更新等属于后续 agent/guardrails 层）。
-- 全部字段对齐设计文档 §2/§3/§7/§8 的 JSON 示例；对设计文档中两处不一致的形态
-  （``Hypothesis.evidence_for/against`` 为"证据引用/摘要字符串"而非结构化对象；
-  ``Budget`` 同时兼容 §3 运行态与 §2.2 ``budget_used`` 快照两种形态，故在 §3 字段之上
-  追加 ``latency_ms``）在本模块 docstring 中显式说明，见各模型注释。
-- ``extra="forbid"``：拒收未声明字段 —— 作为 DTO 契约，上游悄悄加字段应立即报错而非静默吞掉。
+边界：只声明结构与取值约束，不含业务/决策逻辑（预算超限判断、假设后验更新属
+agent/guardrails 层）。``extra="forbid"``：拒收未声明字段，上游悄悄加字段应立即报错。
 """
 
 from __future__ import annotations
@@ -35,17 +23,11 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-# ---------------------------------------------------------------------------
-# 枚举 —— 受控词表（§7.1 / §7.3 / §3）
-# ---------------------------------------------------------------------------
+# ---- 枚举：受控词表 ----
 
 
 class Decision(str, Enum):
-    """最终裁决三分类（§7.1）。
-
-    解决"这个案子怎么处理"的业务问题：PASS 放行 / REJECT 违规拒绝上架 /
-    HUMAN_REVIEW 转人工（证据不足、置信不足、预算耗尽、政策模糊时主动克制地转人工）。
-    """
+    """最终裁决三分类：PASS 放行 / REJECT 拒绝上架 / HUMAN_REVIEW 转人工（证据不足、置信不足、预算耗尽、政策模糊时主动克制地转人工）。"""
 
     PASS = "PASS"
     REJECT = "REJECT"
@@ -53,10 +35,7 @@ class Decision(str, Enum):
 
 
 class RiskLevel(str, Enum):
-    """风险等级（§2.2 输出示例 ``risk_level``）。
-
-    解决"风险有多高"的量级问题，供人工队列排序与统计；PASS 案件对应 NONE。
-    """
+    """风险等级：供人工队列排序与统计；PASS 案件对应 NONE。"""
 
     NONE = "NONE"
     LOW = "LOW"
@@ -65,10 +44,7 @@ class RiskLevel(str, Enum):
 
 
 class RiskType(str, Enum):
-    """风险类型受控词表（§7.3）—— 评测集标签 / 政策库元数据 / 决策输出三方共用。
-
-    解决"风险是什么类型"的可统计问题，保证召回/精确率能按类型做指标。
-    """
+    """风险类型受控词表 —— 评测集标签 / 政策库元数据 / 决策输出三方共用，保证召回与精确率可按类型统计。"""
 
     POTENTIAL_IP_RISK = "POTENTIAL_IP_RISK"  # 疑似 IP / 品牌模仿
     EVASION_PATTERN = "EVASION_PATTERN"      # 规避审核行为模式
@@ -77,16 +53,10 @@ class RiskType(str, Enum):
 
 
 class HypothesisStatus(str, Enum):
-    """假设生命周期状态（§3 示例使用 SUPPORTED/REFUTED；词表拍板见 docs/03-decisions.md T-3）。
+    """假设生命周期状态：PENDING=生成后尚未调查验证；SUPPORTED=被证据支持；REFUTED=被证伪；UNRESOLVED=已核查但证据不足、无定论。
 
-    解决"这条假设当前处于什么验证阶段"的问题：
-    PENDING=生成后**尚未调查验证**（还没查）；
-    SUPPORTED=被证据支持；REFUTED=被证据证伪；
-    UNRESOLVED=**已核查但证据不足、无定论**（查了没结论，悬而未决）。
-
-    UNRESOLVED 与 PENDING 的区分：PENDING 是"没查"，UNRESOLVED 是"查过但未能证实
-    也未证伪"—— 显式对应《00》§7.2-4"区分证明无风险与没查到风险"：高优先假设处于
-    UNRESOLVED → 不可 PASS → 导向 HUMAN_REVIEW（不能把"没查到"当"证明无"）。
+    PENDING 与 UNRESOLVED 的区分是业务不变量：高优先假设处于 UNRESOLVED → 不可 PASS →
+    导向 HUMAN_REVIEW（不能把「没查到」当「证明无」）。
     """
 
     PENDING = "PENDING"
@@ -95,16 +65,13 @@ class HypothesisStatus(str, Enum):
     UNRESOLVED = "UNRESOLVED"
 
 
-# ---------------------------------------------------------------------------
-# 输入事实快照（§2.1）
-# ---------------------------------------------------------------------------
+# ---- 输入事实快照 ----
 
 
 class ProductImage(_StrictModel):
-    """商品图片（§2.1 ``images[]`` 元素；DB ``product_image``）。
+    """商品图片（DB ``product_image``）。
 
-    解决"这张图是什么"的事实问题：``ocr_text`` 预填机审阶段已产出的 OCR 结果，
-    避免 Agent 重复调用 OCR Tool（§2.3 设计要点 2 —— 起点信息）。
+    ``ocr_text`` 预填机审阶段已产出的 OCR 结果，避免 Agent 重复调用 OCR Tool。
     """
 
     url: str = Field(description="图片地址")
@@ -113,10 +80,7 @@ class ProductImage(_StrictModel):
 
 
 class SkuInfo(_StrictModel):
-    """SKU 维度信息（§2.1 ``sku_list[]`` 元素；DB ``product_sku``）。
-
-    解决"具体到可售卖规格"的事实问题（颜色/尺码/价格），供字段冲突类调查比对。
-    """
+    """SKU 维度信息（DB ``product_sku``）：颜色/尺码/价格，供字段冲突类调查比对。"""
 
     sku_id: str = Field(description="SKU ID，如 S_1")
     color: str = Field(description="颜色/款式规格")
@@ -125,11 +89,10 @@ class SkuInfo(_StrictModel):
 
 
 class ProductInfo(_StrictModel):
-    """商品事实快照（§2.1 ``product`` 对象；DB ``product`` 主表）。
+    """商品事实快照（DB ``product`` 主表）。
 
-    解决"这个商品的事实到底是什么"的问题 —— 尤其 brand 是否真空缺、字段间是否冲突，
-    是后续 ProductTool / OCRTool 交叉验证的**事实锚点**（§5.1）。
-    ``version`` 为乐观锁版本号（§9 主键/版本约定），同一商品不同版本只审一次（§8.2-5）。
+    回答「商品事实到底是什么」—— 尤其 brand 是否真空缺、字段间是否冲突，是 ProductTool /
+    OCRTool 交叉验证的事实锚点。``version`` 为乐观锁版本号，同一商品不同版本只审一次。
     """
 
     product_id: str = Field(description="商品 ID，如 P_88231")
@@ -145,11 +108,7 @@ class ProductInfo(_StrictModel):
 
 
 class ScreeningSignal(_StrictModel):
-    """传统机审信号（§2.1 ``screening_signals[]`` 元素；DB ``review_signal``）。
-
-    解决"确定性机审已经查过什么、结果如何"的问题 —— Agent 的**起点信息**，
-    避免重复劳动（§2.3 设计要点 2）。``name`` 对应信号器，如 KEYWORD / LOGO_DETECT。
-    """
+    """传统机审信号（DB ``review_signal``）—— Agent 的起点信息，避免重复劳动；``name`` 如 KEYWORD / LOGO_DETECT。"""
 
     name: str = Field(description="信号器名称，如 KEYWORD / LOGO_DETECT / CATEGORY_RULE")
     result: str = Field(description="信号器结果（文本语义由信号器定义，示例为 PASS）")
@@ -157,11 +116,7 @@ class ScreeningSignal(_StrictModel):
 
 
 class ProductReviewCase(_StrictModel):
-    """审核案件 —— Agent 的**输入 DTO**（§2.1；DB ``review_case``）。
-
-    解决"一次审核事件面对的全部事实"的问题：一次上架/改标题/改属性/改图片事件
-    对应一个案件，携带商品快照 + 商家 + 事件类型 + 机审信号，作为调查起点。
-    """
+    """审核案件 —— Agent 的输入 DTO（DB ``review_case``）：一次上架/改标题/改属性/改图片事件 = 一个案件。"""
 
     case_id: str = Field(description="案件 ID，如 CASE_20240907_001")
     product: ProductInfo = Field(description="商品事实快照（可含空 brand 等缺口，恰是调查对象）")
@@ -170,21 +125,15 @@ class ProductReviewCase(_StrictModel):
     screening_signals: list[ScreeningSignal] = Field(default_factory=list, description="机审信号起点，可为空（直接命中复杂队列）")
 
 
-# ---------------------------------------------------------------------------
-# 运行中状态对象（§2.2 / §3 / §7）
-# ---------------------------------------------------------------------------
+# ---- 运行中状态对象 ----
 
 
 class Evidence(_StrictModel):
-    """单条证据（§2.2 ``evidence[]`` 元素；DB ``evidence``）。
+    """单条证据（DB ``evidence``）—— 结论依据的最小可引用单元，区别于过程审计 ``tool_call_history``。
 
-    解决"为什么这么判"的最小可引用单元 —— 结论依据（区别于过程审计
-    ``tool_call_history``，§3.1 设计要点 4）。``source`` 记工具名，``ref_id`` 指向
-    证据的源对象（图片 URL / 商家 ID / 先例 case_id / 政策条款 ID 等），保证可回溯。
-    ``extra`` 承载结构化附加数值（如 similarity / removals / violations_total /
-    conflict 信号），供确定性函数（矛盾检测、字段冲突判定等）机器读取 ——
-    人读摘要只进 ``value``，数值进 ``extra``，避免把可计算信息塞进人读文本
-    （对齐 docs/01-agent-loop.md §2.4 / docs/03-decisions.md §4.2 漂移项 3）。
+    ``source`` 记工具名，``ref_id`` 指向源对象（图片 URL / 商家 ID / 先例 case_id / 政策条款
+    ID 等）保证可回溯。``extra`` 承载结构化附加数值（similarity / removals /
+    violations_total / conflict 信号）供确定性函数机器读取 —— 人读摘要只进 ``value``。
     """
 
     type: str = Field(description="证据类型（开放性文本），如 IMAGE_SIMILARITY / MERCHANT_HISTORY / CASE_PRECEDENT")
@@ -196,17 +145,12 @@ class Evidence(_StrictModel):
 
 
 class Hypothesis(_StrictModel):
-    """风险假设（§3 ``hypotheses[]`` 元素 / §2.2 ``hypothesis_trace[]`` 元素）。
+    """风险假设（``hypotheses[]`` / ``hypothesis_trace[]`` 元素）—— Agent 是假设验证器而非分类器。
 
-    解决"Agent 作为假设验证器而非分类器"的核心问题（§3.1 设计要点 1）：
-    每条假设携带 ``prior → posterior`` 的可解释演变与生命周期状态。
-    注意 ``evidence_for / evidence_against`` 依设计 §3 JSON 为**证据引用/摘要字符串**
-    （如 ``"image_similarity=0.91"``、``"brand=null"``），结构化证据本体统一存
-    ``AgentState.evidence[]``，避免同一事实双份存。
-    ``prior`` / ``posterior`` 均为可选（缺省 None）：正式路径里 ``prior`` 由
-    hypothesize 显式给出（docs/03-decisions.md T-1）、``posterior`` 由 reevaluate
-    更新；None 表示"尚未赋值/未评估"，确定性公式对 None 按 0 处理（与 §4.2 漂移项
-    2 的后验口径一致）。
+    每条假设携带 ``prior → posterior`` 的可解释演变与生命周期状态。``evidence_for /
+    evidence_against`` 为证据引用/摘要字符串（如 ``"image_similarity=0.91"``、
+    ``"brand=null"``），结构化证据本体统一存 ``AgentState.evidence[]``，避免同一事实双份存。
+    ``prior`` / ``posterior`` 为 None 表示尚未赋值/未评估，确定性公式按 0 处理。
     """
 
     id: str = Field(description="假设 ID，如 H1 / H2")
@@ -219,14 +163,11 @@ class Hypothesis(_StrictModel):
 
 
 class BudgetLimits(_StrictModel):
-    """预算限额（§8.1 Guardrail 上限；§3 ``budget.limits``）。
+    """预算限额（Guardrail 上限）。
 
-    解决"一次调查最多允许花多少"的问题 —— 默认值与拍板一致（03-decisions T-7：
-    10 次 LLM / 15 次 Tool / 40000 token / 30s）。**语义是 Guardrail 上界而非目标**：
-    正常案件实际调用应明显低于上限（主链路常态 8 次 LLM / 5 次 Tool），余量用于
-    "schema 校验失败→重试 1 次"、工具失败恢复与防无限循环（§8.1）；运行时可由配置
-    覆盖（``limits`` 经 worker/guardrails 常量层注入）。超限语义为"带部分证据转人工
-    止损"而非失败（§8.1）。
+    默认 10 次 LLM / 15 次 Tool / 40000 token / 30s。语义是上界而非目标：正常案件实际调用
+    明显低于上限（主链路常态 8 次 LLM / 5 次 Tool），余量用于 schema 校验失败重试、工具失败
+    恢复与防无限循环；运行时可由配置覆盖。超限语义为「带部分证据转人工止损」而非失败。
     """
 
     max_llm_calls: int = Field(default=10, gt=0, description="最大 LLM 调用次数（Guardrail 上界，可配置覆盖）")
@@ -236,13 +177,10 @@ class BudgetLimits(_StrictModel):
 
 
 class Budget(_StrictModel):
-    """已用预算 + 限额（§3 ``budget``；§8.1）。
+    """已用预算 + 限额 —— AgentState 的硬字段，由条件边路由函数每轮进入节点前确定性检查，超限即转人工。
 
-    解决"花了多少、还剩多少、是否已超限"的问题 —— AgentState 的**硬字段**（§3.1 要点 3），
-    由条件边路由函数在每轮进入节点前确定性检查，超限即路由转人工。
-    说明：设计 §3 JSON 的 ``budget`` 无 ``latency_ms``，而 §2.2 ``budget_used`` 含之；
-    本模型为**两者并集**（额外字段均有默认值），故运行态状态与决策输出快照共用同一类型，
-    ``ReviewDecision.budget_used`` 可直接引用运行期实例（一份真相，无派生形态）。
+    本模型是「运行态字段 + 决策输出快照字段（含 ``latency_ms``）」的并集，额外字段均有默认值，
+    故运行态与 ``ReviewDecision.budget_used`` 共用同一类型（一份真相，无派生形态）。
     """
 
     llm_calls: int = Field(default=0, ge=0, description="已用 LLM 调用次数")
@@ -253,22 +191,18 @@ class Budget(_StrictModel):
     limits: BudgetLimits = Field(default_factory=BudgetLimits, description="本次调查的限额配置")
 
 
-# ---------------------------------------------------------------------------
-# 输出裁决（§2.2）
-# ---------------------------------------------------------------------------
+# ---- 输出裁决 ----
 
 
 class ReviewDecision(_StrictModel):
-    """最终结构化裁决 —— Agent 的**输出 DTO**（§2.2；DB ``decision``）。
+    """最终结构化裁决 —— Agent 的输出 DTO（DB ``decision``）。
 
-    解决"怎么判 + 凭什么判"的输出问题：三分类 + 风险等级/类型 + 置信度 + 证据链 +
-    政策引用 + 假设轨迹 + 预算快照，全部可回溯到"哪个工具提供的哪条证据导致该结论"
-    （§8.2-4 决策审计）。``risk_type`` 语义上必填（PASS 时为 ``[]``）。
-    ``overrides`` 记录确定性 overlay 的改判/归因原因码（R1_HARD_RULE / R2_* / R3_* /
-    R4_* / R5_*，如 R3_BUDGET_EXHAUSTED）—— 空=overlay 未改判（LLM 提案即终值）；
-    这是"谁把 PASS 改成了 HUMAN_REVIEW"的可审计落点（拍板见 docs/03-decisions.md
-    T-8 §2.8）。图内运行唯一终态为 DECIDED（含三种决策结果），ESCALATED /
-    BUDGET_EXCEEDED 不再作为主终态，超限归因只记在 overrides 与预算快照。
+    三分类 + 风险等级/类型 + 置信度 + 证据链 + 政策引用 + 假设轨迹 + 预算快照，全部可回溯到
+    「哪个工具提供的哪条证据导致该结论」。``risk_type`` 语义上必填（PASS 时为 ``[]``）。
+    ``overrides`` 记录确定性 overlay 的改判/归因原因码（R1_HARD_RULE / R2_* / R3_* / R4_* /
+    R5_*）—— 空 = overlay 未改判（LLM 提案即终值），是「谁把 PASS 改成了 HUMAN_REVIEW」的
+    可审计落点。图内运行唯一终态为 DECIDED（含三种决策结果），ESCALATED / BUDGET_EXCEEDED
+    不再作为主终态，超限归因只记在 overrides 与预算快照。
     """
 
     decision: Decision = Field(description="三分类裁决：PASS / REJECT / HUMAN_REVIEW")
@@ -278,10 +212,10 @@ class ReviewDecision(_StrictModel):
         ge=0.0,
         le=1.0,
         description="decision_confidence —— 自动决策安全门槛（确定性重算值，非模型真实概率/非违规概率；"
-        "只回答'如果自动判，判错风险够不够低'，见《00》§7.4；O-7 已由 confidence 改名）",
+        "只回答'如果自动判，判错风险够不够低'，见 docs/00 §7.4；已由 confidence 改名）",
     )
     evidence: list[Evidence] = Field(default_factory=list, description="支撑本裁决的证据链（与运行期 evidence 同型）")
-    policy: list[str] = Field(default_factory=list, description="引用的政策条款 ID，如 POLICY_3.2（REJECT 必须有可引用依据，§7.2-2）")
+    policy: list[str] = Field(default_factory=list, description="引用的政策条款 ID，如 POLICY_3.2（REJECT 必须有可引用依据，见 docs/00 §7.2）")
     hypothesis_trace: list[Hypothesis] = Field(default_factory=list, description="关键假设的演变轨迹（prior→posterior→status），供解释与 eval 重放")
     budget_used: Budget = Field(default_factory=Budget, description="裁决时的预算快照（引用运行期 Budget 实例，含限额与启动时间）")
     overrides: list[str] = Field(default_factory=list, description="overlay 改判/归因原因码（R1_HARD_RULE / R2_* / R3_* / R4_* / R5_*）；空=overlay 未改判")

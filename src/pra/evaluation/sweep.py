@@ -1,33 +1,24 @@
-"""ThresholdSweepRunner —— Evidence 阈值 sweep（evaluation/sweep.py，docs/02-evaluation.md §5）。
+"""Evidence 阈值单参数 sweep。
 
-P-5 已拍板：第一轮**只 sweep Evidence 阈值、单参数**，不做多参数联合 Grid Search：
+``EVIDENCE_MIN_SIM`` 与 ``EVIDENCE_STRONG`` 各在网格 ``{0.60..0.90, 步 0.05}`` 上
+**单变量扫**：每次只动一个常量、另一个取当前默认（0.70 / 0.85）固定；
+``CONFIDENCE_ABSTAIN_THRESHOLD`` 固定 0.7 不参与扫描；不做多参数联合 Grid Search。
 
-- ``EVIDENCE_MIN_SIM`` 与 ``EVIDENCE_STRONG`` 各在网格 ``{0.60..0.90, 步 0.05}`` 上
-  **单变量扫**：每次只动一个常量、另一个取当前默认（0.70 / 0.85）固定；
-- ``CONFIDENCE_ABSTAIN_THRESHOLD`` **固定 0.7，本轮不参与扫描**（加注：联合校准待
-  主扫结果定效果来源后再做，见模块 docstring 注记与 docs §5.1）。
+sweep 只换 ``EvalContext.evidence_thresholds`` 重跑，不触碰判定代码。
+**实际生效范围（如实声明）**：评测侧相似度分档读取路径 —— agent_scheme 的确定性审查员
+模型按 ctx 阈值做相似度证据视图下限过滤（min_sim）与强相似分档（strong）；真实图
+tools_node 的 ``quality_filter`` / gate overlay 常量属 pra.agent 业务层（0.70 / 0.85
+模块常量），不随 ctx 变。**rule 与 single_call_llm 的决策路径不读图片相似度**（screening
+是词表命中、single-call 是表面文本）→ 这两行指标随阈值恒定，属预期。
 
-实现约束（docs §5.1"只动配置不动判定逻辑"）：sweep 只换 ``EvalContext`` 的
-``evidence_thresholds`` 重跑，不触碰任何判定代码。**实际生效范围（如实声明）**：
-评测侧相似度分档读取路径 —— agent_scheme 的确定性审查员模型（EvalScriptedLLMBackend）
-按 ctx 阈值做 (a) 相似度证据视图下限过滤（min_sim）与 (b) 强相似分档（strong）；
-真实图 tools_node 的 ``quality_filter`` / gate overlay 常量属 pra.agent 业务层（0.70 /
-0.85 模块常量），本轮不随 ctx 变 —— 因此 agent 的 sweep 效应是"评测审查员读到的证据
-视图"随阈值变化；**rule 与 single_call_llm 的决策路径不读取图片相似度**（screening 规则
-为词表命中；single-call mock 为表面文本）→ 这两行指标随阈值恒定，属预期，报告注明。
-
-**数据带局限（实证注记，不改数据）**：当前种子世界可观测的相似度权重只落两簇 ——
+**数据带局限（实证注记，不改数据）**：当前种子世界可观测的相似度权重只落两簇
 {0.72, 0.73} 与 {0.90+}，(0.73, 0.90) 之间无 case。因此档间曲线平**不代表生产阈值
-不敏感**，只说明该数据带无样本可判别；校准结论受数据带限制，不能外推成"生产阈值不
-敏感"或据此回写生产常量（tools_node quality_filter / gate overlay 0.70/0.85 不随 ctx
-变，见上）。被扫参数当前只作用于评测审查员读证据视图；Q4（注入下沉 vs 文档收窄）待
-拍板，本模块只陈述现状与边界，不做该方向决策。
+不敏感**，只说明该数据带无样本可判别；校准结论不能外推成"生产阈值不敏感"，也不据此
+回写生产常量。
 
 产出：每档阈值的七项指标（Accuracy / Precision / Recall / FPR / FNR /
-human_review_rate / automation_coverage —— docs §5.2）每 scheme 一组；
-另给四曲线要点（FPR / Recall / HRR / Acc vs 阈值）。可导出 CSV（``to_csv_lines``）。
-
-全程确定性：无真 LLM / 网络 / 随机；case 行序即遍历序、每档 ctx 独立重跑。
+human_review_rate / automation_coverage）每 scheme 一组；另给四曲线要点；可导出 CSV。
+全程确定性：无真 LLM / 网络 / 随机。
 """
 
 from __future__ import annotations
@@ -52,7 +43,7 @@ __all__ = [
     "to_csv_lines",
 ]
 
-# sweep 网格（P-5：0.60/0.65/0.70/0.75/0.80/0.85/0.90）
+# sweep 网格（0.60/0.65/0.70/0.75/0.80/0.85/0.90）
 EVIDENCE_GRID: tuple[float, ...] = (0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
 
 # 变量名（权威）→ EvalContext.evidence_thresholds 的键
@@ -64,7 +55,7 @@ SWEEP_VARIABLES: dict[str, str] = {
 # 当前默认（另一常量扫时固定取此值；与 tools/image_analysis 常量同值）
 DEFAULT_THRESHOLDS: dict[str, float] = {"min_sim": 0.70, "strong": 0.85}
 
-# 观察指标（docs §5.2 七项）—— 与 DecisionMetrics / 报告字段一一对应
+# 观察指标（七项）—— 与 DecisionMetrics / 报告字段一一对应
 SEVEN_METRICS: tuple[str, ...] = (
     "accuracy",
     "precision",
@@ -75,8 +66,8 @@ SEVEN_METRICS: tuple[str, ...] = (
     "automation_coverage",
 )
 
-# §4.4/§5.2 规范名 → DecisionMetrics 字段名（Phase 1 业务模块字段是 human_rate/automation，
-# 规范指标名是 human_review_rate/automation_coverage —— 只差别名，全代码以规范名为准）
+# 业务模块字段名是 human_rate/automation，规范指标名是 human_review_rate/
+# automation_coverage —— 只差别名，全代码以规范名为准
 METRIC_FIELD_ALIASES: dict[str, str] = {
     "human_review_rate": "human_rate",
     "automation_coverage": "automation",
@@ -127,7 +118,7 @@ def _ctx_with_thresholds(base: EvalContext, variable: str, value: float) -> Eval
 
 
 class ThresholdSweepRunner:
-    """Threshold sweep 驱动（docs §5）：每档阈值换 EvalContext 重跑同一数据集。"""
+    """Threshold sweep 驱动：每档阈值换 EvalContext 重跑同一数据集。"""
 
     def __init__(
         self,
@@ -148,7 +139,7 @@ class ThresholdSweepRunner:
         """扫指定变量（默认两个 Evidence 常量都扫）在网格上的全部档点。
 
         每档点跑 EvaluationRunner（同一数据集、顺序串行、确定性），产出
-        DecisionMetrics（七项观察）与 AbstentionMetrics（Phase 2 语义可用时）。
+        DecisionMetrics（七项观察）与 AbstentionMetrics（有 SHOULD 真值时可用）。
         """
         if cases is None:
             if self.data_path is None:
@@ -214,8 +205,7 @@ def _fmt(v) -> str:
 def to_csv_lines(result: SweepResult, *, schemes=None) -> list[str]:
     """sweep 结果 → CSV 行（表头 + 每 (变量, 档, scheme) 一行，七项观察指标）。
 
-    docs §5.2 七项：Accuracy/Precision/Recall/FPR/FNR/human_review_rate/automation_coverage
-    （automation 用 §4.4 命名 automation_coverage）。
+    automation 用规范名 automation_coverage（不写成业务字段别名）。
     """
     wanted = schemes or ALL_SCHEMES
     header = [

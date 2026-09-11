@@ -1,30 +1,17 @@
-"""EvaluationRunner —— 三方案对比最小闭环编排（evaluation/runner.py）。
+"""三方案对比最小闭环编排。
 
-流程（docs/00-system-design.md §11.4 / 02-evaluation.md §8 M2）::
+流程：load 数据集（JSONL → EvalCase[]）→（可选确定性 smoke 子集）→ 对每个
+SchemeRunner（rule / single_call_llm / agent）跑同一数据集 → 统一 EvalRecord →
+总体 + 按 scene 分层的决策指标；数据集含 SHOULD_ABSTAIN/HUMAN 真值时并行算
+abstention 五指标进 EvaluationResult（v1 无 abstain 标签 → abstention 区为空）
+→ report.py 打印 Console Report。
 
-    load 数据集（JSONL → EvalCase[]）
-        ↓
-    （可选 smoke 子集：确定性取前 N 条）
-        ↓
-    对每个 SchemeRunner（rule / single_call_llm / agent）跑同一数据集
-        ↓
-    统一 EvalRecord（DecisionEvaluator 只吃它）
-        ↓
-    总体 + 按 scene 分层指标（Accuracy/Precision/Recall/FPR/FNR + HRR/Automation）
-        ↓
-    （数据集含 SHOULD_ABSTAIN 真值（Phase 2 v2 形态）→ 并行算 AbstentionEvaluator
-      五指标（§4.4）进 EvaluationResult；v1 无 abstain 标签 → abstention 区为空，
-      report 按 Phase 1 兼容口径呈现）
-        ↓
-    report.py 打印 Console Report
+确定性约定（可重放断言的基础）：数据集行序即遍历序；三方案**顺序串行**执行
+（不并发，避免共享态/调度抖动）；Agent 每 case 独立 build 图 + 唯一 thread_id；
+进程级 LLM 后端每次运行后恢复默认；EvalRecord 不含墙钟字段 → 同数据重跑产出
+可逐字节比对。
 
-确定性约定（可重放断言的基础）：
-- 数据集行序即遍历序；三方案**顺序串行**执行（不并发），避免共享态/调度抖动；
-- Agent 每 case 独立 build 图 + 唯一 thread_id；进程级 LLM 后端每次运行后恢复默认；
-- EvalRecord 不含墙钟字段（latency_ms 不进 cost）→ 同数据重跑产出可逐字节比对。
-
-不落 DB：全部在内存完成（评测以内存 EvalRecord 为主，快、不污染业务表 ——
-docs/02-evaluation.md §3.6"DB 落库非必需"）。
+不落 DB：全部在内存完成（快，且不污染业务表）。
 """
 
 from __future__ import annotations
@@ -57,12 +44,11 @@ ALL_SCHEMES: tuple[str, ...] = ("rule", "single_call_llm", "agent")
 
 
 def expected_index(cases: list[EvalCase]) -> dict[str, dict]:
-    """由数据集构造 expected 索引：``{eval_case_id: {"decision": …, "scene": …}}``。
+    """由数据集构造 expected 索引：``{eval_case_id: {"decision", "scene", "abstain_label"}}``。
 
-    Phase 2 起追加 ``abstain_label``（AUTO_DECIDABLE / SHOULD_ABSTAIN；A 面 schema 未
-    升级时经 ``getattr`` 兼容读取 → None，等价 Phase 1 全 AUTO_DECIDABLE，见
-    metrics/abstention.py）。``DecisionEvaluator`` 只消费 decision / scene（行为不变），
-    ``AbstentionEvaluator`` 消费 abstain_label —— 两指标层共享同一索引，不重复构造。
+    ``abstain_label`` 经 ``getattr`` 兼容读取（schema 未升级时 → None，等价全
+    AUTO_DECIDABLE）。``DecisionEvaluator`` 只消费 decision / scene，
+    ``AbstentionEvaluator`` 消费 abstain_label —— 两指标层共享同一索引。
     """
     return {
         c.eval_case_id: {
@@ -77,14 +63,11 @@ def expected_index(cases: list[EvalCase]) -> dict[str, dict]:
 class EvaluationResult(BaseModel):
     """一次评测运行的全部产物（报告 / 测试断言共同消费）。
 
-    新增（P1-3 abstention 接线，Phase 2 v2 形态才非空）：
-    - ``abstention`` / ``abstention_grouped``：scheme → AbstentionMetrics（五指标，
-      全量分母 = 数据集总案数）—— 数据集含 SHOULD_ABSTAIN 真值时才计算（v1 无 abstain
-      标签 → 恒空 dict，report 按 Phase 1 兼容口径呈现）；
-    - ``has_should_abstain``：数据集是否含 SHOULD_ABSTAIN / HUMAN 真值（True = Phase 2
-      三值口径；False = Phase 1 二值口径）。口径判定与 ``metrics/abstention.abstain_subset_of``
-      同源（abstain_label 缺失时按 decision==HUMAN_REVIEW 推断），保证 runner 与
-      AbstentionEvaluator 对"是否有 SHOULD 真值"的认知一致。
+    - ``abstention`` / ``abstention_grouped``：scheme → AbstentionMetrics，分母 = 全量
+      案数；只在数据集含 SHOULD_ABSTAIN 真值时计算（v1 → 恒空 dict）；
+    - ``has_should_abstain``：数据集是否含 SHOULD_ABSTAIN / HUMAN 真值。判定与
+      ``abstain_subset_of`` 同源（abstain_label 缺失时按 decision == HUMAN_REVIEW
+      推断），保证 runner 与 AbstentionEvaluator 认知一致。
     """
 
     data_path: str | None = Field(default=None, description="数据集路径（None=外部注入 cases）")
@@ -150,7 +133,7 @@ class EvaluationRunner:
         :param cases: 外部注入数据集（测试/多数据复用）；None → 从 self.data_path 加载。
         :param include: scheme 名子集；None → 全三方案。
         :param smoke: True → 取 smoke_limit 条确定性冒烟子集。
-        :param smoke_limit: smoke 子集上限（默认 10，Phase 1 ≤10 要求）。
+        :param smoke_limit: smoke 子集上限（默认 10）。
         """
         if cases is None:
             if self.data_path is None:
@@ -163,8 +146,8 @@ class EvaluationRunner:
 
         schemes = self.build_schemes(include)
         exp = expected_index(cases)
-        # 有 SHOULD_ABSTAIN/HUMAN 真值 → 三值（Phase 2 v2）口径：abstention 五指标并行计算；
-        # v1（无 abstain 标签、真值仅 PASS/REJECT）→ abstention 区为空，Phase 1 兼容口径。
+        # 有 SHOULD_ABSTAIN/HUMAN 真值 → 三值口径：abstention 五指标并行计算；
+        # v1（无 abstain 标签、真值仅 PASS/REJECT）→ abstention 区为空。
         has_should = any(abstain_subset_of(v) == "SHOULD_ABSTAIN" for v in exp.values())
         records: dict[str, list[EvalRecord]] = {}
         overall: dict[str, DecisionMetrics] = {}
@@ -182,8 +165,8 @@ class EvaluationRunner:
             grouped[name] = DecisionEvaluator.evaluate_grouped(scheme_records, exp)
             cost_summary[name] = _cost_summary(scheme_records)
             if has_should:
-                # P1-3：abstention 五指标接入主评测路径（§4.4；全量分母，与
-                # DecisionEvaluator 共享同一 expected 索引，不重复构造）
+                # abstention 五指标接入主评测路径；与 DecisionEvaluator 共享同一
+                # expected 索引，不重复构造
                 abstention[name] = AbstentionEvaluator.evaluate(scheme_records, exp)
                 abstention_grouped[name] = AbstentionEvaluator.evaluate_grouped(scheme_records, exp)
 

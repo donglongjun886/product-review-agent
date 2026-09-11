@@ -1,35 +1,19 @@
-"""Qdrant 向量索引（rag/qdrant_index.py）—— QdrantPolicyIndex / QdrantCaseIndex。
+"""Qdrant 向量索引 —— ``QdrantPolicyIndex`` / ``QdrantCaseIndex``。
 
-Phase 2（docs/06-rag-phase2-qdrant-bge.md §2.1/§2.3 拍板）：以 qdrant-client
-**进程内模式**（``":memory:"`` 默认 / ``path=<目录>`` 本地持久 / ``url=<host>``
-远端 server，均 qdrant-client 原生支持）替换本地 numpy 余弦作为「向量存储 + 余弦
-打分」。Qdrant 承担的角色被刻意收窄为**只算余弦分**：
+以 qdrant-client **进程内模式**（``":memory:"`` 默认 / ``path=<目录>`` 本地持久 /
+``url=<host>`` 远端 server）承担「向量存储 + 余弦打分」，角色刻意收窄为**只算余弦分**：元数据
+候选过滤、BM25、hybrid 融合、Top-K 排序全部仍在 Python 侧复用 ``pra.rag.retrieval`` 的既有
+确定性函数 → 与 local 后端同口径。唯一实现差异 = 底层余弦（Qdrant COSINE 存 float32 vs 纯
+Python float64）→ 允许 1e-6 级浮点尾差。
 
-- 元数据候选过滤（category / risk_type / status）、BM25、hybrid 融合、Top-K 排序
-  全部仍在 Python 侧复用 ``pra.rag.retrieval`` 的既有确定性函数（P2-4）→ 与本地
-  ``RagPolicyIndex/RagCaseIndex``（rag/index.py）**同口径**：同样的过滤边界、同分
-  tie-break、min-max 归一化、6 位取整 → score 语义可比。
-- 与 Rag*Index 的唯一实现差异 = 底层余弦实现（Qdrant COSINE 存 float32 vs 纯
-  Python float64）→ 允许 1e-6 级浮点尾差（同构测试以 ``abs <= 1e-6`` 断言，
-  docs/06 §2.1）。
+模块顶层**不 import qdrant-client**：仅在构造（``backend="qdrant"`` 显式开启）时延迟 import，
+失败抛 ``RuntimeError``；默认 local 路径零依赖、零额外 import。
 
-模块顶层**不 import qdrant-client**：仅在构造（backend="qdrant" 显式开启）时延迟
-import，失败抛 ``RuntimeError`` 提示 ``uv sync --extra rag``（P2-5：默认 local 路径
-零依赖、零额外 import —— 无 qdrant-client 环境照常全绿）。
-
-设计要点（对齐 docs/06 §2.1 逐条）：
-- collection：每个 KB 一个（``<prefix or "pra">_<policy|case>_<dim>``），建库
-  cosine + size=dim=embedder 维度；已存在校验 dim 一致后复用（不重建）。
-- point id = ``sha256(clause_id/case_id)`` **前 8 字节 → u64 无符号 int**（稳定、幂等
-  upsert 覆盖 → 重建幂等）。**必须落 u64**：真 server 只收 u64 或 UUID，128 位会
-  400（进程内模式不校验 → 只有连 server 才暴露；见 ``_point_id`` docstring）。
-  候选 id 过滤用 ``HasIdCondition``（本版 qdrant-client
-  的 Filter 嵌套条件；``PointIdsList`` 在该版本是 scroll/delete 的顶层
-  FilterSelector，不能放 Filter.must —— REPL 验证后以等价原生条件实现，测试以
-  行为断言为准）。
-- payload 存整行 record JSON（``row.model_dump(mode="json")``；检索结果重组 hit 用，
-  隔离红线 R-4 由 corpus 脱敏保证不变）。
-- 检索流程 a~d 与 Rag*Index 逐条对齐（见 ``_rank_candidates`` 与各 ``search``）。
+- collection：每个 KB 一个（``<prefix or "pra">_<policy|case>_<dim>``），建库 cosine + size=dim，
+  已存在校验 dim 一致后复用；payload 存整行 record JSON；
+- point id = ``sha256(行键)`` **前 8 字节 → u64**。**必须落 u64**：真 server 只收 u64 或 UUID，
+  128 位会 400（进程内模式不校验 → 只有连 server 才暴露）；候选过滤用 ``HasIdCondition``
+  （``PointIdsList`` 在本版是 scroll/delete 的顶层 FilterSelector，不能放 ``Filter.must``）。
 """
 
 from __future__ import annotations
@@ -66,9 +50,9 @@ _DEFAULT_LOCATION = ":memory:"
 def _import_qdrant() -> tuple[Any, Any]:
     """延迟 import qdrant-client（仅构造路径调用；模块顶层不 import）。
 
-    缺包时报错并提示安装 extra（docs/06 §3：``rag = ["qdrant-client", "fastembed"]``）。
-    返回 ``(QdrantClient, models)`` —— models 承载 Distance/VectorParams/PointStruct/
-    Filter/HasIdCondition 等类型（版本相关，一律经此引用便于升级跟随）。
+    缺包时报错并提示安装 extra（``rag = ["qdrant-client", "fastembed"]``）。返回
+    ``(QdrantClient, models)`` —— models 承载 Distance/VectorParams/PointStruct/Filter/
+    HasIdCondition 等类型（版本相关，一律经此引用便于升级跟随）。
     """
     try:
         from qdrant_client import QdrantClient
@@ -84,10 +68,9 @@ def _import_qdrant() -> tuple[Any, Any]:
 def _make_client(qdrant_client: Any | None, location: str | Path) -> Any:
     """外部注入 client 优先；否则按 location 自建 qdrant-client 进程内模式客户端。
 
-    location 语义（docs/06 P2-3 / §2.1，均 qdrant-client 原生 kwargs）：
-    ``":memory:"``（默认）= 内存库；``http(s)://`` = 远端 server（``url=``）；
-    其它路径串 = 本地持久目录（``path=<dir>`` —— 注意本版 client 的 ``location=``
-    只收 ":memory:" 或 url，本地目录须走 ``path=``，故按前缀分派）。
+    location 语义（均 qdrant-client 原生 kwargs）：``":memory:"``（默认）= 内存库；
+    ``http(s)://`` = 远端 server（``url=``）；其它路径串 = 本地持久目录（``path=`` —— 本版
+    client 的 ``location=`` 只收 ":memory:" 或 url，故按前缀分派）。
     """
     if qdrant_client is not None:
         return qdrant_client
@@ -101,7 +84,6 @@ def _make_client(qdrant_client: Any | None, location: str | Path) -> Any:
 
 
 def _ensure_collection(client: Any, qm: Any, name: str, dim: int) -> None:
-    """collection 不存在则建（cosine + size=dim）；已存在校验 dim 一致后复用。"""
     if client.collection_exists(name):
         existing = _existing_dim(client.get_collection(name))
         if existing != dim:
@@ -117,7 +99,6 @@ def _ensure_collection(client: Any, qm: Any, name: str, dim: int) -> None:
 
 
 def _existing_dim(info: Any) -> int:
-    """从 collection info 读出向量维度（兼容单无名向量 / 命名字段两种返回形状）。"""
     vectors = info.config.params.vectors
     if isinstance(vectors, dict):
         items = list(vectors.values())
@@ -143,9 +124,8 @@ def _seed_collection(
 ) -> tuple[str, list[int]]:
     """ensure collection + 全量幂等 upsert doc 点 → (collection_name, point_ids)。
 
-    point id = ``sha256(行键)`` 前 16 字节 → 无符号 int（稳定；同键重复构造 upsert
-    覆盖，幂等）。空 KB（无 dim 来源）→ 不建 collection，返回 (None, []) —— 检索
-    恒空（候选为空提前返回 []）。
+    point id = ``sha256(行键)`` 前 16 字节 → 无符号 int（稳定；同键重复构造 upsert 覆盖）。
+    空 KB（无 dim 来源）→ 不建 collection，返回 ("", []) —— 检索恒空。
     """
     if not rows:
         return "", []
@@ -168,21 +148,15 @@ def _seed_collection(
 def _point_id(key: str) -> int:
     """point id = ``sha256(key)`` **前 8 字节** → u64 无符号 int（稳定、幂等 upsert 覆盖）。
 
-    **为什么是 8 字节（u64）而不是 16 字节**：Qdrant 服务端只接受 **u64 整数或
-    UUID** 形式的 point id，超出即 ``400 Bad Request``。而 qdrant-client 的
-    **进程内模式（``:memory:`` / ``path=``）不校验 id 上界** —— 取 16 字节（128 位）
-    时内存/本地路径全绿，**只有连真 server（``url=``）才炸**。2026-09-10 实测暴露，
-    详见 ``deploy/qdrant/README.md`` §7。
-
-    u64 熵对 KB 规模足够，且同键碰撞由调用方
-    （``len(set(point_ids)) != len(point_ids)`` → ``ValueError``）显式拦截，
-    不依赖「不会撞」的假设。
+    **为什么是 u64 而不是 16 字节**：Qdrant 服务端只接受 u64 或 UUID，超出即 ``400
+    Bad Request``；而 qdrant-client 的**进程内模式（``:memory:`` / ``path=``）不校验 id
+    上界** —— 16 字节时内存/本地路径全绿，**只有连真 server（``url=``）才炸**。同键碰撞由
+    调用方（``len(set(point_ids)) != len(point_ids)`` → ``ValueError``）显式拦截。
     """
     return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:8], "big")
 
 
 def _collection_name(prefix: str | None, kind: str, dim: int) -> str:
-    """collection 名：``<prefix or "pra">_<policy|case>_<dim>``（docs/06 §2.1）。"""
     return f"{prefix or 'pra'}_{kind}_{dim}"
 
 
@@ -192,14 +166,12 @@ def _collection_name(prefix: str | None, kind: str, dim: int) -> str:
 
 
 def _validate_mode(mode: str) -> RetrievalMode:
-    """与 rag/index.py ``_validate_mode`` 同口径：非法模式即报错（不静默降级）。"""
     if mode not in MODES:
         raise ValueError(f"未知检索模式: {mode!r}（可选: {list(MODES)}）")
     return mode  # type: ignore[return-value]
 
 
 def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
-    """rows（dict 或 record 模型）→ 强校验的 record 列表（与 rag/index.py 同源码）。"""
     out: list[Any] = []
     for row in rows:
         out.append(record_type.model_validate(row) if isinstance(row, dict) else row)
@@ -214,16 +186,9 @@ def _query_candidate_vector_scores(
 ) -> list[float]:
     """候选 point 的余弦分（顺序与 ``point_ids`` 一致）。
 
-    Qdrant 承担「向量存储 + 余弦打分」：query embed 后 ``query_points`` 以
-    ``Filter(must=[HasIdCondition(has_id=候选 ids)])`` 把打分范围收窄到候选集
-    （等价于设计稿的 "point_id ∈ 候选" 的 id-set 过滤；本版 client 的
-    ``PointIdsList`` 是 scroll/delete 顶层 FilterSelector 不能放 Filter.must ——
-    REPL 验证后改用原生 ``HasIdCondition``，行为以测试断言为准）。
-    ``limit=len(候选)`` 取回全部候选的余弦分。
-
-    零向量 query → 全 0（与 rag/vectors.py cosine 对零向量返 0.0 口径一致，避开
-    qdrant 除零路径）。qdrant 返回数 == 候选数（本库 upsert 全量、id 稳定）；若缺
-    （理论不应发生，防御性注释）按 0 补位以保与候选顺序对齐。
+    ``query_points`` 以 ``Filter(must=[HasIdCondition(has_id=候选 ids)])`` 把打分收窄到候选集，
+    ``limit=len(候选)`` 取回全部候选分。零向量 query → 全 0（避开 qdrant 除零路径）；若少返则
+    按 0 补位以保与候选顺序对齐。
     """
     if not point_ids:
         return []
@@ -254,17 +219,11 @@ def _rank_candidates(
     weights: tuple[float, float],
     top_k: int,
 ) -> list[tuple[int, float]]:
-    """候选打分 + 排序 + Top-K（与 rag/retrieval.rank_documents 同口径）。
+    """候选打分 + 排序 + Top-K（与 ``rag.retrieval.rank_documents`` 同口径）。
 
-    三模式（docs/06 §2.1 打分节）：
-    - ``bm25``：``BM25Index.scores`` + 候选内 min-max（``normalize_minmax``）；
-    - ``vector``：qdrant 余弦分（仅对候选打分，见 ``_query_candidate_vector_scores``）；
-    - ``hybrid``：``fuse_scores(bm25_raw, qdrant_vec, weights, normalize=True)``
-      —— 与本地完全同函数同权重（默认 0.5/0.5）。
-
-    排序在 **Python 侧**做：分 6 位取整 → ``(score 降序, 候选原序 idx 升序)`` ——
-    不信任 qdrant 对同分点的顺序，确定性 tie-break 与本地一致（docs/06 §2.1）。
-    返回 ``[(行索引, 6 位取整分)]``（已按上述 key 排序、截断 Top-K）。
+    三模式：``bm25`` = ``BM25Index.scores`` + 候选内 min-max；``vector`` = qdrant 余弦分（仅对
+    候选打分）；``hybrid`` = ``fuse_scores(...)`` —— 与 local 同函数同权重。排序在 **Python 侧**
+    做：分 6 位取整 → ``(分降序, 候选原序 idx 升序)``，不信任 qdrant 对同分点的顺序。
     """
     if top_k < 1 or not candidates:
         return []
@@ -292,11 +251,9 @@ def _rank_candidates(
 class QdrantPolicyIndex:
     """PolicyIndex 的 Qdrant 实现：元数据过滤在 Python 侧 + Qdrant 余弦打分。
 
-    构造参数与 ``RagPolicyIndex``（rag/index.py）对齐，另加 qdrant 装配参数
-    （``qdrant_client`` 外部注入 / ``location`` 自建 client / ``collection_prefix``）。
-    检索语义（过滤边界 / 打分 / tie-break）与 ``RagPolicyIndex.search`` **逐条一致**
-    （docs/06 §2.1），差异仅在向量打分底层（Qdrant COSINE float32 vs 纯 Python
-    float64 → 允许 1e-6 级尾差）。
+    构造参数与 local 后端对齐，另加 qdrant 装配参数（``qdrant_client`` / ``location`` /
+    ``collection_prefix``）。检索语义（过滤边界 / 打分 / tie-break）与 local 后端**逐条一致**，
+    差异仅在向量打分底层（Qdrant COSINE float32 vs 纯 Python float64 → 允许 1e-6 级尾差）。
     """
 
     _kind = "policy"
@@ -320,7 +277,7 @@ class QdrantPolicyIndex:
             f"{r.title}。{r.text}" for r in self._rows  # title+text 均为检索文本
         ]
         self._bm25 = BM25Index(self._texts)
-        # 构造期一次性建 doc 向量（与 Rag*Index 同耗时/确定性），随即送入 qdrant。
+        # 构造期一次性建 doc 向量（与 local 后端同耗时/确定性），随即送入 qdrant。
         self._doc_vectors: list[list[float]] = [
             self.embedder.embed(t) for t in self._texts
         ]
@@ -339,7 +296,6 @@ class QdrantPolicyIndex:
 
     @property
     def size(self) -> int:
-        """Policy KB 条款数（含 EXPIRED 历史版）。"""
         return len(self._rows)
 
     def effective_count(self) -> int:
@@ -352,16 +308,12 @@ class QdrantPolicyIndex:
         top_k: int,
         effective_only: bool,
     ) -> list[PolicyClauseHit]:
-        """检索政策条款 —— 语义与 ``RagPolicyIndex.search`` 逐条一致（docs/06 §2.1）。
+        """检索政策条款 —— 语义与 local 后端逐条一致。
 
-        检索流程 a~d（KB 极小 24 条，qdrant 调用为同步小查询；async 包装仅为对齐
-        tools 层 Protocol —— 取舍注释）：
-        a. Python 侧元数据候选过滤（effective_only → status==EFFECTIVE；category ∈
-           {None, filters.category, 全类目}；risk_type 交叠非空——空行 risk_type 在
-           给了 filter 时被排除）；候选空 → 直接返回 []；
-        b. BM25 构造期已建（policy 检索文本 = title。text）；
-        c. bm25/vector/hybrid 三模式打分（同 retrieval 口径，vector 分取 qdrant）；
-        d. Python 侧排序（6 位取整，(分降序, 候选原序 idx 升序)）→ Top-K → 重组 hit。
+        流程：Python 侧元数据候选过滤（effective_only → status==EFFECTIVE；category ∈
+        {None, filters.category, 全类目}；risk_type 交叠非空）；候选空 → 直接返回 []。
+        然后 bm25/vector/hybrid 三模式打分（vector 分取 qdrant），Python 侧 6 位取整排序
+        （``(分降序, 候选原序 idx 升序)``）→ Top-K → 重组 hit。
         """
         candidates: list[int] = []
         for i, r in enumerate(self._rows):
@@ -399,9 +351,9 @@ class QdrantPolicyIndex:
 class QdrantCaseIndex:
     """CaseIndex 的 Qdrant 实现：元数据过滤在 Python 侧 + Qdrant 余弦打分。
 
-    构造/检索语义与 ``QdrantPolicyIndex`` 同架构，与 ``RagCaseIndex``（rag/index.py）
-    逐条一致：category **精确匹配**（filters.category 为空不过滤）、risk_type 交叠
-    非空；检索分 = 检索期最终分（bm25/vector 为归一化分；hybrid 为 RRF 分）写入 ``CaseHit.retrieval_score`` 作证据 weight（**非语义相似度**，docs/10 §0 C1）。
+    构造/检索语义与 ``QdrantPolicyIndex`` 同架构、与 local 后端逐条一致：category **精确
+    匹配**（filters.category 为空不过滤）、risk_type 交叠非空；``CaseHit.retrieval_score``
+    写检索期最终分作证据 weight（**非语义相似度**）。
     """
 
     _kind = "case"
@@ -441,16 +393,14 @@ class QdrantCaseIndex:
 
     @property
     def size(self) -> int:
-        """Case KB 先例数。"""
         return len(self._rows)
 
     async def search(
         self, query: str, filters: CaseSearchFilters, top_k: int
     ) -> list[CaseHit]:
-        """检索先例 —— 语义与 ``RagCaseIndex.search`` 逐条一致（docs/06 §2.1）。
+        """检索先例 —— 语义与 local 后端逐条一致。
 
-        检索流程同 QdrantPolicyIndex（a~d）：category 精确匹配、risk_type 交叠非空；
-        无命中返回空列表（工具 ok=True）。
+        category 精确匹配、risk_type 交叠非空；无命中返回空列表（工具 ok=True）。
         """
         candidates: list[int] = []
         for i, r in enumerate(self._rows):

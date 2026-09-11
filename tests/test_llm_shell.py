@@ -1,14 +1,13 @@
-"""LLM 壳（guardrails/llm_shell.py）单测 —— 强校验 + 失败分类重试 + 失败不抛异常。
+"""LLM 壳（guardrails/llm_shell.py）单测：强校验 + 失败分类重试 + 失败不抛异常。
 
 注入替身（实现 LLMBackend Protocol，见 tests/helpers.py）验证：
-- schema 校验失败（后端成功返回但内容不合法）→ 追加含**非法输出原文 + 校验错误**
-  的修正提示重试 1 次 → 成功 attempts=2（P2-15 回喂原文）；
-- 后端异常（transport 类：超时/网络等）→ 无输出可修正，**不追加 schema 修正文案**、
-  退避后原样重试 1 次；
-- 截断（LLMResponse.truncated，finish_reason=length）且校验失败 → 不重试
-  （attempts=1 直接降级，省一次大概率无效调用）；
-- 恒失败 / 后端异常 → model=None、attempts=2、不抛异常；
-- set_llm_backend(None) 恢复默认 scripted 桩；
+
+- schema 校验失败（后端成功返回但内容不合法）→ 追加含非法输出原文 + 校验错误的修正提示，
+  重试 1 次后成功则 attempts=2；
+- 后端异常（transport 类：超时/网络等）→ 无输出可修正，不追加 schema 修正文案，退避后原样重试；
+- 截断（``LLMResponse.truncated``，finish_reason=length）且校验失败 → 不重试，attempts=1；
+- 恒失败 → ``model=None``、attempts=2、不抛异常；
+- ``set_llm_backend(None)`` 恢复默认 scripted 桩；
 - 调用方 messages 不被污染（修正提示只追加在工作副本）。
 """
 
@@ -35,6 +34,7 @@ _SCHEMA_BAD = '{"next_action": "SOMETHING_ELSE", "tools": []}'
 
 async def _call(backend, *, output_model=PlanOutput, node="plan",
                 messages=None):
+    """设置全局后端并跑一次 call_structured_llm。"""
     set_llm_backend(backend)
     return await call_structured_llm(
         OutputModel=output_model, node=node, messages=messages if messages is not None
@@ -43,10 +43,6 @@ async def _call(backend, *, output_model=PlanOutput, node="plan",
 
 
 async def test_schema_fail_then_success_retries_once():
-    """校验失败 → 修正提示重试 1 次 → 成功：attempts=2、model 校验通过。
-
-    P2-15：修正提示回喂**第 1 次非法输出原文**（模型第 2 次能看到自己上一版输出）。
-    """
     backend = SequenceBackend(contents=[_SCHEMA_BAD, plan_conclude_json()], tokens=5)
     outcome = await _call(backend)
     assert isinstance(outcome, LLMCallOutcome)
@@ -67,7 +63,6 @@ async def test_schema_fail_then_success_retries_once():
 
 
 async def test_valid_first_attempt_succeeds():
-    """首次即校验通过 → attempts=1、无修正提示追加。"""
     backend = SequenceBackend(contents=[plan_conclude_json()], tokens=3)
     outcome = await _call(backend)
     assert outcome.model is not None and outcome.attempts == 1
@@ -77,7 +72,6 @@ async def test_valid_first_attempt_succeeds():
 
 
 async def test_always_invalid_two_failures_no_raise():
-    """两次均 schema 校验失败 → model=None、attempts=2、不抛异常，error 含校验错误。"""
     backend = SequenceBackend(contents=[_INVALID, _SCHEMA_BAD], tokens=0)
     outcome = await _call(backend)
     assert outcome.model is None
@@ -87,7 +81,6 @@ async def test_always_invalid_two_failures_no_raise():
 
 
 async def test_backend_raises_both_attempts_no_raise():
-    """后端异常（transport 类，LLMBackendError）也重试 1 次；两次失败 → model=None。"""
     backend = AlwaysRaiseBackend()
     outcome = await _call(backend)
     assert backend.calls == 2
@@ -98,11 +91,6 @@ async def test_backend_raises_both_attempts_no_raise():
 
 
 async def test_backend_raise_then_success_recovers():
-    """第 1 次后端异常（transport 类）、第 2 次成功 → 恢复：attempts=2、model 通过。
-
-    P2-15：transport 失败没有可"修正"的输出 —— 重试**不追加 schema 修正文案**
-    （旧版对超时/HTTP 也按"schema 修正"重试是误导）；messages 保持原长度纯重试。
-    """
     backend = SequenceBackend(contents=[None, plan_conclude_json()], tokens=4)
     outcome = await _call(backend)
     assert outcome.model is not None and outcome.model.next_action == "conclude"
@@ -114,7 +102,6 @@ async def test_backend_raise_then_success_recovers():
 
 
 async def test_caller_messages_not_polluted():
-    """修正提示只追加在工作副本 —— 调用方传入的 messages 列表不被改动。"""
     messages = [dict(m) for m in _MESSAGES]
     snapshot = [dict(m) for m in messages]
     backend = SequenceBackend(contents=[_SCHEMA_BAD, plan_conclude_json()], tokens=1)
@@ -124,7 +111,6 @@ async def test_caller_messages_not_polluted():
 
 
 async def test_set_llm_backend_none_restores_default():
-    """set_llm_backend(None) 恢复默认 scripted 桩（name="scripted-walkthrough"）。"""
     set_llm_backend(SequenceBackend(contents=[plan_conclude_json()]))
     assert get_llm_backend().name == "test-sequence"
     set_llm_backend(None)
@@ -136,7 +122,6 @@ async def test_set_llm_backend_none_restores_default():
 
 
 async def test_invalid_output_model_type_returns_error():
-    """OutputModel 非 pydantic 模型 → 不可恢复失败（attempts=1、不碰后端）。"""
     outcome = await call_structured_llm(OutputModel=dict, node="plan", messages=[])
     assert outcome.model is None
     assert outcome.attempts == 1
@@ -144,8 +129,6 @@ async def test_invalid_output_model_type_returns_error():
 
 
 async def test_backend_protocol_violation_is_caught_as_failure():
-    """后端抛非 LLMBackendError 的任意异常（如 KeyError）同样被捕获为失败。"""
-
     class BoomBackend:
         name = "boom"
 
@@ -180,11 +163,6 @@ class _TruncatedOnceBackend:
 
 
 async def test_truncated_failure_is_not_retried_attempts_one():
-    """P2-15（壳级）：截断（truncated=True）且校验失败 → 不重试、attempts=1、error 标注截断。
-
-    截断按 transport 类处理：同 max_tokens 下重试大概率再截断，不白烧第 2 次调用
-    （替身若被第 2 次调用会直接 AssertionError）。
-    """
     backend = _TruncatedOnceBackend()
     outcome = await _call(backend)
     assert backend.calls == 1  # 恰好一次
@@ -210,7 +188,6 @@ class _TruncatedValidBackend:
 
 
 async def test_truncated_but_valid_content_succeeds():
-    """P2-15：截断但内容恰好通过校验 → 照常成功 attempts=1（不误伤）。"""
     backend = _TruncatedValidBackend()
     outcome = await _call(backend)
     assert backend.calls == 1

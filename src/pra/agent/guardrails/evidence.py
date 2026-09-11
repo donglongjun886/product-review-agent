@@ -1,40 +1,19 @@
-"""确定性证据质量过滤 + O-8 extra 回填（04 §9 / 01 §5.0，tools_node 消费）。
+"""证据质量过滤 + extra 派生数值回填（tools_node 的两步确定性 Python，不调 LLM）。
 
-本模块是 tools_node evidence processing 的两步确定性 Python（不调 LLM）：
+``quality_filter``：丢弃 ``IMAGE_SIMILARITY`` 且 ``weight < EVIDENCE_MIN_SIM``
+（0.70）的弱相似命中，其余类型全部保留（含低相似度的 ``IMAGE_LOGO`` —— logo 是
+「检出即事实」，留给业务层判断）。工具层 ``to_evidence`` 只产原始事实、不设下限，
+阈值裁决在本层。
 
-1. ``quality_filter`` —— T-11 已拍板 B 的证据质量下限：IMAGE_SIMILARITY 且
-   ``weight < EVIDENCE_MIN_SIM(0.70)`` 的弱命中丢弃（避免低相似噪声进证据链）；
-   其余类型全保留。工具层 to_evidence 只产原始事实、不设下限（任务边界，
-   见 ``pra.tools.image_analysis.tool`` 模块 docstring），阈值裁决在本层落位。
+``backfill_extra``：证据的派生数值统一在本层按类型回填，工具转换器不写 extra。
+``IMAGE_SIMILARITY`` 按 ``weight`` 派生 ``similarity`` 与 ``strong``；
+``MERCHANT_HISTORY`` / ``POLICY_REF`` / ``IMAGE_LOGO`` 按 value 固定格式正则解析；
+``PRODUCT_FACT`` 仅在与库中版本不等时标注 ``version_drift``。解析失败保留原
+extra、不报错。
 
-2. ``backfill_extra`` —— O-8 已拍板（04 §4/§9、03-decisions §4.4 行 5）：Evidence.extra
-   的**派生数值**统一在本层回填，工具转换器不写 extra。回填目标字段以
-   graph-mvp-contracts §2.2 定死：
-
-   - ``IMAGE_SIMILARITY`` → ``{"similarity": round(weight,3), "strong": weight>=EVIDENCE_STRONG}``
-     （确定性，不解析 value；``similarity`` 直接由 ``weight`` 派生 —— weight 本就是
-     相似度，T-11；``strong`` 供矛盾检测/风险派生读，EVIDENCE_STRONG=0.85 与
-     EVIDENCE_MIN_SIM 同源 import 自 ``pra.tools.image_analysis.tool``）。
-   - ``MERCHANT_HISTORY`` → 按 value 固定格式 ``"N similar / N removals / N
-     title-relisting, credit=N"``（merchant/tool.py to_evidence 拼装）正则解析
-     ``{"similar", "removals", "title", "credit"}``。
-   - ``POLICY_REF`` → 按 value 前缀 ``"POLICY_x.y vN 条款：…"``（policy_search/tool.py
-     拼装）解析 ``{"policy_id", "policy_version"}``。
-   - ``PRODUCT_FACT`` → value 含 ``"version=<int>（库中最新）"``（product/tool.py
-     拼装）；当 ``case`` 给出且库中 version != ``case.product.version`` → 标注
-     ``{"version_drift": True}``（§2.2 语义：仅在不等时标注；相等/无法解析/无 case
-     时**不写该键** —— 确定性消费者一律用 ``extra.get("version_drift") is True`` 判定，
-     缺失 == 无漂移，与"只在不等时标注"等价且无来回翻转风险，因为证据一旦收集不可篡改）。
-   - ``IMAGE_LOGO`` → 按 value 固定格式 ``"logo=<brand>, conf=<float>"``
-     （image_analysis/tool.py 拼装）解析 ``{"logo_brand", "confidence"}``。
-
-   **尽力而为**：任何解析失败保留原 extra、不报错（不中断证据流）；回填是纯派生，
-   确定性逻辑只读 extra/weight/ref_id（§2.2），value 字符串仅供人读与审计。
-
-不变式：两个函数都不改动入参 Evidence（pydantic 模型默认不可变语义）—— 返回
-新 list；``backfill_extra`` 对每条输出 ``model_copy(update={"extra": merged})``，
-且 merged 恒为**新 dict**（先 ``dict(e.extra)`` 再叠加），避免与原对象共享 extra
-引用。实现对齐 docs/04-graph-design.md §9 evidence.py 行（表 679 行）。
+不变式：两函数都不改写入参 ``Evidence``；``backfill_extra`` 逐条
+``model_copy(update={"extra": merged})``，merged 恒为**新 dict**（先浅拷贝原
+extra 再叠加），不与原对象共享 extra 引用。
 """
 
 from __future__ import annotations
@@ -52,10 +31,7 @@ from pra.tools.merchant.tool import MERCHANT_HISTORY_TYPE
 from pra.tools.policy_search.tool import POLICY_REF_TYPE
 from pra.tools.product.tool import PRODUCT_FACT_TYPE
 
-# ---------------------------------------------------------------------------
-# value 解析正则 —— 与各 tool.py::to_evidence 的 f-string 固定格式一一对应
-# （改动 tool 格式前必须先改此处；解析失败走"保留原 extra"兜底，不回退工具）
-# ---------------------------------------------------------------------------
+# 与各 tool.py::to_evidence 的 f-string 格式一一对应（改 tool 格式须同步改此处）。
 
 # merchant/tool.py: f"{similar_product_count} similar / {removals} removals / "
 #                   f"{title_relisting_count} title-relisting, credit={credit_score}"
@@ -75,13 +51,7 @@ _IMAGE_LOGO_RE = re.compile(r"logo=(?P<brand>[^,]+?)\s*,\s*conf=(?P<confidence>[
 
 
 def quality_filter(raw: list[Evidence], *, evid_min_sim: float = EVIDENCE_MIN_SIM) -> list[Evidence]:
-    """确定性证据质量过滤（T-11 B：EVIDENCE_MIN_SIM=0.70）。
-
-    丢弃 IMAGE_SIMILARITY 且 ``weight < evid_min_sim`` 的弱命中；其余类型/强度全保留
-    （MERCHANT_HISTORY/POLICY_REF 等默认权重 0.85/0.9 本就不低于下限；低相似度 Logo
-    命中不在此过滤，Logo 是"检出即事实"，保留给业务层判断）。返回新 list、
-    元素复用原 Evidence 引用（函数不改写任何对象）；入参为 None/空 → 返回 []。
-    """
+    """丢弃弱相似命中（``weight < evid_min_sim``）；返回新 list、元素复用原引用，入参空 → ``[]``。"""
     kept: list[Evidence] = []
     for e in raw or []:
         if e.type == IMAGE_SIMILARITY_TYPE and e.weight < evid_min_sim:
@@ -91,7 +61,7 @@ def quality_filter(raw: list[Evidence], *, evid_min_sim: float = EVIDENCE_MIN_SI
 
 
 def _parse_merchant_history(value: str) -> dict | None:
-    """按 value 固定格式解析 MERCHANT_HISTORY 数值；失败返回 None（尽力而为）。"""
+    """按 value 固定格式解析 ``MERCHANT_HISTORY`` 数值；失败返回 None。"""
     m = _MERCHANT_HISTORY_RE.search(value)
     if m is None:
         return None
@@ -107,7 +77,7 @@ def _parse_merchant_history(value: str) -> dict | None:
 
 
 def _parse_policy_ref(value: str) -> dict | None:
-    """按 value 前缀 ``POLICY_x.y vN`` 解析；失败返回 None（尽力而为）。"""
+    """按 value 前缀 ``POLICY_x.y vN`` 解析；失败返回 None。"""
     m = _POLICY_REF_RE.match(value)
     if m is None:
         return None
@@ -132,11 +102,7 @@ def _parse_image_logo(value: str) -> dict | None:
 
 
 def _product_version_drift(e: Evidence, case: ProductReviewCase | None) -> bool | None:
-    """PRODUCT_FACT 版本漂移判定：返回 True=漂移；False/None=不标注。
-
-    None 表示无法判定（value 无 ``version=<int>（库中最新）`` 或 case 缺失/
-    case.product.version 缺失）—— 与"相等"同样不写 extra 键（§2.2 仅在不等时标注）。
-    """
+    """``PRODUCT_FACT`` 版本漂移判定：True=漂移；False/None=不标注（仅不等时标注）。"""
     if case is None:
         return None
     product = getattr(case, "product", None)
@@ -152,18 +118,15 @@ def _product_version_drift(e: Evidence, case: ProductReviewCase | None) -> bool 
 
 
 def backfill_extra(evs: list[Evidence], *, case: ProductReviewCase | None = None) -> list[Evidence]:
-    """O-8 extra 派生数值回填：逐条输出 ``model_copy(update={"extra": merged})``。
+    """extra 派生数值回填：逐条输出 ``model_copy(update={"extra": merged})``。
 
-    按 graph-mvp-contracts §2.2 定死字段回填（见模块 docstring 对照表）；merged 恒为
-    新 dict（``dict(e.extra)`` 起步再叠加派生键），**绝不改写原对象**、不共享 extra
-    引用。解析失败 → merged 保持原 extra 内容，不报错（尽力而为）。每条都返回
-    model_copy（即使无键新增），保证调用方拿到的与输入无对象别名。入参 None/空 → []。
+    merged 恒为新 dict 且**绝不改写原对象**；解析失败保留原 extra、不报错。
     """
     out: list[Evidence] = []
     for e in evs or []:
         merged = dict(e.extra)  # 新 dict：保留工具/前序已填键，叠加派生键
         if e.type == IMAGE_SIMILARITY_TYPE:
-            # 确定性派生：similarity 即 weight（工具 weight=相似度），不解析 value
+            # similarity 即 weight（工具侧 weight 就是相似度）
             merged["similarity"] = round(e.weight, 3)
             merged["strong"] = bool(e.weight >= EVIDENCE_STRONG)
         elif e.type == MERCHANT_HISTORY_TYPE:
@@ -181,6 +144,5 @@ def backfill_extra(evs: list[Evidence], *, case: ProductReviewCase | None = None
             parsed = _parse_image_logo(e.value)
             if parsed is not None:
                 merged.update(parsed)
-        # 其余类型（OCR_TEXT / CASE_PRECEDENT 等）无 §2.2 回填字段 → 原样保留 extra
         out.append(e.model_copy(update={"extra": merged}))
     return out

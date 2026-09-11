@@ -1,37 +1,11 @@
-"""确定性走查桩 —— 无 API key 端到端（graph MVP，04 §8 裁剪）。
+"""确定性走查桩 —— 无 API key 也能端到端。
 
-``ScriptedLLMBackend`` 实现 :mod:`pra.agent.guardrails.llm_shell` 的
-``LLMBackend`` Protocol：按 ``node`` 分发，返回**固定剧本**的结构化 JSON 文本；
-同 ``(node, __STATE__)`` → 同输出（无 API key、无网络、无随机、无实例可变状态），
-eval 可重放。走查剧本与期望结局见 graph-mvp-contracts §2.3 / §4.3：复古运动鞋
-P_88231 / M_5512 场景目标 ``llm_calls==8 / tool_calls==5`` —— 执行序列为
-hypothesize → plan(外观) → tools → reevaluate(①) → plan(商品+商家) → tools →
-reevaluate(②) → plan(先例+政策) → tools → reevaluate(③，收敛) → decide（converged
-后不再进 plan，故 plan 恰 3 次、LLM 总 8 次；三轮工具 1+2+2=5 次）。
-
-**完整状态约定（与 G5 hypothesize/plan、G6 reevaluate/decide 的隐式契约 ——
-对契约 §4.3 的补充）**
-
-契约 §4.1 的 ``LLMBackend.complete(*, node, messages, json_schema)`` **没有 state
-参数**，而 §4.3 要求 plan/reevaluate/decide 按 evidence/case/hypotheses 存在性做
-确定性分支。本后端**不自持外部状态**（``set_context`` 之类会破坏确定性/重放，
-不采用）。解决决定：节点在 ``_build_messages`` 中把**本节点需要的 state 子集**
-以 JSON 行挂到首条 user 消息 content —— ``__STATE__ {json}``；后端解析该行得到
-state 字典，其中：
-
-- ``case``：与 ``pra.domain.models`` 同形状的 dict（``case.product.images[].url`` /
-  ``case.product.category`` / ``case.product.product_id`` / ``case.merchant_id``）；
-- ``evidence``：元素 dict ``{"type","weight","value","ref_id","extra"}``；
-- ``hypotheses``：元素 dict ``{"id","statement","prior","posterior","status"}``；
-- ``queue``（或 ``investigation_queue``）：元素 dict ``{"q","priority","status"}``。
-
-首条 system 消息不带状态；只含本节点需要的字段。找不到 ``__STATE__`` 行 → 按
-空事实兜底（hypothesize 仍输出固定假设；plan 无图可查直接 conclude，保证不崩）。
-除该状态行外，messages 的其余内容仅占位审计，后端一律忽略。
-
-本模块 docstring 注明：确定性走查桩（04 §8 MVP 裁剪 / 任务 "scripted stub：
-无 API key 也能端到端"）；eval 可重放。真实 litellm 后端的完整 prompt 属后续，
-不经本模块。
+``ScriptedLLMBackend`` 实现 ``LLMBackend`` Protocol：按 ``node`` 分发并返回固定剧本的
+结构化 JSON 文本；同 ``(node, __STATE__)`` → 同输出（无 API key、无网络、无随机、无
+实例可变状态），eval 可重放。走查剧本对应复古运动鞋 P_88231 / M_5512 场景，目标
+``llm_calls==8 / tool_calls==5``：hypothesize → plan(外观) → tools → reevaluate(①) →
+plan(商品+商家) → tools → reevaluate(②) → plan(先例+政策) → tools → reevaluate(③ 收敛)
+→ decide（plan 恰 3 次、LLM 总 8 次；三轮工具 1+2+2=5 次）。
 """
 
 from __future__ import annotations
@@ -40,9 +14,7 @@ import json
 
 from pra.agent.guardrails.llm_shell import LLMBackend, LLMBackendError, LLMResponse
 
-# ---------------------------------------------------------------------------
-# 剧本常量（§4.3 原文；只读，进程内不变）
-# ---------------------------------------------------------------------------
+# 剧本常量（只读，进程内不变）
 
 # hypothesize 固定输出：4 条假设 (statement, prior)
 _HYPOTHESES_SCRIPT: tuple = (
@@ -58,7 +30,7 @@ _QUEUE_SCRIPT: tuple = (
     ("商家历史是否显示系统性类似行为？", 2),
 )
 
-# decide 固定提案（§4.3 原文）
+# decide 固定提案
 _DECIDE_RATIONALE = "证据链充分但涉及仿冒主观判定且政策指引高风险转人工，克制转人工"
 
 # 证据类型常量（与 domain/models.py Evidence.type / tools 输出对齐）
@@ -68,17 +40,14 @@ _MERCHANT_HISTORY = "MERCHANT_HISTORY"
 _CASE_PRECEDENT = "CASE_PRECEDENT"
 _POLICY_REF = "POLICY_REF"
 
-_STRONG_SIM_WEIGHT = 0.85  # sim_strong：IMAGE_SIMILARITY 强证据阈值（§4.3）
-_CITATION_MAX = 200  # 引用串 value 截断上限（§2.2：value 已人读摘要 ≤200 字符）
+_STRONG_SIM_WEIGHT = 0.85  # sim_strong：IMAGE_SIMILARITY 强证据阈值
+_CITATION_MAX = 200  # 引用串 value 截断上限（value 已是人读摘要）
 
 _STATE_MARKER = "__STATE__"  # 消息内状态行前缀：__STATE__ {json}
 
 
 def _citation(ev: dict) -> str:
-    """证据引用/摘要串（§2.2）：``f"{type} {value}"``，value ≤200 字符截断。
-
-    只进审计/展示/引用，不参与确定性分支判定。
-    """
+    """证据引用/摘要串：``f"{type} {value}"``，value 截到 200 字符（不参与分支判定）。"""
     value = ev.get("value")
     value = "" if value is None else (value if isinstance(value, str) else str(value))
     return "{} {}".format(ev["type"], value[:_CITATION_MAX])
@@ -94,12 +63,15 @@ def _to_float(value: object) -> float:
 
 
 def _extract_state(messages) -> dict:
-    """从 messages 里解析 ``__STATE__ {json}`` 状态行（与 G5/G6 的隐式契约）。
+    """从 messages 里解析 ``__STATE__ {json}`` 状态行。
 
-    - 遍历 messages（取首个命中），content 为 str 且含 ``__STATE__`` 标记：
-      ``json.loads`` 标记后的 JSON 得到 state 字典；
-    - 找不到/解析失败 → ``{}``（空事实兜底，调用方各自防御）；
-    - 除状态行外，messages 其余内容一律忽略（仅占位审计）。
+    状态约定（``complete`` 无 state 参数，故由节点把 state 子集挂到消息里）——标记后的
+    dict 键：``case``（与 ``pra.domain.models`` 同形状）、``evidence``（元素含
+    ``{"type","weight","value","ref_id","extra"}``）、``hypotheses``（元素含
+    ``{"id","statement","prior","posterior","status"}``）、``queue`` 或
+    ``investigation_queue``（元素含 ``{"q","priority","status"}``）。
+    取首个含 ``__STATE__`` 的 str content 解析；失败 → ``{}``（空事实兜底）；其余内容
+    一律忽略（仅占位审计）。
     """
     for msg in messages or []:
         content = msg.get("content") if isinstance(msg, dict) else None
@@ -160,7 +132,7 @@ def _queue_list(state: dict) -> list:
 
 
 def _case_facts(state: dict) -> dict:
-    """抽取 plan 分支需要的案件事实（防御式：任何缺失均给安全空值，不崩）。"""
+    """抽取 plan 分支需要的案件事实（防御式：缺失给安全空值，不崩）。"""
     case = state.get("case")
     case = case if isinstance(case, dict) else {}
     product = case.get("product")
@@ -190,7 +162,7 @@ def _case_facts(state: dict) -> dict:
 
 
 def _risk_filters(category) -> dict:
-    """plan 分支 3 的 filters（§4.3 原文）：category（有则带）+ risk_type 词表。"""
+    """plan 分支 3 的 filters：category（有则带）+ risk_type 词表。"""
     filters = {}
     if category:
         filters["category"] = category
@@ -201,9 +173,8 @@ def _risk_filters(category) -> dict:
 class ScriptedLLMBackend:
     """确定性走查桩（LLMBackend）：按 node 返回固定剧本 JSON，忽略消息正文。
 
-    - ``name`` = "scripted-walkthrough"（仅审计/展示）；
-    - 无实例可变状态 —— 同 (node, __STATE__) 恒同输出，eval/测试可重放；
-    - 未知 node → 抛 ``llm_shell.LLMBackendError``（供降级路径测试）。
+    无实例可变状态（同 (node, __STATE__) 恒同输出，可重放）；未知 node →
+    ``LLMBackendError``（供降级路径测试）。
     """
 
     name = "scripted-walkthrough"
@@ -224,13 +195,12 @@ class ScriptedLLMBackend:
             payload = self._decide(state)
         else:
             raise LLMBackendError("unknown node: {}".format(node))
-        # 桩没有真实 token（无 provider 响应）：tokens=0 照旧、usage=None ——
-        # **绝不伪造** token 拆分（S3 观测口径：拿不到就不传 usage_details）。
+        # 桩无真实 provider 响应：tokens=0、usage=None —— 绝不伪造 token 拆分。
         return LLMResponse(
             content=json.dumps(payload, ensure_ascii=False), tokens=0, usage=None
         )
 
-    # -- hypothesize：固定 4 假设 + 2 队列（§4.3），与案件事实无关 --------------
+    # -- hypothesize：固定 4 假设 + 2 队列，与案件事实无关 ----------------------
 
     def _hypothesize(self, state: dict) -> dict:
         hypotheses = [
@@ -247,7 +217,7 @@ class ScriptedLLMBackend:
             "rationale": "依据品牌字段空缺与典型仿冒模式给出初始假设与调查问题。",
         }
 
-    # -- plan：按证据 type 集合的四分支（§4.3 1→2→3→4 顺序） ------------------
+    # -- plan：按证据 type 集合的四分支（1→2→3→4 顺序） ------------------------
 
     def _plan(self, state: dict) -> dict:
         facts = _case_facts(state)
@@ -256,7 +226,7 @@ class ScriptedLLMBackend:
         has_sim = _IMAGE_SIMILARITY in types
         urls = facts["image_urls"]
 
-        # 分支 1：无 IMAGE_SIMILARITY → 先做外观比对（需图片；无图 → conclude 兜底）
+        # 分支 1：无 IMAGE_SIMILARITY → 先做外观比对（无图 → conclude 兜底）
         if not has_sim:
             if not urls:
                 return {
@@ -306,10 +276,8 @@ class ScriptedLLMBackend:
                 "rationale": "补齐商品事实与商家历史，验证规避品牌与系统性上架假设。",
             }
         if "PRODUCT_FACT" not in types or "MERCHANT_HISTORY" not in types:
-            # 证据仍缺（PRODUCT_FACT/MERCHANT_HISTORY 至少一类未收集）但无 id 可补
-            # （product_id/merchant_id 均缺失的畸形案件事实）→ conclude，不穿透到
-            # 分支 3 跳过"先商品/商家"取证顺序（code review R-A P2-③；真实案件两
-            # id 为必填，此处仅防御 __STATE__ 畸形载荷）。
+            # 证据仍缺但 product_id/merchant_id 均缺失（畸形案件事实）→ conclude，
+            # 不穿透到分支 3；真实案件两 id 必填，此处仅防御 __STATE__ 畸形载荷。
             return {
                 "next_action": "conclude",
                 "tools": [],
@@ -359,7 +327,7 @@ class ScriptedLLMBackend:
             "rationale": "外观/商品/商家/先例/政策证据已齐备，无需继续调查。",
         }
 
-    # -- reevaluate：按假设 id + 证据 flags 更新（§4.3；幂等） ------------------
+    # -- reevaluate：按假设 id + 证据 flags 更新（幂等） ------------------------
 
     def _reevaluate(self, state: dict) -> dict:
         evs = _evidence_list(state)
@@ -369,7 +337,7 @@ class ScriptedLLMBackend:
         )
         strong = [ev for ev in sim_evs if _to_float(ev.get("weight")) >= _STRONG_SIM_WEIGHT]
         sim_strong = bool(strong)
-        # 强证据取 weight 最大者（并列取列表首现 —— max 保序首现，确定性）
+        # 强证据取 weight 最大者（并列取首现 —— max 保序，确定性）
         strong_ev = max(strong, key=lambda ev: _to_float(ev.get("weight"))) if strong else None
         strong_ref = _citation(strong_ev) if strong_ev is not None else ""
 
@@ -380,7 +348,7 @@ class ScriptedLLMBackend:
         case_pre = _first_of_type(evs, _CASE_PRECEDENT) is not None
         policy = _first_of_type(evs, _POLICY_REF) is not None
 
-        # flags 速查（§4.3）：sim_strong / sim_max / prod / merch / case_pre / policy
+        # flags 速查：sim_strong / sim_max / prod / merch / case_pre / policy
         hypothesis_updates = []
         for h in _hypothesis_list(state):
             hid = h.get("id")
@@ -403,7 +371,7 @@ class ScriptedLLMBackend:
                 target_status, target_posterior = "SUPPORTED", 0.85
                 fields = {"evidence_for": [_citation(merch_ev)]}
             else:
-                # 未知 id / 条件不满足 → 跳过（未知 id 直接跳过，§4.3）
+                # 未知 id / 条件不满足 → 跳过
                 continue
             # 幂等：目标 status/posterior 与当前相同 → 不列入（同一证据集重复调用
             # 输出稳定，不会来回翻；H3/H4 在首轮证据未齐前保持 PENDING 不误更新）
@@ -445,7 +413,7 @@ class ScriptedLLMBackend:
             "rationale": "按本轮证据批量更新假设状态与调查队列；无新增假设、无矛盾证据。",
         }
 
-    # -- decide：固定提案（§4.3 原文） -----------------------------------------
+    # -- decide：固定提案 -------------------------------------------------------
 
     def _decide(self, state: dict) -> dict:
         evs = _evidence_list(state)

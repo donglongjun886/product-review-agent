@@ -1,28 +1,20 @@
-"""demo_walkthrough.py —— graph MVP 验收走查脚本（graph-mvp-contracts §9.2 实现）。
+"""graph 走查脚本：端到端驱动 LangGraph 并断言终态。
 
-用途：以「复古运动鞋 P_88231 / 商家 M_5512」走查 case 端到端驱动 LangGraph：
-hypothesize → plan → tools → reevaluate ×N → decide，打印每一步节点关键内容，
-流结束后读取终态并执行 §9.2 全量断言，末尾打印决策摘要块。
+流程 hypothesize → plan → tools → reevaluate ×N → decide，逐步打印节点关键内容；
+流结束后读终态、跑全量断言，末尾打印决策摘要块。
 
-契约要点（graph-mvp-contracts §9.2，唯一事实源）：
-- 直接可执行：仓库根 ``uv run python scripts/demo_walkthrough.py``（默认 6 tools +
-  默认 scripted LLM 桩，无 API key 端到端）。
-- ``build_agent_graph(checkpointer=make_memory_checkpointer())``；每次 stream 传入
+要点：
+- 直接可执行：``uv run python scripts/demo_walkthrough.py``（默认 6 tools + scripted
+  LLM 桩，无 API key）。
+- ``build_agent_graph(checkpointer=make_memory_checkpointer())``；每次 stream 传
   ``build_initial_state(case)``；checkpointer 场景下终态用
-  ``(await app.aget_state(config))["values"]`` 读取。
-  兼容注记：仓库锁定 langgraph 1.2.11，其 ``StateSnapshot`` 为 **NamedTuple**（
-  ``snap["values"]`` 会抛 TypeError），本脚本按 §9.2 字面写法优先、失败后回退
-  ``snapshot.values`` 属性（交付偏差清单已注明，未改契约语义）。
-- 期望结局（§2.3）：HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] /
-  dc>=0.7；evidence 覆盖 IMAGE_SIMILARITY(similarity=0.91)+MERCHANT_HISTORY+
-  CASE_PRECEDENT+POLICY_REF；llm_calls=8、tool_calls=5（≤10/15）；overrides=[]；
-  图终止（decide 唯一出口）。
-- graph.py 由批 2 并行实施者编写（尚未落盘时本脚本的 import 冒烟失败属预期，
-  最终验收由协调者执行）—— 故 ``pra.agent.graph`` 的 import 延迟到 ``_build_app()``
-  内，并给出明确报错文案。
-
-语法/import 约定：顶部 ``from __future__ import annotations``（可被 Python 3.9
-解析）；import 一律 ``pra.*``。本文件只读 src，不做任何 git 操作。
+  ``(await app.aget_state(config))["values"]`` 读取。兼容注记：仓库锁定
+  langgraph 1.2.11，其 ``StateSnapshot`` 是 **NamedTuple**（``snap["values"]`` 抛
+  TypeError），故先按字面写法、失败后回退 ``snapshot.values`` 属性。
+- 期望结局：HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / dc>=0.7；
+  evidence 覆盖 IMAGE_SIMILARITY(similarity=0.91) + MERCHANT_HISTORY + CASE_PRECEDENT
+  + POLICY_REF；llm_calls=8、tool_calls=5（限值 10/15）；overrides=[]；decide 是唯一出口。
+- ``pra.agent.graph`` 延迟到 ``_build_app()`` 内 import，未落盘时给出明确报错。
 """
 
 from __future__ import annotations
@@ -44,7 +36,7 @@ from pra.domain.models import (
     SkuInfo,
 )
 
-# §9.2 断言清单中的受控常量（与 pra.domain.models / 工具证据类型对齐）。
+# 断言清单里的受控常量（与 pra.domain.models / 工具证据类型对齐）
 _IMG_URL = "https://cdn.example.com/products/P_88231/img1.jpg"
 _REQUIRED_EVIDENCE_TYPES = frozenset(
     {"IMAGE_SIMILARITY", "MERCHANT_HISTORY", "CASE_PRECEDENT", "POLICY_REF"}
@@ -53,19 +45,17 @@ _EXPECTED_LLM_CALLS = 8
 _EXPECTED_TOOL_CALLS = 5
 
 
-# ---------------------------------------------------------------------------
-# case 构造（§9.2 / §8 demo 定义：P_88231 / M_5512 / NEW_LISTING）
-# ---------------------------------------------------------------------------
+# case 构造（P_88231 / M_5512 / NEW_LISTING）
 
 
 def build_demo_case() -> ProductReviewCase:
-    """构造走查输入 case（字段对齐 §9.2：brand=None、无品牌词、img1、version=3）。"""
+    """构造走查输入 case（brand=None、无品牌词、img1、version=3）。"""
     product = ProductInfo(
         product_id="P_88231",
         title="新款厚底复古跑鞋 女士百搭运动鞋",
         description="复古厚底设计，舒适百搭，适合日常通勤与运动。",  # 无品牌词
         category="女鞋/运动鞋",
-        brand=None,  # 品牌真空缺 —— "规避品牌识别"调查的起点信号
+        brand=None,  # 品牌真空缺 —— 规避品牌识别调查的起点信号
         sku_list=[SkuInfo(sku_id="S_1", color="米白", size="38", price=219.0)],
         images=[ProductImage(url=_IMG_URL, source="主图")],
         listing_time=datetime(2024, 9, 6, 14, 0, 0),  # naive datetime（DB DATETIME 口径）
@@ -86,9 +76,7 @@ def build_demo_case() -> ProductReviewCase:
     )
 
 
-# ---------------------------------------------------------------------------
-# 每步节点关键内容打印（§9.2：按序打印节点名 + 关键内容）
-# ---------------------------------------------------------------------------
+# 每步节点关键内容打印（按序打印节点名 + 关键内容）
 
 
 def _print_hypothesize(update: dict) -> list:
@@ -118,7 +106,7 @@ def _print_plan(update: dict) -> None:
 
 
 def _print_tools(update: dict) -> None:
-    """tools 步：执行的 tool 与 evidence 增量 + 边际增益 4 字段（§8.2 ok record）。"""
+    """tools 步：执行的 tool 与 evidence 增量 + 边际增益 4 字段。"""
     records = list(update.get("tool_call_history") or [])
     added = list(update.get("evidence") or [])
     print(f"[tools] 执行 {len(records)} 个调用，本轮新增 {len(added)} 条证据")
@@ -209,10 +197,7 @@ def _print_node(node_name: str, update: dict, snapshot: list) -> list:
     return snapshot
 
 
-# ---------------------------------------------------------------------------
 # 断言辅助（assert + 清晰消息；全部通过打印 "ALL CHECKS PASSED"）
-# ---------------------------------------------------------------------------
-
 
 def _check(cond: bool, msg: str) -> None:
     if not cond:
@@ -220,7 +205,7 @@ def _check(cond: bool, msg: str) -> None:
 
 
 def _assert_all(final_state: dict, node_seq: list) -> None:
-    """§9.2 断言清单 1~8（失败即抛，消息带实际值）。"""
+    """断言清单 1~8（失败即抛，消息带实际值）。"""
     decision = final_state.get("decision")
     _check(
         decision is not None,
@@ -274,7 +259,7 @@ def _assert_all(final_state: dict, node_seq: list) -> None:
         decision.overrides == [],
         f"断言6 失败: overrides={decision.overrides!r}，期望 []",
     )
-    # 7) 预算计数（先打印 utilization，再断言；计数不符时消息给出实际值供协调者排查）
+    # 7) 预算计数（先打印 utilization，再断言）
     budget = final_state.get("budget")
     _check(budget is not None, "断言7 失败: 终态 budget 缺失")
     limits = budget.limits
@@ -314,9 +299,7 @@ def _assert_all(final_state: dict, node_seq: list) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# 末尾摘要块（§9.2）
-# ---------------------------------------------------------------------------
+# 末尾摘要块
 
 
 def _print_summary(final_state: dict) -> None:
@@ -350,13 +333,11 @@ def _print_summary(final_state: dict) -> None:
     print(f"tool_call_history:   {len(history)} 条")
 
 
-# ---------------------------------------------------------------------------
 # 主流程
-# ---------------------------------------------------------------------------
 
 
 def _build_app():
-    """构造编译图。graph.py 由批 2 并行实施者编写——未落盘时给出明确报错（验收由协调者跑）。"""
+    """构造编译图；graph.py 未落盘时给出明确报错。"""
     try:
         from pra.agent.graph import build_agent_graph  # 延迟 import：防未落盘/循环
     except Exception as exc:  # pragma: no cover - 仅 graph.py 未就绪时触发
@@ -368,7 +349,7 @@ def _build_app():
 
 
 async def main() -> None:
-    """走查主流程：构造 case → astream 按序打印 → 终态断言 → 摘要块。"""
+    """构造 case → astream 按序打印 → 终态断言 → 摘要块。"""
     case = build_demo_case()
     print("=" * 76)
     print(
@@ -398,9 +379,8 @@ async def main() -> None:
             hypo_snapshot = _print_node(node_name, update, hypo_snapshot)
     print(f"节点序列: {' -> '.join(node_seq)}")
 
-    # checkpointer 场景：流结束后取终态。§9.2 字面写法为 snapshot["values"]；
-    # langgraph 1.2.11 的 StateSnapshot 是 NamedTuple（不可下标），退化为 .values
-    # 属性读取（契约偏差说明见文件 docstring / 交付偏差清单）。
+    # checkpointer 场景：流结束后取终态。langgraph 1.2.11 的 StateSnapshot 是
+    # NamedTuple（不可下标），失败后退化为 .values 属性读取。
     snapshot = await app.aget_state(config)
     try:
         final_state = snapshot["values"]  # type: ignore[index]

@@ -1,20 +1,11 @@
-"""BM25 检索内核（rag/bm25.py）—— 自写 Okapi BM25，离线确定性（MVP，R-1/R-6）。
+"""BM25 检索内核 —— 自写 Okapi BM25，离线确定性。
 
-口径（轻量切分，无第三方分词依赖 —— 不引入 jieba 等新依赖）：
-- CJK 连续段 → **字符 bigram**（中文检索常见无词典口径：二字窗口同时覆盖
-  「品牌/仿冒/复刻/高度模仿」等关键词及其跨界，注释即文档）；
-- 拉丁字母/数字段 → 小写词（按非字母数字切分，如 ``image_similarity>=0.85``
-  → ``image_similarity`` / ``0`` / ``85``）；
-- 其它字符（标点/空白）仅作分隔，不进 token。
+切分口径（无第三方分词依赖）：CJK 连续段 → **字符 bigram**（二字窗口覆盖
+「品牌/仿冒/复刻/高度模仿」等关键词及其跨界）；拉丁字母/数字段 → 小写词；其它字符仅作分隔。
 
-实现：Okapi BM25（k1=1.5 / b=0.75，常数可配）：
-``score = Σ idf(t) * f·(k1+1) / (f + k1·(1 − b + b·dl/avgdl))``；
-IDF 在**整库**（构造期传入的全部文档）上统计 —— 与"过滤后再打分"正交：
-元数据过滤只收窄候选文档集合，词频统计口径固定 → 过滤与否不影响 IDF（确定性）。
-返回值可重复（无随机、无进程相关量）。
-
-Phase 2 迁移点：本模块即 "BM25 路" 的替换位（真实词法分析器/停用词表/索引库可换，
-接口不变）；上层 ``rag/retrieval.py`` 只依赖 ``BM25Index`` 的形状。
+``score = Σ idf(t) * f·(k1+1) / (f + k1·(1 − b + b·dl/avgdl))``，``k1=1.5`` / ``b=0.75``
+（常数可配）。IDF 与平均文档长在**整库**（构造期传入的全部文档）上统计 —— 元数据过滤只收窄
+查询期候选集合，词频统计口径固定，故过滤与否不影响 IDF。返回值可重复（无随机、无进程相关量）。
 """
 
 from __future__ import annotations
@@ -28,7 +19,7 @@ __all__ = ["K1", "B", "BM25Index", "tokenize"]
 K1 = 1.5
 B = 0.75
 
-# CJK 统一表意文字基本区（检索语料为中文电商治理文本；扩展区罕见，不进 MVP 口径）
+# CJK 统一表意文字基本区（检索语料为中文电商治理文本；扩展区罕见，不进本模块切分口径）
 _CJK_MIN = 0x4E00
 _CJK_MAX = 0x9FFF
 
@@ -40,7 +31,7 @@ def _is_cjk(ch: str) -> bool:
 
 
 def tokenize(text: str) -> list[str]:
-    """轻量确定性切分：CJK 段 → 字符 bigram；拉丁/数字段 → 小写词（见模块 docstring）。
+    """轻量确定性切分：CJK 段 → 字符 bigram；拉丁/数字段 → 小写词。
 
     ``text`` 为检索/被检索文本（去空白后处理）；空输入返回 []。
     """
@@ -76,8 +67,8 @@ def tokenize(text: str) -> list[str]:
 class BM25Index:
     """离线确定性 BM25 索引：构造期统计整库词频/文档长，查询期按候选文档打分。
 
-    ``texts``：与 corpus 行**一一对齐**的检索文本列表（整库，含被过滤候选 ——
-    词频统计以全库为口径，过滤只作用在查询期候选选择上）。
+    ``texts``：与 corpus 行一一对齐的检索文本列表（整库，含被过滤候选 —— 词频统计以全库
+    为口径，过滤只作用在查询期候选选择上）。
     """
 
     texts: list[str]
@@ -104,11 +95,9 @@ class BM25Index:
         return len(self._doc_tokens)
 
     def term_df(self, term: str) -> int:
-        """词 t 的文档频率（整库统计；未出现返回 0）。"""
         return self._df.get(term, 0)
 
     def idf(self, term: str) -> float:
-        """IDF(t) = ln(1 + (N − df + 0.5) / (df + 0.5))（df=0 → 0，防除零）。"""
         df = self._df.get(term, 0)
         if df <= 0:
             return 0.0
@@ -118,7 +107,6 @@ class BM25Index:
     # -- 打分 ----------------------------------------------------------------
 
     def score_doc(self, query_terms: list[str], doc_index: int) -> float:
-        """单文档 BM25 分（query 词 ∩ 文档词求和；无交集 → 0.0）。"""
         doc_toks = self._doc_tokens[doc_index]
         if not doc_toks or not query_terms:
             return 0.0

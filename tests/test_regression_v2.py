@@ -1,27 +1,16 @@
-"""v2 正式集回归守护（tests/test_regression_v2.py）—— backlog P1-4 修法（域 B）。
+"""v1 / v2 正式集回归守护：三方案决策序列、digest 与数据字节锁。
 
-背景（域 B 实测确认，eval-review-b-data.md §1 P1-1 / §5）：
-- v2（320 正式集）此前零回归守护：``scripts/run_regression.py`` 默认只指 v1；
-  ``docs/05-visual-similarity-gate-proposal.md`` 明示 v2 "目前无 baseline 文件"；
-- 入库 v1 基线（含 rule/single_call_llm/agent 三方案 35 案）只有 agent 单方案被
-  ``tests/test_rag.py:329-336`` 断言 —— v1 与 v2 的 rule/single_call_llm 决策漂移
-  （如 screening 修正集合入、terms 词表变动）此前 CI 均抓不到。
+此前 v2 零回归守护、v1 基线只有 agent 单方案被断言，rule/single_call_llm 的决策
+漂移（screening 修正集、terms 词表变动等）CI 抓不到；本文件补齐：
 
-本文件补齐（全部离线确定性：scripted 桩、无真 LLM/网络；基线/数据文件**只读**，
-重放路径不写 eval_data 目录 —— 与 test_rag.py / test_evaluation_phase2.py 约定一致）：
+1. 入库 v2 基线静态结构 + digest 自洽（由文件内 ids+decisions 重算）；
+2. v2 三方案 320 决策序列与 digest 全部 == 入库基线；
+3. 重放快照的规范化序列化与入库文件逐字节一致；
+4. ``compare_snapshots`` 对 v2 基线判 PASS；
+5. v1 基线三方案全断言；
+6. (320,42) 重新生成与入库 ``cases_v2.jsonl`` 逐字节一致（防手改数据行 / 生成器漂移）。
 
-1. ``test_v2_baseline_file_structure_and_self_digest``：入库 v2 基线文件静态结构 +
-   digest 自洽（由文件内 ids+decisions 重算 == 存储 digest）；
-2. ``test_v2_three_scheme_decisions_match_baseline``：三方案 320 决策序列 == 入库
-   基线（rule/single_call_llm/agent **全部**断言，不再只 agent）+ digest 相等；
-3. ``test_v2_snapshot_byte_replay``：重放快照规范化序列化 == 入库文件逐字节一致
-   （digest 机制的字节级重放口径）；
-4. ``test_v2_regression_compare_passes``：``compare_snapshots``（regression API）
-   对 v2 基线判 PASS；
-5. ``test_v1_baseline_all_three_schemes_asserted``：v1 基线三方案全断言（补
-   test_rag 只断 agent 的缺口），rule/single_call_llm 漂移从此可被抓；
-6. ``test_v2_dataset_generator_byte_lock``：(320,42) 重新生成 vs 入库
-   ``cases_v2.jsonl`` **逐字节**一致（防手改数据行 / 生成器漂移；只读内存比对）。
+全部离线确定性（scripted 桩）；基线/数据文件只读，重放不写 eval_data 目录。
 """
 
 from __future__ import annotations
@@ -57,12 +46,11 @@ def _load_baseline(path: Path) -> dict:
 
 
 def _canonical_serialize(snapshot: dict) -> str:
-    """与 regression.write_baseline 完全相同的落盘序列化（字节级重放口径）。"""
+    """与 regression.write_baseline 相同的落盘序列化（字节级重放口径）。"""
     return json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
 def _load_gen_module():
-    """按路径加载生成器脚本（scripts/ 非包；importlib 载入 —— 与 dataset_v2 测试同款）。"""
     spec = importlib.util.spec_from_file_location("eval_dataset_gen_regress_mod", GEN_SCRIPT)
     assert spec and spec.loader, f"无法定位生成器脚本: {GEN_SCRIPT}"
     mod = importlib.util.module_from_spec(spec)
@@ -86,9 +74,7 @@ def v2_current_snapshot() -> dict:
         llm_shell._default_backend = saved_default
 
 
-# ---------------------------------------------------------------------------
-# 1) 入库 v2 基线：结构 + digest 自洽（不跑任何方案，纯文件静态断言）
-# ---------------------------------------------------------------------------
+# --- 1) 入库 v2 基线：结构 + digest 自洽（不跑任何方案，纯文件静态断言）
 
 
 def test_v2_baseline_file_structure_and_self_digest() -> None:
@@ -101,15 +87,12 @@ def test_v2_baseline_file_structure_and_self_digest() -> None:
     assert baseline["per_case_ids"][0].startswith("EC_V2_")
     for s in SCHEMES:
         assert len(baseline["decisions"][s]) == 320, f"scheme={s} 决策序列长度须 320"
-    # digest 自洽：由文件内 ids+decisions 重算 == 存储 digest（防只改序列不改 digest）
+    # digest 自洽：由文件内 ids+decisions 重算 == 存储 digest
     assert canonical_digest(baseline["per_case_ids"], baseline["decisions"]) == baseline["digest"]
-    # data_hint 指向 v2 数据文件（与 v1 基线"相对路径"口径同构）
     assert baseline["data_hint"].endswith("eval_data/v2/cases_v2.jsonl")
 
 
-# ---------------------------------------------------------------------------
-# 2) v2 三方案决策序列 == 入库基线（全量重跑一次；rule/single/agent 全断言）
-# ---------------------------------------------------------------------------
+# --- 2) v2 三方案决策序列 == 入库基线（全量重跑一次；rule/single/agent 全断言）
 
 
 def test_v2_three_scheme_decisions_match_baseline(v2_current_snapshot: dict) -> None:
@@ -121,14 +104,13 @@ def test_v2_three_scheme_decisions_match_baseline(v2_current_snapshot: dict) -> 
             f"v2 scheme={s} 决策序列与入库基线不一致（回归漂移）"
         )
     assert snap["digest"] == baseline["digest"]
-    # 决策分布不变量（口径见 manifest/docs §2.1）：agent REJECT=140=GT REJECT 数等
+    # 决策分布不变量：agent REJECT=140=GT REJECT 数
     from collections import Counter
 
     assert Counter(snap["decisions"]["agent"]) == {"PASS": 124, "REJECT": 140, "HUMAN_REVIEW": 56}
 
 
 def test_v2_snapshot_byte_replay(v2_current_snapshot: dict) -> None:
-    """重放快照（data_hint 归一为入库口径后）逐字节 == 入库基线文件。"""
     baseline = _load_baseline(BASELINE_V2)
     snap = {**v2_current_snapshot, "data_hint": baseline["data_hint"]}  # 仅路径形态元数据
     assert _canonical_serialize(snap) == BASELINE_V2.read_text(encoding="utf-8"), (
@@ -137,7 +119,6 @@ def test_v2_snapshot_byte_replay(v2_current_snapshot: dict) -> None:
 
 
 def test_v2_regression_compare_passes(v2_current_snapshot: dict) -> None:
-    """regression API 对 v2 入库基线判 PASS（digest 逐字节重放口径）。"""
     baseline = _load_baseline(BASELINE_V2)
     report = compare_snapshots(v2_current_snapshot, baseline)
     assert report.ok is True and report.status == "PASS"
@@ -146,9 +127,7 @@ def test_v2_regression_compare_passes(v2_current_snapshot: dict) -> None:
     assert report.baseline_cases == 320 and report.current_cases == 320
 
 
-# ---------------------------------------------------------------------------
-# 3) v1 基线三方案补全断言（rule/single_call_llm 此前无任何 CI 引用）
-# ---------------------------------------------------------------------------
+# --- 3) v1 基线三方案补全断言（rule/single_call_llm 此前无任何 CI 引用）
 
 
 async def test_v1_baseline_all_three_schemes_asserted() -> None:
@@ -163,21 +142,17 @@ async def test_v1_baseline_all_three_schemes_asserted() -> None:
     assert snap["digest"] == baseline["digest"]
     report = compare_snapshots(snap, baseline)
     assert report.ok is True and report.status == "PASS"
-    # v1 基线同样逐字节可重放（data_hint 归一为入库口径）
     ser = _canonical_serialize({**snap, "data_hint": baseline["data_hint"]})
     assert ser == BASELINE_V1.read_text(encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
-# 4) 数据字节锁：(320,42) 重新生成 == 入库 cases_v2.jsonl（防手改数据行 / 生成器漂移）
-# ---------------------------------------------------------------------------
+# --- 4) 数据字节锁：(320,42) 重新生成 == 入库 cases_v2.jsonl（防手改数据行 / 生成器漂移）
 
 
 def test_v2_dataset_generator_byte_lock_320_42() -> None:
     gen = _load_gen_module()
     rows = gen.generate(count=320, seed=42)
     assert len(rows) == 320
-    # _write_dataset 同款序列化（见 eval_dataset_gen.py:976-980）
     regenerated = ("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n").encode("utf-8")
     checked_in = EVAL_V2.read_bytes()
     assert regenerated == checked_in, (

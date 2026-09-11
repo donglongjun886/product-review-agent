@@ -1,37 +1,35 @@
-"""AblationRunner —— Ablation Evaluation（evaluation/ablation.py，docs/02-evaluation.md §6）。
+"""消融评测：方案级（2a/2b/2c）与组件级（full / −rag / −merchant / −case / −image）。
 
-两类消融跑**同一 eval_dataset**（差异唯一归因：只换装配，不动判定逻辑与数据集）：
+两类消融跑**同一 eval_dataset**：差异唯一归因于装配，判定逻辑与数据集不动。
 
-1. **方案级（Single-call 的上下文 vs Agent 的主动调查，docs §3.3 变体）**：
-   - ``2a`` = SingleCallScheme 现行为（Raw Input，无任何预塞知识）；
-   - ``2b`` = SingleCallScheme + RAG-in-prompt —— 政策/先例**文本摘要**预塞 prompt
-     （``SingleCallScheme(extra_context=…)``，见 single_call_scheme.py；仍不给工具）。
-     **公平性**：2b 预塞的是"基础输入外的事实文本"（评测世界里可查的静态政策/先例
-     digest，本模块 ``build_rag_context`` 由 EVAL_PRECEDENTS / EVAL_POLICY_CLAUSES 生成），
-     **不含 expected 答案**；
-   - ``2c`` = AgentScheme 现行为（多步主动调查）。
-   报告给出并排指标与差异行。**差异口径诚实化（P2-12，实证注记）**：docs §6 的分解
-   目标（先量化 2b 的"更多文本"增益、再把 2c−2b 归因"主动调查增量"）依赖 2b 腿可激活；
-   实测 v1/v2 全量 2a≡2b（0 差异）——R-2b 升级路径在本评测世界的种子摘要下永远不命中
-   （见 run() 注记），故"更多文本"增益**不可测**；2c−2b 因而 = 2c−2a = **Single-call→
-   Agent 整体差异**（工具 + 多步 + mock 变体 ContextAware 一并替换），**不可分解归因于
-   "主动调查"**。本报告差异行据此口径命名（2c vs 2b 不称"主动调查增量"）。
+方案级 —— Single-call 的上下文 vs Agent 的主动调查：
+- ``2a`` = SingleCallScheme 现行为（Raw Input，无任何预塞知识）；
+- ``2b`` = SingleCallScheme + RAG-in-prompt（``extra_context`` 预塞政策/先例**文本
+  摘要**；仍不给工具）。**公平性**：预塞的只是"基础输入外的事实文本"（本模块
+  ``build_rag_context`` 由 EVAL_PRECEDENTS / EVAL_POLICY_CLAUSES 生成），不含 expected
+  答案；
+- ``2c`` = AgentScheme 现行为（多步主动调查）。
 
-2. **组件级（同图结构逐组件去掉）**：Full Agent（基线）/ −RAG（无 CaseSearch+
-   PolicySearch）/ −MerchantTool / −CaseTool / −ImageTool。实现为**装配层裁剪**：
-   ``AgentScheme(allowed_tools=…)`` —— 图工具注册与该方案的 plan tool schema 都只给
-   ``全工具 − 被裁组件``（见 harness/agent_scheme.py），判定逻辑不变。
-   **0 决策变化 ≠ 组件无用（P2-13 防误读）**：证据可能被另一组件**同案冗余替代**
-   —— REJECT Gate 的 citable 只要 POLICY_REF 或 CASE_PRECEDENT 之一（gate 判例行），
-   本评测世界 REJECT 案政策齐备 → CaseSearch 证据被 PolicySearch 兜底（−CaseTool 实测
-   0/35 变化），报告在 0 变化组件旁标注冗余替代读法，勿读成"该组件无用"。
+**差异口径诚实化（实证注记）**：分解 2b 的"更多文本"增益、再把 2c−2b 归因"主动
+调查增量"，依赖 2b 腿可激活；实测 v1/v2 全量 2a≡2b（0 差异）—— R-2b 升级路径在本
+评测世界的种子摘要下永远不命中（见 ``run()`` 注记），故"更多文本"增益**不可测**；
+2c−2b 因而 = 2c−2a = **Single-call→Agent 整体差异**（工具 + 多步 + mock 变体一并
+替换），**不可分解归因于"主动调查"**。报告差异行据此命名（2c vs 2b 不称"主动调查
+增量"）。
 
-**InMemory 种子局限标注（docs §6 前置依赖）**：种子里查不到某工具的证据时，
-−该工具必然无差异、结论失效 —— 本模块对每个组件统计"该组件在评测世界中的证据覆盖"
-（哪些 case 的 ``expected.expected_tools`` 含该工具），报告如实标注空消融风险。
+组件级 —— 同图结构逐组件去掉：实现为**装配层裁剪** ``AgentScheme(allowed_tools=…)``
+—— 图工具注册与该方案的 plan tool schema 都只给 ``全工具 − 被裁组件``，判定逻辑不变。
+**0 决策变化 ≠ 组件无用**：证据可能被另一组件**同案冗余替代** —— REJECT Gate 的
+citable 只要 POLICY_REF 或 CASE_PRECEDENT 之一，本评测世界 REJECT 案政策齐备 →
+CaseSearch 证据被 PolicySearch 兜底（实测 −CaseTool 零变化）；报告在 0 变化组件旁
+标注该读法。
 
-确定性：全程无真 LLM/网络/随机；case 行序即遍历序、方案顺序固定；EvalRecord 不含
-墙钟字段 → 同数据重跑结果一致。全部在内存完成（不落 DB）。
+**InMemory 种子局限标注**：种子里查不到某工具的证据时，−该工具必然无差异、结论失效
+—— 本模块统计每个组件的"证据覆盖"（哪些 case 的 ``expected.expected_tools`` 含该工具），
+报告如实标注空消融风险。
+
+确定性：全程无真 LLM / 网络 / 随机；EvalRecord 不含墙钟字段 → 同数据重跑结果一致；
+全部在内存完成（不落 DB）。
 """
 
 from __future__ import annotations
@@ -64,13 +62,11 @@ __all__ = [
     "render_ablation_report",
 ]
 
-# ---------------------------------------------------------------------------
 # 变体定义（命名权威；字符串即 CLI/报告标识）
-# ---------------------------------------------------------------------------
 
 SCHEME_LEVEL_VARIANTS: tuple[str, ...] = ("2a", "2b", "2c")
 
-# eval 世界 5 个 InMemory 工具（pra/agent_scheme make_eval_world_tools；产品/图片/商家/先例/政策）
+# eval 世界 5 个 InMemory 工具（产品/图片/商家/先例/政策）
 ALL_TOOL_NAMES: tuple[str, ...] = (
     "ProductTool",
     "ImageAnalysisTool",
@@ -98,9 +94,7 @@ COMPONENT_LABELS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # RAG-in-prompt 上下文（2b 的预塞文本；来自评测世界静态事实，不含 expected 答案）
-# ---------------------------------------------------------------------------
 
 
 def _fold(text: str) -> str:
@@ -111,10 +105,10 @@ def build_rag_context(case: EvalCase) -> list[str]:
     """构造 2b 的预塞文本：该案**类目**下可查的判例/政策 digest（确定性静态文本）。
 
     只取评测世界里**已裁决**的先例（EVAL_PRECEDENTS 含 decision）作 ``判例:`` 行
-    （single_call_scheme 的 R-2b 消费格式：``判例: <id> 类目[<类目>] <summary> → <决策>``）；
-    政策条款（EVAL_POLICY_CLAUSES）摘要行仅作参考材料一并预塞（R-2b 只认自动拒绝
-    判例，政策现行口径为"转人工" → 不会错误地触发升级）。类目匹配不上时不预塞该行
-    （确定性检索近似：RAG 只给相关材料）。
+    （格式 ``判例: <id> 类目[<类目>] <summary> → <决策>``，由 single_call_scheme 的
+    R-2b 消费）；政策条款（EVAL_POLICY_CLAUSES）摘要行仅作参考材料一并预塞 ——
+    R-2b 只认自动拒绝判例，政策现行口径为"转人工"，不会错误触发升级。
+    类目匹配不上时不预塞该行（确定性检索近似：只给相关材料）。
     """
     product = case.input.product
     category = (product.category or "").strip()
@@ -139,9 +133,7 @@ def build_rag_context(case: EvalCase) -> list[str]:
     return lines
 
 
-# ---------------------------------------------------------------------------
 # 小工具（确定性）
-# ---------------------------------------------------------------------------
 
 
 def decision_sequence(records: list[EvalRecord]) -> list[str]:
@@ -152,8 +144,8 @@ def decision_sequence(records: list[EvalRecord]) -> list[str]:
 def expected_tool_coverage(cases: list[EvalCase]) -> dict[str, list[str]]:
     """每个工具的**评测世界证据覆盖**：expected.expected_tools 含该工具的 case id 列表。
 
-    用于组件级消融的"空消融风险"标注（docs §6 前置依赖）：某工具 coverage 为空 →
-    评测世界里没有 case 标注需要它 → −该工具无差异不代表组件不必要。
+    用于组件级消融的"空消融风险"标注：某工具 coverage 为空 → 评测世界里没有 case
+    标注需要它 → 该工具无差异不代表组件不必要。
     """
     coverage: dict[str, list[str]] = {name: [] for name in ALL_TOOL_NAMES}
     for c in cases:
@@ -183,9 +175,7 @@ def _decision_diff(
     return changed, pairs
 
 
-# ---------------------------------------------------------------------------
 # 变体运行与结果容器
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -231,8 +221,8 @@ async def _run_records(
 class AblationRunner:
     """Ablation runner：方案级（2a/2b/2c）+ 组件级（full/−rag/…）消融。
 
-    构造可注入 cases（测试/多数据复用）或 data_path；``run`` 只跑所请求的层级，
-    每变体产出统一 EvalRecord → 同一 metrics（DecisionEvaluator + AbstentionEvaluator）。
+    每变体产出统一 EvalRecord，再走同一 metrics（DecisionEvaluator +
+    AbstentionEvaluator）。
     """
 
     def __init__(
@@ -302,7 +292,7 @@ class AblationRunner:
                     f"{COMPONENT_LABELS[name]} 装配裁剪: allowed_tools={sorted(allowed) if allowed else '全工具'}"
                 )
 
-        # 空消融风险标注（工具覆盖；docs §6 前置依赖）
+        # 空消融风险标注（工具覆盖）
         variant_of = {
             "ProductTool": None,
             "ImageAnalysisTool": "-image",
@@ -341,9 +331,7 @@ class AblationRunner:
         )
 
 
-# ---------------------------------------------------------------------------
 # 报告渲染（纯文本，stdout；无文件 IO）
-# ---------------------------------------------------------------------------
 
 
 def _fmt(v) -> str:

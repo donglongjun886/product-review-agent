@@ -1,19 +1,11 @@
-"""MerchantTool —— 行为模式工具（docs/01-agent-loop.md §5.4 /《00》§5）。
+"""MerchantTool —— 行为模式工具。
 
-回答的业务问题：单商品看不出问题，商家的**历史行为**才是"规避"的关键信号 ——
-相似商品数、违规/下架/改标题重上架次数、信用分（《00》§5.1）。
+回答的业务问题：单商品看不出问题，商家的**历史行为**才是「规避」的关键信号 —— 相似商品数、
+违规/下架/改标题重上架次数、信用分。
 
-分层（依赖倒置）：
-
-- ``MerchantRepository``（Protocol）：窄接口 —— 按 merchant_id + 观察窗口取商家
-  行为画像。返回 None = 商家不存在（确定性无结果 → ok=False）。
-- ``InMemoryMerchantRepository``：**Mock 默认实现**（显式标注，仅供开发/测试/
-  演示），种子对齐《00》§4.4 走查商家 M_5512（23 similar / 5 removals /
-  3 title-relisting / credit 62）。真实实现 = MySQL 聚合 + 向量扫描（§5.4），
-  待 infra 阶段接入。
-
-本工具不含业务判定：只聚合"取到事实"（结果即画像字段），"违规+下架+改标题
-重上架组合是否构成规避行为"（§5.4 extra.signals）的判定归 guardrails/reevaluate。
+``MerchantRepository`` 是窄接口（按 merchant_id + 观察窗口取行为画像；返回 None = 商家不存在
+→ ``ok=False``）；``InMemoryMerchantRepository`` 是 **Mock 默认实现**。本工具不含业务判定：只
+交付「取到的事实」，「违规 + 下架 + 改标题重上架是否构成规避」归 guardrails/reevaluate。
 """
 
 from __future__ import annotations
@@ -25,9 +17,9 @@ from pydantic import BaseModel, Field
 from ...domain.models import Evidence
 from ..base import ToolArgs, ToolContext, ToolResult
 
-# ---- §5.7 受控证据类型 & §5.4 默认证据强度 ----
+# ---- 受控证据类型 & 默认证据强度 ----
 MERCHANT_HISTORY_TYPE = "MERCHANT_HISTORY"
-MERCHANT_HISTORY_WEIGHT = 0.85  # §5.4：多信号聚合型证据默认高权重；暂定默认，待 T-5 拍板后可调
+MERCHANT_HISTORY_WEIGHT = 0.85  # 多信号聚合型证据默认高权重（暂定默认，可调）
 
 
 # ---------------------------------------------------------------------------
@@ -36,21 +28,18 @@ MERCHANT_HISTORY_WEIGHT = 0.85  # §5.4：多信号聚合型证据默认高权�
 
 
 class MerchantEvent(BaseModel):
-    """商家行为事件（§5.4 recent_events[] 元素；DB ``merchant_event``）。"""
 
     event_type: str = Field(description="事件类型：违规 / 下架 / 改标题重上架 等")
     ts: str = Field(description="事件时间 ISO8601")
 
 
 class MerchantViolations(BaseModel):
-    """违规统计（§5.4 violations）。"""
 
     total: int = Field(default=0, ge=0)
     by_type: dict[str, int] = Field(default_factory=dict, description="按违规类型计数")
 
 
 class MerchantProfile(BaseModel):
-    """商家行为画像（§5.4 result.data 完整形状）。"""
 
     merchant_id: str
     product_total: int = Field(default=0, ge=0, description="在架商品总数")
@@ -67,7 +56,6 @@ class MerchantRepository(Protocol):
 
     ``window_days`` 为聚合观察窗口；实现须返回窗口内统计。商家不存在返回 None。
     """
-
     async def get_profile(self, merchant_id: str, window_days: int) -> MerchantProfile | None: ...
 
 
@@ -89,10 +77,10 @@ _DEFAULT_MERCHANTS: Mapping[str, dict[str, Any]] = {
 
 
 class InMemoryMerchantRepository:
-    """MerchantRepository 的 Mock 默认实现（显式标注，仅供开发/测试/演示）。
+    """MerchantRepository 的 Mock 默认实现（仅供开发/测试/演示）。
 
-    种子画像按 merchant_id 匹配；``window_days`` 在 mock 中不改变聚合结果
-    （真实实现按其截取事件窗口）。
+    种子画像按 merchant_id 匹配；``window_days`` 在 mock 中不改变聚合结果（真实实现按其
+    截取事件窗口）。
     """
 
     def __init__(self, data: Mapping[str, dict[str, Any]] | None = None) -> None:
@@ -110,14 +98,13 @@ class InMemoryMerchantRepository:
 
 
 class MerchantArgs(ToolArgs):
-    """MerchantTool 入参（§5.4 args Schema）。"""
 
     merchant_id: str = Field(description="商家 ID，如 M_5512")
     window_days: int = Field(default=90, ge=1, le=365, description="行为统计观察窗口（天，默认 90）")
 
 
 class MerchantResult(ToolResult):
-    """MerchantTool 出参信封 + 负载（§5.4 result.data）。
+    """MerchantTool 出参信封 + 负载。
 
     ``ok=False``（商家不存在）时 ``profile`` 为 None。
     """
@@ -126,7 +113,6 @@ class MerchantResult(ToolResult):
 
 
 class MerchantTool:
-    """查询商家的系统性行为画像：在架商品数、相似商品数、历史违规/下架/改标题重上架次数、信用分。"""
 
     name = "MerchantTool"
     description = "查询商家的系统性行为画像：在架商品数、相似商品数、历史违规/下架/改标题重上架次数、信用分"
@@ -142,12 +128,11 @@ class MerchantTool:
         return MerchantResult(profile=profile)
 
     def to_evidence(self, result: MerchantResult) -> list[Evidence]:
-        """结果 → Evidence（§5.4 → Evidence 列）：1 条聚合 MERCHANT_HISTORY。
+        """结果 → Evidence：1 条聚合 MERCHANT_HISTORY。
 
-        value 按 §5.4 示例形态拼装（"23 similar / 5 removals / 3 title-relisting,
-        credit=62"）；``ref_id=merchant_id``（O-1：稳定业务标识）；"规避行为模式"的
-        判定（§5.4 extra.signals）由 guardrails 确定性层基于 backfill_extra 后的
-        extra 数据完成（O-8），本工具只交付画像事实。
+        value 拼成 ``"23 similar / 5 removals / 3 title-relisting, credit=62"``；
+        ``ref_id=merchant_id``（稳定业务标识）；「规避行为模式」的判定由 guardrails
+        确定性层基于 backfill_extra 后的 extra 数据完成，本工具只交付画像事实。
         """
         if not result.ok or result.profile is None:
             return []

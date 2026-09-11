@@ -1,10 +1,9 @@
-"""证据质量过滤 + O-8 extra 回填（guardrails/evidence.py）与 plan 去重
-（guardrails/dedup.py）单测。
+"""证据质量过滤 + extra 回填（guardrails/evidence.py）与 plan 去重（guardrails/dedup.py）。
 
-evidence 侧：quality_filter 边界（0.70 保留 / 0.699 丢弃 / 非 IMAGE_SIMILARITY 全保留）；
-backfill_extra 各类型回填（IMAGE_SIMILARITY / MERCHANT_HISTORY / POLICY_REF /
-PRODUCT_FACT / IMAGE_LOGO）、解析失败保留原 extra、不改入参。
-dedup 侧：dedup_pending（ok 命中→skipped、error 允许重试、同轮自去重、canonical 键序无关）。
+``quality_filter``：只按 weight 丢弱 ``IMAGE_SIMILARITY``（0.70 保留 / 0.699 丢弃），其它类型全保留。
+``backfill_extra``：按类型从 value 解析派生键（IMAGE_SIMILARITY / MERCHANT_HISTORY / POLICY_REF /
+PRODUCT_FACT / IMAGE_LOGO）；解析失败保留原 extra；不改入参。``dedup_pending``：ok 命中 →
+skipped、error 允许重试、同轮自去重、canonical 键序无关。
 """
 
 from __future__ import annotations
@@ -14,26 +13,23 @@ from pra.agent.guardrails.evidence import backfill_extra, quality_filter
 from helpers import ev, make_case
 
 
-# ---------------------------------------------------------------------------
-# quality_filter（T-11 B：EVIDENCE_MIN_SIM=0.70）
-# ---------------------------------------------------------------------------
+# quality_filter（EVIDENCE_MIN_SIM=0.70）
 
 
 def test_quality_filter_boundary_keeps_at_threshold():
-    """weight==0.70（达下限）→ 保留（丢弃条件是 <，0.70 不满足）。"""
     e = ev("IMAGE_SIMILARITY", value="similarity=0.70", weight=0.70, ref_id="img1")
     out = quality_filter([e])
     assert out == [e]
 
 
 def test_quality_filter_drops_below_threshold():
-    """weight==0.699（低于下限）→ 丢弃（弱相似噪声不进证据链）。"""
     e = ev("IMAGE_SIMILARITY", value="similarity=0.699", weight=0.699, ref_id="img1")
     assert quality_filter([e]) == []
 
 
 def test_quality_filter_keeps_strong_and_drops_weak_in_mix():
     """混合输入：弱相似丢弃、强相似保留、顺序不变。"""
+
     weak = ev("IMAGE_SIMILARITY", value="similarity=0.42", weight=0.42, ref_id="img2")
     strong = ev("IMAGE_SIMILARITY", value="similarity=0.91", weight=0.91, ref_id="img1")
     out = quality_filter([weak, strong])
@@ -41,8 +37,6 @@ def test_quality_filter_keeps_strong_and_drops_weak_in_mix():
 
 
 def test_quality_filter_keeps_non_similarity_types():
-    """非 IMAGE_SIMILARITY 类型全保留（即使 weight 低）—— MERCHANT_HISTORY 默认 0.85，
-    IMAGE_LOGO/OCR 等"检出即事实"不在此过滤。"""
     logo = ev("IMAGE_LOGO", value="logo=某品牌, conf=0.93", weight=0.93, ref_id="img2")
     low_logo = ev("IMAGE_LOGO", value="logo=某品牌, conf=0.30", weight=0.30, ref_id="img3")
     merch = ev("MERCHANT_HISTORY", value="23 similar / 5 removals", weight=0.85, ref_id="M1")
@@ -51,7 +45,6 @@ def test_quality_filter_keeps_non_similarity_types():
 
 
 def test_quality_filter_none_and_empty_safe_and_pure():
-    """None/空 → []；入参元素未被改动（纯函数）。"""
     assert quality_filter(None) == []
     assert quality_filter([]) == []
     e = ev("IMAGE_SIMILARITY", value="similarity=0.99", weight=0.99, ref_id="img1")
@@ -59,9 +52,7 @@ def test_quality_filter_none_and_empty_safe_and_pure():
     assert out[0] is e  # 保留元素复用原引用，不复制
 
 
-# ---------------------------------------------------------------------------
-# backfill_extra —— 各类型回填
-# ---------------------------------------------------------------------------
+# backfill_extra：各类型回填
 
 
 def test_backfill_image_similarity():
@@ -74,7 +65,6 @@ def test_backfill_image_similarity():
 
 
 def test_backfill_merchant_history_parses_value():
-    """MERCHANT_HISTORY value 固定格式 → similar/removals/title/credit 数值回填。"""
     e = ev("MERCHANT_HISTORY", value="23 similar / 5 removals / 3 title-relisting, credit=62",
            weight=0.85, ref_id="M_5512")
     out = backfill_extra([e])[0]
@@ -82,7 +72,6 @@ def test_backfill_merchant_history_parses_value():
 
 
 def test_backfill_policy_ref():
-    """POLICY_REF value 前缀 POLICY_x.y vN → policy_id/policy_version。"""
     e = ev("POLICY_REF", value="POLICY_3.2 v2 条款：外观高度模仿知名品牌设计",
            weight=0.9, ref_id="POLICY_3.2_v2_c1")
     out = backfill_extra([e])[0]
@@ -99,7 +88,6 @@ def test_backfill_product_fact_no_drift_when_versions_equal():
 
 
 def test_backfill_product_fact_drift_when_versions_differ():
-    """PRODUCT_FACT：version != case.product.version → version_drift=True。"""
     e = ev("PRODUCT_FACT", value="brand=null, version=3（库中最新）, status=ON_SALE",
            weight=0.6, ref_id="P_88231")
     out = backfill_extra([e], case=make_case(version=2))[0]
@@ -116,7 +104,6 @@ def test_backfill_product_fact_without_case_no_key():
 
 
 def test_backfill_image_logo():
-    """IMAGE_LOGO value 固定格式 → logo_brand/confidence。"""
     e = ev("IMAGE_LOGO", value="logo=某品牌, conf=0.93", weight=0.93, ref_id="img2")
     out = backfill_extra([e])[0]
     assert out.extra == {"logo_brand": "某品牌", "confidence": 0.93}
@@ -124,6 +111,7 @@ def test_backfill_image_logo():
 
 def test_backfill_parse_failure_keeps_original_extra():
     """解析失败（尽力而为）→ 保留原 extra、不报错。"""
+
     e = ev("POLICY_REF", value="这段文本不符合 POLICY_x.y vN 前缀", weight=0.9,
            ref_id="c1", extra={"custom": 1})
     out = backfill_extra([e])[0]
@@ -131,7 +119,6 @@ def test_backfill_parse_failure_keeps_original_extra():
 
 
 def test_backfill_merges_with_existing_extra():
-    """已存在的工具/前序键保留，派生键叠加（merged 为新 dict）。"""
     e = ev("MERCHANT_HISTORY", value="1 similar / 2 removals / 0 title-relisting, credit=80",
            weight=0.85, ref_id="M1", extra={"source_note": "seed"})
     out = backfill_extra([e])[0]
@@ -162,9 +149,7 @@ def test_backfill_none_empty_safe():
     assert backfill_extra([]) == []
 
 
-# ---------------------------------------------------------------------------
-# dedup_pending —— plan 输出确定性去重
-# ---------------------------------------------------------------------------
+# dedup_pending：plan 输出确定性去重
 
 
 def _ok_record(tool: str, args: dict, seq: int) -> dict:
@@ -172,13 +157,13 @@ def _ok_record(tool: str, args: dict, seq: int) -> dict:
 
 
 def test_canonical_args_key_order_independent():
-    """canonical 序列化：key 排序 + default=str —— 键序无关、类型规整。"""
+    """canonical 序列化：key 排序 + ``default=str``。"""
     assert canonical_args({"a": 1, "b": 2}) == canonical_args({"b": 2, "a": 1})
     assert canonical_args({"when": "x"}) != canonical_args({"when": "x", "extra": "y"})
 
 
 def test_dedup_ok_hit_goes_to_skipped_with_seq_continuing():
-    """命中已执行成功 → 进 skipped（seq 从 len(history)+1 顺延），cleaned 为空。"""
+    """命中已执行成功 → 进 skipped（seq 从 ``len(history)+1`` 顺延），cleaned 为空。"""
     state = {"tool_call_history": [_ok_record("ImageAnalysisTool", {"u": "u1"}, 1)]}
     planned = [
         {"tool": "ImageAnalysisTool", "args": {"u": "u1"}, "reason": "r", "priority": 1},
@@ -192,7 +177,7 @@ def test_dedup_ok_hit_goes_to_skipped_with_seq_continuing():
 
 
 def test_dedup_error_record_allows_retry():
-    """曾 status=error 的 (tool, args) 不进已执行集合 → 允许重试（进 cleaned）。"""
+    """曾 ``status=error`` 的 (tool, args) 不进已执行集合 → 允许重试。"""
     state = {
         "tool_call_history": [
             {"tool": "MerchantTool", "args": {"merchant_id": "M1"}, "status": "error",
@@ -208,7 +193,6 @@ def test_dedup_error_record_allows_retry():
 
 
 def test_dedup_same_round_self_dedup_silent():
-    """同轮自去重：同一 (tool, canonical) 保留先出现，后现静默丢弃（不产重复审计行）。"""
     state = {"tool_call_history": []}
     planned = [
         {"tool": "ProductTool", "args": {"product_id": "P1"}, "priority": 1},
@@ -221,7 +205,6 @@ def test_dedup_same_round_self_dedup_silent():
 
 
 def test_dedup_same_round_duplicate_of_executed_only_one_skipped():
-    """已执行调用在同轮重复出现：首个 → skipped，重复项静默丢弃（只产 1 条审计）。"""
     state = {"tool_call_history": [_ok_record("ProductTool", {"product_id": "P1"}, 1)]}
     planned = [
         {"tool": "ProductTool", "args": {"product_id": "P1"}, "priority": 1},
@@ -234,6 +217,7 @@ def test_dedup_same_round_duplicate_of_executed_only_one_skipped():
 
 def test_dedup_cleaned_are_shallow_copies():
     """cleaned 保留原 dict 内容但为浅拷贝（防别名污染后续执行）。"""
+
     planned = [{"tool": "ProductTool", "args": {"product_id": "P1"}, "reason": "r", "priority": 1}]
     cleaned, _ = dedup_pending({"tool_call_history": []}, planned)
     assert cleaned[0] == planned[0]
@@ -241,7 +225,6 @@ def test_dedup_cleaned_are_shallow_copies():
 
 
 def test_dedup_skipped_seq_monotonic_after_history():
-    """多 skipped 的 seq 从 history 尾部顺延递增（与工具审计 seq 体系一致）。"""
     state = {"tool_call_history": [_ok_record("ProductTool", {"product_id": "P1"}, 1)]}
     planned = [
         {"tool": "ProductTool", "args": {"product_id": "P1"}, "priority": 1},
@@ -254,7 +237,6 @@ def test_dedup_skipped_seq_monotonic_after_history():
 
 
 def test_dedup_none_and_defensive_inputs():
-    """防御：planned None → 空结果；history 缺失按空；非 dict 元素跳过。"""
     assert dedup_pending({"tool_call_history": []}, None) == ([], [])
     assert dedup_pending({}, None) == ([], [])
     assert dedup_pending(None, None) == ([], [])

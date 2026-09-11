@@ -1,14 +1,9 @@
-"""确定性决策 Gate / overlay（guardrails/gate.py）单测 —— code review 拍板语义固化。
+"""确定性决策 Gate / overlay（``guardrails/gate.py``）单测：锁住各分支结论与归因码。
 
-覆盖清单：
-- dc 公式锚点：5 证据 + H2 SUPPORTED posterior=0.91 → 0.87；空态 → 0.10 基线；
-- run_decision_overlay 各分支 overrides 码：R1 / R3_BUDGET_EXHAUSTED /
-  R5_DEGRADED_OR_FAILED_STEP / R3_CRITICAL_CONFLICT /
-  R3_HYPOTHESES_INDISTINGUISHABLE / R3_KEY_TOOL_FAILED（warn 不触发）/
-  R4_PASS_GATE_FAIL / R2_REJECT_GATE_FAIL；
-- policy_indeterminate 只拦 REJECT 侧（干净案 False 且 pass_gate=True；风险案无
-  POLICY_REF True；有 POLICY_REF False；CASE_PRECEDENT 不替代政策）；
-- 空 hypotheses/evidence 全谓词安全不抛、无 vacuous PASS。
+覆盖：dc 公式锚点（5 证据 + H2 SUPPORTED posterior=0.91 → 0.87；空态 0.10 基线）；
+``run_decision_overlay`` 各分支 overrides 码（R1 / R3_* / R4 / R2 / R5）；
+``policy_indeterminate`` 只拦 REJECT 侧，CASE_PRECEDENT 不替代政策；
+空 hypotheses/evidence 下全部谓词安全不抛、无 vacuous PASS。
 """
 
 from __future__ import annotations
@@ -64,11 +59,6 @@ def _proposal(
     )
 
 
-# ---------------------------------------------------------------------------
-# dc 公式锚点
-# ---------------------------------------------------------------------------
-
-
 def test_dc_anchor_five_evidence_posterior_091():
     """走查锚点：5 证据 + H2 SUPPORTED posterior=0.91 → 0.87（0.45*0.91+0.25*5/8
     +0.20*1+0.10，round 2，无矛盾扣分）。"""
@@ -97,13 +87,8 @@ def test_dc_clips_to_one_and_penalizes_conflict():
     )
 
 
-# ---------------------------------------------------------------------------
-# 谓词层
-# ---------------------------------------------------------------------------
-
-
 def test_high_priority_threshold_and_none_prior():
-    """prior>=0.3 才算高优先；0.29 与 None 排除（T-1 口径，仅 Gate 用）。"""
+    """prior>=0.3 才算高优先；0.29 与 None 排除（仅 Gate 用）。"""
     hs = [
         hp("H1", prior=0.3, status=HypothesisStatus.PENDING),
         hp("H2", prior=0.29, status=HypothesisStatus.PENDING),
@@ -185,11 +170,6 @@ def test_pass_gate_empty_hypotheses_false():
     assert pass_gate({"hypotheses": [], "evidence": [], "failures": [], "tool_call_history": []}) is False
 
 
-# ---------------------------------------------------------------------------
-# policy_indeterminate —— 只拦 REJECT 侧
-# ---------------------------------------------------------------------------
-
-
 def _supported_state(*, prior: float, evidence_types: list[str]) -> dict:
     evidence = []
     if "POLICY_REF" in evidence_types:
@@ -237,11 +217,6 @@ def test_policy_indeterminate_supported_with_policy_ref_false():
 def test_policy_indeterminate_low_prior_supported_false():
     """低 prior（0.2）SUPPORTED 非高优先 → 不拦（policy 只约束拟 REJECT 的高优先案）。"""
     assert policy_indeterminate(_supported_state(prior=0.2, evidence_types=[])) is False
-
-
-# ---------------------------------------------------------------------------
-# run_decision_overlay —— overrides 码
-# ---------------------------------------------------------------------------
 
 
 def test_overlay_r1_hard_rule_forces_reject(monkeypatch):
@@ -444,11 +419,6 @@ def test_overlay_human_proposal_adopted_without_overrides():
     assert final.decision == Decision.HUMAN_REVIEW
     assert final.overrides == []
     assert final.decision_confidence == 0.87
-
-
-# ---------------------------------------------------------------------------
-# 空 hypotheses/evidence —— 全谓词安全、无 vacuous PASS
-# ---------------------------------------------------------------------------
 
 
 def test_empty_state_proposal_none_r5_fallback():

@@ -1,31 +1,21 @@
-"""plan 节点 —— 决定本轮取证工具（LLM 语义步；确定性 dedup 在 guardrails/dedup）。
+"""plan 节点 —— 决定本轮取证工具（LLM 语义步 + 确定性 dedup）。
 
-职责（docs/04-graph-design.md §2.2 /《01》§3.2；graph-mvp-contracts §3 G5）：
-对照当前证据缺口与仍存疑（PENDING/UNRESOLVED）的假设，决定本轮是否调用取证工具
-（``PlanOutput.next_action`` ∈ call_tools / conclude），为 tools → reevaluate →
-（plan）循环的每一轮选择"下一步查什么"。
+对照当前证据缺口与仍存疑（PENDING/UNRESOLVED）的假设，决定本轮是否调用取证工具：
+``PlanOutput.next_action`` ∈ call_tools / conclude。
 
-- **入口短路**（§2.1 / §4.2）：``state["degraded"]`` 为真或
-  ``budget_exceeded(state["budget"])`` 非 None → 不调 LLM，返回最小更新
-  ``{"pending_tool_calls": []}``，**不动 degraded**（后续路由转 decide 止损）。
-- 假设/证据/工具调用选择来自 LLM（``PlanOutput`` 由 llm_shell 强校验：失败重试 1
-  次仍失败 → 本节点降级 + ``degraded=True``，§2.1）；**是否真的执行**由 tools_node
-  经 ``ToolRegistry.parse_args`` 确定性校验（不信任 LLM 参数）。
-- 确定性 apply：``next_action=="conclude"`` 或 ``tools`` 为空 → 计划为空；
-  否则 ``PlannedToolCall → dict {tool, args, reason, priority}``（model_dump）。
-- **确定性 dedup**（guardrails/dedup，§6.2）：``dedup_pending`` 同轮自去重 + 过滤
-  已执行成功调用（曾 error 的同 tool+args 允许重试）；被过滤的调用进 ``skipped``
-  （带审计 seq 的 tool_call_history 记录，append reducer —— 本节点只返回本次新增）。
-  清洗后 ``pending_tool_calls`` 为空（含全被 dedup）→ 路由自动 decide（§6.2：
-  pending 空 → decide，无需额外标记）。
-- ``_build_messages`` MVP 只做"首条 user 消息以 ``__STATE__ {json}`` 注入 state 子集
-  （hypotheses 仪表盘 + evidence 摘要 + case 子集；domain 对象经
-  ``model_dump(mode="json")`` 转 JSON 形状；scripted_llm 桩据此决策）"；真实
-  litellm 的完整 prompt（规划约束展开）在接入真实 LLM 时补充。
-
-分工声明：本节点只做"计划 + dedup"（计划是 LLM 语义步，dedup 调确定性护栏）；
-预算/降级判定、failures 审计、确定性工具执行分别在 guardrails/{budget,errors} 与
-tools_node —— 不在本节点重复实现。
+- **入口短路**：``state["degraded"]`` 为真或 ``budget_exceeded(state["budget"])`` 非
+  None → 不调 LLM，返回 ``{"pending_tool_calls": []}``，且**不动 degraded**（后续路由
+  转 decide 止损）。
+- 假设/证据/工具选择来自 LLM（``PlanOutput`` 由 llm_shell 强校验：失败重试 1 次仍失败
+  → 降级 + ``degraded=True``）；**是否真的执行**由 tools_node 经 ``ToolRegistry.parse_args``
+  确定性校验（不信任 LLM 参数）。
+- 确定性 apply：``next_action=="conclude"`` 或 ``tools`` 为空 → 计划为空；否则
+  ``PlannedToolCall → dict {tool, args, reason, priority}``。
+- **确定性 dedup**（guardrails/dedup）：同轮自去重 + 过滤已执行成功调用（曾 error 的
+  同 tool+args 允许重试）；被过滤的调用进 ``skipped`` 审计（带 seq 的 tool_call_history
+  记录，append reducer）。清洗后 pending 为空 → 路由自动 decide。
+- ``_build_messages`` 首条 user 消息以 ``__STATE__ {json}`` 注入 state 子集
+  （hypotheses 仪表盘 + evidence 摘要 + case 子集）。
 """
 
 from __future__ import annotations
@@ -40,8 +30,7 @@ from pra.agent.guardrails.schemas import PlanOutput
 
 __all__ = ["plan_node"]
 
-# LLM 步降级 failure 文案（契约 §2.1 允许用默认文案；与 hypothesize 保持一致，
-# 不拼 outcome.error —— 失败路径 reason 稳定、可断言）。
+# LLM 步降级 failure 文案：与 hypothesize 一致，取固定字面值、不拼 outcome.error。
 _DEGRADE_REASON = "schema 校验重试仍失败"
 
 _SYSTEM_PROMPT = (
@@ -58,12 +47,7 @@ _SYSTEM_PROMPT = (
 
 
 def _case_subset(case) -> dict:
-    """plan 视角的 case 子集：案件身份 + 商品核心字段 + 图片（取证起点）。
-
-    保持 ProductReviewCase / ProductInfo / ProductImage 的**原字段名**（值已 JSON
-    化），便于脚本后端与真实 LLM 直接按 ``state["case"][...]`` 读取 merchant_id /
-    product_id / category / images（url 列表等）做确定性分支。
-    """
+    """plan 视角的 case 子集：案件身份 + 商品核心字段 + 图片（保持原字段名）。"""
     product = case.product
     return {
         "case_id": case.case_id,
@@ -85,12 +69,8 @@ def _case_subset(case) -> dict:
 
 
 def _build_messages(state: dict) -> list[dict]:
-    """组装 LLM 消息：system=规划指令；首条 user 以 "__STATE__ " 开头携带 state 子集。
-
-    state 子集 = hypotheses 仪表盘（id/status/prior/posterior/证据引用，model_dump
-    全量即仪表盘）+ evidence 摘要 + case 子集 —— 供 scripted_llm 桩按 evidence 类型
-    存在性与 case 字段做确定性分支。MVP 简短注入即可，完整 prompt 后续补。
-    """
+    """组装 LLM 消息：system=规划指令；首条 user 以 "__STATE__ " 携带 state 子集
+    （hypotheses 仪表盘 + evidence 摘要 + case 子集，供 scripted 桩做确定性分支）。"""
     payload = {
         "hypotheses": [
             h.model_dump(mode="json") for h in (state.get("hypotheses") or [])
@@ -110,9 +90,8 @@ def _build_messages(state: dict) -> list[dict]:
 def _apply_plan(out: PlanOutput) -> list[dict]:
     """LLM 提案 → 待执行工具列表（确定性 apply）。
 
-    ``conclude`` 或 ``tools`` 为空（含 next_action=call_tools 但 tools 空的不一致
-    输出，按 conclude 容错）→ 计划为空；否则 PlannedToolCall → dict {tool, args,
-    reason, priority}（``model_dump``）。
+    ``conclude`` 或 ``tools`` 为空（含 call_tools 但 tools 空，按 conclude 容错）→ 计划
+    为空；否则 PlannedToolCall → dict ``model_dump()``。
     """
     if out.next_action == "conclude" or not out.tools:
         return []
@@ -122,11 +101,10 @@ def _apply_plan(out: PlanOutput) -> list[dict]:
 async def plan_node(state: dict, config) -> dict:
     """plan 图节点：决定本轮取证工具（LLM 语义步）+ 确定性 dedup。
 
-    返回 dict 只含 AgentState channel 键：pending_tool_calls / tool_call_history /
-    degraded / failures / budget。cleaned 为空（conclude 或全被 dedup）时
-    pending_tool_calls=[] → 路由自动 decide（契约 §6.2，无需额外标记）。
+    返回 pending_tool_calls / tool_call_history / degraded / failures / budget；cleaned
+    为空 → 路由自动 decide。
     """
-    # §2.1 入口短路：degraded 或预算超限 → 不调 LLM、最小更新、不动 degraded。
+    # 入口短路：degraded 或预算超限 → 不调 LLM、最小更新、不动 degraded。
     if state.get("degraded") or budget_exceeded(state["budget"]) is not None:
         return {"pending_tool_calls": []}
 
@@ -152,8 +130,8 @@ async def plan_node(state: dict, config) -> dict:
         }
 
     planned = _apply_plan(outcome.model)
-    # 确定性 dedup：同轮自去重 + 过滤已执行成功调用（曾 error 的允许重试）。
-    # skipped = 被过滤的调用审计记录（append reducer：本次新增），与 pending 分离。
+    # 确定性 dedup：同轮自去重 + 过滤已执行成功调用（曾 error 的允许重试）；
+    # skipped 为被过滤调用的审计记录（append reducer），与 pending 分离。
     cleaned, skipped = dedup_pending(state, planned)
     return {
         "pending_tool_calls": cleaned,

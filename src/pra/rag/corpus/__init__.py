@@ -1,13 +1,11 @@
-"""RAG 知识库数据包（rag/corpus/）—— Policy KB / Case KB 静态 corpus。
+"""RAG 知识库数据包 —— Policy KB / Case KB 静态 corpus。
 
-结构：
-- ``schema.py``：数据契约 + Pydantic 强校验（见其 docstring：来源与隔离声明）；
-- ``policies.json`` / ``cases.json``：静态数据（git 入库、可评审；
-  由 scripts/build_rag_corpus.py 确定性生成/重建，幂等）；
-- 本模块：加载器 —— 读 JSON → 信封校验 → 返回（records, meta）。
+``schema.py`` 是数据契约 + Pydantic 强校验；``policies.json`` / ``cases.json`` 是静态数据
+（git 入库、可评审，由 ``scripts/build_rag_corpus.py`` 确定性生成/重建）；本模块是加载器 ——
+读 JSON → 信封校验 → 返回 ``(records, meta)``。
 
-设计要点：数据是**可评审的静态文件**（R-5：MVP 不落 DB）；运行时索引
-（BM25 / embedding）由 rag/factory.py 在加载之上构建，数据文件本身不含派生索引。
+数据是**可评审的静态文件**，运行时索引（BM25 / embedding）由 ``rag/factory.py`` 在加载之上
+构建，数据文件本身不含派生索引。
 """
 
 from __future__ import annotations
@@ -35,7 +33,6 @@ _CASES_FILE = CORPUS_DIR / "cases.json"
 
 
 def _load_envelope(path: Path, model_type: type) -> tuple[list[Any], dict]:
-    """读取 corpus JSON 信封并强校验；返回 (records, meta)。损坏即报错（不静默）。"""
     if not path.exists():
         raise ValueError(f"corpus 数据文件缺失: {path}（请先跑 scripts/build_rag_corpus.py 重建）")
     try:
@@ -49,10 +46,8 @@ def _load_envelope(path: Path, model_type: type) -> tuple[list[Any], dict]:
 
 
 def load_policies(path: str | Path | None = None) -> tuple[list[PolicyClauseRecord], dict]:
-    """读取 Policy KB → (clause records, meta)。``path`` 缺省取包内 policies.json。"""
     return _load_envelope(Path(path) if path is not None else _POLICIES_FILE, PolicyCorpus)
 
 
 def load_cases(path: str | Path | None = None) -> tuple[list[CasePrecedentRecord], dict]:
-    """读取 Case KB → (precedent records, meta)。``path`` 缺省取包内 cases.json。"""
     return _load_envelope(Path(path) if path is not None else _CASES_FILE, CaseCorpus)

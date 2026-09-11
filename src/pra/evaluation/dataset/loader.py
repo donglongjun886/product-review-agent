@@ -1,24 +1,19 @@
-"""评测集加载器（dataset/loader.py）—— JSONL 读取 + 分层统计 + smoke 子集。
+"""评测集加载器：JSONL 读取 + 分层统计 + smoke 子集。
 
-职责（Phase 1 最小闭环口径；Phase 2 增 abstention 统计）：
-
-- ``load_dataset(path)``：逐行读取 JSONL，每条经 ``EvalCase.model_validate_json``
-  强校验（input 复用 ProductReviewCase 契约 → 任何 domain 未声明键在加载期即报错；
-  expected 的 abstain_label⇔decision 一致性由 schema 校验器保证）；
-  **向后兼容**：Phase 1 老 JSONL（无 abstain_label 字段、decision∈{PASS,REJECT}）
-  读入后 abstain_label=None（等价 AUTO_DECIDABLE，docs/02 §4.4），照常加载；
-  解析失败抛出带行号的 ``ValueError``（评测集损坏不该被静默跳过）。
-- ``scene_stats(cases)``：按 scene 分层的计数统计（含 expected.decision 分布；
-  Phase 2 起含 HUMAN_REVIEW 真值计数），供 manifest 生成 / 报告声明分布。
-- ``abstain_stats(cases)``：abstention 语义标签（AUTO_DECIDABLE / SHOULD_ABSTAIN /
+- ``load_dataset(path)``：逐行读 JSONL，每条经 ``EvalCase.model_validate_json`` 强校验
+  （任何 domain 未声明键在加载期即报错；abstain_label⇔decision 一致性由 schema 校验器
+  保证）。向后兼容：v1 老 JSONL（无 abstain_label、decision ∈ {PASS, REJECT}）读入后
+  abstain_label=None（等价 AUTO_DECIDABLE）。解析失败抛带行号的 ``ValueError`` ——
+  评测集损坏不该被静默跳过。
+- ``scene_stats(cases)``：按 scene 分层的计数（含 expected.decision 分布），
+  供 manifest 生成与报告声明分布。
+- ``abstain_stats(cases)``：abstention 标签（AUTO_DECIDABLE / SHOULD_ABSTAIN /
   老数据 None）计数 —— manifest 与 AbstentionEvaluator 前置口径的单一取数点。
-- ``smoke_subset(cases, limit)``：确定性取前 ``limit`` 条做冒烟（不随机 ——
-  Phase 1 要求全程确定性；数据集文件行序即稳定序）。
-- ``manifest 解析``：load_manifest(dir) 读取 manifest.json（版本/分布/阈值口径
-  快照/生成命令等元数据）；loader 只负责读与回传，不校验与 JSONL 强一致
-  （防"文档口径漂移 vs 数据实际分布"由评审复核，报告里会打印实际分布）。
+- ``smoke_subset(cases, limit)``：确定性取前 ``limit`` 条（不随机；文件行序即稳定序）。
+- ``load_manifest(dir)``：读 manifest.json（版本/分布/阈值口径快照/生成命令等元数据）；
+  只读不校验，与 JSONL 是否一致由评审复核（报告会打印实际分布）。
 
-错误语义：行号从 1 起，异常信息含行号与 eval_case_id（若可解析）。
+行号从 1 起，异常信息含行号与 eval_case_id（若可解析）。
 """
 
 from __future__ import annotations
@@ -70,9 +65,8 @@ def scene_stats(cases: list[EvalCase]) -> dict:
     """按 scene × expected.decision 分层的计数统计（manifest / 报告用）。
 
     返回 ``{"total": N, "by_scene": {scene: {total, PASS, REJECT, HUMAN_REVIEW,
-    share}} }``；share 保留 2 位小数（确定性四舍五入，纯展示）。
-    Phase 1 数据无 HUMAN_REVIEW 真值 → 该键恒 0（对 report/runner 纯增量，不破坏
-    旧口径）；Phase 2 数据含 SHOULD_ABSTAIN（decision=HUMAN_REVIEW）案时如实计数。
+    share}} }``；share 保留 2 位小数（纯展示）。v1 数据无 HUMAN_REVIEW 真值 →
+    该键恒 0（对 report/runner 纯增量，不破坏旧口径）。
     """
     total = len(cases)
     by_scene: dict = {}
@@ -96,7 +90,7 @@ def scene_stats(cases: list[EvalCase]) -> dict:
 
 
 def abstain_stats(cases: list[EvalCase]) -> dict:
-    """abstention 语义标签计数（docs/02 §4.4；manifest / 测试 / B 面指标共用口径）。
+    """abstention 语义标签计数（manifest / 测试 / 指标层共用口径）。
 
     返回::
 
@@ -104,15 +98,14 @@ def abstain_stats(cases: list[EvalCase]) -> dict:
           "total": N,
           "AUTO_DECIDABLE": n,        # 显式标 AUTO_DECIDABLE（decision∈{PASS,REJECT}）
           "SHOULD_ABSTAIN": n,        # decision==HUMAN_REVIEW 案
-          "LEGACY_UNLABELED": n,      # abstain_label=None（Phase 1 老数据；等价 AUTO_DECIDABLE）
+          "LEGACY_UNLABELED": n,      # abstain_label=None（v1 老数据；等价 AUTO_DECIDABLE）
           "auto_decidable_equivalent": n,  # AUTO_DECIDABLE + LEGACY_UNLABELED
           "auto_share": float,        # auto_decidable_equivalent / total（2 位小数）
           "abstain_share": float,     # SHOULD_ABSTAIN / total（2 位小数）
           "by_scene": {scene: {"total", "AUTO_DECIDABLE", "SHOULD_ABSTAIN", "LEGACY_UNLABELED"}},
         }
 
-    None（老数据缺失字段）在语义上等价 AUTO_DECIDABLE，但单独计数以便区分
-    Phase 1 老数据与 Phase 2 显式标注。
+    None 在语义上等价 AUTO_DECIDABLE，但单独计数以便区分老数据与显式标注。
     """
     total = len(cases)
     counts = {label: 0 for label in _ABSTAIN_LABELS}
@@ -158,7 +151,7 @@ def smoke_subset(cases: list[EvalCase], limit: int = 10) -> list[EvalCase]:
 def load_manifest(data_dir: str | Path) -> dict:
     """读取 ``manifest.json``（版本/分布/口径快照等元数据）；缺失返回 {}。
 
-    Phase 1 只读不校验：manifest 与 JSONL 的一致性由报告侧打印实际分布供人核对。
+    只读不校验：manifest 与 JSONL 的一致性由报告侧打印实际分布供人核对。
     """
     p = Path(data_dir) / "manifest.json"
     if not p.exists():

@@ -1,18 +1,11 @@
-"""PolicySearchTool —— 政策依据检索工具（RAG · Policy KB）（docs/01-agent-loop.md §5.6 /《00》§5）。
+"""PolicySearchTool —— 政策依据检索工具（RAG · Policy KB）。
 
-回答的业务问题：当前有效政策对这类情况怎么说 —— 决定"能不能判、判到什么程度"，
-是 REJECT/HUMAN_REVIEW 的**可引用依据**来源（§5.6 /《00》§7.2.2）。
+回答的业务问题：当前有效政策对这类情况怎么说 —— 决定「能不能判、判到什么程度」，是
+REJECT/HUMAN_REVIEW 的**可引用依据**来源。
 
-分层（依赖倒置）：
-
-- ``PolicyIndex``（Protocol）：窄接口 —— 政策库检索（元数据过滤 + 版本有效性
-  过滤 + 语义检索，《00》§6.3）的查询面。
-- ``InMemoryPolicyIndex``：**Mock 默认实现**（显式标注，仅供开发/测试/演示）。
-  做元数据/版本有效性过滤 + 按种子排序截断，**不做真实语义检索**（真实
-  BM25/向量/rerank 在 rag 阶段接入，替换同一接口）。
-
-本工具不含业务判定：每个 hit → 1 条 POLICY_REF 证据（weight=0.9、
-ref_id=clause_id 必填，可追溯），政策是否适用归 reevaluate/decide。
+``PolicyIndex`` 是窄接口（政策库检索的查询面）；``InMemoryPolicyIndex`` 是 **Mock 默认实现**，
+只做版本有效性 + 元数据过滤与种子排序截断，**不做真实语义检索**。本工具不含业务判定：每个 hit
+→ 1 条 POLICY_REF 证据（``weight=0.9``、``ref_id=clause_id`` 必填），政策是否适用归 reevaluate/decide。
 """
 
 from __future__ import annotations
@@ -25,10 +18,10 @@ from pydantic import BaseModel, Field
 from ...domain.models import Evidence, RiskType
 from ..base import ToolArgs, ToolContext, ToolResult
 
-# ---- §5.7 受控证据类型 & §5.6 默认证据强度 ----
+# ---- 受控证据类型 & 默认证据强度 ----
 POLICY_REF_TYPE = "POLICY_REF"
-POLICY_REF_WEIGHT = 0.9  # §5.6 默认权重；暂定默认，待 T-5 拍板后可调
-POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限（人读摘要用，全文在 Result/审计）
+POLICY_REF_WEIGHT = 0.9  # 默认权重（暂定默认，可调）
+POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限（全文在 Result/审计）
 
 
 # ---------------------------------------------------------------------------
@@ -37,17 +30,16 @@ POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限（人读�
 
 
 class PolicySearchFilters(BaseModel):
-    """Policy KB 元数据过滤（§5.6 args.filters）。"""
 
     category: str | None = Field(default=None, description="类目过滤，如 女鞋/运动鞋")
     risk_type: list[RiskType] | None = Field(default=None, description="风险类型过滤（受控词表）")
 
 
 class PolicyClauseHit(BaseModel):
-    """单个政策条款命中（§5.6 result.data.hits[] 元素；DB ``policy / policy_clause``）。
+    """单个政策条款命中（DB ``policy / policy_clause``）。
 
-    ``status`` 取 "EFFECTIVE"（生效）/ "EXPIRED"（失效）；``effective_date`` 为
-    生效日期（ISO date）。版本号 ``version`` 用于 policy_id + version 的唯一引用。
+    ``status`` 取 "EFFECTIVE"（生效）/ "EXPIRED"（失效）；``effective_date`` 为生效日期
+    （ISO date）。``version`` 用于 policy_id + version 的唯一引用。
     """
 
     policy_id: str
@@ -62,7 +54,6 @@ class PolicyClauseHit(BaseModel):
 
 
 class PolicyIndex(Protocol):
-    """政策库检索窄接口。无命中返回空列表（合法结果，工具 ok=True）。"""
 
     async def search(
         self,
@@ -100,11 +91,10 @@ _DEFAULT_CLAUSES: list[dict[str, Any]] = [
 
 
 class InMemoryPolicyIndex:
-    """PolicyIndex 的 Mock 默认实现（显式标注，仅供开发/测试/演示）。
+    """PolicyIndex 的 Mock 默认实现（仅供开发/测试/演示）。
 
     检索 = 版本有效性过滤（effective_only 时只留 status=EFFECTIVE）+ 元数据过滤
-    （category / risk_type）+ top_k 截断；**query 不参与匹配**，真实语义检索待
-    rag 阶段实现同一接口。
+    （category / risk_type）+ top_k 截断；**query 不参与匹配**。
     """
 
     def __init__(self, clauses: list[dict[str, Any]] | None = None) -> None:
@@ -134,7 +124,6 @@ class InMemoryPolicyIndex:
 
 
 class PolicySearchArgs(ToolArgs):
-    """PolicySearchTool 入参（§5.6 args Schema）。"""
 
     query: str = Field(description="政策检索描述，如 '外观高度模仿品牌设计'")
     filters: PolicySearchFilters = Field(default_factory=PolicySearchFilters)
@@ -143,13 +132,11 @@ class PolicySearchArgs(ToolArgs):
 
 
 class PolicySearchResult(ToolResult):
-    """PolicySearchTool 出参信封 + 负载（§5.6 result.data.hits）。"""
 
     hits: list[PolicyClauseHit] = Field(default_factory=list, description="Top-K 政策条款命中")
 
 
 class PolicySearchTool:
-    """检索当前有效平台政策条款（按类目/风险类型过滤），返回条款原文与版本引用。"""
 
     name = "PolicySearchTool"
     description = "检索当前有效平台政策条款（按类目/风险类型过滤），返回条款原文与版本引用"
@@ -165,10 +152,10 @@ class PolicySearchTool:
         return PolicySearchResult(hits=hits)
 
     def to_evidence(self, result: PolicySearchResult) -> list[Evidence]:
-        """结果 → Evidence（§5.6 → Evidence 列）：每个 hit 1 条 POLICY_REF。
+        """结果 → Evidence：每个 hit 1 条 POLICY_REF。
 
-        weight=0.9（政策条款为强依据）；``ref_id=clause_id`` **必填**（可追溯，
-        §5.6 /《00》§6.3 引用格式）；value 形如 "POLICY_3.2 v2 条款：…"。
+        ``weight=0.9``（政策条款为强依据）；``ref_id=clause_id`` **必填**（可追溯）；
+        value 形如 ``"POLICY_3.2 v2 条款：…"``。
         """
         evidences: list[Evidence] = []
         for h in result.hits:

@@ -1,30 +1,19 @@
-"""API 服务层 —— **调查执行器**（总链路 A·1「HTTP 接入」的核心；未来 worker 复用入口）。
+"""调查执行器 —— 全链路唯一执行入口（HTTP 路由调用，未来 worker 复用）。
 
-职责与设计：
-- ``run_review`` 是**全链路唯一执行入口**：接收一个 ``ProductReviewCase``，走完整图
-  （hypothesize → plan → tools → reevaluate ×N → decide），返回 ``ReviewRunResult``。
-  本轮由 HTTP 路由**同步**调用（请求内 await 完成）；演进到 infra 阶段后，**同一个
-  函数**被 MQ worker 消费 ``product_review_request`` topic 时调用（docs/00-system-design.md
-  §9.3 —— Redis 幂等/限流/分布式锁、落 MySQL 属 worker 侧职责，均不进本函数），
-  故本函数保持"纯执行、无传输语义"：不感知 HTTP、不感知 MQ、不落库。
-- run_id 语义（O-6 拍板）：案件身份不进 AgentState，接入层映射为 LangGraph **线程维度
-  thread_id = run_id**。本函数把 run_id 同时用作 thread_id 写进
-  ``config = {"configurable": {"thread_id": run_id}}``；调用方未显式给 run_id 时自动生成
-  ``uuid4().hex`` —— 每请求一条独立线程，天然隔离多次调查（InMemorySaver 线程状态互不
-  串扰），也与 demo 脚本"RUN_{case_id}"的可读风格并存（两者都只是字符串，语义等价）。
-- 图装配**懒加载 + 模块级缓存**（``get_graph``）：首次调用才 build + compile
-  （``build_agent_graph(checkpointer=make_memory_checkpointer())``，默认 6 个 InMemory
-  Tool + 默认 scripted LLM 桩，**无需 API key**）；之后复用同一编译图实例。图不挂在
-  FastAPI app 对象上（app.py 只做路由装配），避免 app 持有重对象、也便于未来 worker
-  进程直接 import 本模块复用同一份缓存。
+``run_review`` 接收 ``ProductReviewCase``，走完整图（hypothesize → plan → tools → reevaluate
+×N → decide），返回 ``ReviewRunResult``；保持纯执行、无传输语义：不感知 HTTP/MQ、不落库
+（落库闭环在 ``pra.infra.persist_service``）。
 
-并发说明：build_agent_graph / InMemorySaver 均为**同步、无 I/O**（不 await），同一事件
-循环内检查与赋值之间不存在协程切换点，故 ``get_graph`` 的"先查缓存再构建"天然原子，
-无需加锁；未来若换异步 Checkpointer（AsyncSqlite/自研 MySQL saver）需在此加锁或改
-asyncio 单飞（once）模式，届时见 04 §7 选型 A 的迁移注释。
+run_id 语义：案件身份不进 AgentState，接入层映射为 LangGraph 线程维度 ``thread_id = run_id``；
+缺省自动生成 ``uuid4().hex`` —— 每请求独立线程，InMemorySaver 线程状态互不串扰（也可传可读
+形式如 ``RUN_{case_id}``）。图装配为懒加载 + 模块级缓存（``get_graph``），首次调用才
+``build_agent_graph(checkpointer=make_memory_checkpointer())``（默认 6 个 InMemory Tool +
+scripted LLM 桩，无需 API key），图不挂在 FastAPI app 上。
 
-约束：build_agent_graph 不注入 llm → 保持 scripted 桩；注入真实 LLM 属未来配置化
-（调用方先 ``set_llm_backend`` 或传 ``llm=`` 改此处缓存重建），本轮不引入。
+并发：build_agent_graph / InMemorySaver 均为同步、无 I/O（不 await），同一事件循环内检查与赋值
+之间无协程切换点，故「先查缓存再构建」天然原子，无需加锁；未来换异步 Checkpointer
+（AsyncSqlite/自研 MySQL saver）需在此加锁或改 asyncio 单飞模式。约束：不注入 llm → 保持
+scripted 桩；注入真实 LLM 属未来配置化（调用方先 ``set_llm_backend`` 或传 ``llm=`` 并重建缓存）。
 """
 
 from __future__ import annotations
@@ -56,15 +45,15 @@ _graph: CompiledStateGraph | None = None
 def get_graph() -> CompiledStateGraph:
     """懒加载返回编译图单例（默认 6 InMemory Tools + scripted LLM 桩，无 API key）。
 
-    图实例与 FastAPI app 生命周期解耦 —— app 重建/热重载不影响已编译图（反之亦然）；
-    未来真实 LLM / 外部 Checkpointer（MySQL saver）接入时改这里即可，调用方零改动。
+    图实例与 FastAPI app 生命周期解耦 —— app 重建/热重载不影响已编译图；接真实 LLM / 外部
+    Checkpointer（MySQL saver）时改这里即可，调用方零改动。
     """
     global _graph
     if _graph is None:
         from pra.agent.graph import build_agent_graph  # 延迟 import：pra.api 不被 agent 反向依赖
 
         # checkpointer 默认 None = 不持久化仅调试；接入层一律注入 InMemorySaver，
-        # 使 thread_id=run_id 的线程状态可查询/可断点续跑（04 §7.3 选型 A / §2.3 invoke 约定）。
+        # 使 thread_id=run_id 的线程状态可查询/可断点续跑。
         _graph = build_agent_graph(checkpointer=make_memory_checkpointer())
     return _graph
 
@@ -74,29 +63,22 @@ async def run_review(
     *,
     run_id: str | None = None,
 ) -> ReviewRunResult:
-    """执行一次完整风险调查 —— **本轮 HTTP 路由调用，未来 MQ worker 复用同一入口**。
+    """执行一次完整风险调查 —— HTTP 路由调用，未来 MQ worker 复用同一入口。
 
     :param case: 审核案件（domain 输入 DTO：商品快照/商家/事件类型/机审信号）。
-    :param run_id: 本次运行 ID（= LangGraph thread_id，O-6）。None → 自动生成
-        ``uuid4().hex``（每请求独立线程）；调用方也可传可读形式（如 ``RUN_{case_id}``）。
-    :return: ``ReviewRunResult{run_id, review_decision}``，review_decision 为图终态
-        decision（三分类 + 风险等级/类型 + 置信度 + 证据链 + 假设轨迹 + 预算快照）。
+    :param run_id: 本次运行 ID（= LangGraph thread_id）；None → 自动 ``uuid4().hex``。
+    :return: ``ReviewRunResult{run_id, review_decision}``，review_decision 为图终态 decision
+        （三分类 + 风险等级/类型 + 置信度 + 证据链 + 假设轨迹 + 预算快照）。
 
-    :raises RuntimeError: 图执行完成但终态缺少 decision（理论不可达 —— decide 是图唯一
-        终态出口；HTTP 层捕获转 500，未来 worker 捕获转失败重试/死信）。
-
-    执行流程：解析 run_id → 构造 config（thread_id=run_id）→ 取缓存编译图 →
-    ``await app.ainvoke(build_initial_state(case), config)`` 同步跑完整图 →
-    读取终态 decision 打包返回。每次调用都传 ``build_initial_state(case)`` 全量初始态
-    （04 §2.3 invoke 约定），多次调查间的隔离由唯一 thread_id 保证。
+    :raises RuntimeError: 图执行完成但终态缺少 decision（理论不可达 —— decide 是图唯一终态
+        出口；HTTP 层捕获转 500，worker 捕获转失败重试/死信）。
     """
     resolved_run_id = run_id or uuid4().hex
     config = {"configurable": {"thread_id": resolved_run_id}}
     app = get_graph()
 
-    # Root trace（docs/09 §4.1 落点 1）：trace_id = run_id 映射（32-hex 原样，否则
-    # 确定性 uuid5）→ Langfuse trace 可与 MySQL review_run.run_id 硬对齐。
-    # HTTP 常驻服务不 per-request flush（缓冲由 SDK 后台批量上报）。
+    # Root trace：trace_id = run_id 映射（32-hex 原样，否则确定性 uuid5）→ Langfuse trace
+    # 可与 MySQL review_run.run_id 硬对齐。常驻服务不 per-request flush（SDK 后台批量上报）。
     root_ctx = TraceContext(
         trace_id=trace_id_from_run_id(resolved_run_id),
         name="review",

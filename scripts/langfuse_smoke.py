@@ -1,67 +1,32 @@
-"""langfuse_smoke.py —— Langfuse 接线端到端自检：发一条合成 trace，再用公开 API 回读断言。
+"""Langfuse 接线端到端自检：发一条合成 trace，再用公开 API 回读断言。
 
-用途（把 docs/09 §13 那条「端到端发一条 trace」的占位验收命令落成可执行脚本）：
+用 ``get_tracer()`` 取当前生效 tracer（与业务同一入口），在一条 trace 里覆盖四类观测
+（root / node / llm generation / tool），并用 ``asyncio.create_task`` 跑子 span 验证 OTel
+contextvar 传播（LangGraph 节点在独立 task 里跑，这点必须成立）。flush 后用标准库 urllib
+（Basic Auth = base64(pk:sk)）轮询 ``GET {host}/api/public/v2/observations?traceId=…&fields=…``
+逐条断言并打印缩进的 observation 树。
 
-1. 用 ``pra.observability.tracing.get_tracer()`` 取当前生效 tracer —— 与业务**同一入口**，
-   不绕过适配层、不直接 import SDK；
-2. 在**一条**合成 trace 里覆盖四类观测（root / node / llm generation / tool），
-   并用 ``asyncio.create_task`` 跑一个子 span（验证 OTel contextvar 传播，
-   docs/09 §6 实测结论第 4 条 —— LangGraph 节点在独立 task 里跑，这点必须成立）；
-3. ``flush`` 后用**标准库 urllib**（Basic Auth = ``base64(public_key:secret_key)``）轮询
-   ``GET {host}/api/public/v2/observations?traceId=<hex32>&limit=50&fields=...``
-   （ingestion 有延迟），逐条断言并打印缩进的 observation 树。
+v3 → v4 回读接口（实测结论，2026-09-09 对本机 localhost:3000）：
 
-**v3 → v4 回读接口（以下全部为实测结论，2026-09-09 对 localhost:3000）**：
+- 服务端是 v4、以 ``events_only`` 模式运行，v3 的 trace 回读接口全 404
+  （``/api/public/traces``、``/api/public/traces/{id}``、v1 ``/api/public/observations``）——
+  此前一直 404 的原因。可用读法是 v4 观测列表，响应体 ``{"data": [<observation>, ...],
+  "meta": {}}``，不是 v3 的 ``{"observations": [...]}``。
+- ``fields=`` 必须显式传：不传时只回 ``core,basic`` 分组，``model`` / ``usageDetails`` /
+  ``tags`` 字段根本不存在（不是 null），model/usage 断言会静默失败；要拿这些字段得传
+  ``fields=core,basic,model,usage,trace_context``。
+- v4 没有单条 by-id 回读（``/api/public/v2/observations/{id}`` → 404），只能按 ``traceId``
+  过滤列表（``/api/public/projects`` 仍 200，服务本身是活的）。
+- root 的 ``isRootObservation`` 为 true，但 ``parentObservationId`` 指向不在本 trace 的幽灵
+  id，故组装树必须以 ``isRootObservation`` 为准。
+- generation 观测带 ``model`` / ``usageDetails`` / ``version`` / ``sessionId`` / ``tags``；
+  非 generation 的 ``usageDetails`` 是 ``{}``、``model`` 是空串；不依赖 ``statusMessage``。
 
-- 本机 Langfuse 服务端是 **v4**，且以 **``events_only`` 模式**运行（``deploy/langfuse``）。
-  该模式下 **v3 的 trace 回读接口已被移除**：``GET /api/public/traces/{id}`` → 404、
-  ``GET /api/public/traces`` → 404、``GET /api/public/observations``（v1）→ 404。
-  这就是本脚本此前一直 404 的原因。
-- 可用的读法是 **v4 观测列表**：``GET /api/public/v2/observations?traceId=<hex32>&limit=50``
-  → 200，响应体形状为 ``{"data": [<observation>, ...], "meta": {}}``（**不是** v3 的
-  ``{"observations": [...]}``，也不是单条 trace 对象）。
-- **``fields=`` 语义（实测）**：不传 ``fields=`` 时服务端只回 ``core,basic`` 分组 →
-  ``model`` / ``usageDetails`` / ``tags`` **字段根本不存在**（不是 ``null``），
-  于是 model/usage 断言会静默失败。必须显式传
-  ``fields=core,basic,model,usage,trace_context`` 才拿得到
-  ``model`` / ``usageDetails`` / ``tags`` / ``version`` / ``sessionId``。
-- **v4 没有单条 by-id 回读**：``/api/public/v2/observations/{id}`` → 404、
-  ``/api/public/observations/{id}`` → 404（events_only 提示）。只能按 ``traceId`` 过滤列表。
-  （``/api/public/projects`` 仍 200，故服务本身是活的。）
-- **root 的幽灵父 id（实测）**：root observation 的 ``isRootObservation`` 为 ``true``，
-  但它的 ``parentObservationId`` 指向一个**不存在于本 trace 的幽灵 id**。因此组装树时
-  **必须以 ``isRootObservation`` 为准**，不能拿 ``parentObservationId`` 当父子关系唯一依据。
-- 实测字段形状（单条 observation）::
+退出码（CI 友好）：0 = 无凭据 / ``PRA_LANGFUSE_ENABLED=0`` / SDK 未装（打印 ``tracing
+disabled (NullTracer: <reason>)`` + 启用提示）、``--no-verify``、或断言全通过（``SMOKE
+PASS``）；1 = 回读不到或任一断言失败；2 = 参数非法（``--trace-id`` 非 32-hex）。
 
-      {"id": "fff60661269d867e", "traceId": "c5ad91…", "parentObservationId": "787f670a…",
-       "isRootObservation": false, "type": "GENERATION", "name": "llm.hypothesize",
-       "startTime": "…", "endTime": "…", "latency": 0, "level": "DEFAULT",
-       "statusMessage": "", "environment": "default", "version": "smoke",
-       "sessionId": "langfuse-smoke", "tags": ["env:local", "source:smoke"],
-       "model": "scripted", "usageDetails": {"input": 12, "output": 34, "total": 46}}
-
-  非 generation 的 ``usageDetails`` 是 ``{}``、``model`` 是空串 ``""``。
-  （注：任务说明里 ``statusMessage`` 写的是 ``null``，实测为 ``""``；本脚本不依赖该字段。）
-
-**退出码约定（CI 友好）**：
-
-| 情形 | 行为 | 退出码 |
-|---|---|---|
-| 无凭据 / ``PRA_LANGFUSE_ENABLED=0`` / SDK 未装（NullTracer） | 打印 ``tracing disabled (NullTracer: <reason>)`` + 启用提示 | 0 |
-| 已启用 + ``--no-verify`` | 发 trace + flush，跳过回读 | 0 |
-| 已启用 + 回读断言全通过 | 打印 ``SMOKE PASS`` + UI 链接 | 0 |
-| 回读不到 / 任一断言失败 | 打印具体差异 | 1 |
-| 参数非法（``--trace-id`` 非 32-hex） | 打印用法 | 2 |
-
-**注意**：本脚本只读环境变量与 HTTP GET，**不安装任何依赖、不写任何文件**；
-``langfuse`` SDK 属 optional extra，未安装时同样走 NullTracer 分支并退出码 0。
-
-用法::
-
-    python scripts/langfuse_smoke.py                       # 自动生成 trace_id
-    python scripts/langfuse_smoke.py --trace-id <HEX32>    # 指定 trace_id（可复跑同一条）
-    python scripts/langfuse_smoke.py --host http://localhost:3000 --timeout 60
-    python scripts/langfuse_smoke.py --no-verify           # 只发不读（服务端未起时看埋点）
+脚本只读环境变量 + HTTP GET，不装依赖、不写文件；``langfuse`` SDK 属 optional extra。
 """
 
 from __future__ import annotations
@@ -93,39 +58,29 @@ POLL_INTERVAL_S = 5.0
 #: 轮询最大次数（即使 --timeout 很大也不无限等）。
 POLL_MAX_ATTEMPTS = 12
 
-#: 回读用的 v4 观测列表端点（**v3 的 /api/public/traces 在 events_only 下已 404**）。
 OBSERVATIONS_PATH = "/api/public/v2/observations"
-#: ``fields=`` 分组（**必须显式传**：不传时 v4 只回 core,basic，
-#: ``model`` / ``usageDetails`` / ``tags`` 字段直接不存在 —— 实测）。
 OBSERVATION_FIELDS = "core,basic,model,usage,trace_context"
-#: 单次回读的 limit（远大于合成 trace 的观测数，留余量）。
 OBSERVATION_LIMIT = 50
-#: 合成 trace 的观测条数下限（实测 7 条：root + 3 node + generation + tool + 异步子 span）。
 MIN_OBSERVATIONS = 7
 
 #: 合成 trace 的固定关联字段（断言用，脚本与测试共享）。
 TRACE_NAME = "smoke"
-#: root observation 名（``trace_root(ctx)`` 用 ``ctx.name``，即 ``TRACE_NAME``）。
 ROOT_NAME = TRACE_NAME
 SESSION_ID = "langfuse-smoke"
 SOURCE_TAG = "source:smoke"
 CASE_ID = "SMOKE_001"
-#: 合成 trace 的 version（``TraceContext(version=...)``）。
 EXPECTED_VERSION = "smoke"
-#: 合成 generation 的模型名。
 EXPECTED_MODEL = "scripted"
-#: 合成 generation 的 token 用量 —— **故意用非零值**：既验证 usage 真的过管道落库
-#: （全 0 可能被服务端当作"无用量"丢弃），也便于回读时做逐键比对。这是**管道自检
-#: 的合成数据**，与业务口径无关（真实 Agent 走 scripted 桩时 token 恒 0，docs/09 §7）。
+#: 合成 generation 的 token 用量，**故意非零**：既验证 usage 真的过管道落库（全 0 可能
+#: 被服务端当作「无用量」丢弃），也便于回读逐键比对。属管道自检数据，与业务口径无关
+#: （真实 Agent 走 scripted 桩时 token 恒 0）。
 EXPECTED_USAGE = {"input": 12, "output": 34, "total": 46}
-#: 异步嵌套验证用的子 span 名（docs/09 §6 实测第 4 条）。
 ASYNC_CHILD_SPAN = "plan.async_child"
 
 #: 断言目标：必须存在的 observation 名与类型（root / node / generation / tool）。
 REQUIRED_SPANS = ("hypothesize", "plan", "tools")
 REQUIRED_GENERATIONS = ("llm.hypothesize",)
 REQUIRED_TOOLS = ("ProductTool",)
-#: 名字 → 期望 type（v4 的 ``type`` 大写；非 generation 的 model/usage 为空）。
 EXPECTED_TYPES: dict[str, str] = {
     **dict.fromkeys(REQUIRED_SPANS, "SPAN"),
     **dict.fromkeys(REQUIRED_GENERATIONS, "GENERATION"),
@@ -144,7 +99,7 @@ EXPECTED_PARENTS: dict[str, str | None] = {
 #: W3C trace id 形状（32 位小写 hex）。
 _HEX32 = re.compile(r"\A[0-9a-f]{32}\Z")
 
-#: 每个 HTTP 请求的单次超时上限（秒）—— 总时长由 --timeout 控制。
+#: 每个 HTTP 请求的单次超时上限（秒）；总时长由 --timeout 控制。
 _HTTP_TIMEOUT_S = 10.0
 
 
@@ -162,9 +117,8 @@ def _observations_api_url(
 ) -> str:
     """回读用 v4 观测列表 URL（尾斜杠归一，``fields=`` 默认带上）。
 
-    ``{host}/api/public/v2/observations?traceId=<hex32>&limit=50&fields=core,basic,model,usage,trace_context``
-    —— v4 ``events_only`` 下 v3 的 ``/api/public/traces`` 已 404，只能按 traceId 过滤列表；
-    ``fields=`` 不传会导致 ``model`` / ``usageDetails`` / ``tags`` 字段缺失（实测）。
+    v4 ``events_only`` 下 v3 的 ``/api/public/traces`` 已 404，只能按 traceId 过滤列表；
+    不传 ``fields=`` 会导致 ``model`` / ``usageDetails`` / ``tags`` 字段缺失。
     """
     query = urllib.parse.urlencode(
         {"traceId": trace_id, "limit": int(limit), "fields": fields}
@@ -172,7 +126,6 @@ def _observations_api_url(
     return f"{host.rstrip('/')}{OBSERVATIONS_PATH}?{query}"
 
 
-#: 项目 id（v4 UI 路由需要）；与 `deploy/langfuse/.env` 的 `LANGFUSE_INIT_PROJECT_ID` 一致。
 DEFAULT_PROJECT_ID = "pra-local"
 
 
@@ -184,14 +137,14 @@ def _project_id() -> str:
 def _ui_url(host: str, trace_id: str) -> str:
     """Langfuse **v4** UI 中该 trace 的链接。
 
-    注意：v3 的短链 ``/trace/<id>`` 在 v4 里渲染为 notFound（HTTP 200 但页面空）——
-    实测 v4 正确路由是 ``/project/<projectId>/traces/<traceId>``（docs/09 §6.1）。
+    v3 的短链 ``/trace/<id>`` 在 v4 里渲染为 notFound（HTTP 200 但页面空）；实测正确
+    路由是 ``/project/<projectId>/traces/<traceId>``。
     """
     return f"{host.rstrip('/')}/project/{_project_id()}/traces/{trace_id}"
 
 
 def _auth_header(public_key: str, secret_key: str) -> str:
-    """Basic Auth 头（**手写 base64**，不引入额外依赖）：``Basic base64(pk:sk)``。"""
+    """Basic Auth 头（手写 base64，不引入额外依赖）：``Basic base64(pk:sk)``。"""
     token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode("ascii")
     return f"Basic {token}"
 
@@ -208,15 +161,14 @@ def _json_or_none(body: str) -> dict[str, Any] | None:
 def _observations_from_payload(payload: Any) -> list[dict[str, Any]] | None:
     """从 v4 响应体取观测列表：``{"data": [...]}`` → ``list``；否则 ``None``。
 
-    v3 的 ``{"observations": [...]}`` 形状在 v4 ``events_only`` 下已不再返回；
-    这里只认 ``data``，避免"看起来拿到了却全空"的静默误判。
+    只认 ``data``（v3 的 ``observations`` 形状在 v4 已不返回），避免「看起来拿到了
+    却全空」的静默误判。
     """
     if not isinstance(payload, dict):
         return None
     data = payload.get("data")
     if not isinstance(data, list):
         return None
-    # 外部服务返回的 payload 不做信任假设：只保留 dict 元素
     return [obs for obs in data if isinstance(obs, dict)]
 
 
@@ -271,7 +223,7 @@ async def _emit_synthetic_trace(tracer: Tracer, trace_id: str) -> None:
     )
 
     async def _async_child() -> None:
-        """``asyncio.create_task`` 里开的子 span —— 验证 contextvar 传播（不靠 await 链）。"""
+        """``asyncio.create_task`` 里开的子 span，验证 contextvar 传播（不靠 await 链）。"""
         with tracer.node_span(ASYNC_CHILD_SPAN) as child:
             child.update(
                 output={"async": True, "note": "contextvar propagation via create_task"},
@@ -280,7 +232,6 @@ async def _emit_synthetic_trace(tracer: Tracer, trace_id: str) -> None:
             await asyncio.sleep(0)
 
     with tracer.trace_root(ctx) as root:
-        # 1) node span：hypothesize → 内含一次 LLM generation
         with tracer.node_span("hypothesize"), tracer.llm_generation(
             name="llm.hypothesize",
             model="scripted",
@@ -293,7 +244,6 @@ async def _emit_synthetic_trace(tracer: Tracer, trace_id: str) -> None:
                 metadata={"latency_ms": 1},
             )
 
-        # 2) node span：tools → 内含一次 tool span
         with tracer.node_span("tools"), tracer.tool_span(
             name="ProductTool", input={"args": {"product_id": "P_88231"}}
         ) as tool:
@@ -302,11 +252,9 @@ async def _emit_synthetic_trace(tracer: Tracer, trace_id: str) -> None:
                 metadata={"latency_ms": 1},
             )
 
-        # 3) node span：plan → 内含 create_task 起的子 span（异步嵌套验证）
         with tracer.node_span("plan"):
             await asyncio.create_task(_async_child())
 
-        # root observation 的整体 output（终态决策摘要）
         root.update(output={"decision": "HUMAN_REVIEW"})
 
     try:
@@ -331,9 +279,8 @@ def _fetch_trace(
     """轮询回读该 trace 的观测列表：最多 ``POLL_MAX_ATTEMPTS`` 次、间隔
     ``POLL_INTERVAL_S`` 秒，总时长受 ``timeout`` 约束。
 
-    一旦观测数达到 ``MIN_OBSERVATIONS`` 立即返回；若只拿到部分观测（ingestion 未完成），
-    继续轮询并保留"最全"的一份，超时后返回它 —— 这样断言能打印出**具体差异**
-    而不是笼统的"回读不到"。
+    观测数达到 ``MIN_OBSERVATIONS`` 立即返回；只拿到部分观测（ingestion 未完成）时继续
+    轮询并保留最全的一份，超时后返回它，好让断言打印具体差异。
 
     :return: ``(observations, notes)``；一条都没拿到时返回 ``(None, 每次尝试的说明)``。
     """
@@ -371,9 +318,8 @@ def _fetch_trace(
 def _observation_tree(observations: list[dict[str, Any]]) -> list[str]:
     """按 ``parentObservationId`` 组装缩进树（父缺失按 root 处理）。
 
-    **root 判定以 ``isRootObservation`` 为准**：v4 实测里 root 的
-    ``parentObservationId`` 是一个幽灵 id（不在本 trace 的 id 集合内），
-    若同时存在同名/同 id 巧合就会挂错位置，故显式置为顶层。
+    root 判定以 ``isRootObservation`` 为准：v4 实测里 root 的 ``parentObservationId``
+    是幽灵 id（不在本 trace 的 id 集合内），故显式置为顶层。
 
     :return: 每行一条 observation 的字符串（深度即缩进层级），供直接打印。
     """
@@ -440,7 +386,6 @@ def _verify_trace(observations: Any, trace_id: str) -> list[str]:
     for obs in items:
         by_name.setdefault(str(obs.get("name")), []).append(obs)
 
-    # 1) 数量 + traceId 归属
     if len(items) < MIN_OBSERVATIONS:
         problems.append(
             f"observation count {len(items)} < {MIN_OBSERVATIONS} "
@@ -456,7 +401,6 @@ def _verify_trace(observations: Any, trace_id: str) -> list[str]:
             f"{len(mismatched)} observation(s) traceId mismatch, want {trace_id!r}: {detail}{more}"
         )
 
-    # 2) root
     root = next((obs for obs in items if str(obs.get("name")) == ROOT_NAME), None)
     if root is None:
         problems.append(f"missing root observation {ROOT_NAME!r} (present: {sorted(by_name)})")
@@ -465,7 +409,6 @@ def _verify_trace(observations: Any, trace_id: str) -> list[str]:
             f"root {ROOT_NAME!r} isRootObservation = {root.get('isRootObservation')!r}, want True"
         )
 
-    # 3) 名字与类型
     for name in (*REQUIRED_SPANS, *REQUIRED_GENERATIONS, *REQUIRED_TOOLS):
         if name not in by_name:
             problems.append(f"missing observation {name!r} (present: {sorted(by_name)})")
@@ -475,7 +418,6 @@ def _verify_trace(observations: Any, trace_id: str) -> list[str]:
             if obs_type != want_type:
                 problems.append(f"{name!r} type is {obs.get('type')!r}, want {want_type!r}")
 
-    # 4) generation 的 model / usage（usage 逐键比对 EXPECTED_USAGE，验证真的过管道）
     for name in REQUIRED_GENERATIONS:
         for obs in by_name.get(name, []):
             model = obs.get("model")
@@ -496,7 +438,6 @@ def _verify_trace(observations: Any, trace_id: str) -> list[str]:
                             f"(full: {usage!r})"
                         )
 
-    # 5) 每条观测的会话 / 标签 / 版本（v4 把 trace 级属性下放到每条 observation）
     for obs in items:
         label = f"{str(obs.get('name') or '<unnamed>')!r}"
         if obs.get("sessionId") != SESSION_ID:
@@ -510,7 +451,6 @@ def _verify_trace(observations: Any, trace_id: str) -> list[str]:
                 f"{label} version = {obs.get('version')!r}, want {EXPECTED_VERSION!r}"
             )
 
-    # 6) 树结构（以 isRootObservation 定 root，再按 parentObservationId 挂子）
     if root is not None:
         root_id = str(root.get("id"))
         for child, parent_name in EXPECTED_PARENTS.items():
@@ -520,7 +460,7 @@ def _verify_trace(observations: Any, trace_id: str) -> list[str]:
             else:
                 parents = by_name.get(parent_name, [])
                 if not parents:
-                    continue  # 缺父节点已由第 3 条断言报告
+                    continue
                 want_id = str(parents[0].get("id"))
                 want_label = f"{parent_name!r} id {want_id!r}"
             for obs in by_name.get(child, []):
@@ -546,7 +486,7 @@ def _print_enable_hint(host: str) -> None:
     print("  export LANGFUSE_SECRET_KEY=sk-lf-...")
     print(f"  export LANGFUSE_HOST={host}")
     print("  uv run --extra observability python scripts/langfuse_smoke.py")
-    print("  # 服务端：cd deploy/langfuse && docker compose up -d（docs/09 §9）")
+    print("  # 服务端：cd deploy/langfuse && docker compose up -d")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -641,7 +581,7 @@ def main(argv: list[str] | None = None) -> int:
     if not any(str(obs.get("name")) == ASYNC_CHILD_SPAN for obs in observations):
         print(
             f"NOTE: async child span {ASYNC_CHILD_SPAN!r} missing — "
-            "contextvar 传播可能不成立（docs/09 §6 实测第 4 条）"
+            "contextvar 传播可能不成立（实测：异步子 span 曾观测到缺失）"
         )
 
     problems = _verify_trace(observations, trace_id)

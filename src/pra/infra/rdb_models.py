@@ -1,17 +1,12 @@
 """核心审核 5 表的 SQLAlchemy ORM 模型（与 migrations/001_review_core_tables.sql 同构）。
 
-关系（2026-09-08 定稿）：
-    review_case 1:N review_run ── review_run 1:N review_trace
-                           └──── review_run 1:N review_evidence
-    review_case 1:1 review_result ── source_run_id → review_run
+关系：review_case 1:N review_run（review_run 1:N review_trace、1:N review_evidence）；
+review_case 1:1 review_result（source_run_id → review_run）。
 
-用途边界：
-- 本模块是**审核业务表的 ORM 映射**（DB 真相），与 `pra.domain.models`（业务 DTO，
-  不落库）解耦 —— worker 层负责 domain → ORM 的转换与落库（infra 阶段接线）。
-- 只含核心 5 表；RAG/Evaluation/上游数据源表不在本文件（MVP 收敛，勿扩展）。
-- 类型刻意用 MySQL 方言类型（BIGINT/DATETIME(fsp=3)/DOUBLE/JSON），与手写 DDL 逐字一致；
-  engine/session（async SQLAlchemy）工厂在 infra 接线阶段补，本文件不持有连接。
-- SQLAlchemy 2.0 declarative（Mapped/mapped_column）；注释里标明 MySQL 实际类型。
+边界：本模块是审核业务表的 ORM 映射（DB 真相），与 ``pra.domain.models``（业务 DTO，不落库）
+解耦 —— domain → ORM 的转换与落库在 persist_service。只含核心 5 表，勿扩展。类型刻意用
+MySQL 方言（BIGINT/DATETIME(fsp=3)/DOUBLE/JSON），与手写 DDL 逐字一致；engine/session 工厂在
+``pra.infra.db``，本文件不持有连接。
 """
 
 from __future__ import annotations
@@ -39,10 +34,9 @@ class Base(DeclarativeBase):
 class ReviewCaseORM(Base):
     """审核案件 —— 一次上架/修改事件 = 一个案件（1 行 = 1 次审核事件）。
 
-    ``triage_result``：Screening 三分流结果（PASS/REJECT/COMPLEX）—— COMPLEX 时记录
-    （case 走 Agent 调查）、直判时也记录（case 为什么直接终裁），用于回答「case 为什么
-    直接结束 / 为什么进 Agent」。直判 case 收尾 status=DECIDED；Agent 调查 case 先
-    INVESTIGATING 后 DECIDED。
+    ``triage_result``：Screening 三分流结果（PASS/REJECT/COMPLEX）—— COMPLEX 走 Agent
+    调查，直判也记录原因，用于回答「case 为什么直接结束 / 为什么进 Agent」。直判 case
+    收尾 status=DECIDED；Agent 调查 case 先 INVESTIGATING 后 DECIDED。
     """
 
     __tablename__ = "review_case"
@@ -73,16 +67,14 @@ class ReviewCaseORM(Base):
 
 
 class ReviewRunORM(Base):
-    """一次审核判定活动（case 1:N run）—— Agent 调查或规则直判均各占一行。
+    """一次审核判定活动（case 1:N run）—— Agent 调查或规则直判各占一行。
 
-    语义重定义（拍板 D）：review_run 不再只描述「一次 Agent 执行」，而是「一次审核判定
-    活动」的两种执行方式之一：
     - Agent 调查：trigger_type=INITIAL/RE_REVIEW，逐节点落 review_trace；
-    - 规则直判：trigger_type="SCREENING_DIRECT"（Screening 三分流 PASS/REJECT 直接
-      终裁），**无 trace 行**、started_at≈ended_at、status 直接 DECIDED；
-      规则命中证据挂本 run 的 review_evidence，终裁写 review_result
-      （source_run_id=本 run）—— 保证 ``result → run → evidence`` 审计链对两类裁决
-      统一成立。
+    - 规则直判：trigger_type="SCREENING_DIRECT"（Screening PASS/REJECT 直接终裁），
+      无 trace 行、started_at≈ended_at、status 直接 DECIDED；规则命中证据挂本 run 的
+      review_evidence，终裁写 review_result（source_run_id=本 run）—— 保证
+      ``result → run → evidence`` 审计链对两类裁决统一成立。
+
     本表只存运行侧事实，不存裁决（裁决唯一在 review_result）。
     """
 
@@ -154,8 +146,8 @@ class ReviewEvidenceORM(Base):
     source_tool: Mapped[str] = mapped_column(String(64), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     weight: Mapped[float] = mapped_column(DOUBLE, nullable=False)
-    ref_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # O-1 稳定引用
-    extra_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # O-8 回填
+    ref_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # 稳定引用（去重/回溯）
+    extra_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 结构化附加数值
     created_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
 
     run: Mapped["ReviewRunORM"] = relationship(back_populates="evidences")
@@ -176,7 +168,7 @@ class ReviewResultORM(Base):
     decision: Mapped[str] = mapped_column(String(16), nullable=False)  # PASS/REJECT/HUMAN_REVIEW
     risk_level: Mapped[str] = mapped_column(String(16), nullable=False, default="NONE")
     risk_type_json: Mapped[list] = mapped_column(JSON, nullable=False)
-    decision_confidence: Mapped[float] = mapped_column(DOUBLE, nullable=False)  # O-7 列名
+    decision_confidence: Mapped[float] = mapped_column(DOUBLE, nullable=False)
     policy_refs_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     decision_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # ReviewDecision 全量快照
     created_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)

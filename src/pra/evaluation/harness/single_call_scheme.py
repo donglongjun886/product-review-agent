@@ -1,46 +1,28 @@
-"""SingleCallLLM —— Baseline 2：单次 LLM 调用（harness/single_call_scheme.py）。
+"""Baseline 2：单次 LLM 调用（确定性 mock，可注入 llm_fn）。
 
-语义（对齐 docs/00-system-design.md §12.2 / docs/02-evaluation.md §3.3）：
-- 一次调用 = 基础输入全量（商品快照：标题/描述/属性/类目/品牌/SKU/图片 +
-  机审 OCR 文本 + screening_signals）→ 结构化决策 JSON；
-- **不给商家历史 / 案例库 / 政策库**（那是 Agent 经工具调查获得的证据，给了等于
-  作弊，§12.2 公平性约束）；
-- 输出 = ReviewDecision 形状子集（decision / risk_level / risk_type /
-  decision_confidence / policy）；``budget_used / overrides / hypothesis_trace``
-  恒不适用。
+一次调用 = 基础输入全量（商品快照 + 机审 OCR 文本 + screening_signals）→ 结构化决策
+JSON。**不给商家历史 / 案例库 / 政策库** —— 那是 Agent 经工具调查才拿到的证据，给了
+等于作弊。输出是 ReviewDecision 形状子集（decision / risk_level / risk_type /
+decision_confidence / policy）；``budget_used / overrides / hypothesis_trace`` 不适用。
 
-Phase 1 实现（确定性、无真 LLM）：
-- ``llm_fn`` 可注入（签名 ``fn(case_json: dict) -> dict``）；默认 ``DefaultSingleCallMock``
-  —— "弱但有规则可循的单次审查员"，只扫描基础输入**表面字段**，体现没有调查能力
-  的局限（看不到图片相似度 / 商家历史 / 在库事实 → 需要这些证据的案会判错或转
-  人工，绝不读取 expected 作弊）。
-- 后处理（§4.5 对齐 REJECT Gate 口径）：``decision_confidence < ctx.
-  abstain_confidence_threshold(0.7)`` 的 REJECT 候选 → 确定性记 HUMAN_REVIEW。
-
-mock 表面启发式（确定性，规则即文档）：
+默认 ``DefaultSingleCallMock`` 只扫基础输入**表面字段**，不读 expected、不读图片
+相似度 / 商家历史 / 在库事实；需要这些证据的案会判错或转人工。表面启发式：
 1. 标题/描述明示仿冒词（复刻/高仿/1:1/同款/原单）→ REJECT（conf 0.88，文本自证）；
-2. 仅图片 OCR 文本含仿冒词 → REJECT 候选 conf 0.60（证据弱，后处理转 HUMAN）；
-3. 标题/描述/OCR 含知名品牌词但无仿冒词 → HUMAN（授权/真伪单次调用无法核验）；
-4. brand 空缺或 category 空缺 → HUMAN（关键事实缺失，R-301 同口径）；
-5. 机审信号非 PASS → HUMAN（已有确定性信号，需人工复核）；
-6. 否则 → PASS（conf 0.78：表面干净，单次调用视角可放行）。
-真实 single-call LLM 的不稳定性主要由"看不到调查证据"体现：多信号/对抗类案在
-mock 视角可能表面干净 → 误 PASS（漏放）—— 这是"缺证据"的诚实近似（§12.2 变体
-2a：仅商品原始数据）。
+2. 仅图片 OCR 含仿冒词 → REJECT 候选 conf 0.60（证据弱，后处理转 HUMAN）；
+3. 含知名品牌词但无仿冒词 → HUMAN（授权/真伪单次调用无法核验）；
+4. brand 或 category 空缺 → HUMAN（关键事实缺失，与 R-301 同口径）；
+5. 机审信号非 PASS → HUMAN；6. 否则 → PASS（conf 0.78）。
+后处理：``decision_confidence < ctx.abstain_confidence_threshold``（默认 0.7）的
+REJECT 候选确定性改记 HUMAN_REVIEW。
 
-**Phase 2 Ablation 变体 2b（RAG-in-prompt）**（docs/02-evaluation.md §3.3）：
-``SingleCallScheme(llm_fn=…, extra_context=[…])`` —— 预塞政策/先例**文本摘要**进
-prompt（仍不给工具）。extra_context=None 时本模块行为与 Phase 1 **完全一致**；
-给定列表时方案把该静态文本注入 llm_fn 的入参 dict（键 ``extra_context``），并由
-确定性 ``ContextAwareSingleCallMock``（RAG 变体 mock，name=single-call-rag-mock-v1）
-按 docstring 的规则消费。**公平性**：预塞的只能是"基础输入外的事实文本"
-（评测世界里可查的政策/先例），不得含 expected 答案 —— 注入键由 mock 显式读取，
-不进 EvalRecord 证据链（单次调用仍无工具/无在库查询）。
+2b 变体（RAG-in-prompt）：``SingleCallScheme(extra_context=[…])`` 把政策/先例**文本
+摘要**预塞进 prompt（仍不给工具）；None 时与 2a 行为完全一致。预塞的只能是评测世界里
+可查的事实文本，不得含 expected 答案；注入键 ``extra_context`` 由 mock 显式读取，
+不进 EvalRecord 证据链。
 
-**已知泄漏边界（P2-5，仅注释标注）**：``run`` 把整份 case 输入（含图片 url 字面）
-喂给 llm_fn；当前 eval 数据的 image url 含语义段（``eval/viol_*`` / ``logo_*`` 等）。
-现有 mock 不读 url → 无实际影响；**换真实 single-call LLM 前必须先改中性 URL**，
-否则真实模型会从 url 字符串读到类别信号（等同把 GT 类目注入 prompt）。
+**泄漏边界**：``run`` 把整份 case 输入（含图片 url 字面）喂给 llm_fn；当前 eval 数据
+的 url 含语义段（``eval/viol_*`` / ``logo_*``），现有 mock 不读 url → 无实际影响；
+**换真实 LLM 前必须先改中性 URL**，否则模型会从 url 读到类别信号（等同注入 GT）。
 """
 
 from __future__ import annotations
@@ -65,10 +47,8 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # 文本词命中辅助（确定性；与 screening rules 的 _term_hits 同口径但本地实现，
 # 避免依赖 screening 私有函数 —— 词表仍复用 terms 单一来源）
-# ---------------------------------------------------------------------------
 
 _ASCII_LATIN = re.compile(r"[a-z ]+\Z")
 
@@ -92,18 +72,15 @@ def _scan_hits(text: str, terms: frozenset[str]) -> list[str]:
     return sorted(matched)
 
 
-# ---------------------------------------------------------------------------
 # 默认 mock：确定性表面审查员
-# ---------------------------------------------------------------------------
 
 
 class DefaultSingleCallMock:
-    """Phase 1 默认单次 LLM mock —— 纯函数式表面启发式（确定性、可重放）。
+    """默认单次 LLM mock —— 纯函数式表面启发式（确定性、可重放）。
 
     ``__call__(case_json: dict) -> dict``：入参为 ``ProductReviewCase.model_dump(
-    mode="json")`` 形状；返回 ReviewDecision 子集 dict：decision ∈
-    {PASS, REJECT, HUMAN_REVIEW}、risk_level、risk_type、confidence、
-    policy（恒 []，无政策库访问）、rationale、signals（逐项表面信号，供审计）。
+    mode="json")`` 形状；返回 ReviewDecision 子集 dict（policy 恒 []，无政策库访问；
+    signals 为逐项表面信号，供审计）。
     """
 
     name = DEFAULT_MOCK_NAME
@@ -221,25 +198,19 @@ def _surface_predict(case_json: dict) -> dict:
     )
 
 
-# ---------------------------------------------------------------------------
-# 2b 变体：RAG-in-prompt（政策/先例文本预塞，docs/02-evaluation.md §3.3）
-# ---------------------------------------------------------------------------
+# 2b 变体：RAG-in-prompt（政策/先例文本预塞）
+#
 # 确定性触发器（规则即文档，仅供 scripted 近似 —— 真实 LLM 的"读了检索文本所以敢
 # 下结论"在此用显式规则模拟，语义诚实、可单测、无真 LLM）：
-#
-# R-2b：基础 raw 决策为 **REJECT 候选但置信 < 0.7**（本会确定性转人工 —— 规则 ②
-# OCR 弱证据案）时，若注入的 extra_context 中存在**判例行**满足：
-#   1) 以 ``判例:`` 开头；
-#   2) 含结论标记 ``→ REJECT``（判例是自动拒绝，非转人工）；
+# 基础 raw 决策为 **REJECT 候选但置信 < 0.7**（本会确定性转人工，即规则 ② 的 OCR 弱
+# 证据案）时，若注入的 extra_context 中存在**判例行**满足：
+#   1) 以 ``判例:`` 开头；2) 含结论标记 ``→ REJECT``（判例是自动拒绝，非转人工）；
 #   3) 类目作用域（形如 ``类目[<scope>]``，可省）与案件类目一致；
-#   4) 行内含案件**已观测的表面信号词**（OCR/标题仿冒词或品牌词，_scan_hits 口径）——
-#      "检索到与本案表面特征同型的自动拒绝先例"；
+#   4) 行内含案件**已观测的表面信号词**（OCR/标题仿冒词或品牌词）；
 # 则把该 REJECT 候选的置信抬到 0.85（> abstain 门槛 → 不再转人工），理由标注命中行。
-# 语义：RAG 让"弱怀疑 + 同型先例"收敛为可自动拒绝；反之（无命中行/先例是转人工）
-# 维持原样 —— 预塞文本不得让 mock 凭空造证据。
-#
-# 判定行由 ablation.py 的 ``build_rag_context`` 从评测世界静态文本（EVAL_PRECEDENTS /
-# EVAL_POLICY_CLAUSES）生成 —— 只含政策/先例事实，不含 expected 答案。
+# 语义：RAG 让"弱怀疑 + 同型先例"收敛为可自动拒绝；无命中行或先例是转人工则维持原样
+# —— 预塞文本不得让 mock 凭空造证据。判定行由 ablation.build_rag_context 从评测世界
+# 静态文本（EVAL_PRECEDENTS / EVAL_POLICY_CLAUSES）生成，只含事实、不含 expected。
 
 _CTX_LINE_PREFIX = "判例:"
 _CTX_REJECT_MARK = "→ REJECT"
@@ -344,9 +315,7 @@ class ContextAwareSingleCallMock:
         return upgraded if upgraded is not None else base
 
 
-# ---------------------------------------------------------------------------
-# 置信门槛后处理（§4.5：REJECT 候选 conf < 门槛 → HUMAN_REVIEW）
-# ---------------------------------------------------------------------------
+# 置信门槛后处理（REJECT 候选 conf < 门槛 → HUMAN_REVIEW）
 
 
 def apply_abstain_threshold(
@@ -362,19 +331,16 @@ def apply_abstain_threshold(
     return raw.get("decision"), False
 
 
-# ---------------------------------------------------------------------------
 # SchemeRunner
-# ---------------------------------------------------------------------------
 
 SingleCallLLMFn = Callable[[dict], dict]
 
 
 class SingleCallScheme(SchemeRunner):
-    """Baseline 2 —— 单次 LLM 调用（Phase 1 = 确定性 mock，可注入 llm_fn）。
+    """Baseline 2 —— 单次 LLM 调用（默认确定性 mock，可注入 llm_fn）。
 
-    2b 变体（Ablation，docs §3.3）：``extra_context`` 非 None → RAG-in-prompt ——
-    把静态政策/先例文本预塞进 prompt（经 ``ContextAwareSingleCallMock`` 消费），
-    默认 None = Phase 1 现行为（Raw Input，2a），**零行为变化**。
+    ``extra_context`` 非 None → 2b RAG-in-prompt（静态政策/先例文本经
+    ``ContextAwareSingleCallMock`` 消费）；None = 2a Raw Input，**零行为变化**。
     """
 
     name = "single_call_llm"
@@ -411,11 +377,10 @@ class SingleCallScheme(SchemeRunner):
         return self._extra_context
 
     async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
-        # 快照 = 整份 case 输入（含图片 url 字面）。已知泄漏边界（P2-5）：
-        # 当前 eval 数据的 image url 带语义段（`eval/viol_*` / `logo_*` / `clean_*` /
-        # `bound_*`），本模块的 mock 不读 url（只扫 ocr_text / 表面文本）→ 现无实际影响；
-        # 将来换真实 single-call LLM 前必须改中性 URL，否则模型会从 url 字符串直接
-        # 读到类别信号，等同泄漏 GT 类目（换 real LLM 属本方案待办，见模块 docstring）。
+        # 快照 = 整份 case 输入（含图片 url 字面）。当前 eval 数据的 url 带语义段
+        # （`eval/viol_*` / `logo_*` / `clean_*` / `bound_*`），本模块 mock 不读 url
+        # （只扫 ocr_text / 表面文本）→ 现无实际影响；换真实 LLM 前必须改中性 URL，
+        # 否则模型会从 url 直接读到类别信号，等同泄漏 GT 类目。
         case_json = case.input.model_dump(mode="json")
         raw = self._llm_fn(case_json)
         if not isinstance(raw, dict) or "decision" not in raw:

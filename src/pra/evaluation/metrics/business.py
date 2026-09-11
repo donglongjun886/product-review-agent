@@ -1,29 +1,20 @@
-"""决策业务指标（metrics/business.py）—— DecisionEvaluator：三方案可比口径。
+"""决策业务指标：DecisionEvaluator —— 三方案可比口径。
 
-在 **expected.decision ∈ {PASS, REJECT}** 的案上计算（Phase 1 全量真值都是二值）：
-REJECT 为**正类**。EvalRecord 的 HUMAN_REVIEW 输出 Phase 1 计为"未自动判"
-（不计入二分类混淆，见下口径说明），单独以 human_rate / automation 观察。
+只统计 **expected.decision ∈ {PASS, REJECT}** 的案，REJECT 为**正类**。
+pred HUMAN_REVIEW 记为该案未自动判（见下），另用 human_rate / automation 观察。
 
-口径（代码注释即文档；report.py 会复述）：
-- 二分类混淆（只统计**自动判出**的案，即 pred ∈ {PASS, REJECT}）：
+- 二分类混淆（只计 pred ∈ {PASS, REJECT} 的案）：
   TP=truth REJECT ∧ pred REJECT；FP=truth PASS ∧ pred REJECT；
   TN=truth PASS ∧ pred PASS；FN=truth REJECT ∧ pred PASS；
-- Precision = TP/(TP+FP)（自动拒绝中真违规占比）；
-- Recall（违规召回）= TP/(TP+FN)；
-- FPR = FP/(FP+TN) —— **误杀红线**（真 PASS 被自动 REJECT 的比例）；
-- FNR = FN/(TP+FN) —— 漏放（真 REJECT 被自动 PASS）；
-- Accuracy = (TP+TN) / 全部真值案（PASS+REJECT）—— **口径选择：预测 HUMAN_REVIEW
-  视为"未命中业务真值"（判错），故不入 (TP+TN) 分子但计入分母** —— 对保守转人工的
-  方案 Accuracy 更严格；human_rate / automation 另行报出解释差异（避免"全转人工
-  刷高 Precision"的假象；与 docs/02-evaluation.md §4.1 Decision Accuracy 一致：
-  期望 ∈ {PASS,REJECT} 上逐案精确匹配）。
-- human_rate = pred HUMAN / 全部（HRR_total）；automation = 1 - human_rate；
-- reject_unhandled = (truth REJECT ∧ pred HUMAN) / truth REJECT 数（漏放的上限视角
-  —— 本该自动判却转人工）；pass_unhandled 同理。
+- Precision = TP/(TP+FP)；Recall = TP/(TP+FN)；
+- FPR = FP/(FP+TN) —— **误杀红线**；FNR = FN/(TP+FN) —— 漏放；
+- Accuracy = (TP+TN) / 全部真值案 —— **pred HUMAN_REVIEW 计为判错**：不入分子
+  但入分母，故对保守转人工的方案更严格（避免"全转人工刷高 Precision"的假象）；
+- human_rate = pred HUMAN / 全部；automation = 1 − human_rate；
+- reject_unhandled = (truth REJECT ∧ pred HUMAN) / truth REJECT 数（漏放的上限视角）；
+  pass_unhandled 同理。
 
-分母为 0 的比率返回 None（报告显示 "-"，不硬造 0/∞）。按 scene 分层由
-``evaluate_grouped`` 复用同一实现（scene 取自 EvalRecord 关联的 case，由调用方
-以 expected_by_case 传入 scene）。
+分母为 0 的比率返回 None（报告显示 "-"，不硬造 0/∞）。
 """
 
 from __future__ import annotations
@@ -40,7 +31,11 @@ _BINARY = {"PASS", "REJECT"}
 
 
 class DecisionMetrics(BaseModel):
-    """一组二分类业务指标 + 覆盖率口径（None = 分母为 0，未定义）。"""
+    """一组二分类业务指标 + 覆盖率口径（None = 分母为 0，未定义）。
+
+    按 scene 分层由 ``evaluate_grouped`` 复用同一实现（scene 取自调用方传入的
+    expected 索引）。
+    """
 
     total: int = Field(description="真值案总数（expected ∈ {PASS, REJECT}）")
     auto_decided: int = Field(description="自动判出案数（pred ∈ {PASS, REJECT}）")
@@ -62,7 +57,7 @@ class DecisionMetrics(BaseModel):
     pass_unhandled: float | None = None  # (truth PASS ∧ pred HUMAN)/truth PASS
 
     def metric_row(self) -> dict:
-        """报告用一行摘要（None → "-"）。"""
+        """报告用一行摘要（None → "-"；键用表头缩写 acc/prec/hrr/auto 等）。"""
         fmt = lambda v: "-" if v is None else f"{v:.3f}"
         return {
             "total": self.total,
@@ -85,8 +80,7 @@ def _ratio(numer: int, denom: int) -> float | None:
 class DecisionEvaluator:
     """DecisionEvaluator —— 只吃 EvalRecord.decision × expected.decision。
 
-    Phase 1 不含 AbstentionEvaluator（expected=HUMAN 真值）；expected 字典由调用方
-    从数据集构造（``{eval_case_id: {"decision": ..., "scene": ...}}``）。
+    expected 索引由调用方构造：``{eval_case_id: {"decision": ..., "scene": ...}}``。
     """
 
     @staticmethod

@@ -1,137 +1,17 @@
-"""ChromaDB + LlamaIndex 检索后端（rag/chroma_backend.py）—— ChromaPolicyIndex / ChromaCaseIndex。
+"""ChromaDB + LlamaIndex 检索后端 —— ``ChromaPolicyIndex`` / ``ChromaCaseIndex``。
 
-docs/10-rag-upgrade-spec.md（唯一实施契约）§1/§3 的落地实现：
-
-```
-Query → Hybrid Retrieval（Policy KB / Case KB 各自独立）
-          ├── VectorRetriever : ChromaDB(cosine) + 自带 embedding（Mock / BGE）
-          └── BM25Retriever   : llama-index-retrievers-bm25（引擎 bm25s）+ jieba 分词
-        → RRF（Reciprocal Rank Fusion）
-        → Top-K → PolicySearchTool / CaseSearchTool（现有契约一行不改）
-```
-
-业务边界仍由 tools 层 ``PolicyIndex`` / ``CaseIndex`` Protocol 守护（docs/10 §2 铁律）：
-本模块只是「向量库 + 检索器 + 融合」的实现替换，Agent / Gate / Evidence / Evaluation 零改动。
-
-Node / Chunk 口径（§3「不切碎」）
---------------------------------
-**1 政策条款 = 1 Node**、**1 先例 = 1 Node**，不做任何切分；node id 由「collection 名 +
-corpus 行键」稳定哈希得出（同 corpus 重建幂等 upsert 覆盖）。metadata 按 §3：
-
-- policy → ``clause_id / policy_id / version / category / risk_type / status / effective_date``
-- case   → ``case_id / category / decision / risk_level / risk_type``
-
-⚠️ **实测约束（Chroma 1.5.9）**：metadata 里**空列表值不被接受** ——
-``ValueError: Expected metadata list value for key 'risk_type' to be non-empty in add.``。
-而 corpus 真实存在 ``risk_type == []`` 的行（67 case 中 16 条、24 policy 中 1 条）。
-故 ``risk_type`` **仅在非空时写入**（语义等价：缺键 == 空列表，检索侧一律用
-``wanted & set(...)`` 判定），本模块以 ``_RISK_TYPE_KEY`` 常量集中标注该处理。
-
-三种检索模式（与仓库其它实现同名：``"bm25" | "vector" | "hybrid"``）
-------------------------------------------------------------------
-- ``vector``：Chroma cosine 距离 → **相似度 = 1 − distance**（docs/10 §3 实测口径：用
-  ``[1,0,0]`` vs ``[0.9,0.1,0]`` 验证 distance 0.006116271 ↔ 1−cos 0.9938837）。
-  ⚠️ **实测（本轮）**：``llama-index-vector-stores-chroma 0.6.0`` 的 ``ChromaVectorStore``
-  把分数算成 ``exp(-distance)``（安装源码 ``_query``：``similarity_score = math.exp(-distance)``；
-  同一对向量 store 返 0.993902 ≠ 1−distance 0.9938837）—— 那是**另一套映射、不是余弦**。
-  故本模块**自建 ``BaseRetriever`` 子类**（``_ChromaCosineRetriever``）：装配仍走 LlamaIndex
-  （``TextNode`` / ``MetadataFilters``），但取数直接调 **Chroma 原生 ``collection.query``**
-  拿 ``distance`` 自己算 ``1 − distance``。这一层「只多一层薄适配、不改余弦几何」是
-  docs/10 §3 钉死的口径所要求的（§5 验收 1「同构等价」亦以此为前提）。
-- ``bm25``：``BM25Retriever``（引擎 ``bm25s``，``jieba`` 分词，见下「jieba 接入」）；
-  **在本模块自建的 RRF 里作为一路排名**（见下 hybrid）。
-- ``hybrid``：**RRF（Reciprocal Rank Fusion）** —— 两路排名列表 → ``Σ_r 1/(60 + rank_r)``。
-  ⚠️ **本模块自己算 RRF**（:func:`_fuse_rrf`），**不调用** ``QueryFusionRetriever`` 现成的融合：
-  实测该实现在融合时**原地改写共享 node 的 ``score``**（源码
-  ``reranked_nodes[-1].score = score``），而 node 对象跨检索共享 → **同一 query 连查两次结果
-  不同**（实测 top-1 从 ``RAG_CASE_0064`` 0.020393 变成 ``RAG_CASE_0020`` 0.022821）——
-  直接违反 §3「确定性不可退化」。融合定义/常数与它一致（同 k=60），并已提供
-  ``_make_fusion_retriever``（**必传 ``num_queries=1`` + ``MockLLM()`` 守卫**）供外部/测试
-  引用的「配置正确」构造：⚠️ ``num_queries`` 默认 4 会**调用 LLM 生成 query 变体**（源码
-  ``if self.num_queries > 1: queries.extend(self._get_queries(...))``），本项目检索侧
-  **禁止任何 LLM 调用**；且不传 ``llm`` 时该库回落 ``Settings.llm`` → 本环境直接
-  ``ImportError: llama-index-llms-openai package not found``（项目未装该集成）。
-
-``retrieval_score`` 口径（docs/10 §0 C1 / §6-R5）
-------------------------------------------------
-写进 ``CaseHit.retrieval_score`` 的是**检索分，不是语义相似度**：
-``bm25`` 模式 = 候选集内 min-max 归一化的 BM25 分；``vector`` 模式 = ``1 − distance``；
-**``hybrid`` 模式 = RRF 融合分**（``Σ 1/(k+rank)``，``k=60``，落在 ~(0, **2/60 = 1/30**]）。
-任何文档/注释/报告都**不得**把它表述成「语义相似度」。
-
-Metadata 过滤：**两路过滤位置不统一（实测钉死，如实标注）**
---------------------------------------------------------
-- 向量路：经 LlamaIndex ``MetadataFilters`` 下推到 Chroma ``where``（store 侧过滤）。
-- BM25 路：``BM25Retriever`` 无等价下推 —— 改为**按候选集重建 retriever**（构造期只喂
-  候选 node），即 Python 侧先过滤候选。
-
-→ 这正是 docs/10 §3 / §6-R2 记录的**已知口径分裂**（原 docs/06 P2-4 刻意只在 Python 侧
-单实现以避免双实现漂移）；本模块不掩盖它。为把「同语义」这条底线守住，向量路在
-store 下推**之后**仍会用**同一份** ``_match_*`` Python 谓词复核一遍（下推只为收窄候选，
-不参与判定）—— 两路最终判定是同一段代码，不存在双实现漂移。
-
-两处**实测**得到的 Chroma 过滤能力边界（决定了下推能推多少）：
-1. **列表字段的成员判定**：``{"risk_type": {"$in": [X]}}`` / ``$eq`` **恒不命中**
-   （Chroma 的 ``$in`` 面向标量）；把列表嵌进 ``$in`` 会报
-   ``ValueError: Expected operand value to be a str, int, float, or bool``。实测可用的只有
-   ``{"risk_type": {"$contains": X}}``（X 为标量）。
-2. ``llama_index.vector_stores.chroma`` 的 ``_transform_chroma_filter_operator`` 只认
-   ``!= == > < >= <= in nin`` —— ``FilterOperator.ANY/ALL/CONTAINS`` 直接抛
-   ``ValueError: Filter operator any not supported``（``contains`` 同理）。
-
-故向量路的下推范围为 **category（``FilterOperator.IN``，含「全类目」）**；
-``risk_type`` 交叠判定在 Python 侧与 BM25 路共用同一谓词（能力边界来自上面两条实测，
-非实现偷懒）。文档务必同步此段。
-
-jieba 接入（C3 的意图：成熟库 + 中文分词）
-------------------------------------------
-``llama-index-retrievers-bm25 0.8.0`` 实测**没有任何 tokenizer 注入点**：
-``from_defaults`` 里 ``tokenizer`` 参数已标记 deprecated（传了只 warning 且**不使用**），
-构造与检索两处都硬编码 ``bm25s.tokenize(..., token_pattern=self.token_pattern, stemmer=...)``
-（见安装源码），且该函数**只接受 ``str``**。因此本模块在**构造前后**把
-``bm25s.tokenize`` 替换为 jieba 实现（``_install_jieba_tokenizer`` / 可恢复的
-``_jieba_tokenizer`` 上下文管理器），使索引与查询**都**走 jieba 切词：
-
-- jieba 精确模式切词 → 词表按首次出现顺序稳定编号（确定性）；
-- 不做停用词/词干化（``skip_stemming=True`` / ``language=""`` 显式关掉英文 Stemmer ——
-  中文文本用英文词干器无意义且引入额外依赖行为）；
-- 缺失查询词由同一切词器编号进同一词表，不会给 bm25s 发越界 id
-  （否则会 ``ValueError: The maximum token ID in the query ... is higher than the number
-  of tokens in the index``）。
-
-这是对第三方库全局符号的**受控替换**（本模块独占，构造与检索均在同一锁内进行），
-在模块 docstring 如实记录 —— 不假装 bm25s 原生支持中文分词。
-
-确定性（不可退化）
-------------------
-检索链路**零 LLM、零随机**；排序 tie-break 恒为 ``(score 降序, corpus 原序 idx 升序)``，
-**不依赖** Chroma / bm25s 的返回顺序（两者顺序都不可信）；分数统一 ``round(..., 6)``。
-模块级 ``SERVED_COUNTERS`` 记录本进程内经本模块发出的 llm 调用数（恒为 0，供验收断言）。
-
-客户端与 collection
--------------------
-- 默认客户端 ``chromadb.HttpClient(host="127.0.0.1", port=8001)``（本机服务端已部署；
-  从不动连接，构造不联网 —— 见返回报告 §4）；可外部注入任意 client（测试）或使用
-  ``EphemeralClient()``（内存，离线恒跑）。
-- collection 名沿用仓库既有形状 ``<prefix or "pra">_<policy|case>_<dim>``（与
-  ``rag/qdrant_index.py`` 对齐，便于测试复用）；**建库必须同时满足两条**（§3 实测，缺一
-  不可，两条都是「静默出错」型陷阱）：
-
-  1. ``embedding_function=None`` —— 否则 Chroma 静默启用**默认 ONNX 嵌入函数**并去下模型
-     （我们自带向量）；
-  2. ``configuration={"hnsw": {"space": "cosine"}}`` —— **Chroma 默认空间是 ``l2``**，
-     只关嵌入函数**不会**变成 cosine。实测同一对单位向量 ``[1,0,0]`` vs ``[0.9,0.1,0]``：
-     默认 l2 → distance ``0.020000005``（``1 − distance`` = 0.979999995 而 numpy 余弦
-     0.993883735，**静默错**）；显式 cosine → distance ``0.006116271`` → ``1 − distance``
-     = 0.993883729 ✅。
-
-  空间由 :func:`_verify_collection_space` **断言**（新建 + 复用两条路径都查，读
-  ``collection.configuration["hnsw"]["space"]``/旧式 ``metadata["hnsw:space"]``），
-  并在 upsert 后做一次自身距离 ≈ 0 的 cosine 自检；不符即抛 ValueError（含清理指引），
-  **绝不带着未知/错误空间继续检索**。⚠️ 实测：对**已存在**的 l2 库再传 cosine 配置
-  ``get_or_create_collection`` **不会**改建库空间 —— 复用路径不校验就会拿到语义错库。
-  已存在时另校验 ``pra_dim`` 一致（同名不同维即报错，不静默复用）。
-- 空候选集 → 返回 ``[]``（合法空结果，工具 ok=True），与其它实现一致。
+查询链路：向量路（ChromaDB cosine）+ BM25 路（``bm25s`` + jieba）→ RRF 融合 → Top-K。
+业务边界由 tools 层 Protocol 守护；1 条款 / 1 先例 = 1 Node，不切分，node id 由「collection
+名 + corpus 行键」哈希得出，重建幂等覆盖。
+三种模式：``vector`` = ``1 − distance``；``bm25`` = 候选集内 min-max 归一化；``hybrid`` =
+RRF（``Σ 1/(60+rank)``）。写进 ``CaseHit.retrieval_score`` 的是检索分，不是语义相似度。
+建 collection 两条缺一即静默出错：``embedding_function=None``（否则启用默认 ONNX 嵌入函数并
+去下模型）、``space="cosine"``（Chroma 缺省 ``l2``，让「相似度 = 1 − distance」失效）；已存在的
+l2 collection 传配置**不会**被改建，故创建与复用两条路径都校验空间。过滤位置两路不统一：向量路
+把 ``category`` 下推到 store，BM25 路只喂候选 node，最终判定是同一份 Python 谓词；``risk_type``
+只能在 Python 侧判（Chroma ``$in`` 对列表字段恒不命中、LlamaIndex 的 ANY/CONTAINS 无翻译）。
+``bm25s.tokenize`` 无注入点，故构造与检索期间在锁内换成 jieba 实现；这**不是「天然线程安全」**，
+``_TOKENIZER_LOCK`` 必须写在前面。链路零 LLM、零随机；tie-break 为「分降序、corpus 原序升序」。
 """
 
 from __future__ import annotations
@@ -147,7 +27,7 @@ from datetime import date
 from typing import Any
 
 # 顶层只 import 仓库内模块 + 标准库；chroma / llama_index / jieba 一律延迟 import
-# （默认 local 路径零额外依赖，构造/检索时才拉起 —— 对齐 rag/qdrant_index.py 的约定）。
+# （默认 local 路径零额外依赖，构造/检索时才拉起）。
 from pra.rag.corpus.schema import CasePrecedentRecord, PolicyClauseRecord
 from pra.rag.embedder import Embedder, MockHashEmbedder
 from pra.rag.llama_embedding import LlamaIndexEmbeddingAdapter
@@ -180,21 +60,21 @@ __all__ = [
 # 常量
 # ---------------------------------------------------------------------------
 
-#: 默认 Chroma 服务端地址（deploy/chroma：宿主 8001 → 容器 8000；`/api/v1` 已废弃，只用 /api/v2）。
+#: 默认 Chroma 服务端地址（deploy/chroma：宿主 8001 → 容器 8000；只用 `/api/v2`）。
 CHROMA_DEFAULT_HOST = "127.0.0.1"
 CHROMA_DEFAULT_PORT = 8001
 
-#: collection 名形状（与 rag/qdrant_index.py 的 `_collection_name` 同形）。
+#: collection 名形状（与 qdrant 后端的 `_collection_name` 同形）。
 COLLECTION_NAME_TEMPLATE = "<prefix or 'pra'>_<policy|case>_<dim>"
 
 _DEFAULT_COLLECTION_PREFIX = "pra"
 _FULL_CATEGORY = "全类目"
 #: metadata 维度键（Chroma 不声明向量维度，故把本索引声明的 dim 存进 collection metadata 复用校验）。
 _DIM_KEY = "pra_dim"
-#: 风险类型列表键（空列表不写 —— Chroma 拒绝空列表 metadata 值，见模块 docstring）。
+#: 风险类型列表键（空列表不写 —— Chroma 1.5.9 拒绝空列表 metadata 值）。
 _RISK_TYPE_KEY = "risk_type"
 
-#: RRF 常数 k=60（与 ``QueryFusionRetriever._reciprocal_rerank_fusion`` 同源：Cormack 2009）。
+#: RRF 常数 k=60（与 ``QueryFusionRetriever`` 的融合同源：Cormack 2009）。
 _RRF_K = 60.0
 
 #: 本进程内经本模块发出的计数（验收断言用）：llm 必须恒为 0（检索侧零 LLM）。
@@ -220,11 +100,6 @@ _LATIN_RUN = re.compile(r"[0-9A-Za-z_]+")
 
 
 def _import_chroma() -> tuple[Any, Any]:
-    """延迟 import ``chromadb``（仅构造路径调用；模块顶层不 import）。
-
-    缺包时报错并提示安装 extra（与 ``rag/qdrant_index._import_qdrant`` 同风格）。
-    返回 ``(chromadb, ChromaNotFoundError)``。
-    """
     try:
         import chromadb
         from chromadb.errors import NotFoundError as ChromaNotFoundError
@@ -237,11 +112,10 @@ def _import_chroma() -> tuple[Any, Any]:
 
 
 def _import_llama() -> dict[str, Any]:
-    """延迟 import LlamaIndex 装配面（仅构造路径调用；模块顶层不 import）。
+    """延迟 import LlamaIndex 装配面（仅构造路径调用）。
 
-    只 import ``llama-index-core`` + ``llama-index-retrievers-bm25`` +
-    ``llama-index-vector-stores-chroma`` 三个具体集成（**不装/不引伞包** ``llama-index``，
-    docs/10 §3：「伞包会拖进 llms-openai / embeddings-openai 等不用的集成」）。
+    只 import core + retrievers-bm25 + vector-stores-chroma 三个具体集成，不引伞包
+    ``llama-index``（伞包会拖进 llms-openai / embeddings-openai 等不用的集成）。
     """
     try:
         from llama_index.core.base.base_retriever import BaseRetriever
@@ -282,13 +156,8 @@ def make_chroma_client(
 ) -> Any:
     """取用/自建 Chroma 客户端（外部注入优先）。
 
-    - ``chroma_client`` 非空 → 原样返回（测试注入 ``EphemeralClient`` 或自有 client）；
-    - ``ephemeral=True`` → ``chromadb.EphemeralClient()``（进程内内存库，**离线可用**）；
-    - 否则 → ``chromadb.HttpClient(host=host, port=port)``（默认本机 ``127.0.0.1:8001``
-      服务端）。
-
-    **构造不联网**：``HttpClient`` 只做参数装配，首个请求才建立连接（故无服务端时构造
-    安全、检索时才失败）。匿名遥测显式关闭（用本机服务端不应产生外发流量）。
+    ``ephemeral=True`` → 进程内 ``EphemeralClient``；否则 ``HttpClient(host, port)``。
+    **构造不联网**（``HttpClient`` 只做参数装配，首个请求才连接）；匿名遥测显式关闭。
     """
     if chroma_client is not None:
         return chroma_client
@@ -306,22 +175,19 @@ def make_chroma_client(
 
 
 def _collection_name(prefix: str | None, kind: str, dim: int) -> str:
-    """collection 名：``<prefix or "pra">_<policy|case>_<dim>``（与 qdrant 后端同形）。"""
     return f"{prefix or _DEFAULT_COLLECTION_PREFIX}_{kind}_{dim}"
 
 
 def _node_id(collection: str, key: str) -> str:
-    """node id = ``sha256(collection + '\x1f' + row_key)`` 前 16 字节 hex（稳定、幂等覆盖）。
+    """node id = ``sha256(collection + 行键)`` 前 16 字节 hex（稳定、幂等覆盖）。
 
-    以 collection 名参与哈希，避免 policy / case KB 在同一 collection 前缀下 node id 撞车；
-    同 corpus 重复构造 → 同 id → upsert 幂等覆盖（不产生重复点）。
+    collection 名参与哈希，避免 policy / case KB 前缀相同时 node id 撞车。
     """
     digest = hashlib.sha256(f"{collection}\x1f{key}".encode()).hexdigest()[:32]
     return f"pra-{digest}"
 
 
 def _resolve_dim(embedder: Embedder, doc_vectors: list[list[float]]) -> int:
-    """解析检索向量维度（embedder 声明优先，否则取首条 doc 向量的长度）。"""
     dim = getattr(embedder, "dim", None)
     if isinstance(dim, int) and dim > 0:
         if doc_vectors and len(doc_vectors[0]) != dim:
@@ -335,8 +201,7 @@ def _resolve_dim(embedder: Embedder, doc_vectors: list[list[float]]) -> int:
 
 
 #: collection 的期望向量空间（**必须显式 cosine**）：Chroma 默认是 ``l2``，
-#: 而本模块「相似度 = 1 − distance」的整套口径只在 cosine 空间成立 —— 见
-#: :func:`_verify_collection_space` 的实测记录。
+#: 而本模块「相似度 = 1 − distance」的整套口径只在 cosine 空间成立。
 _REQUIRED_SPACE = "cosine"
 
 #: cosine 自检容差（实测 distance==0 时精确为 0；浮点尾差留 1e-6）。
@@ -346,12 +211,10 @@ _SELF_CHECK_TOL = 1e-6
 def _collection_space(collection: Any) -> str | None:
     """读 collection 的向量空间（优先新式 ``configuration["hnsw"]["space"]``，回落旧式 metadata）。
 
-    - 新式（chromadb ≥ 0.6/1.x）：``collection.configuration["hnsw"]["space"]``，
-      实测（1.5.9）建库时传 ``configuration={"hnsw":{"space":"cosine"}}`` 或
-      ``metadata={"hnsw:space":"cosine"}`` 都会在 config 里体现为 ``"cosine"``；
-    - 旧式：``collection.metadata["hnsw:space"]``（老版本 API）。
     都读不到 → ``None``（调用方按「无法确认」处理，不假定 cosine）。
     """
+    # 新式（chromadb ≥ 0.6/1.x）：实测 1.5.9 建库时传 configuration 或 metadata 都会在
+    # config 里体现为 "cosine"；旧式（老版本 API）只有 metadata["hnsw:space"]。
     cfg = getattr(collection, "configuration", None) or {}
     hnsw = cfg.get("hnsw") if isinstance(cfg, dict) else None
     if isinstance(hnsw, dict) and hnsw.get("space"):
@@ -366,23 +229,12 @@ def _collection_space(collection: Any) -> str | None:
 def _verify_collection_space(collection: Any, name: str, *, context: str) -> None:
     """**断言 collection 真的是 cosine 空间**，不是 cosine 就报错（绝不静默降级）。
 
-    为什么必须有这道闸（docs/10 §3 更正后钉死，本模块实测复现）：
-    ``embedding_function=None`` **只管住默认 ONNX 嵌入函数，不管向量空间** ——
-    Chroma 的默认空间是 **l2**。实测同一对单位向量 ``[1,0,0]`` vs ``[0.9,0.1,0]``：
-
-    - 只传 ``embedding_function=None`` → ``space='l2'``，distance **0.020000005**
-      （=``2(1−cos)``，单位向量下 ``l2`` 距离与余弦不同），``1 − distance`` = 0.979999995
-      而 numpy 余弦 = 0.993883735 → **静默错**；
-    - ``configuration={"hnsw": {"space": "cosine"}}`` → ``space='cosine'``，
-      distance **0.006116271** → ``1 − distance`` = 0.993883729 ≈ numpy 0.993883735 ✅；
-    - ``metadata={"hnsw:space": "cosine"}`` → 同上 ✅。
-
-    更隐蔽的一点（本模块实测）：**对已存在的 l2 collection**，
-    ``get_or_create_collection(..., configuration={"hnsw":{"space":"cosine"}})`` /
-    ``metadata={"hnsw:space":"cosine"}`` **都不会改建库空间**（仍是 ``l2``）——
-    复用路径不校验就会拿到一个「看起来正常、语义却错」的库。故复用与新建**两条路径都校验**。
-
-    读不到空间（``None``）时也报错：宁可让调用方显式清理/换名前缀，也不在未知空间上跑检索。
+    ``embedding_function=None`` **只管住默认 ONNX 嵌入函数，不管向量空间** —— Chroma 默认空间是
+    **l2**。实测单位向量 ``[1,0,0]`` vs ``[0.9,0.1,0]``：默认 l2 → distance ``0.020000005``
+    （``1 − distance`` = 0.979999995 而 numpy 余弦 0.993883735，**静默错**）；显式 cosine →
+    ``0.006116271`` → ``1 − distance`` = 0.993883729。**对已存在的 l2 collection**，再传 cosine
+    配置**不会**改建库空间 —— 故新建与复用**两条路径都校验**。读不到空间（``None``）时也报错：
+    宁可让调用方显式清理/换名前缀，也不在未知空间上检索。
     """
     space = _collection_space(collection)
     if space != _REQUIRED_SPACE:
@@ -399,18 +251,11 @@ def _verify_collection_space(collection: Any, name: str, *, context: str) -> Non
 def check_cosine_self_check(
     collection: Any, sample_vector: list[float], *, name: str
 ) -> float:
-    """cosine 自检：用「库内已有向量」查库，返回自身距离（cosine 空间必须 ≈ 0）。
+    """cosine 自检：用库内已有向量查库，返回自身距离（cosine 空间须 ≈ 0）。
 
-    取一条**已入库**的向量（通常 ``_doc_vectors[0]``）作查询：cosine 空间里它与自身的
-    距离应为 0。实测（MockHashEmbedder，真服务端）出现两类值：``0.0`` 与
-    ``-1.1920929e-07``（float32 尾差，Chroma 存 float32）—— 故用 ``abs() <= _SELF_CHECK_TOL``
-    判定，并让调用方据此回带精确数值（返回原值，便于打印实测证据）。
-
-    真值来源仍是 :func:`_verify_collection_space` 的 configuration 判定（本项自身距离在
-    **l2 空间同样为 0**，单独看不区分空间）；本函数是第二道防线：抓「库未 upsert / 被清空 /
-    空间被外力改掉后数值不可信」这类问题，并给出可打印的实测数字。
-    「单位向量自检」（``1 − distance`` vs numpy 余弦）需要一条**已知不同**的单位向量对，
-    由验收脚本在独立 collection 上做（本函数不往业务库里塞探针向量）。
+    实测自距离有 ``0.0`` 与 ``-1.1920929e-07``（float32 尾差）两类，故用
+    ``abs() <= _SELF_CHECK_TOL`` 判定。自距离在 l2 空间同样为 0，单独看不区分空间；本函数是
+    第二道防线：抓「库未 upsert / 被清空 / 空间被外力改掉后数值不可信」。
     """
     result = collection.query(
         query_embeddings=[list(sample_vector)], n_results=1, include=["distances"]
@@ -428,11 +273,10 @@ def check_cosine_self_check(
 
 
 def check_cosine_space(collection: Any, name: str) -> str:
-    """检索前复检空间（默认对**每次** ``search`` 调用执行，返回空间名）。
+    """检索前复检空间（每次 ``search`` 都执行，返回空间名）。
 
-    读 ``configuration["hnsw"]["space"]``（:func:`_collection_space`）并断言为 cosine。
-    成本可忽略（框架本地字段读取，无网络）；收益是「空间错误」永远在检索前暴露，而不是
-    让错误的 ``1 − distance`` 静默流进 ``CaseHit.retrieval_score`` 与 Evidence.weight。
+    成本可忽略（本地字段读取）；收益是空间错误永远在检索前暴露，而不是让错误的
+    ``1 − distance`` 静默流进 ``CaseHit.retrieval_score``。
     """
     _verify_collection_space(collection, name, context="检索前复检")
     return _collection_space(collection) or _REQUIRED_SPACE
@@ -443,16 +287,9 @@ def _open_collection(
 ) -> tuple[Any, bool]:
     """``get_or_create_collection``（**必须 ``embedding_function=None`` + 显式 cosine 空间**）。
 
-    实测（docs/10 §3）两条独立约束，缺一不可：
-
-    1. **``embedding_function=None``**：不显式关掉，Chroma 会启用**默认 ONNX 嵌入函数**
-       并尝试下载模型 —— 本项目自带向量，必须关闭；
-    2. **``configuration={"hnsw": {"space": "cosine"}}``**：Chroma 默认空间是 **l2**，
-       只关嵌入函数**不会**变成 cosine（实测见 :func:`_verify_collection_space`）。
-
-    返回 ``(collection, reused)``：两条路径都校验空间（复用路径尤其重要 —— 实测对已存在的
-    l2 库再传 cosine 配置**不会改建库空间**）；维度写入 collection metadata 供复用校验。
-    同名不同前缀由调用方负责（``name`` 已含 prefix+kind+dim）。
+    不关 ``embedding_function`` 会启用默认 ONNX 嵌入函数并去下模型；不显式 cosine 则空间是
+    Chroma 缺省的 l2。返回 ``(collection, reused)``：两条路径都校验空间（复用路径尤其重要 ——
+    对已存在的 l2 库再传 cosine 配置**不会**改建库空间）。
     """
     _import_chroma()  # 缺包早失败（提示装 extra）；本函数只用注入进来的 client
     try:
@@ -474,7 +311,6 @@ def _open_collection(
 
 
 def _validate_collection_dim(collection: Any, name: str, dim: int) -> None:
-    """复用已有 collection 时校验维度（Chroma 不声明维度 → 读我们写入的 metadata）。"""
     existing = (collection.metadata or {}).get(_DIM_KEY)
     if existing is not None and int(existing) != int(dim):
         raise ValueError(
@@ -490,7 +326,6 @@ def delete_collection(
     host: str = CHROMA_DEFAULT_HOST,
     port: int = CHROMA_DEFAULT_PORT,
 ) -> bool:
-    """删除 collection（测试清理用）；不存在返回 False（幂等，不抛）。"""
     client = make_chroma_client(chroma_client, host=host, port=port)
     try:
         client.delete_collection(name)
@@ -502,18 +337,16 @@ def delete_collection(
 
 
 def served_counters() -> dict[str, int]:
-    """本进程内经本模块发出的计数快照（``llm_calls`` 必须恒为 0 —— 检索侧零 LLM）。"""
     return dict(SERVED_COUNTERS)
 
 
 def reset_served_counters() -> None:
-    """清零 ``SERVED_COUNTERS``（测试/验收断言前调用）。"""
     for key in SERVED_COUNTERS:
         SERVED_COUNTERS[key] = 0
 
 
 # ---------------------------------------------------------------------------
-# jieba 分词接入（bm25s.tokenize 的受控替换，见模块 docstring）
+# jieba 分词接入（bm25s.tokenize 的受控替换）
 # ---------------------------------------------------------------------------
 
 #: 全局替换锁：bm25s.tokenize 是模块级符号，构造与检索期间独占。
@@ -523,9 +356,8 @@ _TOKENIZER_LOCK = threading.RLock()
 def _jieba_tokens(text: str) -> list[str]:
     """jieba 精确模式切词（确定性；拉丁/数字串拆出并小写，中文词原样）。
 
-    不做停用词过滤/词干化：中文语料上英文词干器无意义，且过滤器会引入版本相关行为。
-    单字符词（如「的」）保留 —— 其文档频率高、IDF 低，对排序影响可忽略；宁可不裁剪也
-    不引入一份需要维护的停用词表。
+    不做停用词过滤/词干化（中文语料上英文词干器无意义）；单字符词保留（文档频率高、IDF 低，
+    对排序影响可忽略）。
     """
     import jieba
 
@@ -544,9 +376,8 @@ def _jieba_tokens(text: str) -> list[str]:
 def _jieba_bm25s_tokenize(texts: Any, **_kwargs: Any) -> Any:
     """``bm25s.tokenize`` 的 jieba 替身（签名兼容：忽略 token_pattern/stemmer/stopwords 等）。
 
-    行为：逐文档 jieba 切词 → 词表「首次出现即编号」（跨文档共享，确定性）；查询与索引
-    走同一函数 → 缺失查询词也进词表，**不会**触发 bm25s 的越界 token id 报错。
-    返回 ``bm25s.tokenization.Tokenized``（``BM25Retriever`` 只用其 ``ids``）。
+    逐文档切词 → 词表「首次出现即编号」（跨文档共享，确定性）；查询与索引走同一函数 →
+    缺失查询词也进词表，不会触发 bm25s 的越界 token id 报错。
     """
     from bm25s.tokenization import Tokenized
 
@@ -568,19 +399,16 @@ def _jieba_bm25s_tokenize(texts: Any, **_kwargs: Any) -> Any:
 def _jieba_tokenizer():
     """在上下文内把 ``bm25s.tokenize`` 换成 jieba 实现（退出即恢复原符号）。
 
-    ``BM25Retriever`` 构造与 ``retrieve`` 两处都硬编码调用 ``bm25s.tokenize``，且**没有**
-    tokenizer 注入点（0.8.0 实测），故只能在此上下文内完成索引与查询 —— 保证「索引分词」
-    与「查询分词」是同一个分词器（否则词表不一致）。
+    ``BM25Retriever`` 的构造与 ``retrieve`` 都硬编码调用 ``bm25s.tokenize`` 且没有注入点，故索引
+    与查询都必须在此上下文内完成 —— 保证两者是同一个分词器。
 
     🔴 **调用方必须写成 ``with _TOKENIZER_LOCK, _jieba_tokenizer():``（锁在前、补丁在后）**：
-    多个上下文管理器按「左→右 __enter__、右→左 __exit__」执行，若写成
-    ``with _jieba_tokenizer(), _TOKENIZER_LOCK:``，则打补丁在取锁**之前**、恢复在放锁
-    **之后** —— 临界区不覆盖补丁的安装/撤销，两个并发线程下必然出错（实测，R6）：
-    线程 B 会把「A 打的补丁」当成 ``original`` 存下，A 退出即恢复真身 → **B 在自以为的
-    jieba 上下文内用真分词器检索 jieba 建的索引**（实测
-    ``ValueError: The maximum token ID in the query (56) is higher than the number of
-    tokens in the index.``）；B 退出再把补丁写回 → ``bm25s.tokenize`` **进程级永久泄漏**。
-    锁在前则补丁窗口 ⊆ 持锁窗口，两线程的补丁窗口互不相交，save/restore 自然成栈。
+    上下文管理器按「左→右 __enter__、右→左 __exit__」执行；写成 ``with _jieba_tokenizer(),
+    _TOKENIZER_LOCK:`` 则补丁在取锁**之前**、恢复在放锁**之后** —— 临界区不覆盖补丁的安装/
+    撤销，并发下必然出错：线程 B 会把「A 打的补丁」当 ``original`` 存下，A 退出即恢复真身 →
+    B 在自以为的 jieba 上下文里用真分词器检索 jieba 建的索引（``ValueError: The maximum token
+    ID in the query ... is higher than the number of tokens in the index.``）；B 退出再把补丁
+    写回 → ``bm25s.tokenize`` 进程级永久泄漏。
     """
     import bm25s
 
@@ -598,12 +426,10 @@ def _jieba_tokenizer():
 
 
 def _iso_or_empty(value: date | None) -> str:
-    """``date`` → ISO 串（None → 空串）。Chroma metadata 不收 None（写库前会被换成 ""）。"""
     return value.isoformat() if value is not None else ""
 
 
 def policy_node_metadata(row: PolicyClauseRecord) -> dict[str, Any]:
-    """Policy 条款 → node metadata（docs/10 §3 规定字段；空 risk_type 不写键）。"""
     meta: dict[str, Any] = {
         "clause_id": row.clause_id,
         "policy_id": row.policy_id,
@@ -618,7 +444,6 @@ def policy_node_metadata(row: PolicyClauseRecord) -> dict[str, Any]:
 
 
 def case_node_metadata(row: CasePrecedentRecord) -> dict[str, Any]:
-    """Case 先例 → node metadata（docs/10 §3 规定字段；空 risk_type 不写键）。"""
     meta: dict[str, Any] = {
         "case_id": row.case_id,
         "category": row.category,
@@ -631,12 +456,10 @@ def case_node_metadata(row: CasePrecedentRecord) -> dict[str, Any]:
 
 
 def _policy_text(row: PolicyClauseRecord) -> str:
-    """Policy 检索文本 = ``title。text``（与 ``rag/index.py`` 同口径）。"""
     return f"{row.title}。{row.text}"
 
 
 def _case_text(row: CasePrecedentRecord) -> str:
-    """Case 检索文本 = ``summary``（与 ``rag/index.py`` 同口径）。"""
     return row.summary
 
 
@@ -645,23 +468,14 @@ def _build_nodes(
 ) -> tuple[list[Any], list[str]]:
     """corpus 行 → (TextNode 列表, node id 列表)。**1 行 = 1 Node，不切分**。
 
-    **检索文本 = 正文**（policy：``title。text``；case：``summary``）—— 与 local 后端
-    （``rag/index.py`` 的 ``_texts``）及本模块向量路 embed 的文本**同一份**。
+    检索文本 = 正文（policy：``title。text``；case：``summary``），与向量路 embed 的文本、
+    local 后端同一份。
 
-    节点 metadata **不参与任何检索文本**（R7 决策）：
-    ``TextNode(excluded_embed_metadata_keys=<全部 metadata 键>)`` 使
-    ``node.get_content(metadata_mode=MetadataMode.EMBED)`` 只返回正文。这一点对 BM25 路是
-    **必需**的 —— ``BM25Retriever`` 用的正是 ``MetadataMode.EMBED``（安装源码
-    ``bm25s.tokenize([node.get_content(metadata_mode=MetadataMode.EMBED) ...])``），
-    不排除就会把 ``case_id`` / ``category`` / ``decision`` / ``risk_level`` / ``risk_type``
-    的字面值（如 ``RAG_CASE_0001`` / ``POTENTIAL_IP_RISK``）索引进去，出现「按 metadata
-    字面值就能命中」的伪检索。实测（本模块，见返回报告 R7 证据）：不排除时 EMBED 文本以
-    ``case_id: RAG_CASE_0001`` / ``category: …`` / ``decision: REJECT`` / ``risk_level: HIGH`` /
-    ``risk_type: ['POTENTIAL_IP_RISK', …]`` 开头再接正文；排除后 EMBED 文本 == 正文。
-    该排除设置**随 ``node_to_metadata_dict`` 的 ``_node_content`` JSON 往返存活**（已实测），
-    故 ``BM25Retriever`` 由 metadata 重建节点时排除仍然生效。
-
-    注：``metadata`` 本身仍完整保留（含 R-4 隔离所需字段），只是不进检索文本。
+    **metadata 不进检索文本**：``excluded_embed_metadata_keys`` / ``excluded_llm_metadata_keys``
+    设为全部 metadata 键，使 ``get_content(metadata_mode=EMBED)`` 只返回正文 —— 这对 BM25 路
+    **必需**（``BM25Retriever`` 用 ``MetadataMode.EMBED``），不排除就会把 ``case_id`` /
+    ``category`` / ``decision`` / ``risk_type`` 的字面值索引进去，出现「按 metadata 字面值就能
+    命中」的伪检索。排除设置随 ``_node_content`` JSON 往返存活；metadata 本身仍完整保留。
     """
     nodes: list[Any] = []
     node_ids: list[str] = []
@@ -676,7 +490,7 @@ def _build_nodes(
                 id_=nid,
                 text=text,
                 metadata=meta,
-                # R7：metadata 不进检索文本（EMBED/LLM 两个模式都排除；ALL 仍保留供审计）。
+                # metadata 不进检索文本（EMBED/LLM 两个模式都排除；ALL 仍保留供审计）。
                 excluded_embed_metadata_keys=list(meta.keys()),
                 excluded_llm_metadata_keys=list(meta.keys()),
             )
@@ -690,10 +504,8 @@ def _build_nodes(
 
 
 def _policy_candidates(rows: list[PolicyClauseRecord], filters: PolicySearchFilters, effective_only: bool) -> list[int]:
-    """Policy 候选行索引（语义与 ``rag/index.py`` / ``rag/qdrant_index.py`` 逐条一致）。
-
-    ``effective_only`` → ``status == "EFFECTIVE"``；``category`` ∈ {None, 值, 全类目}；
-    ``risk_type`` 与给定集合交叠非空。
+    """候选行索引（语义与 local / qdrant 后端逐条一致）：``effective_only`` → ``status ==
+    "EFFECTIVE"``；``category`` ∈ {None, 值, 全类目}；``risk_type`` 交叠非空。
     """
     candidates: list[int] = []
     for i, r in enumerate(rows):
@@ -710,7 +522,6 @@ def _policy_candidates(rows: list[PolicyClauseRecord], filters: PolicySearchFilt
 
 
 def _case_candidates(rows: list[CasePrecedentRecord], filters: CaseSearchFilters) -> list[int]:
-    """Case 候选行索引（category **精确匹配**、risk_type 交叠非空 —— 与既有实现一致）。"""
     candidates: list[int] = []
     for i, r in enumerate(rows):
         if filters.category and r.category != filters.category:
@@ -724,11 +535,8 @@ def _case_candidates(rows: list[CasePrecedentRecord], filters: CaseSearchFilters
 
 
 def _policy_store_filters(filters: PolicySearchFilters, llama: dict[str, Any]) -> Any | None:
-    """Policy 下推过滤（向量路）：仅 ``category``（含「全类目」）可下推。
-
-    ``risk_type`` 不下推 —— 实测 Chroma ``$in``/``$eq`` 对**列表字段**恒不命中，
-    而 LlamaIndex 的 ``FilterOperator.ANY/CONTAINS`` 在 chroma 集成里**无翻译**会抛
-    ValueError（详见模块 docstring「两处实测得到的 Chroma 过滤能力边界」）。
+    """Policy 下推过滤（向量路）：仅 ``category``（含「全类目」）可下推 —— Chroma 的
+    ``$in``/``$eq`` 对列表字段恒不命中，LlamaIndex 的 ANY/CONTAINS 在 chroma 集成里无翻译。
     """
     if not filters.category:
         return None
@@ -744,10 +552,7 @@ def _policy_store_filters(filters: PolicySearchFilters, llama: dict[str, Any]) -
 
 
 def _case_store_filters(filters: CaseSearchFilters, llama: dict[str, Any]) -> Any | None:
-    """Case 下推过滤（向量路）：仅 ``category``（精确匹配可下推）。
 
-    ``risk_type`` 同 policy：Chroma 列表字段无可用成员操作符 → 留在 Python 侧。
-    """
     if not filters.category:
         return None
     return llama["MetadataFilters"](
@@ -768,7 +573,6 @@ def _case_store_filters(filters: CaseSearchFilters, llama: dict[str, Any]) -> An
 
 @dataclass
 class _RetrievalContext:
-    """一次检索需要的装配面（两个索引类共用；避免 policy / case 双实现）。"""
 
     kind: str
     rows: list[Any]
@@ -784,14 +588,11 @@ class _RetrievalContext:
 
 
 def _filters_to_chroma_where(store_filters: Any | None) -> dict | None:
-    """LlamaIndex ``MetadataFilters`` → Chroma ``where`` dict（本模块自实现的**显式**下推）。
+    """LlamaIndex ``MetadataFilters`` → Chroma ``where`` dict（显式下推）。
 
-    支持本项目实际用到的两种算子（``in`` / ``eq``，可组合成 ``$and``）；出现别的算子即
-    报错（不静默忽略 —— 静默会变成「下推了但没推」的隐性错误）。
-
-    ⚠️ 为什么不用 ``llama_index.vector_stores.chroma.base._to_chroma_filter``：本模块的向量路
-    直接读 **Chroma 原生返回的 distance**（见 :func:`_make_vector_retriever` 的实测理由），
-    不再经过 ``ChromaVectorStore.query``，故 where 子句也由本函数显式转换（行为等价、可审计）。
+    支持本项目实际用到的 ``in`` / ``eq``（可组合成 ``$and``）；出现别的算子即报错 —— 静默忽略
+    会变成「下推了但没推」的隐性错误。向量路直接读原生 distance，不经过 ``ChromaVectorStore.query``，
+    故 where 也由本函数显式转换（行为等价、可审计）。
     """
     if store_filters is None:
         return None
@@ -823,39 +624,19 @@ def _make_vector_retriever(
     store_filters: Any | None,
     candidate_ids: list[str] | None = None,
 ) -> Any:
-    """向量检索器：Chroma（cosine 距离）+ ``MetadataFilters`` 下推，分数 = ``1 − distance``。
+    """向量检索器：Chroma cosine 距离，分数 = ``1 − distance``。
 
-    ⚠️ **实测**：``ChromaVectorStore.query`` 把分数算成 ``similarity = exp(-distance)``
-    （读安装源码 ``_query`` 可见 ``similarity_score = math.exp(-distance)``；实测
-    ``[1,0,0]`` vs ``[0.9,0.1,0]`` → store 给 0.993902，而 ``1 − distance`` = 0.9938837）。
-    那是**另一套映射、不是余弦**，会破坏「向量分 = 余弦相似度」这一 docs/10 §3 钉死的口径。
+    ``ChromaVectorStore.query`` 的分是 ``exp(-distance)`` —— **另一套映射、不是余弦**，故取数走
+    **Chroma 原生 ``collection.query``** 自己算 ``1 − distance``；节点由 node id 直接映射，不经
+    ``_node_content`` JSON 反序列化（那一步在语料含相同内容行时会与 ``node.hash`` 去重冲突）。
 
-    故本检索器**只借用标准 LlamaIndex 装配面**（``BaseRetriever`` 子类 + ``MetadataFilters``
-    下推语义 + ``TextNode``），但取数走 **Chroma 原生 ``collection.query``**：拿 ``distance``
-    自己算 ``1 − distance``。节点对象由本模块的 node id → TextNode 表直接映射（node id
-    由行键派生，逐行唯一），**不经** ``_node_content`` JSON 反序列化（那一步在语料含
-    相同内容行时会与 ``node.hash`` 去重冲突）。
-
-    ★ **``candidate_ids`` = 候选集的 node id（本模块给的精确集合）** —— 这是漏召回 bug 的修复点。
-
-    原缺陷（另一个 agent 测出、本模块复现）：先用 ``MetadataFilters`` 把 ``where`` 下推，
-    再按 ``n_results = len(candidates)`` 取 top-N —— 但**下推的 ``where`` 只是候选谓词的
-    超集**（``risk_type`` 无法下推：Chroma 列表字段没有成员算子；``effective_only`` 也不在
-    ``where`` 里）。于是**非候选行按距离抢占 top-N 名额**，被 Python 复核剔除后没有补位，
-    真候选从未被打分 → 结果是 local 的**真子集**，最坏为**空**。实测（真服务端 + Mock 嵌入，
-    修复前）：policy ``外观模仿`` + ``risk_type=[FALSE_CLAIM]`` + ``effective_only`` k=6 →
-    local 3 / chroma **0**；policy ``品牌词`` + ``effective_only``（无任何 store 过滤！）k=30 →
-    local 21 / chroma **19**（只因 EXPIRED 行抢位）。
-
-    修法：把**精确候选 node id 集合**交给 Chroma（``ids=`` 过滤，等价 ``$in``，但走原生 ids
-    参数），即「store 返回的集合 **⊇** 候选集」由构造保证（请求的就是候选本身），
-    ``n_results = min(candidate_count, collection.count())``；随后 Python 复核 + ``top_k``
-    截断照旧。**并断言覆盖率**（见 :meth:`_ChromaCosineRetriever._retrieve`）：返回 id 集合
-    必须覆盖候选集合，否则重试，重试后仍不覆盖即抛。
+    ★ ``candidate_ids`` = 候选集的 node id，这是漏召回 bug 的修复点：下推的 ``where`` 只是候选
+    谓词的**超集**（``risk_type`` 无法下推、``effective_only`` 也不在 ``where`` 里），若只按下推
+    结果取 top-N，非候选行会按距离抢占名额，被 Python 复核剔除后没有补位 → 结果变成真子集甚至
+    空。修法：把精确候选 id 交给 Chroma 的 ``ids=`` 参数，随后复核 + 截断照旧，并断言覆盖率。
     """
 
     class _ChromaCosineRetriever(ctx.llama["BaseRetriever"]):
-        """Chroma cosine 检索器：分数 = ``1 − distance``（**不是** ``exp(-distance)``）。"""
 
         def __init__(self) -> None:
             super().__init__()
@@ -863,18 +644,12 @@ def _make_vector_retriever(
             self._emb = ctx.embed_model
             self._k = int(similarity_top_k)
             self._where = _filters_to_chroma_where(store_filters)
-            # Chroma 返回的是 **node id**（`_node_id()` 派生），不是 corpus 行键 —— 映射键必须用 node id。
+            # Chroma 返回的是 node id（`_node_id()` 派生），不是 corpus 行键 —— 映射键必须用 node id。
             self._by_id = {nid: node for nid, node in zip(ctx.node_ids, ctx.nodes)}
             #: 精确候选 id（NodeWithScore 只允许这些 id 出现；None = 未限定，取 ``where`` 命中的 top-N）。
             self._candidate_ids = list(candidate_ids) if candidate_ids is not None else None
 
         def _query_once(self, query_embedding: list[float]) -> tuple[list[str], list[float]]:
-            """一次 Chroma 查询 → (ids, distances)。
-
-            ``n_results`` 的取值原则：**只要候选**（``len(candidate_ids)``），并夹到
-            ``collection.count()`` —— 实测 ``n_results`` 大于库内条数不会报错（返回全部），
-            但显式夹住可让「要多少」与「只可能有多少」一致，便于覆盖率断言归因。
-            """
             kwargs: dict[str, Any] = {
                 "query_embeddings": [list(query_embedding)],
                 "include": ["distances"],
@@ -896,9 +671,8 @@ def _make_vector_retriever(
             if self._collection is None or not self._by_id:
                 return []
             query_embedding = self._emb.get_query_embedding(query_bundle.query_str)
-            # 覆盖率自检（**不假定「要了 N 就一定拿到 N」**）：chromadb 1.5.9 实测存在少返
-            # （另一 agent 测到 count()=69 而 query(n_results=69) 只回 68；本模块 ephemeral
-            #  紧接 upsert 也见过）。重试 _VECTOR_COVERAGE_ATTEMPTS 次，仍缺真候选即抛。
+            # 覆盖率自检（不假定「要了 N 就一定拿到 N」）：chromadb 1.5.9 实测存在少返。
+            # 重试 _VECTOR_COVERAGE_ATTEMPTS 次，仍缺真候选即抛。
             wanted = set(self._candidate_ids) if self._candidate_ids is not None else None
             ids: list[str] = []
             distances: list[float] = []
@@ -931,18 +705,10 @@ def _make_vector_retriever(
 
 
 def _make_bm25_retriever(ctx: _RetrievalContext, top_k: int) -> Any:
-    """BM25 检索器（``bm25s`` 引擎 + jieba 分词）：**只喂候选 node**（Python 侧过滤）。
+    """BM25 检索器（``bm25s`` + jieba）：**只喂候选 node**（Python 侧过滤）。
 
-    ``similarity_top_k=top_k`` 取候选集内的 Top-K（候选集本身已是过滤后集合）；
-    ``skip_stemming=True`` / ``language=""`` 关掉英文 Stemmer 与英文停用词（中文语料无意义）。
-    ``token_pattern=""``：本模块的 jieba 替身**忽略**该参数（见 :func:`_jieba_bm25s_tokenize`），
-    传空串只为显式标注「不启用 bm25s 的正则切词」。
-
-    **索引文本 = 正文**（R7 决策，见 :func:`_build_nodes`）：该库内部取
-    ``node.get_content(metadata_mode=MetadataMode.EMBED)``，本模块构造 node 时用
-    ``excluded_embed_metadata_keys`` 把 metadata 全部排除，故 BM25 路与向量路
-    （``title。text`` / ``summary``）**检索同一份文本** —— metadata 字面值
-    （``case_id`` / ``risk_type`` 等）不再进入 BM25 词表（实测证据见返回报告 R7 段）。
+    ``similarity_top_k=top_k`` 取候选集内 Top-K；``skip_stemming=True`` / ``language=""`` 关掉
+    英文词干器与停用词（中文语料无意义）；``token_pattern=""`` 只作显式标注（jieba 替身忽略它）。
     """
     # ⚠️ 顺序不可颠倒：锁**在**补丁之前（见 :func:`_jieba_tokenizer` docstring，R6 实测）。
     with _TOKENIZER_LOCK, _jieba_tokenizer():
@@ -961,14 +727,11 @@ def _make_fusion_retriever(
 ) -> Any:
     """RRF 融合检索器 = ``QueryFusionRetriever(mode="reciprocal_rerank", num_queries=1)``。
 
-    ⚠️ ``num_queries=1`` **必填**：默认 4 会调用 LLM 生成 query 变体（读安装源码
-    ``_retrieve``：``if self.num_queries > 1: queries.extend(self._get_queries(...))``）——
-    本项目检索侧**零 LLM 调用**，故 1 + 显式 ``MockLLM()`` 守卫。不传 ``llm`` 时该库回落
-    ``Settings.llm`` → 本环境 ``ImportError: llama-index-llms-openai package not found``
-    （项目刻意不装该集成），故必须显式传守卫对象；``num_queries=1`` 下它**永不被调用**。
-
-    **本函数是给外部/测试用的「配置正确」构造器，不参与本模块检索链路** —— 原因见
-    :func:`_fuse_rrf` 的 docstring（实测该实现会原地改写共享 node 的 score，跨查询污染）。
+    ⚠️ ``num_queries=1`` **必填**：默认 4 会调用 LLM 生成 query 变体，而本项目检索侧零 LLM
+    调用；不传 ``llm`` 时该库回落 ``Settings.llm`` → ``ImportError:
+    llama-index-llms-openai package not found``（项目刻意不装该集成），故显式传 ``MockLLM()``
+    守卫（``num_queries=1`` 下永不被调用）。**本函数不参与本模块检索链路** —— 该实现会原地改写
+    共享 node 的 score，理由见 :func:`_fuse_rrf`。
     """
     return ctx.llama["QueryFusionRetriever"](
         retrievers=[vector_retriever, bm25_retriever],
@@ -986,35 +749,15 @@ def _fuse_rrf(
 ) -> list[tuple[int, float]]:
     """RRF（Reciprocal Rank Fusion）：``score(d) = Σ_r 1 / (k + rank_r(d))``，``k=60``。
 
-    口径与 ``QueryFusionRetriever._reciprocal_rerank_fusion`` **逐条一致**（同 k=60、同
-    「按该路分数降序定 rank」定义，docstring 亦同源引用 Cormack 2009），但**由本模块自己算**：
+    融合定义与 ``QueryFusionRetriever._reciprocal_rerank_fusion`` 逐条一致，但**由本模块自己
+    算**：该实现在融合时会**原地改写** ``NodeWithScore.node.score``，而 node 对象跨检索共享 →
+    融合分被写回共享对象，下一次检索的结果会随此前的调用序列漂移。另：该库用 ``node.hash``
+    去重，而本 corpus 存在内容相同的行 → 会把不同先例合并；本模块用 **node id**（逐行唯一）
+    作融合键。
 
-    ⚠️ **实测（本轮，见返回报告 §5）**：``QueryFusionRetriever`` 在融合时会**原地改写**
-    它拿到的 ``NodeWithScore.node.score``（源码 ``reranked_nodes[-1].score = score``），而
-    这些 node 对象是**跨检索共享的同一批实例**（我方向量路 / BM25 路给的是同一批 node）
-    → 融合分被写回共享对象，**下一次检索的融合结果会随此前的调用序列漂移**。实测证据：
-
-    - 每次新建 retriever + 每次新建 fusion（``num_queries=1``）连查 3 次：
-      ``[('RAG_CASE_0066', 0.030118), ...]`` / ``[('RAG_CASE_0061', 0.016667), ...]`` /
-      ``[('RAG_CASE_0061', 0.016667), ...]`` —— **第一次就与后两次不同**；
-    - 复用同一 fusion 对象连查 2 次：top-1 从 ``RAG_CASE_0064``(0.020393) 变成
-      ``RAG_CASE_0020``(0.022821)（分 > 1/(60+1)，说明同一 node 被重复计入）；
-    - 复用同一对 retriever 对象两次新建 fusion：top-1 从 ``RAG_CASE_0020`` 变成
-      ``RAG_CASE_0061``。
-
-    docs/10 §3 的**确定性红线**（「不得退化」）直接排斥这种行为，故 hybrid 路取「同一融合
-    定义 + 本模块自算」：排名输入来自两路检索器（同一 query、覆盖全部候选），融合与 tie-break
-    由本模块显式完成 —— 逐次运行结果一致（验收已断言两次运行逐字节相同）。
-
-    另注：该库的融合用 ``node.hash``（内容哈希）去重，而本 corpus **实测存在内容相同的行**
-    （67 case 中 2 对哈希相同）→ 依赖内容哈希去重会把不同先例合并成一个；本模块用
-    **node id**（由行键派生，逐行唯一）作融合键，不受此影响。
-
-    ⚠️ **上界是 ``2/60``（``≈0.0333``），不是 ``2/61``**：rank 从 **0** 起（``enumerate(ids)``），
-    故首位贡献 ``1/(60+0) = 1/60``；两路都排首位即 ``2/60 = 1/30``（实测 0.033333）。
-    与 llama-index ``_reciprocal_rerank_fusion`` 的 ``1.0 / (rank + k)`` 同式（其 rank 亦从 0 起）。
-
-    返回 ``[(行索引, 6 位 RRF 分)]``，排序 key = ``(分降序, corpus 原序 idx 升序)``。
+    ⚠️ **上界是 ``2/60``（≈0.0333），不是 ``2/61``**：rank 从 **0** 起（``enumerate(ids)``），
+    首位贡献 ``1/(60+0)``，两路都排首位即 ``2/60 = 1/30``。返回 ``[(行索引, 6 位 RRF 分)]``，
+    排序 key = ``(分降序, corpus 原序 idx 升序)``。
     """
     fused: dict[str, float] = {}
     for ids in ranked.values():
@@ -1031,7 +774,6 @@ def _fuse_rrf(
 
 
 class _ChromaIndexBase:
-    """两个索引类的共用装配（collection / node / 向量 upsert / 三模式检索）。"""
 
     _kind = ""
 
@@ -1073,8 +815,8 @@ class _ChromaIndexBase:
         )
         self._collection = None
         #: ``ChromaVectorStore``（LlamaIndex 官方 store 包装）——**装配面保留**：外部/测试可
-        #: 用它走标准 ``VectorStoreQuery`` 通路（docs/10 §4 要求的 vector-stores-chroma 集成
-        #: 确实被构造并被引用）；本模块自己的向量取数走原生 ``collection.query``（理由见模块
+        #: 用它走标准 ``VectorStoreQuery`` 通路（vector-stores-chroma 集成确实被构造并被
+        #: 引用）；本模块自己的向量取数走原生 ``collection.query``（理由见模块
         #: docstring 的 ``vector`` 段：该 store 的 ``exp(-distance)`` 不是余弦）。
         self._vector_store = None
         self._nodes: list[Any] = []
@@ -1090,7 +832,7 @@ class _ChromaIndexBase:
         node 向量 = 文本向量（与 local 后端同一 embedder/同一文本，逐位一致）；节点按
         「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。
 
-        空间闸（docs/10 §3 更正）：``_open_collection`` 对**新建与复用两条路径**都断言
+        空间闸：``_open_collection`` 对**新建与复用两条路径**都断言
         collection 是 cosine（默认 l2 会让「相似度 = 1 − distance」静默失效）；upsert 后
         再做一次 cosine 自检（自身距离须 ≈ 0），失败即抛 —— **绝不带着未知空间继续检索**。
         """
@@ -1126,7 +868,6 @@ class _ChromaIndexBase:
 
     @property
     def size(self) -> int:
-        """corpus 行数（policy：**含 EXPIRED 历史版**；case：先例数）——与 qdrant 后端同义。"""
         return len(self._rows)
 
     @property
@@ -1139,22 +880,18 @@ class _ChromaIndexBase:
 
     @property
     def cosine_self_check_distance(self) -> float | None:
-        """构造期 cosine 自检值：库内首条向量与自身的距离（cosine 空间应 ≈ 0；空库为 None）。"""
         return self._self_check_distance
 
     @property
     def collection_count(self) -> int:
-        """collection 内 node 数（真服务端落库校验用；空库为 0）。"""
         return int(self._collection.count()) if self._collection is not None else 0
 
     @property
     def node_ids(self) -> list[str]:
-        """本索引写入的 node id（顺序与 corpus 行一致；测试/审计用）。"""
         return list(self._node_ids)
 
     @property
     def nodes(self) -> list[Any]:
-        """LlamaIndex ``TextNode`` 列表（1 行 = 1 node；测试/审计用）。"""
         return list(self._nodes)
 
     # -- 装配子件 -----------------------------------------------------------
@@ -1182,12 +919,7 @@ class _ChromaIndexBase:
     def _bm25_retrieve(self, retriever: Any, query_bundle: Any) -> list[Any]:
         """BM25 检索（**在 jieba 上下文内** —— 查询与索引必须同一分词器）。
 
-        ⚠️ 必须与构造期同一个 ``bm25s.tokenize``：索引词表由 jieba 建立，若查询仍走 bm25s
-        原分词器，未登录词会拿到越界 token id →
-        ``ValueError: The maximum token ID in the query (379) is higher than the number of
-        tokens in the index.``（本模块首次实测即此错，见返回报告 §5）。
-
-        ⚠️ 顺序不可颠倒：锁**在**补丁之前（见 :func:`_jieba_tokenizer` docstring，R6 实测）。
+        ⚠️ 顺序不可颠倒：锁**在**补丁之前（见 :func:`_jieba_tokenizer`）。
         """
         with _TOKENIZER_LOCK, _jieba_tokenizer():
             return retriever.retrieve(query_bundle)
@@ -1201,22 +933,12 @@ class _ChromaIndexBase:
         *,
         count_search: bool = True,
     ) -> list[tuple[int, float]]:
-        """向量路排名：``[(行索引, 1 − distance)]``（**精确候选 id 集** + store 侧 category 下推）。
+        """向量路排名：``[(行索引, 1 − distance)]``（精确候选 id 集 + store 侧 category 下推）。
 
-        与 local 后端的等价性由三件事保证（本模块实测：同序同 id，分差 ≤ 1e-6）：
-
-        1. **打分域 = 精确候选集** —— 检索器只对 ``sub_ctx.node_ids``（候选）取距离，
-           不再让非候选行抢 top-N 名额（漏召回 bug 的根因，见 :func:`_make_vector_retriever`
-           docstring）；
-        2. **覆盖率自检** —— 返回 id 必须覆盖候选 id，否则重试/抛（第三方少返是已知风险）；
-        3. **兜底补算** —— 万一覆盖率自检失败但需继续（例如部分候选确实取不回），
-           缺失候选按**本模块已存向量**（Chroma ``get`` 回来的 doc 向量）与 query 向量
-           现算 cos（复用 ``rag/vectors.cosine_similarity``，不新写第二套余弦），
-           并累加 ``SERVED_COUNTERS["vector_bruteforce_fallbacks"]`` 使其可见。
-
-        ``top_k`` 传候选数上限时返回全部候选（hybrid 的 RRF 需要完整排名列表）。
-        ``count_search``：本次是否记一次 ``vector_searches``（hybrid 会调本函数一次 +
-        另计一次 ``hybrid_searches``；重试/兜底不重复计数）。
+        与 local 后端的等价性由三件事保证：打分域 = 精确候选集（不让非候选行抢名额）；覆盖率
+        自检（返回 id 必须覆盖候选 id，否则重试/抛）；覆盖率失败时用 Chroma 已存的 doc 向量
+        兜底现算 cos，并累加 ``SERVED_COUNTERS["vector_bruteforce_fallbacks"]`` 使其可见。
+        ``count_search`` 控制本次是否记一次 ``vector_searches``（重试/兜底不重复计数）。
         """
         retriever = _make_vector_retriever(
             sub_ctx, top_k, store_filters, candidate_ids=list(sub_ctx.node_ids)
@@ -1307,7 +1029,7 @@ class _ChromaIndexBase:
 
         两路各自返回**全部候选**（``top_k`` = 候选数）→ 在完整排名列表上融合
         （:func:`_fuse_rrf`，含「为什么不用 ``QueryFusionRetriever`` 现成融合」的实测理由）。
-        ⚠️ 该分是**融合排名分，不是相似度**（上界 **2/60 = 1/30 ≈ 0.0333**，docs/10 §6-R5）；排序 key
+        ⚠️ 该分是**融合排名分，不是相似度**（上界 **2/60 = 1/30 ≈ 0.0333**）；排序 key
         = ``(分降序, corpus 原序 idx 升序)``。
         """
         vec_ranked = self._rank_vector(sub_ctx, query_bundle, top_k, store_filters)
@@ -1335,7 +1057,7 @@ class _ChromaIndexBase:
         """三模式检索 → ``[(行索引, 6 位检索分)]``（已按 ``(分降序, 原序)`` 排序、已截断 Top-K）。
 
         向量路在 store 下推之后用 ``recheck``（**与 BM25 路同一份** Python 谓词）复核一遍：
-        下推只用于收窄候选，判定只有一份实现，杜绝双实现语义漂移（docs/10 §6-R2）。
+        下推只用于收窄候选，判定只有一份实现，杜绝双实现语义漂移。
 
         ``top_k`` 截断在**排序之后**统一做；各路内部按需取「候选数」以保证 BM25 的
         min-max 与 RRF 的排名列表覆盖完整候选集。
@@ -1361,18 +1083,15 @@ class _ChromaIndexBase:
 
 
 def _cosine_from_distance(distance: float) -> float:
-    """Chroma cosine ``distance`` → 余弦相似度 ``1 − distance``（docs/10 §3 实测口径）。
+    """Chroma cosine ``distance`` → 余弦相似度 ``1 − distance``。
 
-    实测（本模块首次运行即复现）：``[1,0,0]`` vs ``[0.9,0.1,0]`` → ``distance = 0.006116271``
-    而 ``1 − cos = 0.00611627``；``[1,0,0]`` vs ``[1,1,0]`` → ``distance = 0.29289323``
-    而 ``1 − cos = 0.29289322``。故相似度 = ``1 − distance``（Chroma 对入库向量做过
-    L2 归一化，查询向量不做 —— 其 cosine 距离即 `1 − 余弦`，与 local numpy 余弦同口径）。
+    实测：``[1,0,0]`` vs ``[0.9,0.1,0]`` → ``distance = 0.006116271`` 而 ``1 − cos`` =
+    0.00611627；``[1,0,0]`` vs ``[1,1,0]`` → ``distance = 0.29289323`` ↔ ``1 − cos`` =
+    0.29289322。Chroma 对入库向量做过 L2 归一化、查询向量不做，其 cosine 距离即 ``1 − 余弦``。
 
     夹到 ``[0,1]`` 仅作防御：浮点尾差可能给出 ``-1e-9`` / ``1+1e-9``，而
-    ``CaseHit.retrieval_score`` 约束 ``ge=0, le=1``（不夹会让整个检索抛 ValidationError）。
-    NaN（零向量等退化输入）按 0 计。
-
-    ⚠️ 这是**向量路的检索分**（余弦相似度）；hybrid 路的分数是 RRF 融合分，二者不同量纲。
+    ``CaseHit.retrieval_score`` 约束 ``ge=0, le=1``（不夹会让整个检索抛 ValidationError）；
+    NaN（零向量等退化输入）按 0 计。⚠️ 这是**向量路的检索分**；hybrid 路是 RRF 融合分，不同量纲。
     """
     value = float(distance)
     if math.isnan(value):
@@ -1381,14 +1100,12 @@ def _cosine_from_distance(distance: float) -> float:
 
 
 def _validate_mode(mode: str) -> RetrievalMode:
-    """与 ``rag/index.py`` / ``rag/qdrant_index.py`` 同口径：非法模式即报错（不静默降级）。"""
     if mode not in MODES:
         raise ValueError(f"未知检索模式: {mode!r}（可选: {list(MODES)}）")
     return mode  # type: ignore[return-value]
 
 
 def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
-    """rows（dict 或 record 模型）→ 强校验的 record 列表（与既有实现同源码）。"""
     out: list[Any] = []
     for row in rows:
         out.append(record_type.model_validate(row) if isinstance(row, dict) else row)
@@ -1401,14 +1118,11 @@ def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
 class ChromaPolicyIndex(_ChromaIndexBase):
     """``PolicyIndex`` Protocol 的 Chroma + LlamaIndex 实现。
 
-    构造参数与 ``RagPolicyIndex`` / ``QdrantPolicyIndex`` 对齐，另加 Chroma 装配参数
-    （``chroma_client`` 注入 / ``host``+``port`` 自建 / ``ephemeral`` 离线内存库 /
-    ``collection_prefix``）。检索签名与工具契约逐字一致：
-
-    ``async def search(query, filters, top_k, effective_only) -> list[PolicyClauseHit]``
-
-    过滤语义（effective_only / category / risk_type）与既有实现**逐条一致**；差异只在
-    「向量库 + 检索器 + 融合」（Chroma / LlamaIndex RRF）。
+    构造参数与 local / qdrant 后端对齐，另加 Chroma 装配参数（``chroma_client`` 注入 /
+    ``host``+``port`` 自建 / ``ephemeral`` 离线内存库 / ``collection_prefix``）。检索签名与
+    工具契约逐字一致：``async def search(query, filters, top_k, effective_only) -> list[PolicyClauseHit]``。
+    过滤语义（effective_only / category / risk_type）与既有实现逐条一致，差异只在
+    「向量库 + 检索器 + 融合」。
     """
 
     _kind = "policy"
@@ -1441,7 +1155,6 @@ class ChromaPolicyIndex(_ChromaIndexBase):
         )
 
     def effective_count(self) -> int:
-        """当前生效条款数（``status == "EFFECTIVE"``）——与既有实现同义。"""
         return sum(1 for r in self._rows if r.status == "EFFECTIVE")
 
     async def search(
@@ -1453,9 +1166,8 @@ class ChromaPolicyIndex(_ChromaIndexBase):
     ) -> list[PolicyClauseHit]:
         """检索政策条款（三模式；无命中 → ``[]``，工具 ok=True）。
 
-        流程：a. Python 侧候选过滤（与既有实现同一谓词）→ 候选空即返回 ``[]``；
-        b. 按模式装配检索器（向量路 store 侧下推 category；BM25 路只喂候选 node）；
-        c. 打分/融合（RRF）；d. ``(分降序, corpus 原序)`` 排序 + 6 位取整 → Top-K。
+        流程：Python 侧候选过滤 → 按模式装配检索器（向量路 store 侧下推 category；BM25 路只喂
+        候选 node）→ 打分/融合 → ``(分降序, corpus 原序)`` 排序 + 6 位取整 → Top-K。
         """
         candidates = _policy_candidates(self._rows, filters, effective_only)
         ranked = self._retrieve_ranked(
@@ -1473,14 +1185,11 @@ class ChromaPolicyIndex(_ChromaIndexBase):
 
 
 class ChromaCaseIndex(_ChromaIndexBase):
-    """``CaseIndex`` Protocol 的 Chroma + LlamaIndex 实现。
+    """``CaseIndex`` Protocol 的 Chroma + LlamaIndex 实现（``search`` 签名与工具契约一致）。
 
-    ``async def search(query, filters, top_k) -> list[CaseHit]`` —— 与工具契约逐字一致。
-
-    ``CaseHit.retrieval_score`` 口径（docs/10 §0 C1，**勿误读**）：它是**检索分，不是语义
-    相似度** —— ``bm25`` 模式 = 候选集内 min-max 归一化 BM25 分；``vector`` 模式 =
-    ``1 − distance``（余弦相似度）；**``hybrid`` 模式 = RRF 融合分**（``Σ 1/(k+rank)``，
-    ``k=60``，落在 ~(0, **2/60 = 1/30**]）。取值恒 ⊂ ``[0,1]``（``CaseHit`` 的 ``ge=0, le=1`` 约束成立）。
+    ``CaseHit.retrieval_score`` 是**检索分，不是语义相似度**：``bm25`` = 候选集内 min-max
+    归一化 BM25 分；``vector`` = ``1 − distance``；``hybrid`` = RRF 融合分（``Σ 1/(k+rank)``，
+    ``k=60``，落在 ~(0, ``2/60 = 1/30``]）。取值恒 ⊂ ``[0,1]``。
     """
 
     _kind = "case"
@@ -1515,7 +1224,7 @@ class ChromaCaseIndex(_ChromaIndexBase):
     async def search(
         self, query: str, filters: CaseSearchFilters, top_k: int
     ) -> list[CaseHit]:
-        """检索先例（三模式；无命中 → ``[]``，工具 ok=True）。流程同 ``ChromaPolicyIndex``。"""
+
         candidates = _case_candidates(self._rows, filters)
         ranked = self._retrieve_ranked(
             query,

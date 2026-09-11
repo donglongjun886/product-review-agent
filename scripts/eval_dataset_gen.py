@@ -1,49 +1,36 @@
-"""eval_dataset_gen.py —— Phase 2 正式集（v2）确定性变异生成器（docs/02-evaluation.md §2.3 步骤 3）。
+"""Phase 2 正式集（v2）确定性变异生成器。
 
-用途：以 **eval_data/v1 的 35 条手工种子 + 少量新增语义种子** 为模板，做**确定性字段变异**
-（固定随机种子）制造 300+ 条变体案 → ``eval_data/v2/cases_v2.jsonl`` + ``manifest.json``。
+以 eval_data/v1 的 35 条手工种子 + 少量新增语义种子为模板做确定性字段变异（固定随机种子），
+产出 ``eval_data/v2/cases_v2.jsonl`` + ``manifest.json``；命令
+``uv run python scripts/eval_dataset_gen.py --out eval_data/v2/ --count 320 --seed 42``。
+不联网、不调 LLM；同 (count, seed) → 产物逐字节一致（可重放，进 Regression）。
 
-用法::
+变异维度（**变异后真值必须仍自洽** —— expected 的 decision/abstain_label 按该案在
+Rule / Single-call / Agent 下的真实语义重标，非机械复制模板真值）：
+- 标题词：换品牌 / 换品类核心词 / 加规避词 / 加品牌词 / 加风格词，严格受控词表（避免干净案
+  变异出意外词命中，也避免风险案变异成表面干净）；
+- 图片相似度：世界种子只有 强 0.85+ / 弱 0.70~0.85 / 干净 / Logo 四档，按 URL 选择；
+- 商家历史：removals 0~7（M_3307/M_9904 干净、M_6602 中性 1、M_5512/M_8801 脏）；
+- OCR 文本：含 / 不含品牌词（仅对 Single-call/Agent 可见的表面信号）；
+- category / brand：明确 / 空缺 / 黑名单字段 / 高危或普通类目。
 
-    uv run python scripts/eval_dataset_gen.py --out eval_data/v2/ --count 320 --seed 42
+真值标注规则：明确违规（文本明示 高仿/复刻/1:1/同款/原单、brand 命中知名黑名单、强相似且
+无授权证据）→ REJECT + AUTO_DECIDABLE；明确正常（brand 明确、无风险词、无规避、无强相似）
+→ PASS + AUTO_DECIDABLE；边界（单弱信号 0.7~0.8 且无其它可查信息、brand/category 空缺、
+文本含品牌词但可能是适配/风格描述）→ HUMAN_REVIEW + SHOULD_ABSTAIN；特例（有意构造，
+annotation.notes 注明）是**需调查才能判的 AUTO_DECIDABLE 案** —— Rule/Single 因缺工具会
+COMPLEX/HUMAN（brand 空缺、仅 OCR 品牌词、需商家历史交叉），但 Agent 用评测世界工具
+（EVAL_* 种子）能查到证据判对。
 
-全链路确定性：不联网、不调 LLM；同 (count, seed) → 产物逐字节一致（可重放，进 Regression）。
+目标分布（容差 ±5pp）：normal 20% / violation 20% / boundary 30% / multi-signal 20% /
+evasion 10%；AUTO_DECIDABLE 为主（~85-90%），SHOULD_ABSTAIN ~10-15%，集中在
+boundary/evasion/multi-signal 以保证 abstention 指标有统计意义。
 
-变异维度（docs/02 §2.3；**变异保持真值一致性** —— expected 的 decision/abstain_label
-按"该案 Rule / Single-call / Agent 会怎么判"的真实语义重标，非机械复制模板真值，
-见 ``_BUILDERS`` 各 builder 口径注释与 lineage.mutation 摘要）：
-- 标题词（换品牌 / 换品类核心词 / 加规避词 / 加品牌词 / 加风格词 —— 严格受控词表，
-  避免把干净案变异出意外词命中、也避免把风险案变异成表面干净）；
-- 图片相似度（世界种子只含 强 0.85+ / 弱 0.70~0.85 / 干净 / Logo 四档，按 URL 选择）；
-- 商家历史（removals 0~7：M_3307/M_9904 干净、M_6602 中性 1、M_5512/M_8801 脏）；
-- OCR 文本（含/不含品牌词 —— 仅对 Single-call/Agent 可见的表面信号）；
-- category / brand（明确 / 空缺 / 黑名单字段 / 高危或普通类目）。
-
-真值标注规则（与 screening 修正后三分流语义一致；docs/02 §4.4 两阶段 abstention 口径）：
-- 明确违规（文本明示 高仿/复刻/1:1/同款/原单、brand 字段=知名黑名单品牌、强相似且无
-  授权证据）→ ``decision=REJECT`` + ``abstain_label=AUTO_DECIDABLE``；
-- 明确正常（brand 明确、无风险词、无规避、无强相似）→ ``decision=PASS`` +
-  ``AUTO_DECIDABLE``；
-- 边界（单弱信号相似 0.7~0.8 且无其它可查信息、brand/category 空缺、文本含品牌词但
-  可能是适配/风格描述）→ ``decision=HUMAN_REVIEW`` + ``abstain_label=SHOULD_ABSTAIN``
-  （Rule 无法确定 → 需人工/Agent 判断；docs/02 §4.4 abstention_recall 的真值集）；
-- 特例（有意构造、annotation.notes 注明设计意图）：**"需调查才能判"的 AUTO_DECIDABLE 案**
-  —— Rule/Single 因缺工具会 COMPLEX/HUMAN（如 brand 空缺、仅 OCR 品牌词、需商家历史
-  交叉），但 Agent 用评测世界工具（EVAL_* 种子，与 eval_data/v1 同一份事实）能查到
-  证据判对 → 仍标 AUTO_DECIDABLE（"Rule 无法判断的复杂案、Agent 经调查安全自动化"
-  正是 Phase 2 的核心观察对象，docs/02 §4.4）。
-
-目标分布（docs/02 §2.1，容差 ±5pp）：normal 20% / violation 20% / boundary 30% /
-multi-signal 20% / evasion 10%；AUTO_DECIDABLE 为主（~85-90%），SHOULD_ABSTAIN
-~10-15%（集中 boundary/evasion/multi-signal，保证 abstention 指标有统计意义）。
-
-世界事实锚点：与 ``pra.evaluation.harness.agent_scheme`` 的 EVAL_* 种子**同一份**
-（生成器 import 该常量集）—— 保证每条 input 的 product_id / merchant_id / image URL /
-category 在 Agent 评测世界里可查到与标注一致的事实；真 RAG/商家库接入需扩 EVAL_*
-种子并重新生成（manifest 记录世界标签与生成命令，防口径漂移）。
-
-产物字段：每条 JSONL 行 = EvalCase schema（schema_version=2；含 lineage 溯源与
-annotation.family 标签，便于评审/回归定位）；manifest 记录分布/口径快照/生成命令与 seed。
+世界事实锚点与 ``pra.evaluation.harness.agent_scheme`` 的 EVAL_* 种子同一份（生成器 import
+该常量集），保证每条 input 的 product_id / merchant_id / image URL / category 在 Agent 评测
+世界里可查到与标注一致的事实；真 RAG/商家库接入需扩 EVAL_* 种子并重新生成（manifest 记录
+世界标签与生成命令，防口径漂移）。每条 JSONL 行 = EvalCase schema（schema_version=2，含
+lineage 溯源与 annotation.family 标签）。
 """
 
 from __future__ import annotations
@@ -56,7 +43,7 @@ from pathlib import Path
 from pra.evaluation.dataset.loader import abstain_stats, scene_stats
 
 # 世界事实单一来源：与 B 面 agent_scheme（Agent 评测世界）同一份 EVAL_* 种子。
-# import 失败（如世界标识重构）→ 生成器显式失败，拒绝"手抄世界"漂移。
+# import 失败 → 生成器显式失败，拒绝「手抄世界」漂移。
 from pra.evaluation.harness.agent_scheme import (
     EVAL_CATEGORIES,
     EVAL_IMAGE_MATCHES,
@@ -68,7 +55,7 @@ from pra.evaluation.harness.agent_scheme import (
 )
 
 # ---------------------------------------------------------------------------
-# 世界派生常量（只读自 EVAL_* 种子，不再手抄第二份）
+# 世界派生常量（只读自 EVAL_* 种子，不手抄第二份）
 # ---------------------------------------------------------------------------
 
 _SCENES = ("normal", "violation", "boundary", "multi-signal", "evasion")
@@ -81,7 +68,7 @@ _MERCHANT_TIER = {
 }
 _MERCHANT_REMOVALS = {mid: int(row["removals"]) for mid, row in EVAL_MERCHANTS.items()}
 
-# 图片世界语义（url → 档位）。clean=无命中；weak=0.70~0.85；strong>=0.85；logo。
+# 图片世界语义（url → 档位）：clean=无命中；weak=0.70~0.85；strong>=0.85；logo。
 _IMG_STRONG: dict[str, list[str]] = {c: [] for c in EVAL_CATEGORIES}
 _IMG_WEAK: dict[str, list[str]] = {c: [] for c in EVAL_CATEGORIES}
 _IMG_CLEAN: dict[str, list[str]] = {c: [] for c in EVAL_CATEGORIES}
@@ -123,14 +110,14 @@ for cat in EVAL_CATEGORIES:
             dirty.append({"pid": pid, "mid": mid, "brand": None})
     _OWN_ANCHORS[cat] = own
     _DIRTY_ANCHORS[cat] = dirty
-# 潮动 = 唯一"自有品牌但脏商家"的在库锚点（对抗旗舰 EC_0402 同源，只能进对抗家族）
+# 潮动 = 唯一「自有品牌但脏商家」的在库锚点（对抗旗舰 EC_0402 同源，只能进对抗家族）
 _ADV_ANCHOR = next(a for a in _OWN_ANCHORS["女鞋/运动鞋"] if a["brand"] == "潮动")
 # 中性商家(M_6602)在库自有品牌锚点（山野卫衣）
 _NEUTRAL_ANCHOR = next(
     a for a in _OWN_ANCHORS["服装/卫衣"] if _MERCHANT_TIER[a["mid"]] == "neutral"
 )
-# PASS/干净上下文家族的合法锚点：在库自有品牌 + 商家干净/中性（脏商家锚点只进对抗家族
-# —— 否则"干净自有品牌"案会因脏商家被 Agent 判 HUMAN/REJECT，与真值自洽要求冲突）
+# PASS/干净上下文家族只能用「在库自有品牌 + 商家干净/中性」的锚点：脏商家锚点只进对抗
+# 家族，否则「干净自有品牌」案会因脏商家被 Agent 判 HUMAN/REJECT，与真值冲突
 _CLEAN_OWN_ANCHORS: dict[str, list[dict]] = {
     cat: [dict(a) for a in anchors if _MERCHANT_TIER[a["mid"]] in ("clean", "neutral")]
     for cat, anchors in _OWN_ANCHORS.items()
@@ -227,7 +214,7 @@ _SEED_V2 = {
 
 
 def _pick(rng: random.Random, pool: list) -> object:
-    """确定性取池内随机元素（随机源已固定种子；同 seed 同序列）。"""
+    """确定性取池内随机元素（同 seed 同序列）。"""
     return pool[rng.randrange(len(pool))]
 
 
@@ -278,9 +265,8 @@ def _listing(seq: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Builder 语义口径 —— 每个 family 一个函数：产出 Row（input 具体字段 + 真值标签）。
-# 各函数 docstring/note 写明"Rule/Single/Agent 会怎么判 → 为何标该 expected"（真值自洽）。
-# 签名统一 (rng, seq, scene)；只用在一个 scene 的 builder 忽略 scene 参数。
+# Builder 语义口径 —— 每个 family 一个函数：产出 Row（input 字段 + 真值标签）。
+# 签名统一 (rng, seq, scene)；只在单个 scene 用的 builder 忽略 scene 参数。
 # ---------------------------------------------------------------------------
 
 
@@ -335,8 +321,6 @@ def _row_base(*, seq, pid, mid, cat, brand, title, desc, images, event,
 
 
 def b_clean_own(rng: random.Random, seq: int, scene: str) -> dict:
-    """干净自有品牌（PASS/AUTO）：在库 brand 可查 + 商家干净/中性 + 干净图 + 干净文本。
-    Rule/Single/Agent 三方案均直判 PASS（普通干净案）。"""
     cat = _pick(rng, list(_OWN_ANCHORS))
     a = _anchor(rng, cat, _CLEAN_OWN_ANCHORS[cat])
     core = _clean_text(_pick(rng, _TITLE_CORES[cat]))
@@ -360,9 +344,6 @@ def b_clean_own(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def v_text_evasion(rng: random.Random, seq: int, scene: str) -> dict:
-    """文本明示规避词（REJECT/AUTO）：标题含 高仿/复刻/1:1/同款/原单 → Single 文本自证
-    REJECT、Agent REJECT；Rule R-302(+R-301 brand 空缺) COMPLEX→HUMAN（无 Agent 时复杂
-    案只能人工 —— docs/02 §3.2 口径，Rule 过度 abstention 属预期）。"""
     cat = _pick(rng, list(_DIRTY_ANCHORS))
     a = _anchor(rng, cat, _DIRTY_ANCHORS[cat])
     core = _clean_text(_pick(rng, _TITLE_CORES[cat]))
@@ -394,9 +375,6 @@ def v_text_evasion(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def v_ocr_brand_dirty(rng: random.Random, seq: int, scene: str) -> dict:
-    """仅 OCR 品牌词 + 强视觉 + 脏商家（REJECT/AUTO，需调查）：Rule 看不到 OCR →
-    R-301(brand 空缺) HUMAN；Single ocr_brand → HUMAN；Agent 图证据+商家 → REJECT。
-    需调查才能判的 AUTO 案（OCR 表面信号需 Agent 工具核验）。"""
     cat = _pick(rng, list(_DIRTY_ANCHORS))
     a = _anchor(rng, cat, _DIRTY_ANCHORS[cat])
     title = _plain_title(cat, rng)
@@ -425,10 +403,6 @@ def v_ocr_brand_dirty(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def v_blackbrand_field(rng: random.Random, seq: int, scene: str) -> dict:
-    """product.brand=知名品牌字段（黑名单 R-101 语义）+ 脏商家 + 强相似（REJECT/AUTO）：
-    当前 Rule 词表 BLACKLISTED_BRANDS=∅ → R-101 不命中、文本干净 → 直漏 PASS（缺陷观测）；
-    Single 表面 PASS（漏放观测）；Agent 图×商家 REJECT。修正集注入黑名单后 Rule 应
-    R-101 直判 REJECT —— 作为 R-101 直判边界的实验点（docs/02 §7.1 Fix5）。"""
     cat = _pick(rng, list(_DIRTY_ANCHORS))
     a = _anchor(rng, cat, _DIRTY_ANCHORS[cat])
     title = _plain_title(cat, rng)
@@ -455,9 +429,6 @@ def v_blackbrand_field(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def b_brand_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
-    """brand 空缺但在库可查（PASS/AUTO，需调查）：Rule R-301 / Single 关键字段空缺 →
-    HUMAN；Agent ProductTool 查到在库 brand + 商家干净/中性 → PASS。docs/02 §4.4
-    "需调查才能判"的 AUTO 案，设计意图见 note。"""
     cat = _pick(rng, list(_OWN_ANCHORS))
     a = _anchor(rng, cat, _CLEAN_OWN_ANCHORS[cat])
     title = _plain_title(cat, rng)
@@ -478,8 +449,6 @@ def b_brand_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def b_cat_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
-    """category 空缺但在库可查（PASS/AUTO，需调查）：Rule R-301 / Single → HUMAN；
-    Agent 在库核验后 PASS（v1 EC_0204 语义）。"""
     cat = _pick(rng, list(_OWN_ANCHORS))
     a = _anchor(rng, cat, _CLEAN_OWN_ANCHORS[cat])
     core = _clean_text(_pick(rng, _TITLE_CORES[cat]))
@@ -500,9 +469,6 @@ def b_cat_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def b_weak_sim_own(rng: random.Random, seq: int, scene: str) -> dict:
-    """弱相似 + 自有品牌 + 干净/中性商家（PASS/AUTO，全方案可判）：Rule/Single 看不到
-    弱相似 → 按表面干净 PASS；Agent 弱相似低先验 + 在库 brand/商家证伪 → PASS
-    （v1 EC_0202/0205 语义）。"""
     cat = _pick(rng, ["女鞋/运动鞋", "箱包/女包"])  # 弱相似图只存在于鞋/包
     a = _anchor(rng, cat, _CLEAN_OWN_ANCHORS[cat])
     core = _clean_text(_pick(rng, _TITLE_CORES[cat]))
@@ -522,8 +488,6 @@ def b_weak_sim_own(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def b_neutral_clean(rng: random.Random, seq: int, scene: str) -> dict:
-    """中性商家（1 次下架史 < 系统性阈值）自有品牌（PASS/AUTO，全方案）：Rule 表面
-    干净 PASS；Agent 中性史证伪"系统性" → PASS（v1 EC_0203 语义）。"""
     a = dict(_NEUTRAL_ANCHOR)
     core = _clean_text(_pick(rng, _TITLE_CORES["服装/卫衣"]))
     title = _title_with_brand(a["brand"], core, rng)
@@ -542,10 +506,6 @@ def b_neutral_clean(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def b_styleword_own(rng: random.Random, seq: int, scene: str) -> dict:
-    """风格词标题 + 自有品牌 + 干净图（PASS/AUTO；Agent 过度 abstention 观测案）：
-    Rule/Single 表面直判 PASS；Agent 对风格词外观无视觉确证（图无命中）→ 保守 HUMAN。
-    真值 PASS（风格词不是违规证据、在库可证伪）—— Agent 的 HUMAN 是 AUTO 案上的过度
-    abstention（abstention_rate 观测点），设计意图见 note。"""
     cat = _pick(rng, list(_STYLE_CORES))
     a = _anchor(rng, cat, _CLEAN_OWN_ANCHORS[cat])
     style_core = _pick(rng, _STYLE_CORES[cat])
@@ -569,9 +529,6 @@ def b_styleword_own(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def b_adapter_brandword(rng: random.Random, seq: int, scene: str) -> dict:
-    """品牌词但可能为适配/风格描述（SHOULD_ABSTAIN）：Rule R-102 COMPLEX→HUMAN；
-    Single 品牌词无规避 → HUMAN（无法核验授权/真伪）；Agent text_brand 高先验但无视觉
-    /授权可证 → HUMAN —— 三种方案一致应转人工（docs/02 §4.4 abstention_recall 真值）。"""
     cat = _pick(rng, list(_ADAPTER_TITLES))
     a = _anchor(rng, cat, _CLEAN_OWN_ANCHORS[cat])
     title = _pick(rng, _ADAPTER_TITLES[cat])
@@ -592,9 +549,6 @@ def b_adapter_brandword(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def b_brand_missing_unverifiable(rng: random.Random, seq: int, scene: str) -> dict:
-    """brand 空缺且无在库可查 + 干净/中性商家（SHOULD_ABSTAIN）：Rule R-301 / Single →
-    HUMAN；Agent ProductTool 查无此商品（虚构 pid）+ 商家干净 → 品牌假设 UNRESOLVED →
-    HUMAN —— 无确证信号时克制转人工，不硬判 PASS。"""
     cat = _pick(rng, list(_TITLE_CORES))
     mid = _pick(rng, ["M_3307", "M_9904", "M_6602"])
     title = _plain_title(cat, rng)
@@ -615,9 +569,6 @@ def b_brand_missing_unverifiable(rng: random.Random, seq: int, scene: str) -> di
 
 
 def b_weak_sim_noinfo(rng: random.Random, seq: int, scene: str) -> dict:
-    """单弱信号（弱相似）+ 无其它可查信息（SHOULD_ABSTAIN）：弱相似 0.70~0.85 且 brand
-    空缺、虚构 pid、商家干净/中性 → Rule R-301 / Single → HUMAN；Agent 弱相似低先验 +
-    品牌假设 UNRESOLVED → HUMAN。Rule 无法确定是否模仿 → 需人工/Agent 判断。"""
     cat = _pick(rng, ["女鞋/运动鞋", "箱包/女包"])
     mid = _pick(rng, ["M_3307", "M_9904", "M_6602"])
     title = _plain_title(cat, rng)
@@ -641,9 +592,6 @@ def b_weak_sim_noinfo(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def m_ssim_dirty(rng: random.Random, seq: int, scene: str) -> dict:
-    """强相似 + 脏商家（REJECT/AUTO，需调查）：Rule R-301(brand 空缺)/Single → HUMAN；
-    Agent 图(>=0.85)×商家交叉 → REJECT。multi-signal = 图×商家交叉；evasion 场景 = 风格词
-    包装 + 改图/改标题事件掩盖的对抗形态（v1 EC_0301/0401/0407 语义）。"""
     cat = _pick(rng, list(_DIRTY_ANCHORS))
     a = _anchor(rng, cat, _DIRTY_ANCHORS[cat])
     core = _clean_text(_pick(rng, _TITLE_CORES[cat]))
@@ -671,8 +619,6 @@ def m_ssim_dirty(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def m_wsim_dirty(rng: random.Random, seq: int, scene: str) -> dict:
-    """弱相似 + 脏商家（REJECT/AUTO，需调查交叉）：单弱信号不足，商家系统性(>=3)交叉
-    后 Agent REJECT；Rule/Single HUMAN（v1 EC_0303/0105 语义）。"""
     cat = _pick(rng, ["女鞋/运动鞋", "箱包/女包"])
     a = _anchor(rng, cat, _DIRTY_ANCHORS[cat])
     title = _plain_title(cat, rng)
@@ -694,8 +640,6 @@ def m_wsim_dirty(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def m_own_adversarial(rng: random.Random, seq: int, scene: str) -> dict:
-    """自有品牌对抗（REJECT/AUTO）：潮动（在库自有品牌）表面干净 → Rule 直漏 PASS /
-    Single 漏放 PASS；Agent 强相似+脏商家 → REJECT（v1 EC_0402 对抗旗舰语义）。"""
     a = dict(_ADV_ANCHOR)
     cat = "女鞋/运动鞋"
     core = _clean_text(_pick(rng, _TITLE_CORES[cat]))
@@ -718,8 +662,6 @@ def m_own_adversarial(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def m_logo_dirty(rng: random.Random, seq: int, scene: str) -> dict:
-    """Logo 检测 + 脏商家（REJECT/AUTO，需调查）：无文本品牌词、图含 GUCCI Logo（仅
-    工具可得）+ 脏商家 → Agent REJECT；Rule/Single HUMAN（v1 EC_0404 语义）。"""
     a = _anchor(rng, "箱包/女包", _DIRTY_ANCHORS["箱包/女包"])
     title = _plain_title("箱包/女包", rng)
     img = _pick(rng, _IMG_LOGO)
@@ -740,8 +682,6 @@ def m_logo_dirty(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def m_pair_hide(rng: random.Random, seq: int, scene: str) -> dict:
-    """双图规避（REJECT/AUTO，需调查）：主图干净 + 附图强相似（改图事件露出）→ Agent
-    全图取 max 相似 REJECT；Rule/Single 无图比对能力 → HUMAN（v1 EC_0403 语义）。"""
     cat = _pick(rng, list(_DIRTY_ANCHORS))
     a = _anchor(rng, cat, _DIRTY_ANCHORS[cat])
     title = _plain_title(cat, rng)
@@ -764,9 +704,6 @@ def m_pair_hide(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def e_dirty_brand_missing_cleanimg(rng: random.Random, seq: int, scene: str) -> dict:
-    """疑似规避但查不实（SHOULD_ABSTAIN）：brand 空缺 + 脏商家 + 规避事件（改图/改标题）
-    + 图/文本无确证 → Rule R-301 / Single → HUMAN；Agent 品牌假设存疑但无视觉/文本证据
-    支撑自动拒绝 → HUMAN —— 有嫌疑但证据不足，克制转人工。"""
     cat = _pick(rng, list(_DIRTY_ANCHORS))
     a = _anchor(rng, cat, _DIRTY_ANCHORS[cat])
     title = _plain_title(cat, rng)
@@ -788,9 +725,6 @@ def e_dirty_brand_missing_cleanimg(rng: random.Random, seq: int, scene: str) -> 
 
 
 def e_ssim_cleanmerchant_bm(rng: random.Random, seq: int, scene: str) -> dict:
-    """强相似 + 干净商家 + brand 空缺虚构 pid（SHOULD_ABSTAIN）：视觉强但无商家/在库佐证
-    → Agent 品牌假设 UNRESOLVED（虚构 pid 查无）→ HUMAN；Rule R-301 / Single → HUMAN。
-    政策口径（外观高度模仿无授权 → 转人工审核，POLICY_3.2/4.1/5.2 原文语义）支持克制转人工。"""
     cat = _pick(rng, list(_DIRTY_ANCHORS))
     mid = _pick(rng, ["M_3307", "M_9904"])
     title = _plain_title(cat, rng)
@@ -812,9 +746,6 @@ def e_ssim_cleanmerchant_bm(rng: random.Random, seq: int, scene: str) -> dict:
 
 
 def m_multi_weak_abstain(rng: random.Random, seq: int, scene: str) -> dict:
-    """多弱信号交叉仍无定论（SHOULD_ABSTAIN）：弱相似 + 中性/干净商家 + brand 空缺（虚构
-    pid）→ Rule R-301 / Single → HUMAN；Agent 弱视觉低先验支持 + 品牌假设 UNRESOLVED +
-    商家未达系统性 → 无高置信结论 → HUMAN。"""
     cat = _pick(rng, ["女鞋/运动鞋", "箱包/女包"])
     mid = _pick(rng, ["M_6602", "M_3307"])
     title = _plain_title(cat, rng)
@@ -898,7 +829,7 @@ def _largest_remainder(total: int, weights: list[int]) -> list[int]:
 
 
 def _scene_quota(total: int) -> dict[str, int]:
-    """按 docs/02 §2.1 占比切 scene 配额（evasion 吸收取整尾差，总数恒等于 total）。"""
+    """按占比切 scene 配额（evasion 吸收取整尾差，总数恒等于 total）。"""
     n_norm = round(total * 0.20)
     n_viol = round(total * 0.20)
     n_bdy = round(total * 0.30)

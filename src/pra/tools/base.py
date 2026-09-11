@@ -1,28 +1,18 @@
-"""统一 Tool 契约（抽象层）—— 对应 docs/00-system-design.md §5。
+"""统一 Tool 契约（抽象层）。
 
-设计背景（§5.1 / §5.2）：6 个调查工具各回答审核员的一个"为什么需要这个信息"：
-ProductTool=事实锚点、ImageAnalysisTool=多模态外观、OCRTool=图文交叉验证、
-MerchantTool=商家行为模式、CaseSearchTool=人工先例、PolicySearchTool=政策依据。
-**本模块不承载任何具体工具的查询实现**（那些在 tools/ 各子包），只固定统一的
-调用契约与注册骨架，使上层 Agent（plan 节点输出 ``{tool, args}`` → ToolNode 按名
-调度）只依赖接口而非实现 —— 依赖倒置，便于 pytest mock 与后续替换（§15.1）。
+6 个调查工具各回答审核员的一个「为什么需要这个信息」：``ProductTool`` = 事实锚点、
+``ImageAnalysisTool`` = 多模态外观、``OCRTool`` = 图文交叉验证、``MerchantTool`` = 商家行为
+模式、``CaseSearchTool`` = 人工先例、``PolicySearchTool`` = 政策依据。**本模块不承载任何具体
+工具的查询实现**（那些在 tools/ 各子包），只固定调用契约与注册骨架：plan 节点输出
+``{tool, args}`` → ToolNode 按名调度，只依赖接口而非实现（依赖倒置，便于 mock 与替换）。
 
-各元素的抽象落点：
-
-- ``ToolArgs``：入参契约基类。每个具体 Tool 子类化并声明自有字段，字段即暴露给
-  LLM 的 tool schema 的输入 JSON Schema（§5.2 ``description`` 行注）。
-- ``ToolResult``：出参信封基类（统一成功/错误承载）。具体 Tool 子类化追加结构化
-  负载（如 ProductTool 的负载即 ``ProductInfo``），错误语义统一收敛在信封上，
-  不让原始堆栈直通 LLM（§8.2-3 脱敏/护栏的落点之一）。
-- ``ToolContext``：一次工具调用的运行上下文 —— run_id/case_id 用于审计与幂等，
-  ``budget`` 是对 ``AgentState.budget`` 同一实例的**共享引用**（记账直落，不复制）。
-- ``Tool``：协议。为什么用 ``typing.Protocol`` 而非 ABC：与设计 §5.2 原文一致；
-  契约只约束形状（name/description/args_model/call），结构性类型让测试替身与未来内部服务
-  适配器无需继承本层；深度校验交给每个 Tool 的 pydantic Args/Result 在调用边界完成。
-- ``ToolRegistry``：注册骨架，对应 §5.2 "所有 Tool 注册到 ToolRegistry，Plan 步骤
-  只输出 {tool, args}，由 Controller 调度执行"。O-5 拍板：每个 Tool 声明自己的
-  ``args_model``（Args 子类），registry 提供 ``parse_args(name, raw)`` 把 plan 给的
-  dict 校验/解析成强类型 ``ToolArgs``（tools_node 据此执行，不信任 LLM）。
+- ``ToolArgs`` / ``ToolResult``：入参契约与出参信封基类，子类声明的字段/负载即暴露给 LLM 的
+  schema；错误语义收敛在信封上（原始堆栈不直通 LLM）。
+- ``ToolContext``：``run_id``/``case_id`` 供审计与幂等，``budget`` 是对 ``AgentState.budget``
+  同一实例的**共享引用**（记账直落，不复制）。
+- ``Tool``：结构性协议，只约束形状（name/description/args_model/call），测试替身无需继承。
+- ``ToolRegistry``：每个 Tool 声明自己的 ``args_model``，``parse_args`` 把 plan 给的 dict
+  校验成强类型 ``ToolArgs``（不信任 LLM）。
 """
 
 from __future__ import annotations
@@ -37,18 +27,16 @@ from ..domain.models import Budget
 class ToolArgs(BaseModel):
     """Tool 入参基类。
 
-    每个具体 Tool 声明自己的 Args 子类（如 ProductTool 的 ``ProductArgs``），
-    pydantic 字段 = 给 LLM 的 tool schema 输入。基类对未声明字段**忽略**而非报错：
-    参数来自 LLM 结构化输出，容忍其多带的杂散键（严格校验在子类字段上完成）。
+    每个具体 Tool 声明自己的 Args 子类，pydantic 字段 = 给 LLM 的 tool schema 输入。基类对
+    未声明字段**忽略**而非报错：参数来自 LLM 结构化输出，容忍其多带的杂散键。
     """
 
 
 class ToolResult(BaseModel):
     """Tool 出参信封基类 —— 统一成功/失败承载。
 
-    具体 Tool 子类化追加自有结构化负载（例如 ``class ProductResult(ToolResult):
-    product: ProductInfo``）。``ok=False`` 时 ``error`` 为**人读**错误摘要
-    （由 ToolNode 转述给 LLM，不暴露原始异常/堆栈，见 §8.2-3）。
+    具体 Tool 子类化追加自有结构化负载。``ok=False`` 时 ``error`` 为**人读**错误摘要
+    （由 ToolNode 转述给 LLM，不暴露原始异常/堆栈）。
     """
 
     ok: bool = True
@@ -58,10 +46,9 @@ class ToolResult(BaseModel):
 class ToolContext(BaseModel):
     """一次 Tool 调用的运行上下文。
 
-    ``run_id`` / ``case_id``：本次 Agent 运行与所属案件的标识，工具落审计日志、
-    做幂等键时使用。``budget``：与 ``AgentState.budget`` **同一实例的共享引用**，
-    工具侧只读自检（如 tokens 余量决定是否截断）或由 ToolNode 统一记账后直落；
-    契约要求不在此复制新对象，否则预算计数会丢失。
+    ``run_id`` / ``case_id``：本次 Agent 运行与所属案件的标识，工具落审计日志、做幂等键时
+    使用。``budget``：与 ``AgentState.budget`` **同一实例的共享引用**，工具侧只读自检或由
+    ToolNode 统一记账后直落；契约要求不在此复制新对象，否则预算计数会丢失。
     """
 
     run_id: str
@@ -71,14 +58,14 @@ class ToolContext(BaseModel):
 
 @runtime_checkable
 class Tool(Protocol):
-    """统一 Tool 接口（§5.2 原文 + O-5，结构性协议）。
+    """统一 Tool 接口（结构性协议）。
 
     - ``name``：工具唯一名，Plan 输出与注册表的 key（如 ``"ImageAnalysisTool"``）；
     - ``description``：给 LLM 的工具说明（何时该调、输入输出是什么）；
-    - ``args_model``：本工具的入参 Pydantic 模型（Args 子类）—— 声明式暴露给
-      LLM 的 args JSON Schema，也是 tools_node 校验/解析 plan 给 dict 的入口（O-5）；
-    - ``call``：异步执行，入参已由调用侧解析为该 Tool 的 Args 子类，
-      返回该 Tool 的 Result 子类（都收在基类类型下）。
+    - ``args_model``：本工具入参 Pydantic 模型 —— 声明式暴露给 LLM 的 args JSON Schema，
+      也是 tools_node 校验/解析 plan 给的 dict 的入口；
+    - ``call``：异步执行，入参已由调用侧解析为该 Tool 的 Args 子类。
+
     ``@runtime_checkable`` 仅做属性级浅检查（注册表防呆），不做签名校验。
     """
 
@@ -90,18 +77,17 @@ class Tool(Protocol):
 
 
 class ToolRegistry:
-    """工具注册表 —— name → Tool 的最小骨架（§5.2 调度落点）。
+    """工具注册表 —— name → Tool 的最小骨架。
 
-    由 tools_node / controller 持有：Plan 输出 ``{tool, args}``，经 ``get(name)``
-    取到实现、经 ``parse_args(name, raw)`` 用该工具的 ``args_model`` 校验解析后再
-    调用。只做注册、查询、解析；执行/容错/记账归 ToolNode（后续步骤）。
+    由 tools_node / controller 持有：Plan 输出 ``{tool, args}``，经 ``get(name)`` 取实现、
+    经 ``parse_args(name, raw)`` 用该工具的 ``args_model`` 校验解析后再调用。只做注册、查询、
+    解析；执行/容错/记账归 ToolNode。
     """
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
-        """注册一个 Tool；重名或空名抛错（防呆，避免 dispatch 歧义）。"""
         if not isinstance(tool, Tool):
             raise TypeError(f"只能注册实现 Tool 契约的对象，got {type(tool)!r}")
         name = tool.name
@@ -112,18 +98,16 @@ class ToolRegistry:
         self._tools[name] = tool
 
     def get(self, name: str) -> Tool:
-        """按名取 Tool；未注册抛 KeyError 并附已注册清单（便于排错）。"""
         try:
             return self._tools[name]
         except KeyError:
             raise KeyError(f"未注册的 tool: {name!r}；已注册: {sorted(self._tools)}") from None
 
     def names(self) -> list[str]:
-        """已注册 Tool 名字列表（排序稳定，供白名单/审计用）。"""
         return sorted(self._tools)
 
     def parse_args(self, tool_name: str, raw: dict) -> ToolArgs:
-        """按名取工具并用其 ``args_model`` 校验/解析 plan 给的原始 dict（O-5，01 §5.8）。
+        """按名取工具并用其 ``args_model`` 校验/解析 plan 给的原始 dict。
 
         解析失败抛 ``pydantic.ValidationError``（不做业务判定）：由 tools_node 捕获并记
         ``tool_call_history{status: "error"}``，当轮继续执行其余合法调用 —— 不信任 LLM 参数。

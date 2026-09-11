@@ -1,4 +1,4 @@
-# 领域模型：Case / AgentState / Evidence / Decision（Pydantic）
+# 领域模型：Case / AgentState / Evidence / Decision（Pydantic）。
 # 统一从 pra.domain.models 再导出，供 `from pra.domain import ReviewDecision` 等使用。
 from .models import (
     Budget,

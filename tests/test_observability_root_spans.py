@@ -1,31 +1,13 @@
-"""S4 埋点测试 —— Node span（5 个）+ Root trace（三处）+ Gate 子 span（docs/09 §4.1/§4.2/§4.5/§5）。
+"""埋点测试：5 个 Node span、三处 Root trace、``gate`` 子 span。
 
-用**假 tracer**（写法参考 ``tests/test_observability_tracing.py`` 的
-``_FakeClient``/``_FakeObs`` 与 ``tests/test_observability_instrumentation.py`` 的
-``_FakeTracer``）经 ``pra.observability.tracing.set_tracer`` 注入 —— 本文件不联网、
-不 import ``langfuse`` SDK、不依赖任何凭据。
-
-覆盖点：
-
-1. ``run_review`` → **恰好 1 个 root**，``name="review"``、
-   ``trace_context.trace_id == trace_id_from_run_id(run_id)``（HTTP 路径 = run_id 原样）、
-   metadata/tags/version/input 口径、root 结束时 output 写回终裁摘要；
-2. 5 个 node span 全部出现（hypothesize / plan / tools / reevaluate / decide），
-   入参摘要是**轻量计数**（不含整个 state），且 ``gate`` 是 ``decide`` 的**子** span
-   （``run_decision_overlay`` 的 proposal → 终裁 + overrides 原因码）；
-3. **非 32-hex run_id**（``RUN_CASE_1``）→ trace_id 是 32-hex 且**确定性**（两次同值），
-   而 metadata.run_id 仍是**原始值**；
-4. ``trace_id_from_run_id`` 映射：32-hex 原样 / 非 hex → uuid5 / 空串·None 不抛；
-   ``experiment_name`` / ``session_id`` 环境变量口径；
-5. 评测路径 ``AgentScheme().run(case, ctx)`` → root metadata 含
-   ``eval_case_id / scene / scheme / experiment / source=evaluation``（+ tool_world /
-   rag_mode / budget_limits），trace_id 是确定性 uuid5（同案两次同值），且
-   **不 per-case flush**；experiment 变化会改变 trace_id；
-6. **默认路径**（不注入 tracer）：``run_review`` / ``AgentScheme.run`` 的决策与注入
-   tracer 时**完全一致**（埋点旁路），且 ``langfuse`` 不在 ``sys.modules``；
-7. ``flush_tracer`` 委派 ``Tracer.flush`` 并吞异常（整轮评测收尾用）。
-
-隔离：每个测试经 ``_fake_tracer`` fixture 注入并在结束 ``set_tracer(None)`` 复原。
+用**假 tracer** 经 ``pra.observability.tracing.set_tracer`` 注入 —— 不联网、不 import
+``langfuse`` SDK、不依赖凭据；每个测试结束 ``set_tracer(None)`` 复原。
+- ``run_review`` → **恰好 1 个 root**（HTTP 路径 trace_id = run_id 原样），入参只带轻量标识，
+  root 结束写回终裁摘要；5 个 node span 都出现，``gate`` 是 ``decide`` 的**子** span。
+- ``trace_id_from_run_id``：32-hex 原样 / 非 hex → uuid5（确定性）/ 空串·None 不抛；非 hex 时
+  metadata.run_id 保留原始值。评测路径 trace_id = uuid5(experiment:case:agent:后端名)，
+  **必须含 LLM 后端名**，否则 scripted 臂会污染 real trace。
+- **默认路径**决策与注入 tracer 时完全一致，且 ``langfuse`` 不进 ``sys.modules``。
 """
 
 from __future__ import annotations
@@ -60,9 +42,7 @@ _LIGHT_INPUT_KEYS = {
 }
 
 
-# --------------------------------------------------------------------------------------
 # 假 tracer / 假 observation（记录 + 记录 span 嵌套父节点；不联网、不 import SDK）
-# --------------------------------------------------------------------------------------
 
 
 class _FakeObs:
@@ -170,9 +150,7 @@ def _v2_case():
     return cases[0]
 
 
-# --------------------------------------------------------------------------------------
 # 1. HTTP root trace（pra.api.service.run_review）
-# --------------------------------------------------------------------------------------
 
 
 async def test_run_review_emits_exactly_one_root_trace_with_run_id_trace_id(fake_tracer) -> None:
@@ -269,9 +247,7 @@ async def test_non_hex_run_id_gives_deterministic_32hex_trace_id(fake_tracer) ->
     assert first.review_decision.decision == second.review_decision.decision
 
 
-# --------------------------------------------------------------------------------------
 # 2. trace_id / experiment / session 纯函数
-# --------------------------------------------------------------------------------------
 
 
 def test_trace_id_from_run_id_passthrough_and_uuid5_fallback() -> None:
@@ -357,9 +333,7 @@ def test_flush_tracer_is_noop_and_returns_none_with_null_tracer(monkeypatch) -> 
     assert pkg_flush_tracer() is None
 
 
-# --------------------------------------------------------------------------------------
 # 3. 评测 root trace（AgentScheme.run）
-# --------------------------------------------------------------------------------------
 
 
 async def test_agent_scheme_root_metadata_and_deterministic_uuid5(fake_tracer, monkeypatch) -> None:
@@ -434,9 +408,7 @@ async def test_agent_scheme_root_metadata_and_deterministic_uuid5(fake_tracer, m
     assert "experiment:prompt-v2" in third.tags
 
 
-# --------------------------------------------------------------------------------------
 # 3b. 落库路径 root trace（pra.infra.persist_service.run_and_persist，假 session 不连库）
-# --------------------------------------------------------------------------------------
 
 
 class _FakeSession:
@@ -521,9 +493,7 @@ async def test_run_and_persist_emits_root_and_nested_spans_without_db(
     assert fake_tracer.flushes == 0  # 常驻/评测路径都不 per-request flush
 
 
-# --------------------------------------------------------------------------------------
 # 4. 默认路径（无 tracer 注入）—— 行为完全一致 + 不拉起 SDK
-# --------------------------------------------------------------------------------------
 
 
 async def test_default_path_behaves_identically_and_never_imports_sdk(monkeypatch) -> None:
@@ -586,10 +556,9 @@ async def test_run_review_default_stub_decision_is_unchanged(monkeypatch) -> Non
 def test_root_trace_id_is_scoped_by_llm_backend() -> None:
     """trace_id 必须含 LLM 后端名 —— 否则 scripted 对照臂会污染 real trace。
 
-    实测背景（2026-09-09）：`run_evaluation_real.py` 同进程跑 scripted + real 两臂、
-    两臂 experiment 相同；旧公式 `uuid5(experiment:case:agent)` 让两臂落进**同一条
-    trace**（每 trace 出现 2 个 root、generation 交织，按 trace 汇总 token 会混入
-    0-token 的桩 generation）。
+    `run_evaluation_real.py` 同进程跑 scripted + real 两臂、experiment 相同；旧公式
+    `uuid5(experiment:case:agent)` 让两臂落进**同一条 trace**（每 trace 2 个 root、generation
+    交织，按 trace 汇总 token 会混入 0-token 的桩 generation）。
     """
     from pra.agent.state import build_initial_state
     from pra.evaluation.harness.agent_scheme import _root_trace_context

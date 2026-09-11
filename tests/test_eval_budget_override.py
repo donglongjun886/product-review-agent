@@ -1,43 +1,15 @@
-"""评测装配层 B-2：LLM 调用预算覆盖（max_llm_calls）—— 装配/默认/护栏边界/端到端/CLI。
+"""评测装配层可配 LLM 调用预算（``max_llm_calls``）的装配 / 默认 / 边界 / 端到端 / CLI 测试。
 
-背景（决策 B-2）：真实 LLM 评测发现大量案件打满 LLM 调用预算（llm_calls=10）被
-确定性护栏转人工。本轮给评测装配层加可配置的 LLM 调用预算（10/12/15 档对照），
-回答"截胡是预算太紧还是 Agent 收敛逻辑差"；生产护栏仍固定 10/15/40000/30000
-（domain/models.py ``BudgetLimits`` 契约不改），只动评测装配层。
+生产护栏固定 10/15/40000/30000（``BudgetLimits`` 契约不改），只动评测装配层。覆盖：
+覆盖走 ``model_copy`` 只改注入臂 limits（原对象不动），None/{} 原样返回；``>=`` 达限即
+超，cap=12 时第 12 次才截胡、默认仍第 10 次，cap=2 第 2 次截胡；v2 不收敛案
+（EC_V2_0260）在 cap 10/12/15 下恰好打满对应上限；覆盖不跨实例泄漏到对照臂；
+CLI ``--llm-budget`` 缺省 None。
 
-覆盖点：
-1. ``AgentScheme(budget_limits={"max_llm_calls": 12})`` → 注入臂 initial_state 的
-   ``budget.limits.max_llm_calls == 12``（其余限额保持默认；覆盖走 model_copy，
-   原 Budget/BudgetLimits 对象不被改动）；
-2. 默认 None / 空覆盖 → 上限仍为生产默认 10，且 ``_apply_budget_limits`` 对 None/{}
-   原样返回（零拷贝、行为逐字节不变）；
-3. 护栏纯函数边界：cap=12 时第 10/11 次 LLM 调用不截胡、第 12 次才截胡；无覆盖
-   （生产默认 10）仍在第 10 次截胡 —— ``>=`` 达限即超语义，与 test_budget 同口径；
-4. 端到端（确定性 scripted 全图跑、无网络）：cap=2 恰好第 2 次调用被截胡转人工
-   （HUMAN + R3_BUDGET_EXHAUSTED）；cap=12 与默认在同一案上结果一致（自然收敛
-   需求 < 10，cap=12 不会在第 10 次误截胡）—— 上限真正生效的是覆盖后的值；
-   另用 v2 确定性不收敛案（EC_V2_0260，默认下打满 10 转人工）证明截胡次数 ==
-   生效上限：cap 12 → 第 10/11 次不截胡、第 12 次才截胡；cap 15 → 第 15 次才截胡
-   （预算抬高仍烧满 ⇒ 收敛逻辑差而非预算紧，B-2 归因的确定性证据）；
-5. 覆盖只作用于注入臂：同进程 cap=2 的臂被截胡，AgentScheme()（scripted 对照臂，
-   同 run_evaluation_real.py 装配）仍跑满自然调查、不受影响（实例隔离）；
-6. CLI：run_evaluation_real.py 的 ``--llm-budget`` 缺省解析为 None；
-   ``_build_budget_limits`` 缺省只产 ``{"max_latency_ms": 600000}``（与改动前
-   逐字节一致），给 N 时追加 ``max_llm_calls=N``（10/12/15 档均可），装配产物可
-   直接投 AgentScheme（real 臂构造路径，同 _main）。
-
-修复包 3 追加覆盖（P2-14/P2-16/P2-17/P1-6c，均确定性、无网络）：
-7. P2-14：``budget_limits`` 未知键（拼错字如 ``max_llm_call``）在构造与
-   ``_apply_budget_limits`` 都抛 ValueError（白名单校验）—— 不再被 pydantic
-   ``model_copy`` 静默挂属性、以生产默认跑；
-8. P2-16：R3 命中案的 ``EvalRecord.detail["budget_hit_dim"]`` 记录先撞限维度
-   （默认截胡案 = LLM_CALLS），overrides 码字面不变；收敛案为 None；
-9. P2-17：cap 是**节点级护栏** —— cap=1 且单节点 schema 重试 attempts=2 时，
-   生效截胡点可为 cap+1（llm_calls==2 才截胡），"至多越 1 次"文档化语义的
-   纯函数 + 端到端两条证据；
-10. P1-6c：real 报告 overrides 汇总函数（R5 降级案数 / R3 案数 / 混合案）计数正确。
-
-全程离线：无网络、无真 LLM；被测对象全部确定性。
+未知键（拼错）在构造与 ``_apply_budget_limits`` 都抛 ValueError —— pydantic
+``model_copy`` 不校验未知键，会静默挂属性而覆盖不生效；cap 是节点级护栏，单节点
+schema 重试（attempts=2）时至多越 1 次；R3 案在 ``detail["budget_hit_dim"]`` 附先撞
+限维度，overrides 码字面不变。全程离线、确定性。
 """
 
 from __future__ import annotations
@@ -84,11 +56,6 @@ def _v1_case(case_id: str = "EC_0001"):
     return cases[0]  # id 变更兜底：任一确定性收敛案均可（全 v1 自然 6-7 次 < 10）
 
 
-# ---------------------------------------------------------------------------
-# 1) 装配：覆盖只改注入臂 initial_state 的 limits
-# ---------------------------------------------------------------------------
-
-
 def test_override_sets_initial_state_llm_cap_and_preserves_other_limits():
     case = _v1_case()
     state = build_initial_state(case.input)
@@ -99,7 +66,6 @@ def test_override_sets_initial_state_llm_cap_and_preserves_other_limits():
     out = AgentScheme._apply_budget_limits(state, {"max_llm_calls": 12})
     limits = out["budget"].limits
     assert limits.max_llm_calls == 12
-    # 其余限额保持默认（只覆盖给定 key）
     assert (limits.max_tool_calls, limits.max_tokens, limits.max_latency_ms) == (
         15,
         40000,
@@ -122,11 +88,6 @@ def test_default_none_or_empty_keeps_production_10_and_returns_same_object():
     assert AgentScheme._apply_budget_limits(state, {}) is state
 
 
-# ---------------------------------------------------------------------------
-# 2) 护栏边界：cap=12 时第 10/11 次不截胡、第 12 次才截胡（>= 达限即超）
-# ---------------------------------------------------------------------------
-
-
 def test_guardrail_fires_on_12th_call_not_10th_with_cap_12():
     limits12 = BudgetLimits(max_llm_calls=12)
     assert budget_exceeded(Budget(llm_calls=10, limits=limits12)) is None  # 第 10 次不截胡
@@ -134,11 +95,6 @@ def test_guardrail_fires_on_12th_call_not_10th_with_cap_12():
     assert budget_exceeded(Budget(llm_calls=12, limits=limits12)) == DIM_LLM_CALLS  # 第 12 次才截胡
     # 无覆盖（生产默认 10）仍在第 10 次截胡 —— 覆盖不漂移默认语义
     assert budget_exceeded(Budget(llm_calls=10)) == DIM_LLM_CALLS
-
-
-# ---------------------------------------------------------------------------
-# 3) 端到端（确定性 scripted 全图跑）：截胡发生在覆盖后的上限、默认臂不受影响
-# ---------------------------------------------------------------------------
 
 
 async def test_e2e_interception_happens_at_override_cap_not_at_10():
@@ -181,13 +137,10 @@ async def test_override_isolated_to_injected_arm_scripted_control_stays_default(
 async def test_e2e_nonconverging_case_interception_follows_cap_12_not_10():
     """确定性不收敛案（v2 EC_V2_0260：脚本桩下持续烧预算）—— 截胡次数 == 生效上限。
 
-    v2 全量 320 案中恰有 28 案（EC_V2_0145/0150/0155/0160、EC_V2_0260-0288（步长 4）、
-    EC_V2_0305-0320；scene = evasion/multi-signal/boundary）在默认预算 10 下确定性
-    打满后被转人工（R3_BUDGET_EXHAUSTED）；28 案全量 sweep（cap 10/12/15，结果见
-    pra_budget_work/sweep_cap_table.{json,md}）显示抬到 12/15 后仍 28/28 烧满新上限
-    → 归因是"收敛逻辑差"而非"预算紧"。此处用 EC_V2_0260 端到端证明**覆盖后的
-    上限才是截胡边界**：默认 10 → 恰好第 10 次截胡；cap 12 → 第 10、11 次不截胡、
-    第 12 次才截胡；cap 15 → 第 15 次才截胡。
+    v2 全量 320 案中恰有 28 案在默认预算 10 下确定性打满转人工
+    （R3_BUDGET_EXHAUSTED）；cap 抬到 12/15 后仍 28/28 烧满新上限 ⇒ 归因是
+    "收敛逻辑差"而非"预算紧"。此处用 EC_V2_0260 证明**覆盖后的上限才是截胡边界**：
+    默认 10 → 恰好第 10 次；cap 12 → 第 12 次；cap 15 → 第 15 次。
     """
     ctx = EvalContext()
     cases = load_dataset(DATA_PATH_V2)
@@ -197,22 +150,14 @@ async def test_e2e_nonconverging_case_interception_follows_cap_12_not_10():
     at12 = await AgentScheme(budget_limits={"max_llm_calls": 12}).run(case, ctx)
     at15 = await AgentScheme(budget_limits={"max_llm_calls": 15}).run(case, ctx)
 
-    # 默认（生产 10）：第 10 次调用后被截胡转人工
     assert at10.cost["llm_calls"] == 10
     assert at10.decision == "HUMAN_REVIEW"
     assert "R3_BUDGET_EXHAUSTED" in at10.detail["overrides"]
-    # cap 12：越过第 10、11 次，直到第 12 次调用后才截胡（不在 10 截胡）
     assert at12.cost["llm_calls"] == 12
     assert at12.decision == "HUMAN_REVIEW"
     assert "R3_BUDGET_EXHAUSTED" in at12.detail["overrides"]
-    # cap 15：同理第 15 次才截胡 —— 上限真正生效的是覆盖后的值
     assert at15.cost["llm_calls"] == 15
     assert at15.decision == "HUMAN_REVIEW"
-
-
-# ---------------------------------------------------------------------------
-# 4) CLI：--llm-budget 缺省 None、装配缺省与改动前一致、给 N 追加 max_llm_calls
-# ---------------------------------------------------------------------------
 
 
 def test_cli_default_parses_none_and_assembly_byte_identical_to_before():
@@ -240,17 +185,11 @@ def test_cli_llm_budget_flag_maps_to_max_llm_calls_and_feeds_agent_scheme():
     assert scheme._budget_limits == {"max_latency_ms": 600000, "max_llm_calls": 12}
 
 
-# ---------------------------------------------------------------------------
-# 5) 修复包 3 追加：P2-14 键白名单 / P2-17 节点级护栏 / P2-16 记录侧维度 / P1-6c 汇总
-# ---------------------------------------------------------------------------
-
-
 def test_budget_limits_unknown_key_raises_value_error():
-    """P2-14：未知键（拼错字）在装配与 ``_apply_budget_limits`` 都抛 ValueError。
+    """未知键（拼错字）在装配与 ``_apply_budget_limits`` 都抛 ValueError。
 
-    pydantic v2 ``model_copy(update=...)`` 对未知键**不校验**：会静默挂成实例多余
-    属性而覆盖不生效 —— 旧行为会让 ``{"max_llm_call": 12}``（少个 s）以生产默认 10
-    跑完 B-2 实验、归因建立在实际未放宽之上。白名单校验让装配层失败响亮。
+    pydantic v2 ``model_copy(update=...)`` 对未知键不校验：会静默挂成实例多余属性而
+    覆盖不生效 —— 白名单校验让装配层失败响亮，而不是以生产默认 10 跑完实验。
     """
     case = _v1_case()
     state = build_initial_state(case.input)
@@ -271,11 +210,10 @@ def test_budget_limits_unknown_key_raises_value_error():
 
 
 def test_guardrail_cap_is_node_level_can_overshoot_by_one():
-    """P2-17 纯函数证据：cap 只在节点入口检查 → attempts=2 的单节点可把计数推到 cap+1。
+    """cap 只在节点入口检查 → attempts=2 的单节点可把计数推到 cap+1。
 
     cap=1：入口 llm_calls=0 放行 → 单节点 bump 2（schema/transport 重试，attempts=2）
-    → llm_calls=2（== cap+1）→ **下一节点入口**才截胡。语义 = "节点级护栏、至多越
-    1 次"（docstring 已注明；护栏语义未改，本测试锁该边界）。
+    → 下一节点入口才截胡。语义 = "节点级护栏、至多越 1 次"。
     """
     caps = BudgetLimits(max_llm_calls=1)
     b0 = Budget(llm_calls=0, limits=caps)
@@ -311,11 +249,10 @@ class _CapOverrunBackend:
 
 
 async def test_e2e_node_guardrail_cap1_attempts2_intercepts_at_cap_plus_1():
-    """P2-17 端到端：cap=1 时单节点 schema 重试（attempts=2）越过 cap → 截胡点 cap+1。
+    """cap=1 时单节点 schema 重试（attempts=2）越过 cap → 截胡点 cap+1。
 
-    确定性全图 + 注入替身（仅 hypothesize 生效；第 1 次非法输出触发 llm_shell 修正
-    重试 = 单节点 2 次尝试）→ hypothesize bump llm_calls=2，plan/decide 入口见预算
-    已超（>= cap 1）短路 → HUMAN + R3，llm_calls==2==cap+1。
+    确定性全图 + 替身（仅 hypothesize 生效）：hypothesize bump llm_calls=2，
+    plan/decide 入口见预算已超（>= cap 1）短路 → HUMAN + R3，llm_calls==2==cap+1。
     """
     ctx = EvalContext()
     case = _v1_case()
@@ -328,10 +265,10 @@ async def test_e2e_node_guardrail_cap1_attempts2_intercepts_at_cap_plus_1():
 
 
 async def test_record_detail_reports_budget_hit_dimension():
-    """P2-16：R3 命中案在 ``EvalRecord.detail["budget_hit_dim"]`` 附先撞限维度。
+    """R3 命中案在 ``EvalRecord.detail["budget_hit_dim"]`` 附先撞限维度。
 
-    overrides 码字面/语义不变（R3_BUDGET_EXHAUSTED 不拆码）—— 维度只作记录侧
-    附加审计（真实跑分 token 是第二截胡源时区分 llm_calls/tokens/latency）。
+    维度只作记录侧附加审计（真实跑分 token 是第二截胡源时区分
+    llm_calls/tokens/latency），overrides 码字面不变。
     """
     ctx = EvalContext()
     cases = load_dataset(DATA_PATH_V2)
@@ -340,14 +277,13 @@ async def test_record_detail_reports_budget_hit_dimension():
     assert rec.decision == "HUMAN_REVIEW"
     assert "R3_BUDGET_EXHAUSTED" in rec.detail["overrides"]  # 码字面不变
     assert rec.detail["budget_hit_dim"] == "LLM_CALLS"  # llm_calls 先撞限
-    # 收敛案（无 R3）→ dim None
     ok = await AgentScheme().run(_v1_case(), ctx)
     assert ok.detail["overrides"] == []
     assert ok.detail["budget_hit_dim"] is None
 
 
 def test_real_overrides_summary_counts_r5_r3_and_mixed():
-    """P1-6c：real 报告 overrides 汇总函数（R5 降级案数 / R3 案数 / 混合案）计数正确。"""
+    """real 报告 overrides 汇总函数（R5 降级案数 / R3 案数 / 混合案）计数正确。"""
     mod = _real_script()
 
     def _rec(overrides: list) -> EvalRecord:
@@ -371,6 +307,5 @@ def test_real_overrides_summary_counts_r5_r3_and_mixed():
     assert s["R3_BUDGET_EXHAUSTED"] == 2
     assert s["r3_r5_mixed"] == 1
     assert s["other_codes"] == {"R2_REJECT_GATE_FAIL": 1}
-    # 全无码 → 全 0（确定性）
     empty = mod._overrides_summary([_rec([]), _rec([])])
     assert empty["cases_with_any"] == 0 and empty["R5_DEGRADED_OR_FAILED_STEP"] == 0

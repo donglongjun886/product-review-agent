@@ -1,34 +1,24 @@
-"""decide 节点：最终裁决 —— 图中唯一"LLM 提案 + 确定性 overlay"双层节点
-（docs/00-system-design.md §7.2 / docs/01-agent-loop.md §3.4 / 04 §7.2；graph MVP 契约
-§5.5 / §4.2 decide 例外）。
+"""decide 节点：最终裁决 —— 图中唯一"LLM 提案 + 确定性 overlay"双层节点。
 
-职责：LLM 只产 **DecisionProposal 提案**；``run_decision_overlay``（gate.py）做确定性
-收口 —— R1 硬规则强制 REJECT、预算超限/矛盾/关键工具失败/政策不确定/假设不可区分/
-degraded 等 abstention 兜底转人工（R3_*/R5_* 写进 overrides）、PASS/REJECT 只有过
-Gate（pass_gate/reject_gate）才被采纳 → 产出唯一终态 ``ReviewDecision``。
-**DECIDED 是图内唯一终态**：worker 在 invoke 返回后把 decision 落 DB（03 T-8）；
-本节点不落库、不写额外状态字段（只返回 decision channel 覆盖写）。
+职责：LLM 只产 **DecisionProposal 提案**；``run_decision_overlay`` 做确定性收口 ——
+硬规则优先、预算超限 / 证据矛盾 / 关键工具失败 / 政策不确定 / 假设不可区分 / degraded
+等条件一律弃权转人工（归因码写进 overrides），PASS/REJECT 只有过 Gate 才被采纳 →
+产出唯一终态 ``ReviewDecision``。DECIDED 是图内唯一终态：worker 在 invoke 返回后把
+decision 落 DB（本节点不落库、不写额外状态字段）。
 
-契约要点（§5.5，逐条对齐）：
-1. ``can_llm`` = not degraded ∧ 预算未超限（budget_exceeded is None）∧ 无未解决关键
-   工具失败（errors.key_tool_failure）；否则不调 LLM：proposal=None、
-   budget=state["budget"]、decide_llm_failed=False。
-2. can_llm 时：``call_structured_llm(OutputModel=DecisionProposal, node="decide")``；
-   记账按 outcome.attempts/tokens ``bump_llm_usage``。
-3. LLM 失败（decide_llm_failed，outcome.model=None）→ proposal=None；overlay_state
-   置 degraded=True 且 failures 追加一条 critical failure（STEP_DECIDE，reason=
-   "decide LLM schema 校验重试仍失败"），**让 overlay 的 R5_DEGRADED_OR_FAILED_STEP
-   落进 decision.overrides**（可审计的"谁降级了"）。
-4. ``final = run_decision_overlay(overlay_state, proposal)`` —— budget_used 快照在
-   overlay 的 build_decision 内 snapshot_budget 完成，节点不重复快照。
-5. **decide 恒返回 degraded=False**：降级/失败被消费进 decision / overrides /
-   failures 审计，不再把 degraded 透传出去（§5.5 注）。
+契约要点：
+1. ``can_llm`` = not degraded ∧ 预算未超限 ∧ 无未解决关键工具失败；否则不调 LLM：
+   proposal=None、budget=state["budget"]、decide_llm_failed=False。
+2. can_llm 时调 ``call_structured_llm(OutputModel=DecisionProposal, node="decide")``，
+   按 outcome.attempts/tokens 记账。
+3. LLM 失败 → proposal=None，且 overlay 只读快照置 degraded=True + 追加一条 critical
+   failure（reason="decide LLM schema 校验重试仍失败"），让降级归因码落进
+   decision.overrides（可审计"谁降级了"）。budget_used 快照由 overlay 自己完成。
+4. **decide 恒返回 degraded=False**：降级/失败被消费进 decision / overrides / failures
+   审计，不再透传。
 
-- ``_build_messages``：MVP 简短事实注入（真实 litellm 的完整 prompt 后续补，§4.1）；
-  首条 user 消息固定 ``"__STATE__ {json}"``（§4.3：scripted_llm 的确定性决策输入 ——
-  hypotheses/evidence 全量 + degraded + failures + budget 摘要，model_dump(mode="json")）。
-
-语法/import 约定：顶部 ``from __future__ import annotations``；import 一律 ``pra.*``。
+``_build_messages`` 首条 user 消息固定 ``"__STATE__ {json}"``：hypotheses/evidence 全量
++ degraded + failures + budget 摘要（``model_dump(mode="json")``）。
 """
 
 from __future__ import annotations
@@ -44,7 +34,7 @@ from pra.observability.tracing import get_tracer
 
 __all__ = ["decide_node"]
 
-# 系统指令 —— 决策提案（MVP 注入版；真实 litellm 的完整 prompt 后续补，§4.1）。
+# 系统指令 —— 决策提案（MVP 注入版；真实 litellm 的完整 prompt 见 llm_prompts.py）。
 _SYSTEM_PROMPT = (
     "你是商品审核 Agent 的最终决策步骤（decide）：基于 __STATE__ 中的 hypotheses 与 "
     "evidence 给出**裁决提案**（仅提案 —— 确定性 overlay 还会做 Gate 校验与兜底）。\n"
@@ -68,11 +58,8 @@ _SYSTEM_PROMPT = (
 
 
 def _build_messages(state: dict) -> list[dict]:
-    """构造 LLM 消息（§4.3 __STATE__ 机制）。
-
-    首条 user 消息 = ``"__STATE__ " + json``，携带 hypotheses + evidence 全量
-    （model_dump(mode="json")）+ degraded + failures + budget 摘要。
-    """
+    """构造 LLM 消息：首条 user 消息 = ``"__STATE__ " + json``，携带 hypotheses /
+    evidence 全量（``model_dump(mode="json")``）+ degraded + failures + budget 摘要。"""
     hypotheses = [h.model_dump(mode="json") for h in state.get("hypotheses") or []]
     evidence = [e.model_dump(mode="json") for e in state.get("evidence") or []]
     budget = state.get("budget")
@@ -104,10 +91,7 @@ def _build_messages(state: dict) -> list[dict]:
 
 
 def _gate_input_summary(proposal: DecisionProposal | None) -> dict:
-    """Gate 子 span 的入参摘要（LLM 提案：decision / risk_level / confidence）。
-
-    只读摘要，不参与任何判定；``proposal is None``（预算/降级/关键工具失败）如实记 None。
-    """
+    """Gate 子 span 的入参摘要（decision / risk_level / confidence；只读、不参与判定）。"""
     if proposal is None:
         return {"proposal": None}
     return {
@@ -121,7 +105,7 @@ def _gate_input_summary(proposal: DecisionProposal | None) -> dict:
 
 
 def _gate_output_summary(final) -> dict:
-    """Gate 子 span 的出参摘要（overlay 后的终裁 + overrides 原因码，只读）。"""
+    """Gate 子 span 的出参摘要（overlay 后终裁 + overrides 原因码，只读）。"""
     return {
         "decision": getattr(final.decision, "value", final.decision),
         "risk_level": getattr(final.risk_level, "value", final.risk_level),
@@ -131,14 +115,10 @@ def _gate_output_summary(final) -> dict:
 
 
 async def decide_node(state: dict, config) -> dict:
-    """decide 图节点 action（模块级导出名，graph.py 按 ``pra.agent.nodes.decide``
-    import，契约 §9.1）。
+    """decide 图节点 action（graph.py 按 ``pra.agent.nodes.decide`` import）。
 
-    - ``state``：AgentState（build_initial_state 已全量初始化，invoke 约定）；
-    - ``config``：LangGraph 运行时配置（thread_id 本节点不消费，预留签名）。
-
-    返回 {"decision": ReviewDecision, "degraded": False, "budget": Budget,
-    "failures": [新 failure] 或 []}（failures 为 append reducer，只返回本次新增）。
+    ``config`` 为 LangGraph 运行时配置（thread_id 本节点不消费，预留签名）。返回
+    {"decision", "degraded": False, "budget", "failures"}（failures 只含本次新增）。
     """
     can_llm = (
         not state["degraded"]
@@ -158,14 +138,14 @@ async def decide_node(state: dict, config) -> dict:
         proposal = outcome.model
         decide_llm_failed = outcome.model is None
     else:
-        # 预算/降级/关键工具失败 → 不再烧一次 LLM；overlay 用 proposal=None 兜底。
+        # 预算/降级/关键工具失败 → 不再烧 LLM；overlay 用 proposal=None 兜底。
         proposal = None
         budget = state["budget"]
         decide_llm_failed = False
 
     # overlay 只读的本地快照（浅拷贝）：预算换为记账后对象；decide LLM 失败时把
-    # degraded=True + critical failure 注进去，让 R5_DEGRADED_OR_FAILED_STEP 落进
-    # decision.overrides（节点自身返回仍为 degraded=False，§5.5 注）。
+    # degraded=True + critical failure 注进去，让降级归因码落进 decision.overrides
+    # （节点自身返回仍为 degraded=False）。
     overlay_state = dict(state)
     overlay_state["budget"] = budget
     failure = None
@@ -178,7 +158,7 @@ async def decide_node(state: dict, config) -> dict:
         overlay_state["degraded"] = True
         overlay_state["failures"] = [*state["failures"], failure]
 
-    # Gate 子 span（docs/09 §4.5）：Gate 不是图节点，这里只给它一层**只读**子观测 ——
+    # Gate 子 span：Gate 不是图节点，这里只给它一层**只读**子观测 ——
     # 不新增 Graph Node、不改路由、不改 gate.py 的判定顺序与结果。
     with get_tracer().node_span("gate", input=_gate_input_summary(proposal)) as gate_span:
         final = run_decision_overlay(overlay_state, proposal)

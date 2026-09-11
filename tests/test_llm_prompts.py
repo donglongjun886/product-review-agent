@@ -1,21 +1,18 @@
-"""llm_prompts 渲染层确定性测试（Phase 3 real LLM prompt 迭代的约束守护）。
+"""llm_prompts 渲染层确定性测试（real LLM prompt 约束守护，全部纯字符串断言）。
 
-覆盖 Phase 3 v1 real 跑分诊断出的三条新 prompt 约束（全部为纯字符串断言，
-不联网 / 无 API key / 不调真实 LLM）：
-- hypothesize：禁重复提出既有假设（system 规则 + user 上下文渲染「既有假设清单」）
-  与"假设必须可取证、允许少提"；
-- plan：政策条款/先例一次性适用性判定（不重复安排同类检索）；证据已充分（高优先假设
-  已全部结论化、无未解决高优先级疑点）应提前 conclude，UNRESOLVED 低优先级/边际假设
-  与只会重复采集的工具调用不阻止收尾；
-- decide：证据链充分且无矛盾/缺口时应本轮直接裁决（不把可裁决案件推给 HUMAN_REVIEW），
-  人工只留给真正的证据不足/矛盾/政策模糊/取证失败场景；
-- reevaluate：外观/视觉类假设判 SUPPORTED 必须引用图像类证据（IMAGE_SIMILARITY），
-  CASE_PRECEDENT / POLICY_REF 只能佐证；new_hypotheses 禁重复、允许为空。
+四节点 prompt 约束：
 
-另含：四节点 user/system 渲染走查冒烟 + 输出 schema 契约不变守护
-（HypothesizeOutput.hypotheses 仍 1..5 必填、ReevaluateOutput.new_hypotheses 仍可选）。
+- hypothesize：禁重复提出既有假设（system 规则 + user 上下文渲染「既有假设清单」）；
+  假设必须可取证、允许少提；
+- plan：政策条款/先例一次性适用性判定（不重复安排同类检索）；证据已充分（高优先假设已
+  全部结论化、无未解决高优先级疑点）应提前 conclude，低优先级/边际 UNRESOLVED 与只会
+  重复采集的调用不阻止收尾；
+- decide：证据链充分且无矛盾/缺口时本轮直接裁决，人工只留给真正的证据不足/矛盾/政策模糊/
+  取证失败；
+- reevaluate：外观/视觉类假设判 SUPPORTED 必须引用图像类证据（``IMAGE_SIMILARITY``），
+  ``CASE_PRECEDENT`` / ``POLICY_REF`` 只能佐证；``new_hypotheses`` 禁重复、允许为空。
 
-语法/import 约定：顶部 ``from __future__ import annotations``；import 一律 pra.*。
+另含输出 schema 契约守护与四节点渲染走查。不联网 / 无 API key / 不调真实 LLM。
 """
 
 from __future__ import annotations
@@ -27,8 +24,7 @@ from pra.agent.llm_prompts import (
     build_user_prompt,
 )
 
-# 简单 JSON Schema（模拟节点 OutputModel 的 model_json_schema() 形状；只断言分节与
-# 文本约束，不依赖具体模型字段）。
+# 简单 JSON Schema（模拟 OutputModel 的 model_json_schema() 形状；只断言分节与文本约束）
 _SCHEMA = {
     "title": "OutputProposal",
     "type": "object",
@@ -93,7 +89,6 @@ _HYP_WITHOUT_EXISTING = {k: v for k, v in _HYP_WITH_EXISTING.items() if k != "hy
 
 
 def test_hypothesize_system_no_duplicate_and_provable_rules():
-    """hypothesize system：含禁重复既有假设 / 假设可取证且允许少提的显式规则。"""
     prompt = build_system_prompt("hypothesize")
     assert "禁止重复提出假设" in prompt
     assert "既有假设清单" in prompt  # 规则指向 user 上下文里渲染的去重清单
@@ -106,7 +101,6 @@ def test_hypothesize_system_no_duplicate_and_provable_rules():
 
 
 def test_hypothesize_user_prompt_renders_existing_hypotheses():
-    """hypothesize user：state 带 hypotheses → 渲染「四、既有假设清单」精简行。"""
     text = build_user_prompt(
         node="hypothesize", state=_HYP_WITH_EXISTING, json_schema=_SCHEMA
     )
@@ -121,7 +115,6 @@ def test_hypothesize_user_prompt_renders_existing_hypotheses():
 
 
 def test_hypothesize_user_prompt_omits_section_when_no_existing():
-    """hypothesize user：state 无 hypotheses（首轮初始生成）→ 不渲染去重清单分节。"""
     text = build_user_prompt(
         node="hypothesize", state=_HYP_WITHOUT_EXISTING, json_schema=_SCHEMA
     )
@@ -130,7 +123,6 @@ def test_hypothesize_user_prompt_omits_section_when_no_existing():
 
 
 def test_plan_system_policy_applicability_one_shot():
-    """plan system：政策/先例一次性适用性判定 —— 已引用即不再重复安排同类检索。"""
     prompt = build_system_prompt("plan")
     assert "一次性适用性判定" in prompt
     assert "适用性已判定" in prompt
@@ -140,8 +132,7 @@ def test_plan_system_policy_applicability_one_shot():
 
 
 def test_plan_system_early_conclude_when_evidence_sufficient():
-    """plan system：证据已充分（高优先假设已全部结论化、无未解决高优先级疑点）应
-    立即提前 conclude；UNRESOLVED 的低优先级/边际假设与只会重复采集的工具不阻止收尾。"""
+    """证据已充分（高优先假设已全部结论化、无未解决高优先级疑点）应立即提前 conclude。"""
     prompt = build_system_prompt("plan")
     # 判定基准：高优先假设全部得出基于证据的结论 + 无未解决高优先级疑点 = 证据已充分
     assert "证据已充分 → 提前收尾（conclude）" in prompt
@@ -157,7 +148,6 @@ def test_plan_system_early_conclude_when_evidence_sufficient():
 
 
 def test_reevaluate_system_visual_evidence_gate():
-    """reevaluate system：外观/视觉类 SUPPORTED 必须引用图像类证据（禁止脑补）。"""
     prompt = build_system_prompt("reevaluate")
     assert "外观/视觉类假设的证据门槛" in prompt
     assert "图像类证据" in prompt and "IMAGE_SIMILARITY" in prompt
@@ -169,7 +159,6 @@ def test_reevaluate_system_visual_evidence_gate():
 
 
 def test_reevaluate_system_new_hypotheses_no_duplicate_and_policy_one_shot():
-    """reevaluate system：new_hypotheses 禁重复/允许为空 + 政策先例引用一次判定。"""
     prompt = build_system_prompt("reevaluate")
     assert "new_hypotheses 禁重复、允许为空" in prompt
     assert "new_hypotheses **允许为空**" in prompt
@@ -180,8 +169,6 @@ def test_reevaluate_system_new_hypotheses_no_duplicate_and_policy_one_shot():
 
 
 def test_decide_system_rule_when_evidence_sufficient():
-    """decide system：证据链充分且无矛盾/缺口时应本轮直接裁决（不推 HUMAN_REVIEW）；
-    人工只留给真正的证据不足/矛盾/政策模糊/取证失败；禁止凭标题/先例脑补事实。"""
     prompt = build_system_prompt("decide")
     assert "证据充分即裁决（硬性）" in prompt
     assert "PASS 侧无证据缺口" in prompt
@@ -192,7 +179,7 @@ def test_decide_system_rule_when_evidence_sufficient():
 
 
 def test_output_schema_contracts_unchanged():
-    """输出 schema 契约不变守护：hypotheses 仍必填 1..5；new_hypotheses 仍可选无上限。"""
+    """输出 schema 契约守护：``hypotheses`` 仍必填 1..5；``new_hypotheses`` 仍可选无上限。"""
     hypo_schema = HypothesizeOutput.model_json_schema()
     assert hypo_schema["properties"]["hypotheses"]["minItems"] == 1
     assert hypo_schema["properties"]["hypotheses"]["maxItems"] == 5
@@ -202,7 +189,6 @@ def test_output_schema_contracts_unchanged():
 
 
 def test_four_node_prompt_render_smoke_walkthrough():
-    """四节点 system/user 渲染走查冒烟：全 node 可渲染、非空、Schema 要点分节恒在。"""
     # 一个尽量贴近真实 __STATE__ 的富 state（decide 视角字段齐全）
     rich_state = {
         "case": {

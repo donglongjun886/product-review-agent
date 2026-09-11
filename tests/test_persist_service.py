@@ -1,9 +1,8 @@
-"""persist 服务（pra/infra/persist_service.py）—— **不连真库**的单测。
+"""persist 服务的**不连真库**单测：只钉纯映射/摘要函数，无 DB、无 I/O。
 
-run_and_persist 的真库冒烟路径由 scripts/demo_api.py（协调者/带 DB 环境执行）覆盖，
-单测只钉本模块的**纯映射/摘要函数**（无 DB/无 I/O）：_enum_value / _token_count /
-_json_cap / _hypothesis_summary / _node_output_summary（各节点 trace output_json 形状，
-供落库 review_trace 列的确定性契约）。
+``_enum_value`` / ``_token_count`` / ``_json_cap`` / ``_hypothesis_summary`` /
+``_node_output_summary``（各节点 trace output_json 形状，即落库 review_trace 列的
+确定性契约）。真库冒烟路径由 scripts/demo_api.py 覆盖。
 """
 
 from __future__ import annotations
@@ -47,7 +46,7 @@ def test_json_cap_pass_through_primitives_and_small_objects():
     assert _json_cap("text") == "text"
     obj = {"a": 1, "b": ["x", "y"]}
     assert _json_cap(obj) == obj
-    assert _json_cap(obj) is obj  # 正常路径原对象返回（可序列化）
+    assert _json_cap(obj) is obj  # 可序列化时原对象返回
 
 
 def test_json_cap_truncates_oversized_objects():
@@ -162,7 +161,7 @@ def test_node_output_summary_decide():
 
 
 def test_node_output_summary_decide_none_decision():
-    """decide update 无 decision（理论不出现）→ decision=None 摘要，不抛。"""
+    """decide update 无 decision（理论不出现）→ decision=None，不抛。"""
     s = _node_output_summary("decide", {"degraded": True})
     assert s["node"] == "decide"
     assert s["degraded"] is True

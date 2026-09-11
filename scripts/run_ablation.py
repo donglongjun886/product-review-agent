@@ -1,19 +1,12 @@
-"""run_ablation.py —— Evaluation Phase 2 Ablation 跑分入口（docs/02-evaluation.md §6）。
+"""Ablation 跑分入口：方案级（2a/2b/2c）+ 组件级（full/−rag/…）确定性消融。
 
-用法::
+``--scheme-level`` / ``--component-level`` 二选一，都不给则两级都跑；``--data`` 指定评测集
+（默认 v1），``--smoke`` 只跑前 ``--smoke-limit`` 条。无真 LLM / 网络 / 随机；退出码 0 =
+全部变体跑通（任何异常 → 非零退出）。报告含并排指标表（含 abstention 五指标列）、
+2b−2a / 2c−2b 差异、组件相对 Full 的决策差异、工具证据覆盖标注（空消融风险）。
 
-    uv run python scripts/run_ablation.py                       # 方案级 + 组件级 + 全量数据
-    uv run python scripts/run_ablation.py --scheme-level        # 只跑方案级（2a/2b/2c）
-    uv run python scripts/run_ablation.py --component-level     # 只跑组件级（full/−rag/…）
-    uv run python scripts/run_ablation.py --data <path> --smoke # 冒烟（≤10 条）
-
-确定性：无真 LLM / 网络 / 随机；退出码 0 = 全部变体跑通（任何异常 → 非零退出）。
-报告含：并排指标表（含 abstention 五指标列）、2b−2a / 2c−2b 差异、组件相对 Full 的
-决策差异、工具证据覆盖标注（docs §6 空消融风险）。
-
-数据版本注记（Q11 低风险半）：默认数据为 v1（Phase 1，35 案）；v1 相对 Phase 2 正式集
-属 smoke 级，正式口径为 v2 320 案（docs/02-evaluation.md §8）—— 运行默认 v1 时输出首行
-会打印该标注，防 v1 数字被当正式结论（不翻默认数据：翻默认属行为变更，另行拍板）。
+数据版本注记：默认数据是 v1（Phase 1，35 案），相对 Phase 2 正式集属 smoke 级，正式口径为
+v2 320 案；跑默认 v1 时输出首行会打印该标注，防 v1 数字被当正式结论。不翻默认数据。
 """
 
 from __future__ import annotations
@@ -33,7 +26,7 @@ DEFAULT_DATA = "eval_data/v1/cases_v1.jsonl"
 
 
 def _is_default_v1(data_path: str) -> bool:
-    """数据是否 = 脚本默认 v1 文件（Q11：需首行标注 v1 属 smoke 级，勿当正式结论）。"""
+    """数据路径是否等于脚本默认的 v1 文件。"""
     return os.path.normpath(data_path) == os.path.normpath(DEFAULT_DATA)
 
 
@@ -62,8 +55,7 @@ async def _main(argv: list[str] | None = None) -> int:
         component_level=args.component_level or not args.scheme_level,
     )
     if _is_default_v1(args.data):
-        # Q11 低风险半：v1 默认数字易被当正式结论 —— 输出首行标注数据版本
-        #（v1 = Phase 1 集，相对 Phase 2 正式集属 smoke 级；不翻默认数据）。
+        # 默认 v1 数字易被当正式结论：输出首行标注数据版本。
         print(
             f"[数据版本] {DEFAULT_DATA} = Phase 1 v1 集（35 案，本次跑 {result.total_cases} 案），"
             "相对 Phase 2 正式集属 smoke 级 —— 正式口径为 v2 320 案"

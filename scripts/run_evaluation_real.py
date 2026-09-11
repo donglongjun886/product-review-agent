@@ -1,46 +1,33 @@
-"""run_evaluation_real.py —— Evaluation Phase 3（real LLM）第二块：agent real vs scripted 对比跑分。
+"""real LLM vs scripted 对比跑分：真实 LLM 接进评测 harness。
 
-用途
-====
-把真实 LLM 接进评测 harness（``AgentScheme(llm=...)`` real 模式，见
-``pra.evaluation.harness.agent_scheme`` 模块 docstring），与确定性 scripted 基线
-（``EvalScriptedLLMBackend`` 审查员桩）在**同一 eval 数据 / 同一工具世界**上逐案
-对比。输出：
+把 ``pra.evaluation.harness.agent_scheme.AgentScheme(llm=...)`` 的 real 模式与确定性 scripted
+基线（``EvalScriptedLLMBackend`` 审查员桩）在同一 eval 数据 / 同一工具世界上逐案对比，输出：
+逐案一致性（scripted vs real + 差异明细）、决策业务指标（``DecisionEvaluator`` 口径：
+Accuracy/Precision/Recall/FPR/FNR + HRR/自动化率；真值含 HUMAN_REVIEW 的案自动跳过并注明）、
+``--out PATH`` 落盘的 real EvalRecord 全量 + 差异摘要，以及 overrides 归因码汇总（R5 降级 /
+R3 预算截胡 / R3+R5 混合案）—— 「整卷全 HUMAN 是链路降级」一眼可见。
 
-1. 逐案一致性：scripted_decision vs real_decision（一致 / 差异 + 差异明细）；
-2. 决策业务指标（``DecisionEvaluator`` 口径：Accuracy/Precision/Recall/FPR/FNR
-   + HRR/自动化率；truth 含 HUMAN_REVIEW 的案自动跳过并注明）；
-3. ``--out PATH`` 时把 real EvalRecord 全量 + 差异摘要落 JSON（目录需已存在）；
-4. **overrides 汇总（P1-6c）**：real 每案归因码计数（R5 降级 N 案 / R3 预算截胡
-   N 案 / R3+R5 混合案）打印进 Console 与 JSON —— "整卷全 HUMAN 是链路降级"
-   一眼可见（Q5 已拍板 (a)：无 key 模式不支持，CLI 预检报错，见下方校验逻辑）。
+CLI：``--limit N`` / ``--ids "EC_0007,EC_0101"`` 定向取案子集；``--data`` 给 JSONL 或目录
+（eval_data/v1 → cases_v1.jsonl）；``--world {eval,rag}`` 选工具数据源世界（rag = 真实 KB
+检索，mode=hybrid）；``--model`` / ``--api-key`` / ``--base-url`` 配 LLM；``--max-latency-ms``
+放宽 real 臂墙钟护栏（默认 600000=10min，生产护栏 30s 对真实 LLM 过紧，每案 ~9 次串行调用
+天然 >30s，不放宽会每案 LATENCY 截胡转人工）；``--llm-budget N`` 覆盖 real 臂 max_llm_calls
+档（默认 None = 生产默认 10）；``--out`` 写结果 JSON（父目录需已存在）。
 
-用法示例::
+成本与结论边界：
 
-    uv run python scripts/run_evaluation_real.py                        # v1 全量 35 条（会真实调用 LLM！）
-    uv run python scripts/run_evaluation_real.py --limit 10             # 冒烟：只跑前 10 条（确定性取法）
-    uv run python scripts/run_evaluation_real.py --ids "EC_0007,EC_0101"  # 定向 real smoke：只跑这两个 case
-    uv run python scripts/run_evaluation_real.py --data eval_data/v2 --limit 5 --out /tmp/real_v2.json
-    uv run python scripts/run_evaluation_real.py --world rag --limit 10  # RAG 世界（真实 KB 检索）
-    uv run python scripts/run_evaluation_real.py --model deepseek/deepseek-chat --api-key sk-xxx
-    uv run python scripts/run_evaluation_real.py --llm-budget 12 --limit 10  # B-2: real 臂 LLM 预算档 12（生产护栏仍 10）
-
-成本与结论边界（必读）
-====================
-- **真实 API 有费用、非确定性**：real 侧每次运行都调用真实 LLM，同 case 重跑输出
-  可能不同（**不可重放**）。强烈建议先 ``--limit 10`` 冒烟确认链路与成本量级，再
-  跑全量。report / JSON 已如实标注；real 数字只代表单次运行抽样，勿当模型固定水平。
-- **确定性可复现部分**：scripted 结果、指标计算、JSON 结构、差异统计逻辑全程可
-  复现（回归基线永远以 scripted = ``AgentScheme()`` 默认行为为准，real 只观测对照）。
-- API key 读取顺序：``--api-key`` > 环境变量 ``DEEPSEEK_API_KEY`` > 仓库根 ``.env``
-  （脚本开头自动注入，setdefault 语义）；base-url 同理（``--base-url`` >
-  ``DEEPSEEK_BASE_URL``）。**API key 必填**（无 key 本地网关模式不支持，Q5 拍板 (a)）
-  —— 缺 key 预检即报错，不带着空凭据去烧请求。
-- 工具数据源 = 评测种子世界（eval / RAG，与 scripted 同一世界）→ 两臂差异只归因
-  于 LLM。EvalRecord 不含墙钟 latency（Phase 1 口径）；real 墙钟只进进程内进度打印，
-  不落 JSON。
-- 后端 import 为**延迟 import**（``pra.agent.litellm_backend`` 由并行任务落盘）：即使
-  此刻该文件不存在，本模块可 import、scripted / fake 干跑可用；real 运行需要它就绪。
+- 真实 API 有费用、非确定性：real 侧每次运行都调真实 LLM，同 case 重跑输出可能不同（不可重
+  放）。先 ``--limit 10`` 冒烟确认链路与成本量级再跑全量；report / JSON 已如实标注，real 数字
+  只代表单次运行抽样，勿当模型固定水平。
+- scripted 结果、指标计算、JSON 结构、差异统计全程可复现（回归基线永远以 scripted =
+  ``AgentScheme()`` 默认行为为准，real 只观测对照）。
+- API key 读取顺序：``--api-key`` > 环境变量 ``DEEPSEEK_API_KEY`` > 仓库根 ``.env``（脚本开头
+  以 setdefault 语义注入）；base-url 同理（``--base-url`` > ``DEEPSEEK_BASE_URL``）。API key
+  必填 —— 缺 key 预检即报错。
+- 工具数据源 = 评测种子世界（eval / RAG，与 scripted 同一世界）→ 两臂差异只归因于 LLM。
+  EvalRecord 不含墙钟 latency；real 墙钟只进进程内进度打印，不落 JSON。
+- ``pra.agent.litellm_backend`` 为延迟 import：缺失时本模块仍可 import，scripted / fake 干跑
+  可用，只有 real 运行需要它就绪。
 """
 
 from __future__ import annotations
@@ -57,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pra.agent.guardrails.gate import (  # overrides 归因码（P1-6c 汇总用，只读）
+from pra.agent.guardrails.gate import (  # overrides 归因码（汇总用，只读）
     R3_BUDGET_EXHAUSTED,
     R5_DEGRADED_OR_FAILED_STEP,
 )
@@ -91,11 +78,8 @@ __all__ = ["DEFAULT_DATA", "DEFAULT_MODEL", "REAL_NOTE", "_resolve_data_path", "
 
 
 def _resolve_data_path(raw: str) -> Path:
-    """把 ``--data`` 解析为评测 JSONL 路径。
-
-    支持直接 JSONL 路径；或目录 —— 按目录名拼 ``cases_<目录名>.jsonl``
-    （eval_data/v1 → cases_v1.jsonl；eval_data/v2 → cases_v2.jsonl）。
-    """
+    """把 ``--data`` 解析为评测 JSONL 路径（直接 JSONL，或按目录名拼
+    ``cases_<目录名>.jsonl``：eval_data/v1 → cases_v1.jsonl）。"""
     p = Path(raw)
     if p.is_file():
         return p
@@ -112,10 +96,8 @@ def _resolve_data_path(raw: str) -> Path:
 
 
 def _world_tools(world: str):
-    """按 world 取工具列表 —— 给 real 后端构造的 ``tools`` 参数。
-
-    图侧工具由 ``AgentScheme.run`` 按 ctx.tool_world 自行装配；两处同一世界，不漂移。
-    """
+    """按 world 取工具列表，给 real 后端构造 ``tools`` 参数；图侧工具由
+    ``AgentScheme.run`` 按 ctx.tool_world 自行装配，两处同一世界。"""
     if world == "rag":
         return make_rag_world_tools(mode="hybrid")  # rag_mode=None → hybrid（与 ctx 默认一致）
     return make_eval_world_tools()
@@ -135,7 +117,7 @@ def _build_ctx(world: str) -> EvalContext:
 def _make_real_backend(
     *, model: str, api_key: str | None, base_url: str | None, world: str
 ) -> Any:
-    """构造真实 LLM 后端（**延迟 import** —— ``pra.agent.litellm_backend`` 并行落盘中）。
+    """构造真实 LLM 后端（延迟 import ``pra.agent.litellm_backend``）。
 
     按 ``LLMBackend`` Protocol 交给 ``AgentScheme(llm=...)``；tools = 与 world 相同的
     工具列表（供后端输出 function schema / 工具提示）。
@@ -163,11 +145,9 @@ def _resolve_api_key(cli_value: str | None) -> str | None:
 def _load_dotenv() -> None:
     """把仓库根 ``.env`` 的 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL 注入进程环境。
 
-    用户实测时 key 通常写在仓库根 ``.env``（已被 .gitignore，不入版本库）——
-    本函数在 ``_main`` 开头调用：以 **setdefault** 语义注入（真实环境变量优先，
-    不覆盖 CLI/既有 env），key 值本身不入日志/报告/JSON。定位方式与
-    ``pra.infra.db._repo_root_env_file`` 一致：从本文件逐级上溯到含 pyproject.toml
-    的仓库根。找不到 .env 或键缺失 → 静默跳过（后续按无 key 报错路径处理）。
+    以 setdefault 语义注入（真实环境变量优先，不覆盖 CLI/既有 env），key 值不入日志/
+    报告/JSON。定位方式同 ``pra.infra.db._repo_root_env_file``：从本文件上溯到含
+    pyproject.toml 的仓库根；找不到 .env 或键缺失 → 静默跳过。
     """
     here = Path(__file__).resolve()
     env_file: Path | None = None
@@ -244,7 +224,7 @@ def _compare_rows(
             "real_risk_level": r.risk_level,
             "real_risk_type": list(r.risk_type),
             "real_decision_confidence": r.decision_confidence,
-            "real_overrides": list((r.detail or {}).get("overrides") or []),  # P1-6c
+            "real_overrides": list((r.detail or {}).get("overrides") or []),
         }
         rows.append(row)
         counter = by_scene.setdefault(case.scene, {"total": 0, "agree": 0})
@@ -268,14 +248,12 @@ async def run_comparison(
 ) -> tuple[dict, dict]:
     """核心对比：scripted（确定性桩，先行、可复现）→ real（注入后端，逐案串行）。
 
-    返回 ``(payload, extra)``：
-    - ``payload``：JSON 可直接落盘（``--out`` 用；键见任务口径，real 侧含 REAL_NOTE）；
-    - ``extra``：报告渲染用中间物（rows / by_scene / 两臂 DecisionMetrics /
-      scripted_records / truth_human 计数等，不进 JSON）。
+    返回 ``(payload, extra)``：``payload`` 可直接落 JSON（real 侧含 REAL_NOTE）；
+    ``extra`` 是报告渲染用中间物（rows / by_scene / 两臂 DecisionMetrics /
+    scripted_records / truth_human 计数等，不进 JSON）。
 
-    ``budget_limits``：只给 **real 臂**的评测侧预算覆盖（如放宽 ``max_latency_ms``
-    或调 ``max_llm_calls`` 档，见 AgentScheme.budget_limits 说明）；scripted 臂恒为
-    默认预算（确定性对照，毫秒级跑完不触发墙钟护栏）。
+    ``budget_limits`` 只作用于 real 臂的评测侧预算覆盖；scripted 臂恒为默认预算
+    （毫秒级跑完，不触发墙钟护栏）。
     """
     exp = expected_index(cases)
     scripted = AgentScheme()
@@ -312,8 +290,8 @@ async def run_comparison(
             }
             for r in scripted_records
         ],
-        # P1-6c：overrides 汇总 —— R5 降级 N 案 / R3 截胡 N 案 / 混合案，整卷
-        # "全 HUMAN = 链路降级"在 JSON 里也一眼可见（不只在 Console 报告）。
+        # overrides 汇总：R5 降级 / R3 截胡 / 混合案 —— 「整卷全 HUMAN = 链路降级」
+        # 在 JSON 里也一眼可见，不只在 Console 报告。
         "overrides_summary": {
             "real": _overrides_summary(real_records),
             "scripted": _overrides_summary(scripted_records),
@@ -330,7 +308,7 @@ async def run_comparison(
         "scene_stats": scene_stats(cases),
         "scripted_cost": _cost_summary(scripted_records),
         "real_cost": _cost_summary(real_records),
-        "real_overrides": _overrides_summary(real_records),  # P1-6c 渲染用
+        "real_overrides": _overrides_summary(real_records),  # 渲染用
         "scripted_overrides": _overrides_summary(scripted_records),
     }
     return payload, extra
@@ -358,11 +336,11 @@ def _cost_summary(records: list[EvalRecord]) -> dict:
 
 
 def _overrides_summary(records: list[EvalRecord]) -> dict:
-    """overrides 汇总（P1-6c / Q5）：每案归因码计数 + R3/R5 混合案数 —— 链路降级一眼可见。
+    """overrides 汇总：每案归因码计数 + R3/R5 混合案数，链路降级一眼可见。
 
-    每案 overrides 来自 ``EvalRecord.detail["overrides"]``（gate overlay 全量写入的
-    归因码：R5_DEGRADED_OR_FAILED_STEP = LLM 步降级兜底转人工、R3_BUDGET_EXHAUSTED =
-    预算截胡、R2_*/R4_*/R1_* 为 Gate 改判）。无 case → 全 0。确定性函数（只读 detail）。
+    只读 ``EvalRecord.detail["overrides"]``（gate overlay 写入的归因码：
+    R5_DEGRADED_OR_FAILED_STEP = LLM 步降级兜底转人工、R3_BUDGET_EXHAUSTED = 预算截胡、
+    R2_*/R4_*/R1_* = Gate 改判）；无 case → 全 0。确定性函数。
     """
     counts: Counter = Counter()
     cases_with_any = 0
@@ -424,7 +402,7 @@ def _overrides_cell(row: dict) -> str:
 
 
 def _overrides_line(ov: dict, total: int) -> str:
-    """一行 overrides 汇总（P1-6c）：带码案数 / R5 降级 / R3 截胡 / 混合 / 其它码。"""
+    """一行 overrides 汇总：带码案数 / R5 降级 / R3 截胡 / 混合 / 其它码。"""
     parts = [
         f"带 overrides {ov['cases_with_any']}/{total} 案",
         f"R5 降级 {ov[R5_DEGRADED_OR_FAILED_STEP]} 案",
@@ -606,7 +584,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=600000,
         help=(
             "real 评测的预算墙钟护栏上限（毫秒；默认 600000=10min）—— 生产护栏 30s "
-            "（T-7）对真实 LLM 太紧（每案 ~9 次串行调用天然 >30s），不放宽则每案都被 "
+            "对真实 LLM 太紧（每案 ~9 次串行调用天然 >30s），不放宽则每案都被 "
             "LATENCY 超限截胡转人工、测不到决策质量；scripted 毫秒级不受影响。llm/"
             "tool/token 护栏默认 10/15/40000（--llm-budget 可覆盖 llm 档）。报告注明"
             "本口径差异"
@@ -618,7 +596,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "real 臂的 LLM 调用预算上限（max_llm_calls 覆盖；默认 None = 生产默认 10"
-            " 不变）—— B-2 对照实验：10/12/15 档跑同一批数据，回答真实案件打满 10 被"
+            " 不变）—— 预算档位对照实验：10/12/15 档跑同一批数据，回答真实案件打满 10 被"
             "截胡转人工是预算太紧还是 Agent 收敛差（档位抬高仍打满 ⇒ 收敛问题；涨到"
             "收敛即止 ⇒ 预算紧）。只作用于 real 臂，scripted 对照臂恒默认，生产护栏"
             "不受影响"
@@ -633,11 +611,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _build_budget_limits(*, max_latency_ms: int, llm_budget: int | None) -> dict:
-    """real 臂评测侧预算覆盖装配（键 = ``BudgetLimits`` 字段名；scripted 臂恒默认）。
+    """real 臂评测侧预算覆盖装配（键 = ``BudgetLimits`` 字段名）。
 
-    默认（``llm_budget=None``）→ 只含 ``max_latency_ms`` 放宽（与改动前逐字节一致）；
-    ``--llm-budget N`` → 追加 ``max_llm_calls=N``（B-2 对照：10/12/15 档看截胡归因，
-    生产护栏仍固定 10，本覆盖只作用于 real 臂装配）。
+    ``llm_budget=None`` → 只放宽 ``max_latency_ms``（与改动前逐字节一致）；
+    ``--llm-budget N`` → 追加 ``max_llm_calls=N``（本覆盖只作用于 real 臂，生产护栏
+    仍固定 10）。
     """
     limits = {"max_latency_ms": max_latency_ms}
     if llm_budget is not None:
@@ -650,8 +628,7 @@ async def _main(argv: list[str] | None = None) -> int:
     _load_dotenv()  # 仓库根 .env 的 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL 注入（setdefault）
     data_path = _resolve_data_path(args.data)
     cases = load_dataset(data_path)
-    # --ids 定向过滤（加载后按 eval_case_id；缺省 None 零变化；id 拼错宁可快速报错，
-    # 避免带着空/错集去烧 API 费用）
+    # --ids 定向过滤（按 eval_case_id；id 拼错宁可快速报错，避免带着空/错集烧 API 费用）
     if args.ids:
         wanted = {s.strip() for s in args.ids.split(",") if s.strip()}
         if not wanted:
@@ -661,16 +638,15 @@ async def _main(argv: list[str] | None = None) -> int:
             raise ValueError(f"--ids 有 {len(missing)} 个不在当前数据集中: {sorted(missing)}")
         cases = [c for c in cases if c.eval_case_id in wanted]
     if args.limit is not None and args.limit > 0:
-        cases = smoke_subset(cases, args.limit)  # 确定性取前 N 条（与 loader 语义一致）
+        cases = smoke_subset(cases, args.limit)  # 确定性取前 N 条
     if not cases:
         raise ValueError("评测运行无有效 case（数据集为空或 --limit/--ids 截成空）")
 
     api_key = _resolve_api_key(args.api_key)
     base_url = args.base_url or os.environ.get(ENV_BASE_URL, "") or None
-    # Q5 拍板 (a)：real 后端（LiteLLMBackend）强制要求 api_key —— 无 key 模式（仅给
-    # --base-url 的本地网关）当前不可用：任何缺 key 调用预检即报错。旧文档「只给
-    # --base-url 即可」的误导文案已删（按旧方式会整卷 R5 降级 HUMAN、exit 0，静默
-    # 产出假 real 结果）。base_url 仍可用于指向自定义网关端点，但必须配真实 key。
+    # real 后端（LiteLLMBackend）强制要求 api_key：仅给 --base-url 的本地网关模式不支持，
+    # 缺 key 预检即报错（否则会整卷 R5 降级 HUMAN、exit 0，静默产出假 real 结果）。
+    # base_url 仍可指向自定义网关端点，但必须配真实 key。
     if api_key is None:
         raise ValueError(
             f"未检测到 API key（--api-key 或环境变量 {ENV_API_KEY} / 仓库根 .env）。"
@@ -682,14 +658,13 @@ async def _main(argv: list[str] | None = None) -> int:
     real_backend = _make_real_backend(
         model=args.model, api_key=api_key, base_url=base_url, world=args.world
     )
-    # real 评测只测 LLM 决策质量：放宽墙钟护栏（默认 10min），避免 LATENCY 截胡；
-    # --llm-budget N 再覆盖 LLM 调用预算档（B-2 对照，默认 None = 生产默认 10 不变）。
-    # scripted 臂保持默认预算（毫秒级跑完，不受影响）—— AgentScheme() 无覆盖参数。
+    # real 评测只测 LLM 决策质量：放宽墙钟护栏（默认 10min）避免 LATENCY 截胡，
+    # --llm-budget N 再覆盖 LLM 调用预算档；scripted 臂保持默认预算。
     budget_limits = _build_budget_limits(
         max_latency_ms=args.max_latency_ms, llm_budget=args.llm_budget
     )
 
-    # 头部（跑分前先亮明边界，避免误以为可重放 / 无费用）
+    # 头部：跑分前先亮明成本与可重放边界
     stats = scene_stats(cases)
     by_scene = stats.get("by_scene", {})
     scene_n = {s: int(by_scene.get(s, {}).get("total", 0)) for s in SCENES}
@@ -727,7 +702,7 @@ async def _main(argv: list[str] | None = None) -> int:
     out_path: str | None = None
     if args.out:
         out_path = str(args.out)
-        # 目录需已存在（任务口径）；父目录缺失时给出明确报错
+        # 目录需已存在；父目录缺失时明确报错
         out_file = Path(out_path)
         if not out_file.parent.exists():
             raise ValueError(f"--out 父目录不存在: {out_file.parent}（请先创建目录）")

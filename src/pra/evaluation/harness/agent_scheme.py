@@ -1,60 +1,32 @@
-"""AgentScheme —— System 3：完整调查 Agent（harness/agent_scheme.py）。
+"""System 3：完整调查 Agent（走真实图 + eval 世界 + 确定性审查员桩）。
 
-语义（对齐 docs/00-system-design.md §12.3 / docs/02-evaluation.md §3.4 scripted 模式）：
-- 走 ``build_agent_graph``（hypothesize→plan→tools→reevaluate→decide，预算
-  10/15/40000/30000 Guardrail），终态以确定性 overlay 后的 ``ReviewDecision`` 为
-  判决策略真值；
-- **scripted 模式（CI 可跑）**：LLM 节点注入本模块的确定性 ``EvalScriptedLLMBackend``
-  （"按案件表面信号 + 已收集证据"演算的审查员模型，同 case 同输出，可重放）；
-  工具 = **与 eval_data/v1 同一份 InMemory 种子世界**（"eval" 世界，经
-  ``EvalContext.tool_world`` 选择）—— 与仓库默认演示种子（P_88231 / M_5512 等）
-  同源扩展；Agent 经工具拿到 Single-call / Rule 看不到的证据（图片相似度 / Logo /
-  商家历史 / 在库事实 / 先例 / 政策）→ "调查能力差异"由此体现；
-- 不落 DB：直接 ``ainvoke(build_initial_state(case), config)``（api/service.run_review
-  的无 DB 执行方式）；每 case 独立 build + compile 一个图、thread_id 唯一 → 天然
-  隔离、可重放（compile 开销小，确定性优先于性能）。
+走 ``build_agent_graph``（hypothesize→plan→tools→reevaluate→decide，预算
+10/15/40000/30000），终态以确定性 overlay 后的 ``ReviewDecision`` 为评测真值。
+不落 DB；每 case 独立 build + compile 一个图、thread_id 唯一 → 天然隔离、可重放。
+**scripted（CI 可跑）**：注入确定性 ``EvalScriptedLLMBackend``，工具用与 eval_data/v1
+同一份 InMemory 种子世界 —— Agent 经工具拿到 Single-call / Rule 看不到的证据。
+**real**：``AgentScheme(llm=<对象>)`` 直接把该对象交给 ``build_agent_graph``；
+**非确定性、不可重放**、需 API key，仅作观测对照，不进确定性回归基线。
+**结论边界（报告必标注）**：默认工具为 InMemory 种子、LLM 为桩 —— 种子里查不到的
+先例/规避史会低估 Agent 上限；另提供 RAG 世界（``tool_world="rag"``）。
 
-**结论边界（报告必标注，docs/02-evaluation.md §3.4）**：默认评测工具为 InMemory
-种子数据、LLM 为确定性桩 —— 种子里查不到的先例/规避史会低估 Agent 上限；
-本模块另提供 **RAG 世界**（``EvalContext.tool_world="rag"``，CaseSearch/PolicySearch
-注入真实 Policy/Case KB，见 ``make_rag_world_tools``）在同一 eval_data 上复核
-（M4：InMemory vs RAG 差异 + BM25/Vector/Hybrid 三路对比）。
+确定性"审查员模型"（细则见各方法 docstring）：
+- hypothesize 按**表面信号**建假设，prior 由信号确定性给定；
+- plan 按证据类型缺口补五类取证（外观→商品→商家→先例/政策）；
+- reevaluate：相似>=0.85 / Logo>=0.7 → 外观支持；弱相似(0.70~0.85) → 弱支持；商家
+  removals>=3 或改标题>=3 → 系统性支持；在库干净 → 证伪"系统性"；缺证据 →
+  UNRESOLVED（"没查到 ≠ 证伪"）。LLM 消息只带 hypotheses+evidence，表面事实经
+  hypothesize 固化进假设，本层不自造事实。**已知边界**：品牌维度只判"在库品牌非空"
+  （``_product_brand_nonnull``），**不比对案件品牌与在库品牌是否一致** —— 二者不一致
+  （漂移/冒名）会被当作"核验通过"证伪；"案件 brand 在案 + 虚构 pid 查无"只产低先验
+  （prior 0.2 < 0.3）UNRESOLVED，不挡 PASS；
+- decide：**无受支持的"高优先"风险（prior>=0.3）且高优先假设均已证伪 → PASS**；
+  受支持的文本仿冒 / 强视觉 / （弱视觉且商家系统性）→ REJECT（再经 REJECT Gate 校验
+  可引用依据与 dc）；其余 → HUMAN。低先验 SUPPORTED 与 PASS 相容是刻意行为：交叉判据
+  用"假设是否成立"而非"先验"。Gate / abstention overlay 仍做最终收口。
 
-**real 模式（Phase 3 · 真实 LLM 接线）**：``AgentScheme(llm=<对象>)`` 把调用方注入
-的 LLMBackend 实例直接交给 ``build_agent_graph(llm=...)``（跳过上述确定性审查员
-桩；工具仍按 ``ctx.tool_world`` 装配 —— 种子世界不变，与 scripted 的差异只归因于
-LLM）。real 模式**非确定性、不可重放**（同 case 重跑输出可能不同），且需 API key
-与调用费用 —— 仅作观测对照，不参与确定性回归基线（基线恒为 None 分支的
-scripted 模式；评测的确定性约束不覆盖 real 分支）。
-
-确定性"审查员模型"（规则即文档，见各方法 docstring）：
-1. hypothesize：按**表面信号**生成假设 —— 外观模仿（有图才建）、品牌核验（案件
-   brand 空缺时 prior 高且 statement 带「案件品牌空缺」标记，供后续节点识别）、
-   商家行为（恒建）、文本明示仿冒（命中才建）。prior 由信号确定性给定。
-2. plan：按证据类型缺口补全五类取证（外观→商品→商家→先例/政策），与默认
-   scripted 桩同一"缺口驱动"策略（本地复制、自包含）。
-3. reevaluate：把当前证据综合进每条假设 —— 相似 >=0.85 / Logo >=0.7 → 外观支持；
-   弱相似(0.70~0.85) → 弱支持；在库品牌 vs 案件品牌标记裁决"品牌规避"；商家
-   removals>=3 或改标题>=3 → 系统性支持；在库干净/中性 → 证伪"系统性"；缺证据 →
-   UNRESOLVED（"没查到 ≠ 证伪"，domain 口径）。**reevaluate/decide 的 LLM 消息只带
-   hypotheses+evidence（不带 case 全量）→ 表面事实经 hypothesize 固化进假设
-   statement/prior，本层只读假设与证据，不自造事实。**
-   **已知边界（P2-3，v2 无 family 覆盖、real/扩展数据可达 —— 标注不改语义、不补
-   family）**：品牌维度只判"在库品牌非空"（``_product_brand_nonnull``），**不比对
-   案件品牌与在库品牌是否一致** —— 案件 brand 与在库 brand 不一致（漂移/冒名）时
-   会被当作"核验通过"证伪；且"案件 brand 在案 + 虚构 pid 查无"只产**低先验
-   （prior 0.2 < 0.3）UNRESOLVED**，不挡 PASS（低优先 unresolved 不触发 HUMAN）。
-4. decide：由假设终态 + 证据推提案 —— 受支持的高优先风险假设中任一：文本仿冒 /
-   强视觉(相似>=0.85 或 Logo>=0.7) /（弱视觉且商家系统性）→ REJECT（REJECT Gate 再
-   校验可引用依据与 dc）；**无受支持的“高优先”风险（prior>=0.3）且高优先假设均已
-   证伪 / 无高优先未决 → PASS**（低先验 SUPPORTED 假设 —— 如弱相似 0.72、prior
-   0.22 —— 与 PASS 相容是刻意行为：交叉判据用"假设是否成立"而非"先验"，见
-   ``_decide``；故此处的"无受支持风险"应读作"无受支持的**高优先**风险"）；其余 →
-   HUMAN （克制转人工，不硬判）。Gate / abstention overlay 仍做最终收口（谁改判写进
-   decision.overrides —— 转录层只读终态）。
-
-确定性约束：本模块逻辑为纯函数 + 异步包装；不读 expected、不读外部配置；阈值
-常量本地声明并与 gate / evidence / tools 同口径；同 (node, __STATE__) → 同 payload。
+确定性约束：纯函数 + 异步包装；不读 expected、不读外部配置；阈值常量本地声明并与
+gate / evidence / tools 同口径；同 (node, __STATE__) → 同 payload。
 """
 
 from __future__ import annotations
@@ -106,11 +78,9 @@ __all__ = [
     "make_rag_world_tools",
 ]
 
-# ---------------------------------------------------------------------------
 # 评测种子世界（与 eval_data/v1 同一份"事实知识"；默认演示种子同源扩展）
-# ---------------------------------------------------------------------------
 # 三方案公平性：Rule / Single-call 只用基础输入（case 快照），本世界知识只能经
-# Agent 的 6 个 InMemory 工具获得 —— 多信号/对抗类案需要调查才能发现（《00》§12.0）。
+# Agent 的 5 个 InMemory 工具获得 —— 多信号/对抗类案需要调查才能发现。
 
 EVAL_CATEGORIES: tuple[str, ...] = ("女鞋/运动鞋", "箱包/女包", "服装/卫衣")
 
@@ -487,11 +457,10 @@ RAG_WORLD_LABEL = "RAG 世界（真实 Policy/Case KB · 确定性 mock embeddin
 
 
 def make_eval_world_tools():
-    """构造评测世界的 6 个 InMemory 工具（依赖倒置注入，与 ``pra.tools.build_tools`` 同构）。
+    """构造评测世界的 5 个 InMemory 工具（与 ``pra.tools.build_tools`` 同构）。
 
-    复用各工具类的 InMemory/Mock 数据源实现，注入本模块评测种子（默认演示种子
-    P_88231 / M_5512 / POLICY_3.2 / CASE_1832 已并入上述 EVAL_* 常量）。数据源
-    与 eval_data/v1 同一份事实 → 杜绝"评测集与工具世界漂移"。
+    注入本模块评测种子（默认演示种子 P_88231 / M_5512 / POLICY_3.2 / CASE_1832 已并入
+    EVAL_* 常量）—— 数据源与 eval_data/v1 同一份事实，杜绝"评测集与工具世界漂移"。
     """
     # 延迟 import：避免 evaluation 包导入期拉起全部工具子包（防环/省启动）
     from pra.tools.base import Tool
@@ -517,26 +486,20 @@ def make_eval_world_tools():
 def make_rag_world_tools(
     *, mode: str = "hybrid", backend: str = "local", backend_options: dict | None = None
 ):
-    """构造 **RAG 世界** 的 Agent 工具（评测 RAG 单独模式，R-4/R-6）。
+    """构造 RAG 世界的 Agent 工具（评测 RAG 单独模式）。
 
-    与 ``make_eval_world_tools`` 的差异只在两个"知识库检索"工具：
-    CaseSearchTool / PolicySearchTool 注入**真实 RAG 索引**（Policy KB / Case KB，
-    确定性 mock embedding + BM25 + 余弦，三模式可切换）；Product / Image /
-    Merchant 仍沿用 eval 世界种子（案件事实锚点，不属"知识库"，两世界共用 →
-    差异只归因于检索数据源，便于 InMemory vs RAG 对比归因）。
+    与 ``make_eval_world_tools`` 只差两个"知识库检索"工具：CaseSearchTool /
+    PolicySearchTool 注入**真实 RAG 索引**（确定性 mock embedding + BM25 + 余弦，三模式
+    可切换）；Product / Image / Merchant 仍沿用 eval 世界种子（事实锚点，两世界共用 →
+    差异只归因于检索数据源）。
 
-    :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid 0.5/0.5；R-6 不预设
-        Hybrid 最优 —— 三路对比由 Evaluation 实验回答）。
-    :param backend: RAG 索引后端（docs/10 §5，**关键字参数，缺省 "local" 行为不变**）
-        —— 透传 ``pra.rag.factory.build_*_index(backend=...)``："local"（缺省，既有
-        numpy 实现）/ "qdrant" / "chroma"（ChromaDB + LlamaIndex；缺 ``rag`` extra
-        依赖时构造即抛，不静默降级）。**只影响索引装配，零判定逻辑改动**；后端专属
-        装配参数（如 chroma 的 ``chroma_client`` / ``chroma_ephemeral``）由调用方
-        按需另注入。
-    :param backend_options: 后端专属装配参数的透传字典（**关键字参数，缺省 None =
-        不传任何选项 → 装配与改动前逐字节等价**）—— 键名与 ``pra.rag.factory``
-        构造参数逐字对应（如 chroma 的 ``collection_prefix``），非法/未知键由 factory
-        直接抛错（不静默忽略）。
+    :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid 0.5/0.5）。
+    :param backend: 索引后端（缺省 "local" 行为不变）—— "local"（既有 numpy 实现）/
+        "qdrant" / "chroma"（ChromaDB + LlamaIndex；缺 ``rag`` extra 依赖时构造即抛，
+        不静默降级）。只影响索引装配，零判定逻辑改动。
+    :param backend_options: 后端装配参数透传（缺省 None = 不传 → 装配与改动前逐字节
+        等价）；键名与 ``pra.rag.factory`` 构造参数逐字对应（如 chroma 的
+        ``collection_prefix``），非法键由 factory 抛错。
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index
@@ -561,9 +524,7 @@ def make_rag_world_tools(
     return tools
 
 
-# ---------------------------------------------------------------------------
 # 表面信号 / 证据统计辅助（纯函数）
-# ---------------------------------------------------------------------------
 
 _STYLE_WORDS = frozenset({"复古", "经典", "潮流", "同款", "ins风", "韩版"})
 
@@ -654,10 +615,10 @@ def _ev_types(evs: list[dict]) -> set:
 def _visible_sim_evidence(evs: list[dict], *, min_sim: float = _SIM_MIN) -> list[dict]:
     """审查员"看得见"的 IMAGE_SIMILARITY 证据（仅相似度证据，weight >= min_sim）。
 
-    Phase 2 sweep 的最小侵入注入点（docs/02-evaluation.md §5.1"只动配置"）：
-    真实图 tools_node 的 quality_filter 常量（pra.agent，业务层不动）先以 0.70 兜底，
-    评测审查员模型在读证据视图时再按 ``EvalContext.evidence_thresholds.min_sim`` 过滤
-    —— 只在评测侧模拟"更低/更高证据下限"的校准视图；原始 state 证据不动（审计可溯）。
+    sweep 的最小侵入注入点：真实图 tools_node 的 quality_filter 常量（pra.agent，
+    业务层不动）先以 0.70 兜底，评测审查员模型读证据视图时再按
+    ``EvalContext.evidence_thresholds.min_sim`` 过滤 —— 只在评测侧模拟"更低/更高
+    证据下限"的校准视图，原始 state 证据不动（审计可溯）。
     只返回 IMAGE_SIMILARITY 类型条目（相似度分档/证据引用只针对相似度证据）。
     """
     return [
@@ -705,11 +666,10 @@ def _product_found(evs: list[dict]) -> bool:
 def _product_brand_nonnull(evs: list[dict]) -> bool:
     """PRODUCT_FACT 表明在库品牌非空（value 形如 brand=云步, version=… / brand=null, …）。
 
-    **已知边界（P2-3，标注不改语义）**：只判"在库品牌非空"，**不比对案件品牌与
-    在库品牌是否一致** —— 案件 brand 与在库 brand 不一致（漂移/冒名）时，reevaluate
-    BRAND 分支会按"在库可查 → 案件空缺/存疑被证伪"（REFUTED）放行。v2 无对应
-    family（虚构 pid 案全是 brand 空缺）→ 当前不可达；real/扩展数据可达。如需
-    比对一致性须另立规则 + 新 family（设计拍板，本模块不加）。
+    **已知边界**：只判"在库品牌非空"，**不比对案件品牌与在库品牌是否一致** ——
+    二者不一致（漂移/冒名）时 reevaluate 的 BRAND 分支会按"在库可查 → 案件空缺/存疑
+    被证伪"（REFUTED）放行。当前 v2 数据不可达（虚构 pid 案全是 brand 空缺）；
+    real/扩展数据可达。要比对一致性须另立规则 + 新 family，本模块不加。
     """
     for e in evs:
         if e.get("type") == _T_PRODUCT and re.search(
@@ -744,24 +704,21 @@ def _dim_of(statement: str) -> str:
     return "OTHER"
 
 
-# ---------------------------------------------------------------------------
 # EvalScriptedLLMBackend —— 确定性"审查员模型"（LLMBackend 协议）
-# ---------------------------------------------------------------------------
 
 
 class EvalScriptedLLMBackend:
     """确定性审查员模型：同 (node, __STATE__) → 同输出（tokens=0，可重放）。
 
-    规则语义见模块 docstring / 各方法 docstring。注意：reevaluate / decide 的
-    __STATE__ 只含 hypotheses + evidence（节点契约不带 case）→ 本层一律不自造事实，
-    只消费假设标记与证据；hypothesize 阶段已把表面信号固化进假设 prior/statement。
+    要点：reevaluate / decide 的 __STATE__ 只含 hypotheses + evidence（节点契约不带
+    case）→ 本层不自造事实，只消费假设标记与证据；hypothesize 阶段已把表面信号固化
+    进假设 prior/statement。
 
-    Phase 2 可注入参数（均默认 None/默认值 → 与 Phase 1 行为逐字节一致）：
-    - ``allowed_tools``：装配层裁剪（Ablation 组件级，docs §6）——plan 只排程该
-      子集内的工具（plan 的 tool schema 侧裁剪），图工具注册由 AgentScheme 另行
-      过滤；None = 全工具。
-    - ``evidence_thresholds``：证据阈值覆盖（sweep，docs §5）——min_sim 过滤审查员
-      读到的相似度证据视图，strong 决定强相似分档；None = 0.70/0.85。
+    可注入参数（均默认 None/默认值 → 行为逐字节不变）：
+    - ``allowed_tools``：装配层裁剪（组件级 Ablation）—— plan 只排程该子集内的工具，
+      图工具注册由 AgentScheme 另行过滤；None = 全工具。
+    - ``evidence_thresholds``：证据阈值覆盖（sweep）—— min_sim 过滤审查员读到的
+      相似度证据视图，strong 决定强相似分档；None = 0.70/0.85。
     """
 
     name = "eval-scripted-reviewer"
@@ -795,7 +752,7 @@ class EvalScriptedLLMBackend:
             raise LLMBackendError(f"unknown node: {node}")
         return LLMResponse(content=json.dumps(payload, ensure_ascii=False), tokens=0)
 
-    # ---- hypothesize：按表面信号生成假设（规则：prior = 信号强度的确定性映射）----
+    # hypothesize：按表面信号生成假设（prior = 信号强度的确定性映射）
 
     def _hypothesize(self, state: dict) -> dict:
         case = state.get("case")
@@ -859,7 +816,7 @@ class EvalScriptedLLMBackend:
             "rationale": "按案件表面信号（品牌空缺/文本词/图片存在性）确定性生成待验证假设。",
         }
 
-    # ---- plan：缺口驱动取证计划（本轮 ≤3 条；重复执行的 (tool,args) 由 dedup 过滤）----
+    # plan：缺口驱动取证计划（每轮 ≤3 条；重复的 (tool,args) 由 dedup 过滤）
 
     def _plan(self, state: dict) -> dict:
         case = state.get("case")
@@ -927,11 +884,11 @@ class EvalScriptedLLMBackend:
             }
         return {
             "next_action": "call_tools",
-            "tools": candidates[:3],  # 本轮 ≤3 条（T-2 每轮上限）
+            "tools": candidates[:3],  # 每轮 ≤3 条
             "rationale": "按证据缺口排本轮取证（外观/在库/商家/先例/政策）。",
         }
 
-    # ---- reevaluate：证据 → 假设状态（确定性；只列变化项，幂等）---------------
+    # reevaluate：证据 → 假设状态（确定性；只列变化项，幂等）
 
     def _reevaluate(self, state: dict) -> dict:
         evs = _evidence_list(state)
@@ -1040,7 +997,7 @@ class EvalScriptedLLMBackend:
             "rationale": "按当前证据确定性综合假设；证据不足一律 UNRESOLVED，不把'没查到'当'证伪'。",
         }
 
-    # ---- decide：由假设终态 + 证据推提案（overlay/Gate 仍做最终收口）----------
+    # decide：由假设终态 + 证据推提案（overlay/Gate 仍做最终收口）
 
     def _decide(self, state: dict) -> dict:
         evs = _evidence_list(state)
@@ -1080,8 +1037,8 @@ class EvalScriptedLLMBackend:
         if merch_dirty:
             risk_types.append("EVASION_PATTERN")
 
-        # auto_reject 判定（P2-1：原第 4 子句 (V∧B∧M) 被第 3 子句 (V∧M) 蕴含、恒死，
-        # 已删 —— 含 brand 交叉的"弱视觉×商家"覆盖关系由第 3 子句承担，行为零变化）。
+        # auto_reject 判定：原第 4 子句 (V∧B∧M) 被第 3 子句 (V∧M) 蕴含、恒死，已删
+        # —— 行为零变化。
         auto_reject = (
             text_flag
             or visual_strong
@@ -1151,18 +1108,16 @@ class EvalScriptedLLMBackend:
         return _citation(ev)
 
 
-# ---------------------------------------------------------------------------
 # SchemeRunner：走真实图（build_agent_graph + eval 世界 + eval 审查员后端）
-# ---------------------------------------------------------------------------
 
 
 def _validate_budget_limit_keys(overrides: dict, model_cls: type) -> None:
-    """按 pydantic 模型字段白名单校验预算覆盖键（P2-14）；未知键抛 ValueError。
+    """按 pydantic 模型字段白名单校验预算覆盖键；未知键抛 ValueError。
 
-    pydantic v2 的 ``model_copy(update=…)`` **不校验键**：未知键会静默挂成实例
-    多余属性而覆盖不生效 —— 拼错字（如 ``max_llm_call`` 少个 s）会让 B-2 档位
-    实验静默以生产默认 10 跑、归因建立在实际未放宽之上。装配层失败要响亮：
-    非空 overrides 的每个键都必须命中 ``model_cls.model_fields``。
+    pydantic v2 的 ``model_copy(update=…)`` **不校验键**：未知键会静默挂成实例多余
+    属性而覆盖不生效 —— 拼错字（如 ``max_llm_call`` 少个 s）会让档位实验静默以生产
+    默认 10 跑。装配层失败要响亮：非空 overrides 的每个键都必须命中
+    ``model_cls.model_fields``。
     """
     allowed = set(model_cls.model_fields)
     unknown = sorted(set(overrides) - allowed)
@@ -1175,14 +1130,13 @@ def _validate_budget_limit_keys(overrides: dict, model_cls: type) -> None:
 
 
 def _budget_hit_dim_from_snapshot(budget) -> str | None:
-    """从决策预算快照重算“首个撞限维度”（P2-16 记录侧附加，不改 overrides 码）。
+    """从决策预算快照重算“首个撞限维度”（不改 overrides 码）。
 
     与 ``pra.agent.guardrails.budget.budget_exceeded`` 同阈值、同判定顺序
     （LLM_CALLS→TOOL_CALLS→TOKENS→LATENCY），但 latency 用**快照已冻结的
-    ``latency_ms``**（build_decision 时 snapshot_budget 已补入）而非实时墙钟 ——
-    EvalRecord 保持不含进程相关量、可逐字节重放。只写进 EvalRecord.detail 供审计
-    归因（真实跑分 token 是第二截胡源时区分 llm_calls/tokens/latency 哪维先撞限），
-    R3_BUDGET_EXHAUSTED 码字面与语义不变。
+    ``latency_ms``** 而非实时墙钟 —— EvalRecord 保持不含进程相关量、可逐字节重放。
+    只写进 EvalRecord.detail 供审计归因（区分真实跑分时 token / llm_calls / latency
+    哪维先撞限）；``R3_BUDGET_EXHAUSTED`` 码字面与语义不变。
     """
     if budget is None:
         return None
@@ -1201,21 +1155,19 @@ def _budget_hit_dim_from_snapshot(budget) -> str | None:
 def _root_trace_context(
     case: EvalCase, ctx: EvalContext, initial_state: dict, *, backend_name: str = "unknown"
 ) -> TraceContext:
-    """评测路径 root trace 的关联信息（docs/09 §4.1 落点 3 / §5）。
+    """按确定性规则包装评测路径的 root trace（每案一条）。
 
     ``trace_id = uuid5(NAMESPACE_URL, f"{experiment}:{eval_case_id}:agent:{backend_name}")``
-    —— **确定性**：同 experiment + 同案 + 同方案 + **同 LLM 后端**重跑落同一条 trace
-    （可覆盖、可对比，不产生重复）。
+    —— **确定性**：同 experiment + 同案 + 同方案 + **同 LLM 后端**重跑落同一条 trace。
 
     **为什么把 ``backend_name`` 纳入 trace_id**：``run_evaluation_real.py`` 会在同一
-    进程里对同一批 case 跑 **scripted 对照臂 + real 臂**（两臂 experiment 相同）——
-    若 trace_id 不含后端名，两臂会**落进同一条 trace**（实测每 trace 出现 2 个 root
+    进程里对同一批 case 跑 scripted 对照臂 + real 臂（两臂 experiment 相同）—— 若
+    trace_id 不含后端名，两臂会落进同一条 trace（实测每 trace 出现 2 个 root
     observation、real/scripted generation 交织，按 trace 汇总 token 会混入 0-token 的
-    桩 generation）。纳入后端名后两臂各自成 trace，且 scripted 臂的确定性不变。
+    桩 generation）。纳入后端名后两臂各自成 trace，scripted 臂的确定性不变。
 
-    ``session_id`` 取 ``PRA_LANGFUSE_SESSION``（一次评测 run 一个值，把整轮 320 条
-    trace 聚成一个会话；缺省 None）；``version`` = experiment 名。
-    只读：不写 state、不参与任何判定。
+    ``session_id`` 取 ``PRA_LANGFUSE_SESSION``（一次评测 run 一个值）；``version`` =
+    experiment 名。只读：不写 state、不参与任何判定。
     """
     experiment = experiment_name()
     metadata: dict[str, Any] = {
@@ -1258,41 +1210,26 @@ class AgentScheme(SchemeRunner):
 
     每 case 独立 build + compile 一个图（checkpointer=InMemory、thread_id 唯一），
     天然隔离、可重放；运行后把进程级 LLM 后端恢复为默认桩（防污染后续进程）。
-
-    Phase 2 装配参数（Ablation / sweep，均默认 None → Phase 1 行为逐字节不变）：
-    - ``allowed_tools``：允许的工具子集（组件级 Ablation 的**装配层裁剪**）——
-      图工具注册与 plan 的 tool schema 都只给该子集（不动判定逻辑）；
-      None = eval 世界全 6 工具。裁剪时若某工具的注册被去掉，plan 不会再排程它，
+    装配参数均默认 None → 行为逐字节不变：
+    - ``allowed_tools``：**装配层裁剪** —— 图工具注册与 plan 的 tool schema 都只给该
+      子集（不动判定逻辑）；None = eval 世界全 5 工具。裁剪后 plan 不再排程被裁工具，
       证据链自然缺该类证据 → 决策差异即"该组件必要性"的归因。
-    - ctx.tool_world == "rag"：RAG 世界评测（CaseSearch/PolicySearch 注入真实
-      RAG 索引，其余事实工具沿用 eval 世界；检索模式随 ``ctx.rag_mode`` 切换，
-      None → hybrid）—— 评测默认 "eval" 不受影响（R-4）。
-    - ctx.evidence_thresholds：见 ``EvalContext``（sweep 注入相似度分档）。
-    - ``llm``：**Phase 3 real 模式注入** —— 非 None 时 ``run()`` 直接把该对象当
-      LLMBackend 交给 ``build_agent_graph``（跳过 ``EvalScriptedLLMBackend`` 确定性
-      桩；工具仍按 ctx.tool_world 装配，见模块 docstring "real 模式"）；None =
-      确定性审查员桩（默认，Phase 1/2 行为逐字节不变）。注入对象须实现
+    - ``ctx.tool_world`` == "rag"：CaseSearch/PolicySearch 注入真实 RAG 索引，其余事实
+      工具沿用 eval 世界；检索模式随 ``ctx.rag_mode``（None → hybrid）。
+    - ``ctx.evidence_thresholds``：见 ``EvalContext``（sweep 注入相似度分档）。
+    - ``llm``：**real 模式注入** —— 非 None 时 ``run()`` 直接把它当 LLMBackend 交给
+      ``build_agent_graph``（跳过确定性桩）；须实现
       ``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol（``name`` 属性 +
-      ``async complete(*, node, messages, json_schema)``）；run 的 finally 仍统一
-      恢复 ``set_llm_backend(None)``，与 None 分支同路径。real 非确定性 / 不可重放 /
-      需 API key —— 结论边界见模块 docstring。
-    - ``budget_limits``：**评测侧预算覆盖**（None = 默认 10/15/40000/30000，行为不
-      变）—— 键为 ``BudgetLimits`` 字段名（``max_llm_calls`` / ``max_tool_calls`` /
-      ``max_tokens`` / ``max_latency_ms``，与生产模型字段名逐一对应、无别名映射，
-      任意合法字段组合均可），在每次 run 的 ``build_initial_state`` 之后对
-      ``budget.limits`` 做 model_copy 覆盖（整份 limits 逐层拷贝，不改生产对象）。
-      注（P2-14）：**未知键在构造/覆盖装配时抛 ValueError**（按
-      ``BudgetLimits.model_fields`` 白名单校验）—— 拼错字（如 ``max_llm_call``）
-      不再被 model_copy 静默挂成多余属性而“不生效”，装配层失败要响亮。**用途 1：
-      real 模式放宽墙钟护栏** —— 真实 LLM 每案 ~9 次
-      串行调用天然 >30s（30s 是生产护栏，T-7 拍板），不放宽则每案都被 LATENCY
-      超限截胡转人工，评测测不到 LLM 决策质量（scripted 毫秒级跑完不触发，无需
-      放宽）。**用途 2（B-2 对照实验）：调 LLM 调用预算档** —— 如
-      ``{"max_llm_calls": 12}`` / 15，回答"真实案件打满 10 次被截胡转人工是预算
-      太紧还是 Agent 收敛差"：档位抬高后仍打满上限 ⇒ 收敛问题；涨到收敛即止 ⇒
-      预算紧。**生产护栏恒为 10/15/40000/30000**：本覆盖只作用于评测装配层注入
-      的 initial_state，不改生产图/护栏代码（scripted 对照臂 = AgentScheme() 无
-      覆盖，恒默认，确定性基线不变）。
+      ``async complete(*, node, messages, json_schema)``）；run 的 finally 仍统一恢复
+      ``set_llm_backend(None)``。real 非确定性 / 不可重放 / 需 API key。
+    - ``budget_limits``：**评测侧预算覆盖**（None = 默认 10/15/40000/30000）—— 键为
+      ``BudgetLimits`` 字段名（``max_llm_calls`` / ``max_tool_calls`` / ``max_tokens`` /
+      ``max_latency_ms``），对 ``budget.limits`` 做 model_copy 覆盖（不改生产对象）；
+      **未知键抛 ValueError**（按 model_fields 白名单校验），拼错字不会被静默忽略。
+      用途：real 模式放宽墙钟护栏（真实 LLM 每案 ~9 次串行调用天然 >30s，不放宽则每案
+      都被 LATENCY 超限截胡转人工；scripted 毫秒级跑完不触发）；调 LLM 调用预算档
+      （抬高后仍打满 ⇒ 收敛问题，涨到收敛即止 ⇒ 预算紧）。**生产护栏恒为
+      10/15/40000/30000**，本覆盖只作用于评测装配层注入的 initial_state。
     """
 
     name = "agent"
@@ -1329,9 +1266,9 @@ class AgentScheme(SchemeRunner):
         overrides 为 ``BudgetLimits`` 字段名→值的 dict（None/空 = 原样返回）；用
         model_copy 逐层拷贝，不改生产 Budget/BudgetLimits 对象与默认值。
 
-        **键白名单校验（P2-14）**：未知键（如拼错的 ``max_llm_call``）先按
+        **键白名单校验**：未知键（如拼错的 ``max_llm_call``）先按
         ``BudgetLimits.model_fields`` 校验并抛 ValueError —— pydantic v2 的
-        ``model_copy(update=…)`` 对未知键静默挂属性而不生效，若放任会令 B-2 档位
+        ``model_copy(update=…)`` 对未知键静默挂属性而不生效，若放任会令预算档位
         实验静默以生产默认 10 跑；装配层失败要响亮。
         """
         if not overrides:
@@ -1386,7 +1323,7 @@ class AgentScheme(SchemeRunner):
                 # 评测侧预算覆盖（real 放宽 max_latency_ms / 调 max_llm_calls 档用；
                 # 键 = BudgetLimits 字段名；None 分支原样返回）
                 initial_state = self._apply_budget_limits(initial_state, self._budget_limits)
-            # Root trace（docs/09 §4.1 落点 3）：每案一条，trace_id 确定性 uuid5
+            # Root trace：每案一条，trace_id 确定性 uuid5
             # （含 LLM 后端名 —— scripted 对照臂与 real 臂各自成 trace）；
             # **不 per-case flush**（320 次太慢）—— 由评测入口整轮结束后
             # ``tracing.flush_tracer()`` 统一刷出（S5 CLI 收尾调用）。
@@ -1416,7 +1353,7 @@ class AgentScheme(SchemeRunner):
             )
         return self._transcribe(case, final_state, decision)
 
-    # -- 终态 → EvalRecord 转录（只读 ReviewDecision / state 摘要）----------------
+    # 终态 → EvalRecord 转录（只读 ReviewDecision / state 摘要）
 
     @staticmethod
     def _transcribe(case: EvalCase, final_state: dict, decision: ReviewDecision) -> EvalRecord:
