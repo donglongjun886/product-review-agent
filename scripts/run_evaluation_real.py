@@ -343,14 +343,19 @@ def _overrides_summary(records: list[EvalRecord]) -> dict:
     R2_*/R4_*/R1_* = Gate 改判）；无 case → 全 0。确定性函数。
     """
     counts: Counter = Counter()
+    hit_dims: Counter = Counter()
     cases_with_any = 0
     r3_r5_mixed = 0
     for r in records:
-        ovs = list((r.detail or {}).get("overrides") or [])
+        detail = r.detail or {}
+        ovs = list(detail.get("overrides") or [])
         if not ovs:
             continue
         cases_with_any += 1
         counts.update(ovs)
+        if R3_BUDGET_EXHAUSTED in ovs:
+            # 真实跑分里 token 与 llm_calls 都可能是截胡源，必须拆开看（见 budget.py 口径）
+            hit_dims[str(detail.get("budget_hit_dim") or "UNKNOWN")] += 1
         if R3_BUDGET_EXHAUSTED in ovs and R5_DEGRADED_OR_FAILED_STEP in ovs:
             r3_r5_mixed += 1
     return {
@@ -358,6 +363,7 @@ def _overrides_summary(records: list[EvalRecord]) -> dict:
         R3_BUDGET_EXHAUSTED: counts.get(R3_BUDGET_EXHAUSTED, 0),
         R5_DEGRADED_OR_FAILED_STEP: counts.get(R5_DEGRADED_OR_FAILED_STEP, 0),
         "r3_r5_mixed": r3_r5_mixed,
+        "budget_hit_dims": dict(sorted(hit_dims.items())),
         "other_codes": {
             k: v
             for k, v in sorted(counts.items())
@@ -402,13 +408,15 @@ def _overrides_cell(row: dict) -> str:
 
 
 def _overrides_line(ov: dict, total: int) -> str:
-    """一行 overrides 汇总：带码案数 / R5 降级 / R3 截胡 / 混合 / 其它码。"""
+    """一行 overrides 汇总：带码案数 / R5 降级 / R3 截胡（含先撞维度）/ 混合 / 其它码。"""
     parts = [
         f"带 overrides {ov['cases_with_any']}/{total} 案",
         f"R5 降级 {ov[R5_DEGRADED_OR_FAILED_STEP]} 案",
         f"R3 预算截胡 {ov[R3_BUDGET_EXHAUSTED]} 案",
         f"R3+R5 混合 {ov['r3_r5_mixed']} 案",
     ]
+    if ov.get("budget_hit_dims"):
+        parts.append("R3 先撞限 " + ",".join(f"{k}={v}" for k, v in ov["budget_hit_dims"].items()))
     if ov.get("other_codes"):
         parts.append("其它码 " + ",".join(f"{k}={v}" for k, v in ov["other_codes"].items()))
     return " ｜ ".join(parts)

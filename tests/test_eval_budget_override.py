@@ -283,29 +283,33 @@ async def test_record_detail_reports_budget_hit_dimension():
 
 
 def test_real_overrides_summary_counts_r5_r3_and_mixed():
-    """real 报告 overrides 汇总函数（R5 降级案数 / R3 案数 / 混合案）计数正确。"""
+    """real 报告 overrides 汇总函数（R5 降级案数 / R3 案数 / 混合案 / R3 先撞维度）计数正确。"""
     mod = _real_script()
 
-    def _rec(overrides: list) -> EvalRecord:
+    def _rec(overrides: list, dim: str | None = None) -> EvalRecord:
         return EvalRecord(
             eval_case_id="EC_SUM",
             scheme="agent",
             decision="HUMAN_REVIEW",
-            detail={"overrides": list(overrides)},
+            detail={"overrides": list(overrides), "budget_hit_dim": dim},
         )
 
     records = [
         _rec(["R5_DEGRADED_OR_FAILED_STEP"]),
-        _rec(["R5_DEGRADED_OR_FAILED_STEP", "R3_BUDGET_EXHAUSTED"]),  # 混合案
-        _rec(["R3_BUDGET_EXHAUSTED"]),
+        _rec(["R5_DEGRADED_OR_FAILED_STEP", "R3_BUDGET_EXHAUSTED"], dim="TOKENS"),  # 混合案
+        _rec(["R3_BUDGET_EXHAUSTED"], dim="LLM_CALLS"),
+        _rec(["R3_BUDGET_EXHAUSTED"], dim=None),  # 缺维度 → UNKNOWN（不静默丢案）
         _rec(["R2_REJECT_GATE_FAIL"]),
         _rec([]),  # 无码案不计数
     ]
     s = mod._overrides_summary(records)
-    assert s["cases_with_any"] == 4
+    assert s["cases_with_any"] == 5
     assert s["R5_DEGRADED_OR_FAILED_STEP"] == 2
-    assert s["R3_BUDGET_EXHAUSTED"] == 2
+    assert s["R3_BUDGET_EXHAUSTED"] == 3
     assert s["r3_r5_mixed"] == 1
+    # token 与 llm_calls 必须分维度可见（真实跑分里两者都可能是截胡源）
+    assert s["budget_hit_dims"] == {"LLM_CALLS": 1, "TOKENS": 1, "UNKNOWN": 1}
     assert s["other_codes"] == {"R2_REJECT_GATE_FAIL": 1}
     empty = mod._overrides_summary([_rec([]), _rec([])])
     assert empty["cases_with_any"] == 0 and empty["R5_DEGRADED_OR_FAILED_STEP"] == 0
+    assert empty["budget_hit_dims"] == {}
