@@ -85,6 +85,32 @@ def test_bump_tool_usage_increments_tool_and_tokens():
     assert b.tool_calls == 4 and b.tokens == 10
 
 
+def test_cap_one_exceeded_at_first_attempt():
+    """cap=1：已用 1 次即超限（>= 语义）—— cap 为 1 时没有"先跑一次"的余量。"""
+    limits = BudgetLimits(max_llm_calls=1, max_tool_calls=1)
+    assert budget_exceeded(Budget(limits=limits)) is None
+    assert budget_exceeded(Budget(llm_calls=1, limits=limits)) == DIM_LLM_CALLS
+    assert budget_exceeded(Budget(tool_calls=1, limits=limits)) == DIM_TOOL_CALLS
+
+
+def test_node_retry_can_push_counter_to_cap_plus_one():
+    """cap 是**节点级**护栏：节点内 attempts=2 可把计数推到 cap+1，下一次入口才截胡。
+
+    即 ``budget_exceeded`` 保证的是"每个节点入口处 ≤ cap"，不是"整案 ≤ cap" —— 至多越 1 次
+    （见 ``budget.py`` 模块 docstring）。本用例把这条不变量钉住：入口未超 → 节点内两次
+    bump → cap+1 → 下一次入口超限。
+    """
+    limits = BudgetLimits(max_llm_calls=2)
+    b = Budget(llm_calls=1, limits=limits)  # 节点入口：1 < 2 → 允许进入
+    assert budget_exceeded(b) is None
+    b = bump_llm_usage(b)  # 节点内第 1 次尝试 → 达限
+    assert b.llm_calls == limits.max_llm_calls
+    assert budget_exceeded(b) == DIM_LLM_CALLS
+    b = bump_llm_usage(b)  # 重试：节点内不复查预算 → 越到 cap+1
+    assert b.llm_calls == limits.max_llm_calls + 1
+    assert budget_exceeded(b) == DIM_LLM_CALLS
+
+
 def test_snapshot_budget_fills_latency_ms_without_mutating():
     """快照 = 补 latency_ms 的副本；运行期对象不变（latency_ms 仍为初始 0）。"""
     b = _old_budget(start_age_seconds=90)  # latency_ms 字段默认 0
