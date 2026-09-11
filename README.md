@@ -32,7 +32,8 @@
 - **假设驱动的调查子图**：5 节点 7 边单回环（`hypothesize → plan → tools → reevaluate → decide`），
   未收敛则在预算 / 收敛 / 去重护栏约束下回到 `plan`。
 - **LLM 只提案，确定性 Gate 收口**：LLM 产出 `DecisionProposal`，最终裁决由硬规则、abstention 清单与
-  PASS/REJECT Gate 决定；每次改判的原因码写入 `ReviewDecision.overrides`，可审计。
+  PASS/REJECT Gate 依据**证据事实**（必需测量维度是否全覆盖、是否存在维度匹配的阳性证据、规则命中、
+  证据冲突）决定；每次改判的原因码写入 `ReviewDecision.overrides`，可审计。
 - **6 个可插拔调查工具**：商品事实、商家历史、图像分析、OCR、案例检索、政策检索，统一 `Tool` 抽象。
 - **确定性可重放**：默认使用 scripted LLM 桩 + InMemory 数据源 + InMemory Checkpointer，
   无 API key、无网络即可跑通全链路与评测。
@@ -60,7 +61,7 @@ uv run python scripts/demo_walkthrough.py
 
 默认装配 scripted 桩 + InMemory 工具 + InMemory Checkpointer，跑通完整调查子图并执行内置断言。
 确定性输出：`decision=HUMAN_REVIEW` / `risk_level=HIGH` /
-`risk_type=[POTENTIAL_IP_RISK, EVASION_PATTERN]` / `decision_confidence=0.87` / `overrides=[]`。
+`risk_type=[POTENTIAL_IP_RISK, EVASION_PATTERN]` / `decision_confidence=0.95` / `overrides=[]`。
 
 ### 运行测试
 
@@ -119,7 +120,8 @@ DDL 位于 `migrations/`：`001_review_core_tables.sql`（审核核心 5 表）�
 ## 评测
 
 评测方法与口径（三方案定义、abstention 指标、消融、阈值扫描、结论边界）以
-[docs/02-evaluation.md](docs/02-evaluation.md) 为权威出处。
+[docs/02-evaluation.md](docs/02-evaluation.md) 为权威出处：**§11** = scripted 封板结果表，
+**§12** = 语义重构前的 real 历史基线，**§13** = Gate 语义重构，**§14** = 重构后 real 全量（单次运行）。
 
 ```bash
 uv run python scripts/run_evaluation.py      # 三方案对比（默认 v1 数据集）
@@ -180,7 +182,8 @@ docs/              系统设计与评测口径 · migrations/ DDL · scripts/ �
 
 - **裁决收口**：R1 硬规则强制 `REJECT`（LLM 不可覆盖）→ abstention 清单 → PASS/REJECT Gate；
   改判原因码全量写入 `overrides`。
-- **`decision_confidence` 是确定性安全门槛，不是模型概率**：按证据与假设以固定公式重算；
+- **`decision_confidence` 是确定性安全门槛，不是模型概率**：按证据事实以固定公式重算
+  （`0.40*测量覆盖 + 0.30*证据强度 + 0.20*可引用依据 + 0.10 − 0.20*冲突`，系数结构性给定、未用数据集拟合）；
   `0.7` 仅作为 REJECT 的安全门槛（不达标转 `HUMAN_REVIEW`），PASS 另有独立 Gate 校验。
 - **预算是护栏上界而非目标**：默认 10 次 LLM 调用 / 15 次工具调用 / 40k tokens / 30s；
   超限不是失败，而是带部分证据转人工止损。
@@ -208,10 +211,14 @@ docs/              系统设计与评测口径 · migrations/ DDL · scripts/ �
 - **生产 / HTTP 入口 `build_production_tools()` 使用真实数据源**：商品、商家接 MySQL，
   案例、政策接真实 RAG（惰性构建，首次检索才建库连服务端；失败记 warn failure，不静默回退种子）。
   默认 `build_tools()` 与评测世界仍是 InMemory；评测世界为 5 个工具，比生产少一个 `OCRTool`。
-- `image_analysis` 与 `ocr` 尚未接入真实视觉模型与 OCR 服务，为 Mock 桩。
-- 真实 LLM 评测仅通过 `scripts/run_evaluation_real.py` 触发，需 API key、有费用、非确定性；
-  已发布的对照结果基于 v1 数据集单次抽样。
-- 评测集由单一标注者按与审查员同源的规则构造，未做多标注者交叉校验，因此高分只反映实现一致性。
+- `image_analysis` 与 `ocr` 尚未接入真实视觉模型与 OCR 服务，为 Mock 桩；生产装配据此把
+  "外观测量"声明为**不可测**（带图案件不会因此自动放行，属已声明的覆盖缺口而非静默降级）。
+- 真实 LLM 评测仅通过 `scripts/run_evaluation_real.py` 触发，需 API key、有费用、**非确定性且不可重放**；
+  已发布的对照为单次运行（v1 35 案与 v2 320 案各一次，见 [docs/02-evaluation.md](docs/02-evaluation.md) §12/§14），
+  **不代表模型固定水平**。
+- 评测集由单一标注者按与审查员同源的规则构造，未做多标注者交叉校验，因此 scripted 高分只反映实现一致性。
+- **已识别但未排期的边界**：生产预算档位调优（`LLM_CALLS=10 → 12/15`）、`GT=REJECT→HUMAN_REVIEW`
+  回收（回环/取证）、`listing_registry` 阳性路径（案件声明与在库事实的确定性比对）、真实视觉/OCR 数据源。
 - 尚未实现：MQ 异步 worker、Redis 幂等与限流、审核工作台、OpenTelemetry 跨服务链路。
 
 ## 文档
