@@ -2,7 +2,8 @@
 
 > 本文档把《00》评测相关章节（§11 Evaluation Dataset、§12 三方案对比、§13 Hard Case Benchmark，及 §7.6 数值口径）
 > 落成**实现层唯一依据**，服务对象是写 `src/pra/evaluation/**` 与 `scripts/` 评测脚本的人。
-> 引用约定：总设计写作 **《00》§x.y**，契约细化写作 **01 §x.y**，拍板记录写作 **03 T-x / 03 §x**。
+> 引用约定：总设计写作 **《00》§x.y**（即 `docs/00-system-design.md`）；本文内部节号直接写 §x.y。
+> 字段级契约以代码为准（`src/pra/agent/state.py`、`src/pra/domain/models.py`、`src/pra/agent/guardrails/schemas.py`）。
 >
 > **本文档不包含业务代码**：只写 eval_case schema、模块划分、伪代码与指标口径（与 01 同一原则），它们是"契约"。
 > **版本状态：v1（P-1~P-5 已拍板）**：评测口径按拍板结果定稿，正文不再标 [待拍板]（逐条决策记录见 §9，供追溯）；
@@ -38,9 +39,9 @@
 | 文档 | 关系 |
 |---|---|
 | 00-system-design | 本文件是其 §7.6/§11–13 的可执行细化；sweep 校准结果**只作评测内部实验记录，不写回《00》§7.6 口径表**（§5.3） |
-| 01-agent-loop | Agent 指标取数依据：tool_call_history 边际增益 4 字段（01 §2.4/§5.8）、Tool Selection Accuracy 评测接口（01 §4.2）、ReviewDecision 终形状（01 §7.6） |
-| 03-decisions | 参数权威值来源：T-7 预算 10/15、T-11 `EVIDENCE_MIN_SIM=0.70/`EVIDENCE_STRONG=0.85`、`CONFIDENCE_ABSTAIN_THRESHOLD=0.7`（03 §5 常量表）；校准结果**不写回 03 §5**（§5.3） |
-| 04-graph-design | Agent scheme 的图装配与 Ablation 变体构造依据（工具注册层裁剪，见 §6） |
+| Agent 契约（代码） | Agent 指标取数依据：`tool_call_history` 边际增益 4 字段、Tool Selection Accuracy 评测接口、`ReviewDecision` 终形状 —— 实现见 `src/pra/agent/state.py`、`src/pra/agent/tools_node.py`、`src/pra/domain/models.py` |
+| 参数口径（代码） | 权威值在代码常量：预算 10/15、`EVIDENCE_MIN_SIM=0.70` / `EVIDENCE_STRONG=0.85`（`src/pra/tools/image_analysis/tool.py`）、`CONFIDENCE_ABSTAIN_THRESHOLD=0.7`（`src/pra/agent/guardrails/gate.py`）；校准结果**不回写生产常量**（§5.3） |
+| 图装配（代码） | Agent scheme 的图装配与 Ablation 变体构造依据（工具注册层裁剪，见 §6）：`src/pra/agent/graph.py` |
 
 ---
 
@@ -83,7 +84,7 @@
     "risk_level": "HIGH",                   // LOW|MEDIUM|HIGH|NONE（《00》§7.5，独立于 decision）
     "risk_type": ["POTENTIAL_IP_RISK"],     // 受控词表（00 §7.3），供 risk_type 命中类指标
     "evidence": ["image_similarity>=0.85", "merchant_history>=5_removals"],  // 证据类型 + 标注时阈值口径（00 §11.2 注）
-    "expected_tools": ["ImageAnalysisTool", "MerchantTool"],  // Agent 应调用的工具集合（01 §4.2 Tool Selection Accuracy 真值）
+    "expected_tools": ["ImageAnalysisTool", "MerchantTool"],  // Agent 应调用的工具集合（Tool Selection Accuracy 真值）
     "applicable_policy": ["POLICY_3.2"]     // 政策条款 / 先例（REJECT 案必填，对齐 REJECT Gate 的"可引用依据"）
   },
   "annotation": { "labelers": ["A", "B"], "agreed": true, "notes": "" }  // 人工标注与交叉校验记录（2.3-4）
@@ -150,7 +151,7 @@
 
 - 定位：三方案对照的**中层**（Rule Baseline → Single-call LLM → Multi-step Review Agent，Phase 1 三方案全部进框架），用来回答核心问题：**"Agent 的收益来自 LLM 本身，还是来自多步调查 / Tool / RAG / Evidence Aggregation？"**
 - 执行语义：一次调用，基础输入全量（§3.1）+ 少量背景 prompt → 结构化决策 JSON（decision/risk_level/risk_type/decision_confidence/evidence 摘要/policy 候选）；**不给**商家历史/案例库/政策库（那是 Agent 经工具"调查"得来的，否则作弊，《00》§12.2）。
-- 输出 schema 复用 ReviewDecision 子集（01 §7.6 形状的子集）；`budget_used/overrides` 恒空/不适用；决策 JSON 自带置信度后处理（REJECT 候选 `decision_confidence < CONFIDENCE_ABSTAIN_THRESHOLD` → HUMAN_REVIEW，见 §4.5），即 **Single-call 也有 HUMAN_REVIEW 语义**。
+- 输出 schema 复用 ReviewDecision 子集（`src/pra/domain/models.py` 形状的子集）；`budget_used/overrides` 恒空/不适用；决策 JSON 自带置信度后处理（REJECT 候选 `decision_confidence < CONFIDENCE_ABSTAIN_THRESHOLD` → HUMAN_REVIEW，见 §4.5），即 **Single-call 也有 HUMAN_REVIEW 语义**。
 - Phase 1 实现：scripted/mock LLM + InMemory；三方案统一归一为 `ReviewDecision` 形状的 EvalRecord（§3.6），进**同一 Evaluator / Metrics**，保证可比。
 - **消融变体（后续 Ablation，Phase 2，见 §6）**——回答"给 Single-call 更多上下文能提升多少？Agent 的额外收益是否来自主动调查、而非只是看到更多文本"：
   - **2a** Single-call + Raw Input（仅商品原始数据，不给任何预塞知识）；
@@ -159,7 +160,7 @@
 
 ### 3.4 Agent（真实执行语义；Phase 1 运行模式已拍板）
 
-- 走 **`build_agent_graph`**（hypothesize→plan→tools→reevaluate→decide，状态 `AgentState`，预算 10/15/40000/30000 Guardrail）；终态以确定性 overlay 后的 `ReviewDecision`（01 §7.6）为判决策略真值；HUMAN_REVIEW 是三个 Decision Gate 之一（abstention 清单语义，03 T-4），即 **Agent 有 HUMAN_REVIEW 语义**。
+- 走 **`build_agent_graph`**（hypothesize→plan→tools→reevaluate→decide，状态 `AgentState`，预算 10/15/40000/30000 Guardrail）；终态以确定性 overlay 后的 `ReviewDecision`（`src/pra/domain/models.py`）为判决策略真值；HUMAN_REVIEW 是三个 Decision Gate 之一（abstention 清单语义），即 **Agent 有 HUMAN_REVIEW 语义**。
 - **运行模式（P-2 已拍板）**：
   - **Phase 1 默认：scripted Agent + InMemory 种子数据**（Case/Policy/Merchant 现状）——确定性、可重复、**CI 可回归**（同 case 重跑同结果，《00》§11.4）；
   - **Real LLM Evaluation 排后续阶段（Phase 3，§8）**：真实 LLM + 真实工具数据源（RAG 未接前不可用），复核 scripted 结论（尤其 Tool Selection / Evidence Sufficiency 等依赖 LLM 行为的指标）。
@@ -175,7 +176,7 @@ src/pra/evaluation/
 ├── harness/
 │   ├── base.py            # EvalContext（阈值常量/预算/LLM 模式/工具数据源）+ SchemeRunner 抽象 + EvalRecord（见 3.6）
 │   ├── rule_scheme.py     # P-1 已拍板：薄封装 pra.screening 三分流（PASS/REJECT/COMPLEX→HUMAN_REVIEW）；(b) 独立二分 rule 本期不做（RuleBaseline）
-│   ├── single_call_scheme.py  # prompt 构造 + 单次调用 + JSON 校验降级（01 §3.0 壳同款：重试 1 次，失败→HUMAN_REVIEW；低置信 REJECT 候选→HUMAN_REVIEW）（SingleCallScheme）
+│   ├── single_call_scheme.py  # prompt 构造 + 单次调用 + JSON 校验降级（与 Agent 的 LLM 调用壳同款：重试 1 次，失败→HUMAN_REVIEW；低置信 REJECT 候选→HUMAN_REVIEW）（SingleCallScheme）
 │   └── agent_scheme.py    # build_agent_graph + scripted/real LLM + 工具数据源注入 + 结果转录（AgentScheme）
 ├── metrics/
 │   ├── business.py        # §4.1：Accuracy/Precision/Recall/FPR/FNR + human_review_rate/automation_coverage（DecisionMetrics/DecisionEvaluator；命名以 §4 为准，无 HRR 缩写）
@@ -227,7 +228,7 @@ class SchemeRunner(ABC):
   "evidence": [ { "type": "IMAGE_SIMILARITY", "value": "similarity=0.91…", "extra": {"similarity": 0.91} } ],
   "policy": ["POLICY_3.2"],
   "tool_calls_actual": ["ImageAnalysisTool", "MerchantTool"],   // agent 用；rule/llm 为 []
-  "trace": { "plan_outputs": [ … ], "tool_call_history": [ … ] },  // 01 §2.4/§5.8 字段原样转录（scripted 模式）
+  "trace": { "plan_outputs": [ … ], "tool_call_history": [ … ] },  // 边际增益 4 字段原样转录（scripted 模式）
   "cost": { "llm_calls": 8, "tool_calls": 5, "tokens": 18000, "latency_ms": 9200 }
 }
 ```
@@ -241,7 +242,7 @@ class SchemeRunner(ABC):
 ## 4. 指标口径（每个指标给分子/分母/取数字段）
 
 > 取数一律以 **EvalRecord** 为准（3.6）；与 DB 字段（review_trace / review_result.decision_json / decision_json.budget_used）
-> 的映射仅用于集成抽查。字段口径见 01 §2.4（tool_call_history）、01 §7.6（ReviewDecision）、《00》§10.3。
+> 的映射仅用于集成抽查。字段口径见 `src/pra/agent/state.py`（tool_call_history）、`src/pra/domain/models.py`（ReviewDecision）、《00》§10.3。
 
 ### 4.1 业务指标（Phase 1 二分类五指标 + 转人工观测量；abstention 语义见 §4.4）
 
@@ -276,10 +277,10 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 | 指标 | 计算口径（建议） | 取数字段 | 备注 |
 |---|---|---|---|
-| Tool Selection Accuracy | 每 case：`expected_tools ⊆ 实际调用集合` 且实际调用尽量少；聚合 = 命中案 / 总案 | expected.expected_tools × tool_calls_actual | 真值来自 eval_case 标签；取数接口见 01 §4.2（PlanOutput + tool_call_history） |
+| Tool Selection Accuracy | 每 case：`expected_tools ⊆ 实际调用集合` 且实际调用尽量少；聚合 = 命中案 / 总案 | expected.expected_tools × tool_calls_actual | 真值来自 eval_case 标签；取数接口见 `src/pra/agent/guardrails/schemas.py`（PlanOutput）+ `src/pra/agent/state.py`（tool_call_history） |
 | Evidence Sufficiency | ① expected.evidence 的**证据类型**被实际 evidence 覆盖比例；② REJECT 案是否满足 REJECT Gate 前置（有可引用依据 `CITABLE_TYPES`、无关键矛盾） | expected.evidence × evidence | 精确公式〔细化待定：实现者可自行收敛〕 |
 | Reasoning Correctness | 结论对但推理错：risk_type 命中率（expected.risk_type ⊆ 输出）+ risk_level 档位一致 + 抽样人工复核结构化理由 | risk_type/risk_level/trace | 自动化近似无法全覆盖 → 抽样人工复核子集（标注） |
-| Marginal Evidence Gain / Investigation Efficiency | 逐 tool_call 记 `after_confidence−before_confidence` 与 `evidence_added` 非空、`decision_changed`；效率 = Σ(新增证据数 + 决策翻转权重) / 有效 Tool Calls | trace.tool_call_history 边际增益 4 字段（01 §2.4/§5.8） | 暴露"为调查而调查"；加权口径〔细化待定：实现者可自行收敛〕 |
+| Marginal Evidence Gain / Investigation Efficiency | 逐 tool_call 记 `after_confidence−before_confidence` 与 `evidence_added` 非空、`decision_changed`；效率 = Σ(新增证据数 + 决策翻转权重) / 有效 Tool Calls | trace.tool_call_history 边际增益 4 字段（`src/pra/agent/state.py`） | 暴露"为调查而调查"；加权口径〔细化待定：实现者可自行收敛〕 |
 | Budget Utilization | 四组占用率：llm_calls/tool_calls/tokens/latency 各 ÷ 上限（10/15/40000/30000），报均值与分布 | cost + decision_json.budget_used | 证明 Budget 是 Guardrail 非目标（《00》§10.3/§11.3） |
 
 ### 4.3 工程指标（成本与效率，三方案同口径）
@@ -311,8 +312,8 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 三方案统一 **PASS/REJECT/HUMAN_REVIEW 三分类输出**、进同一 EvalRecord（§3.6）与同一 Evaluator——映射是**各方案的执行语义**而非事后补对齐，报告随 EvalRecord 记录每 case 的映射来源：
 
 - **Rule baseline（P-1(a)）**：PASS→PASS、REJECT→REJECT、**COMPLEX→HUMAN_REVIEW**（评测语义 = "不可自动判"：无 Agent 时复杂案只能人工）；报告须注明该 "COMPLEX→人工" 与线上 "COMPLEX→Agent" 是**不同口径**（§3.2/§7.1）。
-- **Single-call LLM**：REJECT 候选 `decision_confidence < CONFIDENCE_ABSTAIN_THRESHOLD(0.7)` 经确定性后处理记 HUMAN_REVIEW（与 Agent 的 REJECT Gate 同源口径，03 T-4；§3.3）。
-- **Agent**：三个 Decision Gate 的终态之一（PASS/REJECT Gate + HUMAN_REVIEW abstention 清单，03 T-4），无额外映射。
+- **Single-call LLM**：REJECT 候选 `decision_confidence < CONFIDENCE_ABSTAIN_THRESHOLD(0.7)` 经确定性后处理记 HUMAN_REVIEW（与 Agent 的 REJECT Gate 同源口径；§3.3）。
+- **Agent**：三个 Decision Gate 的终态之一（PASS/REJECT Gate + HUMAN_REVIEW abstention 清单），无额外映射。
 - 映射影响 FPR / human_review_rate trade-off 的形状，报告须写明所用映射；转人工与安全并读（§4.4 核心口径）。
 
 ---
@@ -322,7 +323,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > sweep **排在 Phase 1 框架跑通之后**（先有三方案可比指标与 §4 口径，再谈校准；落 Phase 2，§8）。
 > P-5 已拍板：第一轮**只 sweep Evidence 阈值、单参数**，不做多参数联合 Grid Search。
 
-### 5.1 扫哪些常量（只动配置，不动判定逻辑；《00》§11.5/03 T-11）
+### 5.1 扫哪些常量（只动配置，不动判定逻辑；《00》§11.5）
 
 | 常量 | 第一轮口径（P-5） | 实际影响路径（2026-09-09 Q4 拍板 (b)，实证收窄） |
 |---|---|---|
@@ -351,7 +352,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 - **当前 sweep 只观测评测确定性审查员的读证据视图，不写回生产常量**（tools_node quality_filter /
   gate 强档未被 sweep 观测过——把选点写进生产属于"写进未测层级"，禁止）。旧版"回写《00》§7.6 /
-  03 §5 常量表 + 同步修订 eval_case 标签阈值口径"的回写流程**仅在注入下沉到生产常量读取点并补
+  注入下沉到生产常量读取点并补
   中间相似度带数据后**才可启用（另行立项）。
 - sweep 结论（曲线/选点）作为**评测内部实验记录**，附 §5.1 数据带限制注后，可与 docs §8 一并引用。
 - 报告必须附 **sweep 曲线**而不是只报最终点（《00》§11.5 精神：证明阈值是"选"出来的，不是拍脑袋
@@ -382,7 +383,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ### 7.2 RAG 未接主流程 → Agent 工具数据源的结论边界
 
-- RAG（Policy KB / Case KB 真实检索）**未接入 HTTP 主流程**（默认 `build_tools()` = memory 世界，§3.4 已拍板为 Phase 1 默认）；**评测侧**可经 `EvalContext.tool_world="rag"`（或显式装配 `data_source="rag"`）切到真实检索，向量库已换 ChromaDB（docs/10）。本文口径下 Agent scheme 的 CaseSearch / PolicySearch / Merchant 仍以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）。
+- RAG（Policy KB / Case KB 真实检索）**未接入 HTTP 主流程**（默认 `build_tools()` = memory 世界，§3.4 已拍板为 Phase 1 默认）；**评测侧**可经 `EvalContext.tool_world="rag"`（或显式装配 `data_source="rag"`）切到真实检索，向量库已换 ChromaDB + LlamaIndex（见 [docs/00-system-design.md](00-system-design.md) 的 RAG 节与 `src/pra/rag/chroma_backend.py`）。本文口径下 Agent scheme 的 CaseSearch / PolicySearch / Merchant 仍以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）。
 - **报告必带边界声明（P-2 口径）**："当前结果主要验证 **Agent Workflow、规则协同与 Evaluation Framework**，不代表真实 LLM 最终能力；InMemory 种子覆盖有限，**可能低估 Agent 上限**。"（与 §3.4 同文）
 - 局限：种子里缺失的真实先例/完整规避史 Agent 取不到 → 多信号与对抗类案的 Evidence Sufficiency、Marginal Evidence Gain 等指标会**低估上限**。
 - 真实 RAG/Merchant 接入后以 real 模式复核（Phase 3，§8）。
@@ -394,7 +395,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | 阶段 | 内容 | 交付 / 验收 |
 |---|---|---|
 | **Phase 1**（当前） | eval_data schema + **30~50 条 golden cases**（PASS/REJECT 真值，§2.1）→ Rule / Single-call / Agent 三 **SchemeRunner**（§3.2–3.4）→ 决策指标评测（Accuracy/Precision/Recall/FPR/FNR，§4.1）→ Console Report → **确定性重放断言** | **三方案在同一数据集上可比跑分**（含 metrics 金标准小样本单测）；scripted 同 case 重跑**逐字节一致**；报告含结论边界声明（§3.4/§7.2）与 screening 行为快照（§7.1）；FPR 为 Phase 1 重点指标 |
-| **Phase 2** | 300+ 正式集（§2.1 五类分布）；Evidence 侧指标评测（Evidence Sufficiency / Marginal Evidence Gain，§4.2）；**Ablation**（2a/2b/2c + 组件级，§3.3/§6）；**abstention 评测**（AUTO_DECIDABLE / SHOULD_ABSTAIN，§4.4）；**Threshold Sweep**（Evidence 单参数、CONFIDENCE 固定 0.7，§5）；**Regression** | sweep 曲线与 operating point（validation 集）**只作评测内部实验记录，不写回《00》§7.6 / 03 §5**（§5.3）；abstention 五指标在正式集出数；修正集合入后重跑 Rule 基线并纳入回归（§7.1） |
+| **Phase 2** | 300+ 正式集（§2.1 五类分布）；Evidence 侧指标评测（Evidence Sufficiency / Marginal Evidence Gain，§4.2）；**Ablation**（2a/2b/2c + 组件级，§3.3/§6）；**abstention 评测**（AUTO_DECIDABLE / SHOULD_ABSTAIN，§4.4）；**Threshold Sweep**（Evidence 单参数、CONFIDENCE 固定 0.7，§5）；**Regression** | sweep 曲线与 operating point（validation 集）**只作评测内部实验记录，不写回生产常量**（§5.3）；abstention 五指标在正式集出数；修正集合入后重跑 Rule 基线并纳入回归（§7.1） |
 | **Phase 3** | **Real LLM Evaluation**；LLM-as-a-Judge（如必要）；Regression Report | real 模式复核 scripted 结论（§3.4/§7.2）；完整报告逐行对照《00》§12.4 预期结论、明确回答 Q1–Q4（§1.2），附全部结论边界标注 |
 
 > **Phase 3 实现状态（2026-09-08 已落地首次复核）**：`LiteLLMBackend`（`pra/agent/litellm_backend.py`，
@@ -428,3 +429,58 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > 其余〔细化待定〕（不含 P 编号，均为**实现者可自行收敛**的落地细节；如与实现冲突以本文口径为准）：
 > evidence 引用素材形态（§2.2）、数据文件分卷方式（§2.3）、Marginal Evidence Gain 加权口径（§4.2）、Evidence Sufficiency 精确公式（§4.2）、
 > sweep 第一轮两个 Evidence 常量的扫描次序与其余常量取值（§5.1）、harness 是否含 DB 真落库集成路径（§3.6）。
+
+---
+
+## 10. 检索层与可观测性实测数字（快照，供追溯）
+
+> 本节收集原先散落在设计文档里的**实测数字**，避免随文档收敛而丢失。数值口径与限制条件必须同框阅读；
+> 绝对值随语料 / 模型 / 服务状态变化，**勿照抄为结论**。
+
+### 10.1 RAG 三路 Recall@3（小 probe；如实并排，不预设 hybrid 最优）
+
+**A. 真实 BGE + Qdrant 进程内（2026-09-09；`bge-small-zh-v1.5`，hybrid 权重 0.5/0.5，Policy/Case 各 8 条 probe = 5 keyword + 3 同义改写）**
+
+| KB | bm25 | vector | hybrid |
+|---|---|---|---|
+| Policy (8) | 6/8 (75%) | 8/8 (100%) | 8/8 (100%) |
+| Case (8) | 6/8 (75%) | 8/8 (100%) | 8/8 (100%) |
+
+- 语义 vs 词面（同义改写 query 与目标文本零/近零共享关键词，已用 `bm25.tokenize` 程序化验证 token 交集）：
+  bm25 **全漏**、vector 命中 @1~@2、hybrid 基本同 vector（`RAG_CASE_0011`「冒用双 G logo 先例」hybrid 漏，如实呈现）。
+- 本 probe 下 **hybrid 未单独优于 vector**（N=8 小样本定向观测）。
+
+**B. MockHash 8+8（2026-09-10；`scripts/run_rag_eval.py --probe`，粒度 12.5%）**
+
+| KB | backend | bm25 / vector / hybrid |
+|---|---|---|
+| Policy | local | 6 / 5 / **6** |
+| Policy | chroma | 6 / 5 / **7** |
+| Case | local | 6 / 4 / **7** |
+| Case | chroma | 6 / 4 / **6** |
+
+- **两个 KB 上 hybrid 的相对位置相反** → 实证「不预设 RRF 最优」。
+- ⚠️ 该组用 **MockHash 而非 BGE**：para 类失败**不得**解读为「语义检索不行」；`--probe` **缺省关闭**
+  （诊断能力不进默认评测路径）。
+
+### 10.2 Chroma 臂客户端等价性（A/B 隔离）
+
+- 16 probe × 3 模式 × 2 KB + 4 组过滤组合：`ephemeral` 与 `http` 两种客户端**报告数据行 diff 为空**，
+  vector parity 分差 `0.000e+00`。
+- `--backend chroma`（`EphemeralClient`）35 案 A/B 报告与 `local` 臂**逐字节一致**（digest `50351888fd8bd605`）。
+- ⚠️ `ephemeral`（进程内、随进程消失）与 `http`（服务端）**不是同一份存储**；生产 RAG 仍用服务端，
+  该开关只影响评测脚本。
+
+### 10.3 可观测性实测（Langfuse）
+
+- 本地 Docker 自托管 Langfuse **4.32.0**，**6 个常驻容器**（另加一次性 `minio-init`）；health 200；project `pra-local`。
+- 埋点覆盖 root / node / generation / tool / gate：单案真实路径 **≈26 observation**；评测侧 `--langfuse`
+  实测 **3 case → 3 条 root trace / 69 条 observation**，全部 `sessionId=eval-demo-1`，每 case 带 `eval_case_id`。
+- **口径**：scripted 桩路径下 token=0 / cost 空 / latency≈0 是真实情况，不得伪造（详见 docs/00 可观测性节）。
+
+### 10.4 Qdrant 历史实测（`url=` 远端 server，2026-09-10）
+
+- 阻断缺陷：`_point_id()` 取 sha256 前 16 字节 → **128 位整数**，而 Qdrant 服务端只接受 u64/UUID；
+  qdrant-client 进程内模式不校验上界，**只在真 server 上以 400 暴露**（复盘见 `src/pra/rag/qdrant_index.py`）。
+- 修复（截为 u64）后：真 server 落库 **24 / 67 点**，与 `local` 后端 top3 逐条一致。
+- 该路线**已被 ChromaDB 取代**，此处数字仅作历史对照。

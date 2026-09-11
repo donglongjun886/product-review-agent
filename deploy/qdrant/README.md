@@ -2,27 +2,25 @@
 
 > 本目录只做一件事：把 **Qdrant 服务端**跑起来，让 `pra.rag` 里那条
 > **`location="http://…"`（`url=` 远端 server）**的装配路径可以被真实验证。
-> 服务端的定位、参数与技术选型以 [docs/06-rag-phase2-qdrant-bge.md](../../docs/06-rag-phase2-qdrant-bge.md)
-> （历史设计）为准；**当前 RAG 契约以
-> [docs/10-rag-upgrade-spec.md](../../docs/10-rag-upgrade-spec.md) 为准**（见下方取代说明）；
-> 本文件只记录**部署事实与实测结果**。
+> 服务端的定位、参数与技术选型见 [docs/00-system-design.md](../../docs/00-system-design.md)
+> 的 RAG 节（历史设计）；**当前 RAG 契约见同一节与 `src/pra/rag/chroma_backend.py`**
+> （见下方取代说明）；本文件只记录**部署事实与实测结果**。
 
-> ⚠️ **已被取代（superseded）**：本文的 Qdrant 向量库路线已被
-> [docs/10-rag-upgrade-spec.md](../../docs/10-rag-upgrade-spec.md) 取代 —— **向量库切换为
-> ChromaDB**（Docker 服务端 + `HttpClient`），检索升级为 **LlamaIndex + BGE + BM25 + RRF**，
-> 对应部署见 [deploy/chroma](../chroma/README.md)。Qdrant 的代码与 `deploy/qdrant`
-> **保留在仓库中**（不删）、`rag_backend="qdrant"` 仍可用，但**本机容器与数据卷已卸**、
-> **不是默认语义路**（默认仍为 `backend="local"`；docs/06 作为历史记录保留、不改写）。
+> ⚠️ **已被取代（superseded）**：本文的 Qdrant 向量库路线已被 **ChromaDB** 取代 ——
+> **向量库切换为 ChromaDB**（Docker 服务端 + `HttpClient`），检索升级为
+> **LlamaIndex + BGE + BM25 + RRF**，对应部署见 [deploy/chroma](../chroma/README.md)。
+> Qdrant 的代码与 `deploy/qdrant` **保留在仓库中**（不删）、`rag_backend="qdrant"` 仍可用，
+> 但**本机容器与数据卷已卸**、**不是默认语义路**（默认仍为 `backend="local"`；本节作为历史记录保留）。
 > 下面 §1–§8 是当时的部署与实测记录，**恢复服务端**得先 `docker compose up -d`。
 
 ## 1. 定位（勿偏移）
 
-- docs/06 **P2-3** 已拍板：Qdrant 以 **qdrant-client 进程内模式**接入 ——
+- 历史设计要点：Qdrant 以 **qdrant-client 进程内模式**接入 ——
   `:memory:`（测试/演示）、`path=<dir>`（本地持久）、`url=`（远端 server，**生产叙事位**）。
-- docs/06 **§5** 当时如实标注：**「远端 server 未实测（代码路径同一，仅连接串差异）」**。
+- 当时如实标注：**「远端 server 未实测（代码路径同一，仅连接串差异）」**。
   本目录补的就是这一条 —— 起真服务端，实测 `url=` 路径。
 - **该假设实测不成立**（见 §7）：远端不是「只差连接串」，存在真实阻断缺陷。
-- Qdrant 承担的角色不变（**P2-4**）：**只做「向量存储 + 余弦打分」**；元数据过滤
+- Qdrant 承担的角色不变：**只做「向量存储 + 余弦打分」**；元数据过滤
   （category / risk_type / status）、BM25、融合、Top-K 排序**仍在 Python 侧**复用 MVP
   的确定性函数，以保证与本地索引同口径。
 
@@ -107,7 +105,7 @@ idx = build_policy_index(backend="qdrant", location="http://127.0.0.1:6333")
 
 ## 7. 实测发现的阻断缺陷（**已修**，保留复盘）
 
-> 装好服务端后第一次跑 `url=` 路径即撞上：**docs/06 §5「远端 server 仅连接串差异」的假设
+> 装好服务端后第一次跑 `url=` 路径即撞上：**「远端 server 仅连接串差异」的假设
 > 被证伪**。下面是完整复盘（§7.1 = 修复）。
 
 **现象**（真 server + 仓库既有代码，未做任何改动）：
@@ -130,7 +128,7 @@ qdrant-client 的**进程内模式对 id 类型宽容**（本地实现不校验�
 
 **影响面**：仅 `url=` 远端路径。默认路径（`local` numpy / `:memory:` / `path=`）不受影响 ——
 `tests/test_rag_qdrant.py` 只覆盖 `:memory:` 与 `path=`，**url/server 路径零测试**，
-这正是 docs/06 §5「未实测」隐藏的缺口。
+这正是「未实测」隐藏的缺口。
 
 **反证（仅将 id 截为 u64，其余代码不动，内存打补丁、未改仓库）**：
 
@@ -171,7 +169,7 @@ v1/v2 回归双 PASS；lint 违例数与 HEAD 持平（120 vs 120，零新增）
 `test_rag_qdrant_point_id.py` 在 CI 上恒跑兜底；服务端未做分布式/集群、未压测、未开鉴权。
 
 > 结论边界：以上均为 `v1.19.0` 服务端 + `qdrant-client 1.19.0` 的实测结果；语料仍为
-> 24 政策 / 67 案例的小语料，**不构成能力声明**（对齐 docs/06 §5）。
+> 24 政策 / 67 案例的小语料，**不构成能力声明**。
 
 ## 8. 安全
 

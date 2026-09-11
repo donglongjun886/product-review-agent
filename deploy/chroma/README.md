@@ -2,24 +2,26 @@
 
 > 本目录只做一件事：把 **ChromaDB 服务端**跑起来，让 `pra.rag` 的
 > **`HttpClient(host="127.0.0.1", port=8001)`** 装配路径可以被真实验证。
-> 选型与实施契约以 [docs/10-rag-upgrade-spec.md](../../docs/10-rag-upgrade-spec.md) 为准；
+> 选型与检索口径以 [docs/00-system-design.md](../../docs/00-system-design.md) 与
+> `src/pra/rag/chroma_backend.py` 的模块注释为准；
 > 本文件只记录**部署事实与实测结果**。
 
 ## 1. 定位（勿偏移）
 
-- **ChromaDB 是本仓库 RAG 的向量库后端**（docs/10 §0 拍板）：`ChromaDB 1.5.9`，
+- **ChromaDB 是本仓库 RAG 的向量库后端**（选型与口径见 [docs/00-system-design.md](../../docs/00-system-design.md) 的 RAG 节）：`ChromaDB 1.5.9`，
   **Docker 服务端 + Python `HttpClient`**（不进程内起库，与「真服务端」叙事一致）。
 - Chroma 只承担「**存向量 + 算余弦**」；元数据过滤、BM25、融合、Top-K 排序仍在
-  **Python 侧**（同口径前提，docs/10 §3/§6-R2）。
-- **`deploy/qdrant` 暂不删除**：Qdrant 是 docs/06 Phase 2 的向量库，`rag_backend="qdrant"`
-  与 `scripts/run_rag_phase2_demo.py` 仍在（docs/10 §2「暂留不删」）。但**本机容器已卸、
+  **Python 侧**（同口径前提，见 `src/pra/rag/chroma_backend.py`）。
+- **`deploy/qdrant` 暂不删除**：Qdrant 是 RAG Phase 2（已被 ChromaDB 取代）的向量库，`rag_backend="qdrant"`
+  与 `scripts/run_rag_phase2_demo.py` 仍在（迁移期暂留不删）。但**本机容器已卸、
   `qdrant_qdrant_storage` 卷亦已删除**（`docker ps -a` / `docker volume ls` 均无）——要复跑
   那 3 个真服务端集成用例得先 `cd deploy/qdrant && docker compose up -d` 重来。
-  两套部署的端口**互不冲突**（Qdrant 6333/6334 vs Chroma 8001）；**Qdrant 暂留不删（去留另定，docs/10 §0）**，
+  两套部署的端口**互不冲突**（Qdrant 6333/6334 vs Chroma 8001）；**Qdrant 去留另定**，
   迁移期保留其代码与部署以便对照/复跑。
 - **检索升级已实施**：本目录交付**部署**，检索升级（LlamaIndex + BGE 向量路 + BM25(jieba)
-  + RRF）与 `src/pra/rag/chroma_backend.py`（docs/10 §4「新增」清单）**均已落地**，
-  实施契约以 [docs/10-rag-upgrade-spec.md](../../docs/10-rag-upgrade-spec.md) 为准；
+  + RRF）与 `src/pra/rag/chroma_backend.py` **均已落地**；
+  检索口径以 [docs/00-system-design.md](../../docs/00-system-design.md) 的 RAG 节与
+  `src/pra/rag/chroma_backend.py` 的模块注释为准；
   `factory.py` 已提供 `backend="chroma"` 装配开关（见 §6）。
 
 ## 2. 端口与数据
@@ -77,7 +79,7 @@ docker compose down -v          # 停止并删除数据（彻底重置）
 | `docker compose restart chroma`（复用容器） | **6.6 秒**转 `healthy` |
 
 > ⚠️ 时间数值的出处澄清（避免误引）：**本目录 compose 注释并没有写「约 9 秒」** ——
-> 「约 9 秒转 healthy」是 **`deploy/qdrant/README.md`** 里 **Qdrant** 的实测值；docs/10 未给数值。
+> 「约 9 秒转 healthy」是 **`deploy/qdrant/README.md`** 里 **Qdrant** 的实测值；本目录文档未给 Chroma 的对照数值。
 > 本目录实测更快（冷启动 5.5s / restart 6.6s，本机 Docker Desktop），两者**未深究差异**
 > （可能是机器负载或首次拉层解压）。**以你机器上的 `docker compose ps` 为准。**
 
@@ -146,7 +148,7 @@ test: ["CMD", "bash", "-c",
 
 ## 6. 客户端接线
 
-服务端起好后，客户端形态（docs/10 §3 三形态）：
+服务端起好后，客户端形态（三形态）：
 
 ```python
 import chromadb
@@ -157,12 +159,12 @@ client = chromadb.HttpClient(host="127.0.0.1", port=8001)   # 服务端（本目
 ```
 
 > ⚠️ **接线状态**：`src/pra/rag/chroma_backend.py`（LlamaIndex 装配）与
-> `src/pra/rag/factory.py` 的 `backend="chroma"` 分支**均已落地**（docs/10 为实施契约）。
+> `src/pra/rag/factory.py` 的 `backend="chroma"` 分支**均已落地**（检索口径见 docs/00 与 `chroma_backend.py`）。
 > 上面的片段既是**客户端契约**，也是仓库实现的接线方式（已用 `chromadb 1.5.9` 对本服务端实测通过）。
 > `pyproject.toml` 的 `rag` extra 已含 `chromadb` + 三个 LlamaIndex 具体集成包。
 
-> ⚠️ **实测提醒（docs/10 §3 未写、建库必须处理）**：Chroma 的 collection **缺省 `space` 是
-> `l2` 而不是 `cosine`**（实测）。docs/10 §3 只说「建库需显式 `embedding_function=None`」，
+> ⚠️ **实测提醒（建库必须处理）**：Chroma 的 collection **缺省 `space` 是
+> `l2` 而不是 `cosine`**（实测）。除了「建库需显式 `embedding_function=None`」，
 > 但**同时必须显式设 `space="cosine"`**，否则 `api/v2` 返回的是 L2 距离、与 `local` 后端
 > 口径不一致且**不会报错**。详见 §6.2。
 
@@ -179,7 +181,7 @@ client = chromadb.HttpClient(host="127.0.0.1", port=8001)   # 服务端（本目
 > 写明 **"delegates to `ONNXMiniLM_L6_V2`"**（`__call__` 内部 import 并调用该 ONNX 模型，
 > 即 MiniLM-L6-v2 的 ONNX 版）——这就是「会去下模型」的实证来源，不是推测。
 
-我们**自带 BGE 向量**（docs/10 §0），必须显式关掉默认 EF —— 否则 Chroma 会尝试下载
+我们**自带 BGE 向量**，必须显式关掉默认 EF —— 否则 Chroma 会尝试下载
 ONNX 模型，既慢又与「默认不联网」基调冲突。
 
 ### 6.2 距离口径：`distance = 1 − cos`（**但 collection 的 `space` 必须显式设成 `cosine`**）
@@ -192,7 +194,7 @@ ONNX 模型，既慢又与「默认不联网」基调冲突。
 | `configuration={"hnsw": {"space": "cosine"}}` | `cosine` | 0.993883735 | 0.006116265 | **`0.006116271`** ✅ |
 | `metadata={"hnsw:space": "cosine"}`（旧写法） | `cosine` | 0.993883735 | 0.006116265 | **`0.006116271`** ✅ |
 
-→ **结论：只要 collection 是 `cosine`，Chroma 的 distance 就是 `1 − cos`**（与 docs/10 §3 一致，
+→ **结论：只要 collection 是 `cosine`，Chroma 的 distance 就是 `1 − cos`**（与 `chroma_backend.py` 的空间自检一致，
 实测 `0.006116271` ↔ 计算值 `0.006116265`，差在浮点与向量归一化精度）。
 
 **但缺省 space 是 `l2`（不是 cosine）** —— 这是本次实测最容易踩的坑：用
@@ -244,10 +246,10 @@ Chroma / Qdrant 的连接参数目前**只能程序化传入**，尚无配置项
 
 - 这是**本机单机开发部署**：**单节点、未集群、未压测、未开鉴权**；数据落在**单个 named
   volume**，无备份、无高可用、无迁移方案。
-- 语料仍是 **24 政策 / 67 案例**的小语料（docs/10 §0，沿用不变）→ **不构成能力声明**，
+- 语料仍是 **24 政策 / 67 案例**的小语料（沿用不变）→ **不构成能力声明**，
   更不代表 Chroma 在生产规模下的表现。
 - 本目录**只交付部署**；检索升级（LlamaIndex + BGE 向量路 + BM25 + RRF）**已实施**，
-  相关代码见 `src/pra/rag/`（`chroma_backend.py` 等；契约以 docs/10 为准，见 §1、§6）。
+  相关代码见 `src/pra/rag/`（`chroma_backend.py` 等；口径见 docs/00 与 §1、§6）。
 - 以上均为 `chromadb/chroma:1.5.9` 镜像 + `chromadb 1.5.9` Python 包（本机 `uv` 环境）
   的实测结果；镜像内 `chroma --version` 自报 **`1.4.4`**（CLI 自报版本与镜像 tag / Python
   包版本不同源，**未深究二者差异**，如需精确对齐请以 tag 与 PyPI 包为准）。

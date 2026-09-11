@@ -1,10 +1,10 @@
 # ============================================================================
 # Qdrant 单机部署（本地开发 / RAG 的 url= 远端模式）
 #
-# 定位（docs/06-rag-phase2-qdrant-bge.md P2-3）：Qdrant 在 Phase 2 里以
-# qdrant-client **进程内模式**接入（":memory:" / path=），本 compose 补的是 P2-3
-# 里那条「url=（远端 server，生产叙事位）」——docs/06 §5 曾如实标注「远端 server
-# 未实测」，本目录起服务后即可实测。
+# 定位：Qdrant 在 RAG Phase 2 里以
+# qdrant-client **进程内模式**接入（":memory:" / path=），本 compose 补的是
+# 那条「url=（远端 server，生产叙事位）」——当时如实标注「远端 server
+# 未实测」，本目录起服务后即可实测。（该路线已被 ChromaDB 取代，此处为历史保留。）
 #
 # 机器适配（本机实测，与 deploy/langfuse 同源约束）：
 #   registry-1.docker.io / hub.docker.com 直连超时，镜像须走国内镜像源拉取后

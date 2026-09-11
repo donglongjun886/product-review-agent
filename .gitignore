@@ -25,7 +25,7 @@ env/
 .coverage
 htmlcov/
 
-# Phase 2 本地缓存（fastembed 模型缓存 / qdrant 本地持久索引统一落 .cache/，docs/06）
+# 本地缓存（fastembed 模型缓存 / qdrant 本地持久索引统一落 .cache/）
 .cache/
 
 # IDE / editor
@@ -39,5 +39,4 @@ htmlcov/
 
 # 本地记忆（不进公开仓库；DSH 直接从磁盘加载 AGENTS.md，无需入库）
 AGENTS.md
-docs/07-project-status.md
-docs/08-eval-review-backlog.md
+.memory/

@@ -93,7 +93,7 @@ uv run python scripts/run_ablation.py                        # 方案级 / 组�
 
 ## RAG 检索（Policy KB / Case KB）
 
-默认后端是 **`local`**（numpy 内存索引 + `MockHashEmbedder`，确定性、无外部依赖）。装 `--extra rag` 后可切 **`rag_backend="chroma"`**（已落地）：ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF，实施契约与实测记录见 [docs/10-rag-upgrade-spec.md](docs/10-rag-upgrade-spec.md)。Qdrant 的代码与 `deploy/qdrant` **迁移期保留**（本机容器已卸，`rag_backend="qdrant"` 仍可用）。
+默认后端是 **`local`**（numpy 内存索引 + `MockHashEmbedder`，确定性、无外部依赖）。装 `--extra rag` 后可切 **`rag_backend="chroma"`**：ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF，检索口径见 [docs/00-system-design.md](docs/00-system-design.md) 与 `src/pra/rag/chroma_backend.py` 的模块注释。Qdrant 的代码与 `deploy/qdrant` **迁移期保留**（本机容器已卸，`rag_backend="qdrant"` 仍可用）。
 
 ```bash
 uv run python scripts/run_rag_demo.py                          # 三模式（bm25/vector/hybrid）Top-K 检索演示
@@ -112,7 +112,7 @@ cd deploy/langfuse && docker compose up -d      # 本地自托管，UI http://lo
 PRA_LANGFUSE_ENABLED=1 uv run python scripts/demo_langfuse_trace.py   # 打印 trace UI 链接
 ```
 
-部署与实测记录见 [deploy/langfuse/README.md](deploy/langfuse/README.md)，职责边界与口径见 [docs/09-langfuse-observability.md](docs/09-langfuse-observability.md)。
+部署与实测记录见 [deploy/langfuse/README.md](deploy/langfuse/README.md)，职责边界与口径见 [docs/00-system-design.md](docs/00-system-design.md)。
 
 ## 目录结构
 
@@ -131,7 +131,7 @@ docs/ 设计文档 · migrations/ DDL · scripts/ 演示与评测脚本 · tests
 - **`decision_confidence` 是确定性安全门槛、不是模型概率**：按证据/假设固定公式重算；`0.7` 仅作 REJECT 的安全门槛（不达标转 `HUMAN_REVIEW`），PASS 另有独立 Gate 校验。
 - **预算是 Guardrail 上界而非目标**：默认 10 LLM / 15 Tool / 40k tokens / 30s；超限不是失败，而是「带部分证据转人工止损」。
 - **`DECIDED` 是唯一终态**：decide 之后无出边，超限 / 降级只记入 overrides 与预算快照。
-- **证据去重与派生回填全确定性**：去重指纹 `(type, source, ref_id)`（ref_id 优先、缺失回退 value），证据收集后不可篡改。参数语义明细见 [docs/03-decisions.md](docs/03-decisions.md)、[docs/01-agent-loop.md](docs/01-agent-loop.md)。
+- **证据去重与派生回填全确定性**：去重指纹 `(type, source, ref_id)`（ref_id 优先、缺失回退 value），证据收集后不可篡改。参数语义明细见 `src/pra/agent/guardrails/schemas.py` 与 `src/pra/agent/state.py`。
 
 ## 技术栈
 
@@ -142,25 +142,18 @@ docs/ 设计文档 · migrations/ DDL · scripts/ 演示与评测脚本 · tests
 | 调查编排 | LangGraph StateGraph：5 节点 7 边单回环 + InMemory Checkpointer |
 | LLM | `LLMBackend` 抽象：默认确定性 scripted 桩（无 key 可跑）；`LiteLLMBackend` 真后端经 `set_llm_backend` / `build_agent_graph(llm=)` 注入 |
 | 评测 | `pra.evaluation`：三方案 harness + business/abstention 指标 + ablation + sweep + regression |
-| RAG | 默认 `local`（numpy + MockHash，确定性）；`--extra rag` 后可 `rag_backend="chroma"`（已落地：ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF，契约 [docs/10](docs/10-rag-upgrade-spec.md)）；Qdrant 迁移期保留 |
+| RAG | 默认 `local`（numpy + MockHash，确定性）；`--extra rag` 后可 `rag_backend="chroma"`（ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF，口径见 [docs/00](docs/00-system-design.md)）；Qdrant 迁移期保留 |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL 五表（DDL 见 `migrations/`） |
 | 可观测性 | `pra.observability` 适配层（Null Object 兜底）+ Langfuse v4 本地自托管（`--extra observability`） |
 
 ## 文档索引
 
-- [docs/00-system-design.md](docs/00-system-design.md) —— 系统设计总览（业务价值 → 决策难点 → 设计 → 验证；§15 目录结构）
-- [docs/01-agent-loop.md](docs/01-agent-loop.md) —— Agent Loop 细化：节点 / 边 / 状态契约
+- [docs/00-system-design.md](docs/00-system-design.md) —— 系统设计总览（业务价值 → 决策难点 → 设计 → 验证；RAG / 可观测性口径；§15 目录结构）
 - [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测方案：三方案定义 / 指标口径（含 abstention）/ Ablation / Sweep / 结论边界
-- [docs/03-decisions.md](docs/03-decisions.md) —— 参数与语义决策表（Decision Gate 口径等）
-- [docs/04-graph-design.md](docs/04-graph-design.md) —— LangGraph StateGraph 正式设计
-- [docs/05-visual-similarity-gate-proposal.md](docs/05-visual-similarity-gate-proposal.md) —— 视觉相似类假设的 Gate 兜底：设计提案 + **已落地**（`R3_VISUAL_CLAIM_UNSUPPORTED`，见 `src/pra/agent/guardrails/gate.py`）
-- [docs/06-rag-phase2-qdrant-bge.md](docs/06-rag-phase2-qdrant-bge.md) —— RAG Phase 2（Qdrant + BGE）：**已被 [docs/10](docs/10-rag-upgrade-spec.md) 取代**，作为历史记录保留
-- [docs/09-langfuse-observability.md](docs/09-langfuse-observability.md) —— Langfuse 可观测性接入与结论边界
-- [docs/10-rag-upgrade-spec.md](docs/10-rag-upgrade-spec.md) —— **RAG 真实化升级实施契约**（ChromaDB + LlamaIndex + BM25(jieba) + RRF；当前 RAG 权威口径）
 
 ## Roadmap（方向与动机）
 
-- **RAG 语料与模型的评测口径扩展**：当前实现与结论边界见 [docs/10-rag-upgrade-spec.md](docs/10-rag-upgrade-spec.md)；动机是扩大语料与模型对比、补检索指令，需要独立评测口径，不做能力外推。
+- **RAG 语料与模型的评测口径扩展**：当前实现与结论边界见 [docs/00-system-design.md](docs/00-system-design.md) 与 [docs/02-evaluation.md](docs/02-evaluation.md)；动机是扩大语料与模型对比、补检索指令，需要独立评测口径，不做能力外推。
 - **MQ 异步 worker + 人工审核队列**：HTTP 同步受理受吞吐 / 并发限制；异步化（含 MySQL Checkpointer、Redis 幂等）支撑接入解耦、削峰与事件溯源。
 - **可观测性下一步**：OpenTelemetry 跨服务链路 trace 与采样 / 容量治理（Langfuse 已覆盖 LLM 调用级）。
 - **Screening 策略库化**：品牌黑名单等规则词表沉淀为可维护的策略库，支撑归因观测与词表调优。
