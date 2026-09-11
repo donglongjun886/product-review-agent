@@ -23,13 +23,13 @@
 
 | 端口 | 服务 | 绑定 |
 | --- | --- | --- |
-| 3000 | Langfuse Web（UI + API） | 0.0.0.0 |
+| 3000 | Langfuse Web（UI + API） | 127.0.0.1 |
 | 3030 | Langfuse Worker | 127.0.0.1 |
 | 5432 | Postgres | 127.0.0.1 |
 | 6379 | Redis | 127.0.0.1 |
 | 8123 | ClickHouse HTTP | 127.0.0.1 |
 | 9000 | ClickHouse native | 127.0.0.1 |
-| 9090 | MinIO S3 API | 0.0.0.0 |
+| 9090 | MinIO S3 API | 127.0.0.1 |
 | 9091 | MinIO Console | 127.0.0.1 |
 
 > 注意：`9000` 是 ClickHouse 的 native 端口（容器内），MinIO 的 S3 API 被映射到宿主机 `9090`，两者不冲突。
@@ -111,7 +111,7 @@ docker compose down -v
 `LANGFUSE_INIT_*` 只在**首次启动**（数据库为空时）生效，自动建好组织、项目、用户和 API 密钥，
 不用手工点 UI。之后想换账号，改 `.env` 并 `docker compose down -v` 重来。
 
-业务侧接入（`product-review-agent` 的 `.env`，**由主 agent 决定是否接线，本目录不改它**）：
+业务侧接入（`product-review-agent` 的 `.env`，**是否接线由使用方决定，本目录不改它**）：
 
 ```bash
 LANGFUSE_PUBLIC_KEY=pk-lf-pra-local
