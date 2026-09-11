@@ -10,15 +10,18 @@
 #   metrics/business.py      DecisionEvaluator（二分类五指标 + human_rate/automation）
 #   metrics/abstention.py    AbstentionEvaluator（human_review_rate / automation_coverage /
 #                            abstention_rate / abstention_recall / wrong_auto_decision_rate）
+#   metrics/agent.py         AgentMetricsBundle（Tool Selection 覆盖口径 / Evidence Sufficiency
+#                            两栏 / Reasoning Correctness 自动代理 / 边际证据增益；只读统计）
+#   metrics/engineering.py   EngineeringEvaluator（llm_calls / tool_calls / tokens 均值·P50·P95）
 #   report.py                Console Report（总体 + 按 scene 分层）
 #   runner.py                EvaluationRunner 编排（load → N scheme → metrics → report）
 #   ablation.py              AblationRunner（方案级 2a/2b/2c + 组件级 full/−rag/…）
 #   sweep.py                 ThresholdSweepRunner（Evidence 单参数 sweep）
 #   regression.py            Regression（三方案决策序列 hash vs 基线快照）
 #
-# 未实现：EvidenceEvaluator（Tool Selection / Evidence Sufficiency / Reasoning Correctness /
-# 边际证据增益等 Agent 级指标，以及工程级分位数与单案成本）—— 真 LLM 臂（scripts/run_evaluation_real.py）、
-# v2 320 案正式集、可选 DB 落库路径均已落地。
+# 未实现：Budget Utilization（EvalRecord 不含预算上限，硬算失真）、Agent 级按 scene 分层分布、
+# 单案成本折算（需价目表）、语义理由人工复核（无第二标注者）。真 LLM 臂
+# （scripts/run_evaluation_real.py）、v2 320 案正式集、可选 DB 落库路径均已落地。
 from pra.evaluation.runner import ALL_SCHEMES, EvaluationResult, EvaluationRunner
 
 __all__ = ["ALL_SCHEMES", "EvaluationResult", "EvaluationRunner"]
