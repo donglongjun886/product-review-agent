@@ -3,8 +3,9 @@
 回答的业务问题：单商品看不出问题，商家的**历史行为**才是「规避」的关键信号 —— 相似商品数、
 违规/下架/改标题重上架次数、信用分。
 
-``MerchantRepository`` 是窄接口（按 merchant_id + 观察窗口取行为画像；返回 None = 商家不存在
-→ ``ok=False``）；``InMemoryMerchantRepository`` 是 **Mock 默认实现**。本工具不含业务判定：只
+``MerchantRepository`` 是窄接口（按 merchant_id 取行为画像；返回 None = 商家不存在 → ``ok=False``）；
+``InMemoryMerchantRepository`` 是 **Mock 默认实现**（默认装配路径恒用它，CI 不连库、评测可重放），
+真实实现见 ``pra.tools.merchant.mysql_repo.MySQLMerchantRepository``。本工具不含业务判定：只
 交付「取到的事实」，「违规 + 下架 + 改标题重上架是否构成规避」归 guardrails/reevaluate。
 """
 
@@ -52,9 +53,14 @@ class MerchantProfile(BaseModel):
 
 
 class MerchantRepository(Protocol):
-    """商家行为数据源窄接口。
+    """商家行为数据源窄接口（按 merchant_id 取行为画像）。
 
-    ``window_days`` 为聚合观察窗口；实现须返回窗口内统计。商家不存在返回 None。
+    不变量：商家不存在返回 ``None``（确定性「无结果」，由工具转 ``ok=False``）；基础设施异常由
+    实现直接抛出，不得吞成 ``None``。
+
+    ``window_days`` 只作调用方语义声明 —— **两个实现都返回数据源侧预计算的固定窗口快照，不按
+    window_days 重算**。按墙钟重算会让同一案件随运行时间改变结果（破坏可重放），也会让真库世界
+    与 InMemory 世界不等价；窗口切分属数据源侧职责（如离线物化不同窗口的聚合）。
     """
     async def get_profile(self, merchant_id: str, window_days: int) -> MerchantProfile | None: ...
 

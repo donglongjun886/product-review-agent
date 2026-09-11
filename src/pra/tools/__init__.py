@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .base import Tool, ToolArgs, ToolContext, ToolRegistry, ToolResult
 
-if TYPE_CHECKING:  # 仅注解用：默认装配路径不 import 商品工具子包
+if TYPE_CHECKING:  # 仅注解用：默认装配路径不 import 这些工具子包
+    from .merchant.tool import MerchantRepository
     from .product.tool import ProductRepository
 
 __all__ = [
@@ -30,6 +31,7 @@ def build_tools(
     *,
     rag_backend_options: dict[str, Any] | None = None,
     product_repo: ProductRepository | None = None,
+    merchant_repo: MerchantRepository | None = None,
 ) -> list[Tool]:
     """组装并返回 6 个调查工具（默认注入 InMemory/Mock 数据源）。
 
@@ -44,7 +46,9 @@ def build_tools(
     :param product_repo: ProductTool 的数据源；默认 **None → InMemory**（CI 不连库、评测可
         重放）。要读真库须**显式**传入 ``pra.tools.product.mysql_repo.MySQLProductRepository()``
         —— 该模块自身不在本函数里 import，连库与否由此入参单点决定。生产/HTTP 装配即
-        ``build_tools(product_repo=MySQLProductRepository())``（调用方持有 repo 生命周期）。
+        ``build_production_tools()``（调用方持有 repo 生命周期）。
+    :param merchant_repo: MerchantTool 的数据源，语义同 ``product_repo``（默认 InMemory，
+        显式传 ``pra.tools.merchant.mysql_repo.MySQLMerchantRepository()`` 才读真库）。
 
     每个工具类可用作结构性 ``Tool``，经 ``ToolRegistry.register`` 注册后由 tools_node 调度；
     替换真实数据源只需换构造入参，本函数保持不变。
@@ -61,7 +65,7 @@ def build_tools(
         ProductTool(repo=product_repo),
         ImageAnalysisTool(),
         OCRTool(),
-        MerchantTool(),
+        MerchantTool(repo=merchant_repo),
         CaseSearchTool(),
         PolicySearchTool(),
     ]
@@ -81,18 +85,21 @@ def build_tools(
 
 
 def build_production_tools() -> list[Tool]:
-    """生产/HTTP 入口的工具世界：商品事实读真库，其余 5 个工具与 ``build_tools()`` 同源。
+    """生产/HTTP 入口的工具世界：商品事实与商家行为读真库，其余 4 个工具与 ``build_tools()`` 同源。
 
-    与 ``build_tools()`` 的唯一差别 = 注入 ``MySQLProductRepository``。**默认装配路径
-    （``build_tools()`` 与 ``build_agent_graph()`` 缺省）仍是 InMemory** —— 单测与 CI 不连库、
-    评测可重放；只有生产入口（HTTP 路由 / 落库编排）走本函数。仓库测试有 autouse fixture
-    把本函数钉回 ``build_tools()``（见 ``tests/conftest.py``）。
+    与 ``build_tools()`` 的唯一差别 = 注入 ``MySQLProductRepository`` 与
+    ``MySQLMerchantRepository``。**默认装配路径（``build_tools()`` 与 ``build_agent_graph()``
+    缺省）仍是 InMemory** —— 单测与 CI 不连库、评测可重放；只有生产入口（HTTP 路由 / 落库编排）
+    走本函数。仓库测试有 autouse fixture 把本函数钉回 ``build_tools()``（见 ``tests/conftest.py``）。
 
-    连库延迟到首次工具调用（``MySQLProductRepository`` 构造期不建 engine），故商品表不可用时
-    装配本身也不抛错；真库读失败由工具层记 error record，不静默降级成「无结果」。
+    连库延迟到首次工具调用（两个 repo 构造期都不建 engine），故真库表不可用时装配本身也不抛错；
+    真库读失败由工具层记 error record，不静默降级成「无结果」。
     """
-    from .product.mysql_repo import (
-        MySQLProductRepository,  # 延迟：默认路径不拉 pra.infra
-    )
+    # 延迟 import：默认装配路径不拉 pra.infra
+    from .merchant.mysql_repo import MySQLMerchantRepository
+    from .product.mysql_repo import MySQLProductRepository
 
-    return build_tools(product_repo=MySQLProductRepository())
+    return build_tools(
+        product_repo=MySQLProductRepository(),
+        merchant_repo=MySQLMerchantRepository(),
+    )

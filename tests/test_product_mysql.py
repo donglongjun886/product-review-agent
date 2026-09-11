@@ -474,11 +474,12 @@ async def test_mysql_product_repository_roundtrip_against_real_db():
 # ---------------------------------------------------------------------------
 
 
-def test_build_production_tools_swaps_only_the_product_source():
-    """生产装配 = 默认 6 工具，只把 ProductTool 的数据源换成真库（装配期不连库）。"""
+def test_build_production_tools_swaps_only_the_mysql_backed_sources():
+    """生产装配 = 默认 6 工具，只把 ProductTool / MerchantTool 的数据源换成真库（装配期不连库）。"""
     prod = _REAL_BUILD_PRODUCTION_TOOLS()
     default = build_tools()
     assert type(prod[0]._repo).__name__ == "MySQLProductRepository"
+    assert type(prod[3]._repo).__name__ == "MySQLMerchantRepository"
     assert [t.name for t in prod] == [t.name for t in default]
     assert [type(t).__name__ for t in prod[1:]] == [type(t).__name__ for t in default[1:]]
 
@@ -491,9 +492,13 @@ def test_tests_are_pinned_to_the_inmemory_world():
     """
     import pra.tools as tools_pkg
 
-    assert type(tools_pkg.build_production_tools()[0]._repo).__name__ == (
-        "InMemoryProductRepository"
-    ), "conftest 的 InMemory 钉回 fixture 失效了 —— 测试会去连真库"
+    tools = tools_pkg.build_production_tools()
+    assert type(tools[0]._repo).__name__ == "InMemoryProductRepository", (
+        "conftest 的 InMemory 钉回 fixture 失效了 —— 测试会去连真库"
+    )
+    assert type(tools[3]._repo).__name__ == "InMemoryMerchantRepository", (
+        "conftest 的 InMemory 钉回 fixture 失效了 —— 测试会去连真库"
+    )
 
 
 def test_http_graph_entries_pass_the_production_world(monkeypatch):
