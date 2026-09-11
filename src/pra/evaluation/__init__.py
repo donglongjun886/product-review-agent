@@ -16,7 +16,9 @@
 #   sweep.py                 ThresholdSweepRunner（Evidence 单参数 sweep）
 #   regression.py            Regression（三方案决策序列 hash vs 基线快照）
 #
-# 未实现：EvidenceEvaluator / 真 LLM / 300+ 数据集 / DB 落库。
+# 未实现：EvidenceEvaluator（Tool Selection / Evidence Sufficiency / Reasoning Correctness /
+# 边际证据增益等 Agent 级指标，以及工程级分位数与单案成本）—— 真 LLM 臂（scripts/run_evaluation_real.py）、
+# v2 320 案正式集、可选 DB 落库路径均已落地。
 from pra.evaluation.runner import ALL_SCHEMES, EvaluationResult, EvaluationRunner
 
 __all__ = ["ALL_SCHEMES", "EvaluationResult", "EvaluationRunner"]

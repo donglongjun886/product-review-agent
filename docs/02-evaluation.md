@@ -381,9 +381,10 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 - 修正集未完成前 Rule baseline 结论会失真（漏放/误杀 → "Agent 比 Rule 强"可能是假象）：Phase 1 的三方案可比跑分照常执行，但把该失真列入**结论边界**（§3.4）；**正式基线结论在修正集合入后重跑并纳入 Regression**（§8 Phase 2）。
 - Fix 5（品牌词命中 REJECT vs COMPLEX→Agent 上下文终裁）本身是评测实验点：评测集需含"品牌词命中但可能合法"样本，报告给出两种规则动作下的对比行；其与评测口径 "COMPLEX→人工"（§3.2/§4.5）的差异须一并注明。
 
-### 7.2 RAG 未接主流程 → Agent 工具数据源的结论边界
+### 7.2 Agent 工具数据源的结论边界（评测世界 InMemory vs 生产真链路）
 
-- RAG（Policy KB / Case KB 真实检索）**未接入 HTTP 主流程**（默认 `build_tools()` = memory 世界，§3.4 已拍板为 Phase 1 默认）；**评测侧**可经 `EvalContext.tool_world="rag"`（或显式装配 `data_source="rag"`）切到真实检索，向量库已换 ChromaDB + LlamaIndex（见 [docs/00-system-design.md](00-system-design.md) 的 RAG 节与 `src/pra/rag/chroma_backend.py`）。本文口径下 Agent scheme 的 CaseSearch / PolicySearch / Merchant 仍以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）。
+- **评测世界**：Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）；评测侧可经 `EvalContext.tool_world="rag"`（或显式装配 `data_source="rag"`）切到真实检索，向量库为 ChromaDB + LlamaIndex（见 [docs/00-system-design.md](00-system-design.md) 的 RAG 节与 `src/pra/rag/chroma_backend.py`）。
+- **生产 / HTTP 入口已接真实链路**：`build_production_tools()` 注入商品/商家 MySQL 与案例/政策的真实 RAG（`Lazy*Index` 惰性构建：装配期零 import/零 IO，首次检索才建库连 Chroma）。故**本文所有数字仍是 InMemory 评测世界口径**，不得读成生产链路成绩。
 - **工具集口径**：本文所有 Agent 数字均出自**评测世界的 5 个工具**（`make_eval_world_tools()`：Product / ImageAnalysis / Merchant / CaseSearch / PolicySearch），比生产 `build_tools()` 的 6 个**少一个 `OCRTool`** —— 评测集 `expected_tools` 从不含它、机审 OCR 文本近乎全空，补进去只是多一个拿不到数据的工具。两者清单各自维护、**无"同构"约束**，Tool Selection Accuracy 真值按该 5 工具集合计。
 - **报告必带边界声明（P-2 口径）**："当前结果主要验证 **Agent Workflow、规则协同与 Evaluation Framework**，不代表真实 LLM 最终能力；InMemory 种子覆盖有限，**可能低估 Agent 上限**。"（与 §3.4 同文）
 - 局限：种子里缺失的真实先例/完整规避史 Agent 取不到 → 多信号与对抗类案的 Evidence Sufficiency、Marginal Evidence Gain 等指标会**低估上限**。

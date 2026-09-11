@@ -124,10 +124,10 @@ def _make_real_backend(
     """
     try:
         from pra.agent.litellm_backend import LiteLLMBackend
-    except ImportError as exc:  # 并行开发中该模块未落盘 → 明确报错而非半路 ImportError
+    except ImportError as exc:  # 模块或 litellm 依赖缺失 → 明确报错而非半路 ImportError
         raise RuntimeError(
-            "pra.agent.litellm_backend 尚未就绪（并行开发中）：real 模式需该模块"
-            "（LiteLLMBackend）落盘后运行；scripted / fake 干跑不受影响"
+            "real 模式需要 pra.agent.litellm_backend（含 litellm 依赖，见 pyproject）："
+            "`uv sync` 后重试；scripted / fake 干跑不受影响"
         ) from exc
     return LiteLLMBackend(
         model=model, api_key=api_key, base_url=base_url, tools=_world_tools(world)
