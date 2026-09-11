@@ -7,6 +7,8 @@
 > 预算明确为 **Guardrail 上界（10/15/40000/30s）而非目标**，Trace/Evaluation 增 Budget Utilization（§8/§10.3/§11.3）；
 > 相似度阈值三档化并配置化 + validation sweep（§7.6/§11.5）；补三方案公平性前提（§12.0）与 **Ablation Evaluation**（§13.4）；
 > 成本/调查效率指标含 **Marginal Evidence Gain**（§11.3）；顶层包更名 `pra`（§15）。
+>
+> **现状口径（2026-09）**：本文兼含**已实现**与**设计蓝图**。已实现 = `pra` 包（同步 HTTP `POST /api/v1/reviews` + 工具数据源 MySQL / Chroma RAG + Langfuse 观测 + 三方案评测与回归）；**MQ 异步 worker、Redis 幂等限流、审核工作台、多标注者交叉校验、OTel 链路指标仅为本节蓝图，未实现**（逐条标注见 §1.2 表、§8.2-3/5、§9.3、§10.1、§13.2-4；放弃项见 §14.3 与 README Roadmap）。
 
 ---
 
@@ -75,12 +77,12 @@ HUMAN_REVIEW → 人工裁决 → 回流案例库 + 策略库 + 评测集
 
 | 层 | 技术载体 | 体现的能力 |
 |---|---|---|
-| 接入 | MQ（Kafka / RabbitMQ） | 异步解耦、削峰、事件溯源 |
+| 接入 | MQ（Kafka / RabbitMQ）（**规划，未实现**；现状：同步 HTTP `POST /api/v1/reviews`） | 异步解耦、削峰、事件溯源 |
 | 同步机审 | FastAPI 服务 + 规则引擎 | 高吞吐、低延迟、确定性 |
 | 分流 | 状态机 + 阈值规则 | 明确性决策，不滥用 LLM |
 | 复杂调查 | LangGraph StateGraph（asyncio + Worker） | 预算控制、可恢复状态机 |
 | 工具/RAG | 内部服务 + 向量检索（ChromaDB；Qdrant 暂留） | 多源数据访问 |
-| 人工回流 | 审核工作台 + 反馈 Topic | 闭环、知识沉淀 |
+| 人工回流 | 审核工作台 + 反馈 Topic（**规划，未实现**） | 闭环、知识沉淀 |
 | 全链路 | MySQL 状态机（**已用**）+ Redis 幂等/限流、OTel（**规划，未实现**） | 可靠性、可观测性（现状：可观测性为 Langfuse，见 §10.4） |
 
 ### 1.3 关键架构决策：为什么"同步 + 异步"两段式
@@ -605,9 +607,9 @@ FIELD_CONFLICT        商品字段信息冲突
 
 1. **硬规则不可被 LLM 覆盖**（黑名单、硬违禁）→ 防漏放。
 2. **REJECT 必须有可引用依据** → 防误伤商家。
-3. **PII / 敏感信息**：工具返回给 LLM 前做脱敏（商家联系方式等），LLM 输出不落地敏感字段。
+3. **PII / 敏感信息**：工具返回给 LLM 前做脱敏（商家联系方式等），LLM 输出不落地敏感字段（**规划，未实现**）。
 4. **决策审计**：每个决策必须带完整 `evidence[] + hypothesis_trace[] + tool_call_history[]`，可回溯到"谁（哪个工具）提供的哪条证据导致这个结论"。
-5. **幂等 / 去重**：同一商品同一版本只审一次（Redis setnx + MySQL 唯一索引），防止重复消费 MQ 重复计费。
+5. **幂等 / 去重**：同一商品同一版本只审一次（Redis setnx + MySQL 唯一索引），防止重复消费 MQ 重复计费（**规划，未实现**；当前同步单请求路径无并发消费）。
 
 ### 8.3 终止性（结论）
 
@@ -677,7 +679,9 @@ CREATE TABLE review_trace (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-### 9.3 Redis / MQ 使用
+### 9.3 Redis / MQ 使用（**规划，未实现** —— 现状为同步 HTTP + 进程内状态）
+
+> 本节为设计蓝图：MVP 不引入 Redis / MQ（幂等、限流、分布式锁、异步 worker 均未做）。
 
 - **Redis**：幂等去重（setnx）、LLM/Tool 限流（令牌桶）、worker 抢占 case 的分布式锁、政策版本/案例索引热点缓存、agent_state 热快照（落库为准）。
 - **MQ**：`product_review_request`（接入）、`complex_review`（分流投递）、`review_feedback`（人工裁决回流）、重试 + 死信队列。
@@ -853,7 +857,7 @@ CREATE TABLE review_trace (
 1. **人工构造对抗样本**：基于核心场景（品牌模仿/规避），故意设计"无 Logo、无品牌词、但外观高度相似 + 商家有规避史"。
 2. **从真实案例改写**：把历史人工裁决案件脱敏改写为 benchmark 条目。
 3. **程序化变异**：对模板做字段变异（改相似度、改商家历史、改 OCR 冲突）制造边界。
-4. **人工标注 + 交叉校验**：每条由人工给 `expected_decision + evidence + policy`，至少两人一致性校验。
+4. **人工标注 + 交叉校验**：每条由人工给 `expected_decision + evidence + policy`，至少两人一致性校验（**未实现**：当前评测集为单一标注者构造）。
 
 ### 13.3 Hard Case 的具体形态（对应核心场景）
 
