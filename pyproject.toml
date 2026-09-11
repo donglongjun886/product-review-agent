@@ -40,7 +40,7 @@ rag = [
 observability = ["langfuse>=4.15,<5"]
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "ruff", "httpx"]
+dev = ["pytest", "pytest-asyncio", "ruff", "httpx", "pytest-timeout>=2.3,<3"]
 
 [build-system]
 requires = ["hatchling"]
@@ -52,3 +52,7 @@ packages = ["src/pra"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# 挂死守护：任何单个用例超过 120s 即中止（thread 方式会打印全部线程栈，
+# 用于定位网络阻塞类挂死——历史上真实发生过一次）。
+timeout = 120
+timeout_method = "thread"
