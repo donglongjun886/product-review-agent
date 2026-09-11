@@ -88,7 +88,11 @@ _compiled_graph: Any = None  # CompiledStateGraph（延迟 import 防 pra.infra 
 
 
 def _get_graph() -> Any:
-    """懒加载返回编译图单例（默认 6 InMemory Tools + scripted LLM 桩，无 API key）。
+    """懒加载返回编译图单例（scripted LLM 桩 + 生产工具世界，无 API key）。
+
+    工具世界 = ``build_production_tools()``（ProductTool 读 MySQL 商品表，其余 5 工具与默认
+    世界同源）—— HTTP/生产入口读真库是刻意的；单测由 ``tests/conftest.py`` 的 autouse
+    fixture 把生产装配钉回 InMemory，故测试/CI 不连库。
 
     每次执行经唯一 ``thread_id=run_id`` 隔离线程状态（InMemorySaver）；真实 LLM / MySQL
     Checkpointer 接入时改这里即可。
@@ -96,8 +100,11 @@ def _get_graph() -> Any:
     global _compiled_graph
     if _compiled_graph is None:
         from pra.agent.graph import build_agent_graph  # 延迟 import：编译代价大、仅首次
+        from pra.tools import build_production_tools  # 函数内 import：便于测试替换装配
 
-        _compiled_graph = build_agent_graph(checkpointer=make_memory_checkpointer())
+        _compiled_graph = build_agent_graph(
+            tools=build_production_tools(), checkpointer=make_memory_checkpointer()
+        )
     return _compiled_graph
 
 

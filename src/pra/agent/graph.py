@@ -148,7 +148,9 @@ def build_agent_graph(*, tools: list | None = None, checkpointer=None, llm=None)
     """装配并编译复杂风险调查子图。
 
     :param tools: ``Tool`` 列表；默认 None → ``pra.tools.build_tools()``（6 个 InMemory
-        工具，开箱可测），经 ``make_tools_node(tools)`` 闭包工厂注入 tools 节点。
+        工具，开箱可测 —— 本缺省是测试/评测/脚本的确定性世界），经 ``make_tools_node(tools)``
+        闭包工厂注入 tools 节点。生产入口（HTTP 路由 / 落库编排）显式传
+        ``pra.tools.build_production_tools()``（商品事实读真库），不依赖本缺省。
     :param checkpointer: LangGraph checkpointer（demo 用 ``make_memory_checkpointer()``
         的 InMemorySaver）；None = 不持久化，仅调试。
     :param llm: 可选 ``LLMBackend``；非 None → ``set_llm_backend(llm)``（进程级全局后端，

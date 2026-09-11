@@ -3,9 +3,10 @@
 回答的业务问题：判断「规避品牌」前，先确认商品在库最新事实 —— brand 是否真空缺、字段是否
 冲突、快照版本。
 
-``ProductRepository`` 是窄接口（按 product_id 取库中最新事实快照），``InMemoryProductRepository``
-是 **Mock 默认实现**；真实实现（SQLAlchemy async）实现同一 Protocol 后注入即可。本模块**不含业务
-判定**：只取事实并结构化为 Evidence 原料。``version_drift``（库中 version vs
+``ProductRepository`` 是窄接口（按 product_id 取在库事实快照）；``InMemoryProductRepository``
+是 **Mock 默认实现**（默认装配路径恒用它，CI 不连库、评测可重放），真实实现是
+``pra.tools.product.mysql_repo.MySQLProductRepository``（显式 opt-in：``build_tools(product_repo=…)``）。
+本模块**不含业务判定**：只取事实并结构化为 Evidence 原料。``version_drift``（库中 version vs
 ``case.product.version``）需比对案件快照，而 ``ToolContext`` 只带 ``case_id`` —— 该比对放
 tools_node 的 evidence processing 层（其持有 case 快照）；``ref_id`` 填 ``product_id``。
 """
@@ -70,8 +71,11 @@ class ProductSnapshot(BaseModel):
 class ProductRepository(Protocol):
     """商品数据源窄接口。
 
-    真实实现：MySQL ``product/product_sku/product_image``（async 读，返回最新 version 行）。
-    找不到商品返回 None（确定性「无结果」，由工具转 ``ok=False``，不抛异常）。
+    语义：取该商品**当前行** —— ``product`` 表以 product_id 为主键只存当前行，该行 ``version``
+    即最新乐观锁版本（历史版本不入库），故「取当前行」与「取最新 version 行」是同一件事。
+    实现：``InMemoryProductRepository``（Mock 默认）/ ``MySQLProductRepository``（真库，显式注入）。
+    **商品不存在返回 None**（确定性「无结果」，由工具转 ``ok=False``，不抛异常）；基础设施异常
+    由实现直接抛出，不得吞成 None。
     """
 
     async def get_latest(self, product_id: str) -> ProductSnapshot | None: ...
@@ -118,8 +122,8 @@ class InMemoryProductRepository:
 class ProductArgs(ToolArgs):
     """ProductTool 入参。
 
-    ``version`` 可选：库中只存当前行（乐观锁 version），传入值仅作审计/比对提示，读取结果恒为
-    库中最新 version。
+    ``version`` 可选：库中只存当前行（product_id 主键，乐观锁 version 即最新），传入值仅作
+    审计/比对提示，读取结果恒为库中当前行的 version。
     """
 
     product_id: str = Field(description="商品 ID，如 P_88231")
