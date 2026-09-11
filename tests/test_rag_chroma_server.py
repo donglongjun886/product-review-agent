@@ -141,7 +141,7 @@ async def test_chroma_policy_index_against_real_server() -> None:
             rh = await remote.search(query, filters, top_k, effective_only)
             lh = await local.search(query, filters, top_k, effective_only)
             assert [h.clause_id for h in rh] == [h.clause_id for h in lh], (
-                f"真服务端 vector 模式应与 local 同序同 id（§5-1 第一行）："
+                f"真服务端 vector 模式应与 local 同序同 id："
                 f"q={query!r} filters={filters} eff={effective_only} k={top_k}"
             )
         assert served_counters()["vector_bruteforce_fallbacks"] == 0, (
@@ -188,7 +188,7 @@ async def test_chroma_case_index_against_real_server() -> None:
             lh = await local.search(_QUERY if top_k == 5 else "外观模仿", filters, top_k)
             assert rh, "真服务端检索不应为空"
             assert [h.case_id for h in rh] == [h.case_id for h in lh], (
-                f"case 真服务端应与 local 同序同 id（§5-1 第一行）：filters={filters} k={top_k}"
+                f"case 真服务端应与 local 同序同 id：filters={filters} k={top_k}"
             )
             for a, b in zip(lh, rh):
                 assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= _SCORE_TOL

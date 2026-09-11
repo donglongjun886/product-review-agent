@@ -148,7 +148,7 @@ def _surface_predict(case_json: dict) -> dict:
             "risk_level": risk_level,
             "risk_type": risk_type,
             "confidence": confidence,
-            "policy": [],  # 单次调用无政策库访问权限（§12.2：不给案例/政策库）
+            "policy": [],  # 单次调用无政策库访问权限（不给案例/政策库）
             "rationale": rationale,
             "signals": signals,
             "reasons": reasons,  # 表面观察理由（人读，进 detail/evidence 审计）

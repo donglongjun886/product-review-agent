@@ -38,7 +38,7 @@ class CaseSearchFilters(BaseModel):
 
 class CaseHit(BaseModel):
 
-    case_id: str = Field(description="回案库引用主键（脱敏文本只含摘要，§5.5）")
+    case_id: str = Field(description="回案库引用主键（脱敏文本只含摘要）")
     retrieval_score: float = Field(
         ge=0.0,
         le=1.0,

@@ -44,7 +44,7 @@ class PolicyClauseHit(BaseModel):
 
     policy_id: str
     version: int
-    clause_id: str = Field(description="条款 ID —— Policy KB 检索/分块的最小单元（§6.2）")
+    clause_id: str = Field(description="条款 ID —— Policy KB 检索/分块的最小单元")
     title: str = Field(default="", description="条款标题")
     text: str = Field(description="条款原文")
     category: str | None = Field(default=None)

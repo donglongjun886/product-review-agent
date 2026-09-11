@@ -74,6 +74,6 @@
     "EVIDENCE_STRONG": 0.85,
     "CONFIDENCE_ABSTAIN_THRESHOLD": 0.7
   },
-  "annotation_notes": "Phase 2 正式集：以 v1 35 条为模板的程序化确定性变异（seed 固定、可重放）；真值三值语义与 abstention 口径见 scripts/eval_dataset_gen.py 模块 docstring 与docs/02 §4.4：明确违规→REJECT/AUTO，明确正常→PASS/AUTO，单弱信号/brand·类目空缺/品牌词可能为适配描述→HUMAN_REVIEW/SHOULD_ABSTAIN；'需调查才能判'的 AUTO 案（Rule/Single 会 COMPLEX/HUMAN、Agent 经 EVAL_* 世界工具可判对）在 annotation.notes 注明设计意图；标注阈值口径与 EvalContext 运行时一致（EVIDENCE_MIN_SIM=0.7 / EVIDENCE_STRONG=0.85 / CONFIDENCE_ABSTAIN_THRESHOLD=0.7）。",
+  "annotation_notes": "Phase 2 正式集：以 v1 35 条为模板的程序化确定性变异（seed 固定、可重放）；真值三值语义与 abstention 口径见 scripts/eval_dataset_gen.py 模块 docstring：明确违规→REJECT/AUTO，明确正常→PASS/AUTO，单弱信号/brand·类目空缺/品牌词可能为适配描述→HUMAN_REVIEW/SHOULD_ABSTAIN；'需调查才能判'的 AUTO 案（Rule/Single 会 COMPLEX/HUMAN、Agent 经 EVAL_* 世界工具可判对）在 annotation.notes 注明设计意图；标注阈值口径与 EvalContext 运行时一致（EVIDENCE_MIN_SIM=0.7 / EVIDENCE_STRONG=0.85 / CONFIDENCE_ABSTAIN_THRESHOLD=0.7）。",
   "lineage_notes": "每条 lineage 记录 seed_case_id（v1 老案 EC_xxxx 或 SEED_V2_* 语义种子）与 mutation 摘要。"
 }

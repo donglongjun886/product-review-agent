@@ -457,7 +457,11 @@ RAG_WORLD_LABEL = "RAG 世界（真实 Policy/Case KB · 确定性 mock embeddin
 
 
 def make_eval_world_tools():
-    """构造评测世界的 5 个 InMemory 工具（与 ``pra.tools.build_tools`` 同构）。
+    """构造评测世界的 5 个 InMemory 工具（比 ``pra.tools.build_tools`` 少一个 ``OCRTool``）。
+
+    **刻意不补 OCRTool**：评测集把 OCR 文本当基础输入（``input.images[].ocr_text``）直接
+    消费，现有 v1/v2 案件既不带图片、也无 ``OCRTool`` 期望 → 补进来只会多一个无数据的
+    工具。工具清单与生产各自维护，**不存在"同构"约束**，对标时以本函数为准。
 
     注入本模块评测种子（默认演示种子 P_88231 / M_5512 / POLICY_3.2 / CASE_1832 已并入
     EVAL_* 常量）—— 数据源与 eval_data/v1 同一份事实，杜绝"评测集与工具世界漂移"。

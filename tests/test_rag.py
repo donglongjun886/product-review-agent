@@ -101,7 +101,7 @@ async def test_policy_retrieval_hits_ip_clause() -> None:
     hits = await idx.search(
         "外观高度模仿知名品牌无授权", PolicySearchFilters(), top_k=5, effective_only=True
     )
-    assert hits, "验收 §6.1：query 应命中 IP 政策条款"
+    assert hits, "验收：query 应命中 IP 政策条款"
     assert all(h.status == "EFFECTIVE" for h in hits)
     top = hits[0]
     assert RiskType.POTENTIAL_IP_RISK in top.risk_type, "首条须为 IP 风险条款"
@@ -121,7 +121,7 @@ async def test_case_retrieval_hits_relevant_precedent() -> None:
     hits = await idx.search(
         _SHOE_CASE_QUERY, CaseSearchFilters(category="女鞋/运动鞋"), top_k=5
     )
-    assert hits, "验收 §6.2：query 应命中对应先例"
+    assert hits, "验收：query 应命中对应先例"
     assert hits[0].decision == Decision.REJECT
     assert any(h.case_id == _SHOE_FLAGSHIP_CASE for h in hits), (
         f"女鞋先例检索应含 demo 改写旗舰案 {_SHOE_FLAGSHIP_CASE}"

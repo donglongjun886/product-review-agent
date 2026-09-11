@@ -108,7 +108,7 @@ def render_report(result: EvaluationResult) -> str:
         auto_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "AUTO_DECIDABLE")
         should_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "SHOULD_ABSTAIN")
         add(f"真值口径: Phase 2 三值（含 HUMAN_REVIEW/SHOULD_ABSTAIN 真值）→ 决策指标分母=二值真值 "
-            f"{binary}，abstention 五指标分母=全量 {total}（§4.4）")
+            f"{binary}，abstention 五指标分母=全量 {total}")
         add(f"真值案: 共 {total} 条（PASS={pass_n} / REJECT={reject_n} / HUMAN_REVIEW={human_n}）")
         add(f"分母注记: 决策指标行（acc/prec/recall/fpr/fnr/hrr/auto）只计二值真值 {binary} 案 "
             f"（AUTO_DECIDABLE={auto_n}；HUMAN 真值不计入其分母）；")
@@ -139,14 +139,14 @@ def render_report(result: EvaluationResult) -> str:
     add("  · screening BLACKLISTED_BRANDS 为空 → Rule 无自动 REJECT（品牌词/规避词/空缺一律 COMPLEX→HUMAN）")
     if not result.has_should_abstain:
         add("  · abstention: v1 无 abstain 标签 → Phase 1 兼容口径（全案等价 AUTO_DECIDABLE，"
-            "§4.4 五指标区不渲染；如需五指标请用 v2 数据集）")
+            "五指标区不渲染；如需五指标请用 v2 数据集）")
     add("  · 结论边界（双向，勿单向解读）:")
     add("    - 低估侧: 工具 = InMemory 种子 + LLM = 桩（覆盖有限，缺真实先例/完整规避史）→ 可能低估 Agent 真实上限")
     add("    - 高估侧: 本集真值由生成器按「与审查员同源 EVAL_* 世界 + 同语义规则」程序化标注（单标注者、"
         "SHOULD 无负例）")
     add("      → scripted 高分含「标注-审查员同口径」耦合，主要衡量实现一致性而非调查能力；")
-    add("      不可外推为真实 LLM 能力（README「评测与结论」/ docs/02 §3.4/§7.2/§8）")
-    add("    - real 对照（docs/02 §8 Phase 3 已执行；v1 35 案 real 单次抽样）: acc 0.200 / human_review_rate 0.771，")
+    add("      不可外推为真实 LLM 能力（理由见上一行同口径耦合）")
+    add("    - real 对照（v1 35 案 real 单次抽样）: acc 0.200 / human_review_rate 0.771，")
     add("      27/35 转人工由确定性 Gate 归因（R3_BUDGET_EXHAUSTED×19 / R3_HYPOTHESES_INDISTINGUISHABLE×7）")
     add("      —— 与 scripted 高分方向相反（同口径耦合只会高估一致性，real 未调优首跑则大幅保守转人工）；"
         "该抽样仅验证链路，非模型固定水平")
@@ -217,7 +217,7 @@ def _render_abstention_section(add, result: EvaluationResult) -> None:
         if isinstance(s, dict)
     )
     add("-" * 100)
-    add("abstention 五指标（§4.4；分母=全量: AUTO_DECIDABLE=%d / SHOULD_ABSTAIN=%d）" % (auto_n, should_n))
+    add("abstention 五指标（分母=全量: AUTO_DECIDABLE=%d / SHOULD_ABSTAIN=%d）" % (auto_n, should_n))
     add("  行含义: hrr/autom=human_review_rate/automation_coverage(全量分母) | "
         "abst_r=abstention_rate(AUTO 中过度转人工) / abst_rl=abstention_recall(SHOULD 正确转人工) / "
         "w_auto=wrong_auto_decision_rate(AUTO 自动终裁错误率)")

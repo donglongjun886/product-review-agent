@@ -127,10 +127,10 @@ class EvalCase(BaseModel):
     source_type: SourceType = Field(default="SYNTHETIC", description="数据来源（SYNTHETIC/REAL_DESENSITIZED/VARIANT）")
     lineage: EvalLineage | None = Field(
         default=None,
-        description="程序化变异溯源（docs/02 §2.2；v1 手工数据无此字段 → None）",
+        description="程序化变异溯源（v1 手工数据无此字段 → None）",
     )
-    hard_case: bool = Field(default=False, description="是否入选 Hard Case（docs/02-evaluation.md §2.4）")
-    input: ProductReviewCase = Field(description="商品事实快照（docs/00 §2.1 形状，线上 DTO 同型）")
+    hard_case: bool = Field(default=False, description="是否入选 Hard Case")
+    input: ProductReviewCase = Field(description="商品事实快照（线上 DTO 同型）")
     expected: EvalExpected = Field(description="标注期望（真值 + abstention 标签 + 标签字段）")
     annotation: dict | None = Field(
         default=None,

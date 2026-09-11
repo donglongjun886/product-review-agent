@@ -441,7 +441,7 @@ def b_brand_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
         reason=["agent_can_discover"],
         note=("brand 空缺（Rule R-301/Single 均→HUMAN）但在库自有品牌可查 + "
               f"{_MERCHANT_TIER[a['mid']]}商家 → Agent 核验后 PASS —— 需调查才能判的 "
-              "AUTO 案（docs/02 §4.4 核心观察对象）。"),
+              "AUTO 案（评测核心观察对象）。"),
         risk_level="NONE", risk_type=[], evidence=[], tools=[], policy=[],
         seed_id=_pick(rng, _V1_SEED["brand_missing_verify"].get(cat, ["EC_0201"])),
         mutation="case.brand→None（在库 brand 可查）；Rule/Single COMPLEX→HUMAN，Agent 核验 PASS —— 需调查 AUTO 案",
@@ -966,8 +966,8 @@ def _build_manifest(rows: list[dict], out_dir: Path, count: int, seed: int) -> d
         },
         "annotation_notes": (
             "Phase 2 正式集：以 v1 35 条为模板的程序化确定性变异（seed 固定、可重放）；"
-            "真值三值语义与 abstention 口径见 scripts/eval_dataset_gen.py 模块 docstring 与"
-            "docs/02 §4.4：明确违规→REJECT/AUTO，明确正常→PASS/AUTO，单弱信号/brand·类目"
+            "真值三值语义与 abstention 口径见 scripts/eval_dataset_gen.py 模块 docstring："
+            "明确违规→REJECT/AUTO，明确正常→PASS/AUTO，单弱信号/brand·类目"
             "空缺/品牌词可能为适配描述→HUMAN_REVIEW/SHOULD_ABSTAIN；'需调查才能判'的 AUTO "
             "案（Rule/Single 会 COMPLEX/HUMAN、Agent 经 EVAL_* 世界工具可判对）在 "
             "annotation.notes 注明设计意图；标注阈值口径与 EvalContext 运行时一致"

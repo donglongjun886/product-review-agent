@@ -59,7 +59,7 @@ async def _main(argv: list[str] | None = None) -> int:
         print(
             f"[数据版本] {DEFAULT_DATA} = Phase 1 v1 集（35 案，本次跑 {result.total_cases} 案），"
             "相对 Phase 2 正式集属 smoke 级 —— 正式口径为 v2 320 案"
-            "（docs/02-evaluation.md §8）；以下 v1 数字仅对该数据集成立，勿当正式结论。"
+            "；以下 v1 数字仅对该数据集成立，勿当正式结论。"
         )
     print_ablation_report(result)
     print(

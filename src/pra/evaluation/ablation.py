@@ -361,7 +361,7 @@ def render_ablation_report(result: AblationResult) -> str:
     add("=" * 108)
     add(f"数据集: {result.data_path or '(外部注入 cases)'}   案数: {result.total_cases}")
     add("口径: acc/prec/recall/fpr/fnr = 二分类（自动终裁子集，真值仅 PASS/REJECT 计入）；")
-    add("      hrr/automation/abstention_rate/abstention_recall/wrong_auto = §4.4 abstention 五指标")
+    add("      hrr/automation/abstention_rate/abstention_recall/wrong_auto = abstention 五指标")
     add("      （'-' = 分母 0，如 Phase 1 无 SHOULD_ABSTAIN 真值 → abstention_recall '-'）")
 
     def _section(title: str, order: tuple, table: dict[str, VariantOutcome]) -> None:
@@ -438,7 +438,7 @@ def render_ablation_report(result: AblationResult) -> str:
 
     add("")
     add("=" * 108)
-    add("工具证据覆盖（组件必要性判定的前置标注，docs §6）:")
+    add("工具证据覆盖（组件必要性判定的前置标注）:")
     for name in ALL_TOOL_NAMES:
         covered = result.tool_coverage.get(name) or []
         add(f"  · {name}: {len(covered)} 个 case 的 expected_tools 含该工具"

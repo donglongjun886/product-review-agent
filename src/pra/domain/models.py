@@ -212,10 +212,10 @@ class ReviewDecision(_StrictModel):
         ge=0.0,
         le=1.0,
         description="decision_confidence —— 自动决策安全门槛（确定性重算值，非模型真实概率/非违规概率；"
-        "只回答'如果自动判，判错风险够不够低'，见 docs/00 §7.4；已由 confidence 改名）",
+        "只回答'如果自动判，判错风险够不够低'；已由 confidence 改名）",
     )
     evidence: list[Evidence] = Field(default_factory=list, description="支撑本裁决的证据链（与运行期 evidence 同型）")
-    policy: list[str] = Field(default_factory=list, description="引用的政策条款 ID，如 POLICY_3.2（REJECT 必须有可引用依据，见 docs/00 §7.2）")
+    policy: list[str] = Field(default_factory=list, description="引用的政策条款 ID，如 POLICY_3.2（REJECT 必须有可引用依据）")
     hypothesis_trace: list[Hypothesis] = Field(default_factory=list, description="关键假设的演变轨迹（prior→posterior→status），供解释与 eval 重放")
     budget_used: Budget = Field(default_factory=Budget, description="裁决时的预算快照（引用运行期 Budget 实例，含限额与启动时间）")
     overrides: list[str] = Field(default_factory=list, description="overlay 改判/归因原因码（R1_HARD_RULE / R2_* / R3_* / R4_* / R5_*）；空=overlay 未改判")
