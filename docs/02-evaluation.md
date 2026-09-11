@@ -613,6 +613,9 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ## 12. real-LLM 结果（v2 320 案；**与 §11 是不同世界，不可混读**）
 
+> ⚠ **本节是 Gate 语义重构（§13）之前的历史基线，已被 §14 取代**：本节 real 数字由重构前的
+> 假设状态侧 Gate 产出；引用 real 320 数字时**以 §14 为准**，本节仅作"重构前 vs 重构后"的对照证据。
+
 > **本节记录 v2 在真实 LLM 下的单次运行结果**，与 §11 的 scripted 封板表**并列但不可混算**：
 > §11 是确定性桩 + 同源标注世界（衡量实现一致性、可逐字节重放）；本节是真实 LLM（非确定性、不可重放、
 > 单次抽样，不代表模型固定水平）。两表指标名相同但含义不同，**引用时必须带世界标签**。
@@ -828,6 +831,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 > **不可外推**：16 案、单次、单模型、非确定性、InMemory 工具世界且生产视觉不可测。
 > 本表只用于验证"两个已知结构性问题在真实 LLM 下是否消失"，**不得**当作 real 能力的估计。
+> **后续已按本表结论跑过 320 全量**（同一重构后代码，单次），结果见 **§14**。
 
 ### 13.6 尚未做与边界
 
@@ -839,3 +843,143 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
   （"疑似规避但图/文本无确证 → 克制转人工"，GT 家族 `dirty_brand_missing_cleanimg`），
   由 `measurements.reject_positive_dims` 实现，并有单测锁定；若后续业务改判该族，
   必须先改这条语义再改实现。
+
+---
+
+## 14. 重构后 real-LLM 全量（v2 320 案；单次、不可重放）
+
+> **本节是 Gate 语义重构（§13）之后 real 臂的第一次、也是唯一一次 320 全量运行**，与 §11（scripted 封板）
+> 并列、与 §12（**重构前** real 历史基线）构成对照。运行期间**未改任何规则 / 架构 / 数据集 / 指标口径**，
+> 唯一变量是 LLM（scripted ↔ real）。
+>
+> - 命令：`uv run python scripts/run_evaluation_real.py --data eval_data/v2 --concurrency 8 --out .cache/real_v2_gate.json`
+> - 代码：`ba97fda`（三态测量 + 事实侧 Gate）· world=eval（与 §11/§12 同一 InMemory 种子世界）
+> - 模型：配置串 `deepseek/deepseek-chat` → 网关实服 **DeepSeek-V4.1-Flash**（与 §12 同模型）
+> - 预算：**生产护栏未动**（llm 10 / tool 15 / token 40000）；仅按既有评测口径放宽墙钟到 600000ms
+> - 320/320 全部产出裁决，墙钟 ≈15 分钟，token **5,173,433**（估算 ≈$2.56 峰价 / $1.29 谷价，
+>   单价口径同 §12.5 —— **金额是估算，token 总量是硬数**）
+> - 产物（gitignored）：`.cache/real_v2_gate.json`（real 全量记录 + 两臂指标）、`.cache/real_v2_gate_console.txt`
+>   （Console 报告，含 51 条差异明细）、`.cache/real_v2_gate_diff.tsv`（320 行逐案 truth/scripted/real/归因）、
+>   `.cache/real_v2_gate_analysis.txt`（事后复算：abstention 五指标 / 安全面 / 分场景 / 归因汇总）
+> - **交叉验证**：同一次运行的 scripted 臂与 §11 主结果**逐项一致**（0.964 / 1.000 / 1.000 / hrr 0.036 /
+>   140-0-124-0）；且其**逐案决策与重构前 scripted 比对为 0/320 变化** ⇒ 两臂同 harness、同世界，
+>   LLM 是唯一变量，本次改动无 scripted 侧回归。
+
+### 14.1 主结果（业务分母 = 二值真值 274，口径同 §4.1）
+
+| Strategy | Accuracy | Precision | Recall | FPR | FNR | 漏放 | 误杀 | TP/FP/TN/FN |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| scripted（= §11） | 0.964 | 1.000 | 1.000 | 0.000 | 0.000 | 0 | 0 | 140/0/124/0 |
+| **real-LLM（重构后 · 单次）** | **0.850** | **1.000** | 1.000 | **0.000** | 0.000 | **0** | **0** | **118/0/115/0** |
+| real-LLM（§12 · 重构前） | 0.109 | 0.938 | 1.000 | 1.000 | 0.000 | 0 | 2 | 30/2/0/0 |
+
+### 14.2 全量 320 口径（口径同 §4.4）
+
+| Strategy | human_review_rate | automation_coverage | abstention_rate | abstention_recall | wrong_auto_decision_rate | pred 分布 |
+|---|---:|---:|---:|---:|---:|---|
+| scripted（= §11） | 0.175 (56) | 0.825 (264) | 0.036 (10/274) | 46/46 = 1.000 | 0.000 (0/264) | PASS 124 / REJECT 140 / HUMAN 56 |
+| **real-LLM（重构后）** | **0.272 (87)** | **0.728 (233)** | 0.150 (41/274) | 46/46 = 1.000 | **0.000 (0/233)** | PASS **115** / REJECT 118 / HUMAN 87 |
+| real-LLM（§12 重构前） | 0.900 (288) | 0.100 (32) | – | 46/46 = 1.000 | 0.062 (2/32) | PASS 0 / REJECT 32 / HUMAN 288 |
+
+### 14.3 三分类混淆矩阵（行 = pred，列 = truth；含 HUMAN 真值）
+
+| real（重构后） | truth PASS | truth REJECT | truth HUMAN |
+|---|---:|---:|---:|
+| pred PASS | **115** | 0 | 0 |
+| pred REJECT | 0 | **118** | 0 |
+| pred HUMAN_REVIEW | 19 | 22 | **46** |
+
+> 对照 scripted 的 HUMAN 行 `10 / 0 / 46`：scripted 有 10 例对 PASS 真值刻意过度转人工（既有观测点），
+> real 反而在该 10 例上判对；real 的 41 例 HUMAN 全部落在安全侧（无 PASS/REJECT 误终裁）。
+
+### 14.4 按 scene（二值真值案）
+
+| scene | scripted acc | **real acc** | real TP | real FP | real hrr |
+|---|---:|---:|---:|---:|---:|
+| normal | 1.000 | **0.953** | 0 | 0 | 0.047 |
+| violation | 1.000 | **0.891** | 57 | 0 | 0.109 |
+| boundary | 0.857 | **0.771** | 0 | 0 | 0.438 |
+| multi-signal | 1.000 | **0.786** | 44 | 0 | 0.312 |
+| evasion | 1.000 | **0.850** | 17 | 0 | 0.469 |
+
+> `normal` 从 §12 的 **0.000 / hrr 1.000** 变为 **0.953 / hrr 0.047**（64 案里 3 案过度保守）；
+> 全场景 **FP = 0**（§12 有 2 例误杀，均在 boundary）。
+
+### 14.5 调用 / token / 工具 / 证据链（两臂同口径）
+
+| 统计项 | scripted | **real（重构后）** | real（§12 重构前） |
+|---|---|---|---|
+| LLM 调用 均值 / P50 / P95 / max | 5.45 / 6 / 10 / 10 | **5.93 / 6 / 10 / 10** | 8.78 / 9 / 10 / 10 |
+| tool 调用 均值 / P50 / P95 / max | 4.19 / 5 / 6 / 6 | **3.83 / 4 / 6 / 8** | 5.37 / 5 / 8 / – |
+| tokens 均值 / P50 / P95 / max | 0（桩不烧 token） | **16,167 / 16,436 / 30,360 / 31,787** | 22,891 / 24,179 / 28,873 / 31,457 |
+| tokens 合计 | 0 | **5,173,433** | 7,325,188 |
+| tool_selection_accuracy（覆盖口径） | 0.870 (188/216) | **0.296 (64/216)** | 0.486 (105/216) |
+| redundant_tool_rate | 0.176 | 0.245 | 0.338 |
+| evidence_type_coverage（micro） | 1.000 (345/345) | **1.000 (345/345)** | 1.000 (345/345) |
+| reject_evidence_gate_pass_rate | 1.000 (140/140) | **1.000 (118/118)** | 1.000 (32/32) |
+| risk_type_coverage | 1.000 (140/140) | 0.971 (136/140) | 0.850 (119/140) |
+| risk_level_agreement | 0.775 (248/320) | **0.816 (261/320)** | 0.466 (149/320) |
+| evidence_gain_rate | 1.000 | 0.999 | 0.817 |
+| decision_changed_rate | 0.352 | 0.377 | 0.040 |
+
+> **scripted 臂的 Agent 级指标与 §11.5 不再逐项相等**（redundant 0.222→0.176、gain 0.910→1.000、
+> changed 0.100→0.352）：工具层新增 `MEASUREMENT` 证据（阴性也算"新增证据"）且 Gate 探测点随语义变化。
+> 这些是**只读审计字段**，主结果（决策）零变化——见 §13.4 的逐案 0/320。
+> **real 侧工具选择准确率下降（0.486→0.296）但证据链指标全满**：真实 LLM 会多调"期望外"的工具去补
+> 判断，属行为差异而非判定缺陷（覆盖口径见 §4.2）。
+
+### 14.6 overrides 归因与异常审计
+
+| 项 | scripted | **real（重构后）** |
+|---|---:|---:|
+| 带 overrides 案数 | 28/320 | **66/320** |
+| R3_BUDGET_EXHAUSTED（先撞维度） | 28（全 `LLM_CALLS`） | **50（全 `LLM_CALLS`）** |
+| R3_MEASUREMENT_MISSING | 28 | 28 |
+| R2_REJECT_GATE_FAIL | 0 | 8 |
+| R3_POSITIVE_INSUFFICIENT | 0 | 8 |
+| R4_PASS_GATE_FAIL | 0 | 8 |
+| R3_EVIDENCE_CONFLICT | 4 | 4 |
+| R3_DIMENSION_UNMEASURABLE / R3_KEY_TOOL_FAILED | 0 / 0 | **0 / 0** |
+| R5_DEGRADED_OR_FAILED_STEP | 0 | **0** |
+
+> **异常审计（可证伪）**：R5 降级 **0 案**、`token=0` 案 **0**（无静默回退）、320/320 全部产出裁决、
+> 日志无 traceback / 超时 / 连接错误。`R3_DIMENSION_UNMEASURABLE = 0` 是**预期**：评测世界 5 个工具都
+> 声明了可测能力，该码只在生产视觉桩（§13.3）下才会出现。
+> 口径限制同 §12.6：`llm_calls`/`tokens` 按 attempts 累计，单次重试次数无法从 record 分离。
+
+### 14.7 逐案 Decision diff（scripted ↔ real，差异 51/320）
+
+| 组 | 案数 | 真值 | 机制归因 |
+|---|---:|---|---|
+| scripted REJECT → real HUMAN | 22 | REJECT | 100% `R3_BUDGET_EXHAUSTED`（先撞 `LLM_CALLS=10`）——收敛/预算边界 |
+| scripted PASS → real HUMAN | 19 | PASS | `overrides=[]`：**LLM 自行提案 HUMAN**（`dc` 全 0.75，coverage 满但无 citation/strength 加分）；16 boundary + 3 normal |
+| scripted HUMAN → real PASS | 10 | PASS | 全 boundary（scripted 刻意过度转人工的观测点），real 判对 |
+| （两臂同为 HUMAN，机制不同） | 16 | HUMAN | real 的 LLM 提案被**事实侧 Gate 拦下**：8×`R4_PASS_GATE_FAIL` + 8×`R2_REJECT_GATE_FAIL`（含 `R3_POSITIVE_INSUFFICIENT`）—— **16/16 真值均为 HUMAN_REVIEW，拦截全部正确** |
+
+> 二值真值案一致率 223/274；全量一致 269/320。**差异无一项是"该自动却转人工造成漏放"或"不该判却自动终裁"**：
+> 22 例是预算截胡（安全侧保守），19 例是 LLM 自评证据不足，10 例是 real 优于 scripted，16 例是 Gate 正确拦截。
+
+### 14.8 结论：重构目标在 real 全量上成立，且无安全侧损失
+
+- **两个结构性目标达成**：① 干净案 **PASS 可达**（GT=PASS→PASS：§12 的 0/64 → **115/134**，hrr 0.900→0.272）；
+  ② 弱相似不再授权自动拒绝，**两例历史误杀（`EC_V2_0163`/`EC_V2_0219`）本次均为 PASS**，误杀 2 → **0**。
+- **安全面全清**：漏放 0、误杀 0、错误自动终裁 0.000、SHOULD_ABSTAIN 被自动终裁 0/46、R5 0、`token=0` 0。
+- **剩余失败 41 案全部在安全侧**（19 自转人工 + 22 预算截胡），没有一项是危险终裁；boundary 仍是最保守族
+  （hrr 0.438）。**没有发现由本轮 Measurement / Gate 重构引入的 bug**：脚本侧逐案决策 0/320 变化、
+  `UNMEASURABLE`/`KEY_TOOL_FAILED`/`R5`/`token=0` 全 0、16 次 Gate 拦截全部落在真值 HUMAN 案上。
+- **成本**：real 每案 LLM 8.78→**5.93**、tool 5.37→**3.83**、tokens 22,891→**16,167**，总 token 7.33M→**5.17M**。
+- **不可外推**：单次运行、单模型、非确定性、InMemory 工具世界、生产视觉不可测；real 数字**只代表这一次运行**，
+  不得当模型固定水平，也不得与 §11 的 scripted 数字混算（§11 衡量实现一致性）。**不重复采样。**
+
+### 14.9 已知边界与后续演进（本轮明确不做）
+
+| 项 | 状态 |
+|---|---|
+| `LLM_CALLS=10 → 12/15` 生产预算调整 | 未做（50 案仍撞墙；`--llm-budget` 对照实验可选，不改规则） |
+| 110 例 `GT=REJECT → HUMAN_REVIEW` 的回收（回环/取证） | 未做（§12 遗留；本轮 22 例同族） |
+| `listing_registry` **阳性路径**（声明与在库事实确定性比对） | 未实现（现只判"事实取到了没有"） |
+| 真实视觉 / OCR 数据源 | 冻结（生产 `image_appearance` 声明为 UNMEASURABLE） |
+| Ablation 在重构后装配下重跑 | 未做（agent 逐案决策零变化 ⇒ 预期不变，未实测） |
+| MQ / 异步 / Observability 扩展 / MySQL Checkpointer 等生产化增强 | 未做（§「不做什么」清单） |
+| 其他功能扩展 | 不做 |
+
