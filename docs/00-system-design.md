@@ -629,25 +629,29 @@ FIELD_CONFLICT        商品字段信息冲突
 
 | 表 | 职责 | 关键字段 |
 |---|---|---|
-| `product` | 商品主表 | product_id, merchant_id, title, description, category, brand, status, version, listing_time |
-| `product_sku` | SKU | sku_id, product_id, color, size, price, status |
-| `product_image` | 商品图片 | image_id, product_id, url, ocr_text, embedding(向量), is_primary |
-| `merchant` | 商家主表 | merchant_id, name, credit_score, status |
-| `merchant_event` | 商家行为事件 | event_id, merchant_id, event_type(违规/下架/改标题重上架), product_id, ts |
-| `review_case` | 审核案件（一次事件一个） | case_id, product_id, event_type, triage_result, status, version |
-| `review_signal` | 传统机审信号 | signal_id, case_id, signal_name, result, score |
+| `product` | 商品主表（只存当前行，`version` 即最新乐观锁版本） | product_id, merchant_id, title, description, category, brand, attributes(JSON), version, listing_time, status |
+| `product_sku` | SKU（1 商品 N SKU） | product_id, sku_id, color, size, price, sort_order |
+| `product_image` | 商品图片（**不含 ocr_text 与向量列**——OCR 归 OCRTool，避免重复劳动） | image_id, product_id, url, source, sort_order |
+| `merchant` | 商家画像（数据源侧预计算的固定窗口快照，不按墙钟重算） | merchant_id, product_total, similar_product_count, removals, title_relisting_count, violations_total, violations_by_type(JSON), credit_score |
+| `merchant_event` | 商家行为事件 | event_id, merchant_id, event_type(违规/下架/改标题重上架), ts, sort_order |
+| `review_case` | 审核案件（一次事件一个） | case_id, product_id, merchant_id, event_type, triage_result, status, version, case_json |
 | `review_run` | Agent 运行 | run_id, case_id, status, trigger_type, started_at, ended_at |
 | `review_trace` | Agent 步骤 trace | trace_id, run_id, seq, step_type, tool_name, input_json, output_json, tokens, latency_ms |
-| `evidence` | 收集的证据 | evidence_id, run_id, type, source_tool, value, weight, ref_id |
-| `decision` | 最终裁决 | decision_id, case_id, decision, risk_level, risk_type, decision_confidence, policy_refs, evidence_json |
-| `policy` / `policy_clause` | 政策库 | policy_id, version, category, risk_type, status, effective_date / clause_id, policy_id, text |
-| `policy_chunk` / `policy_embedding` | 政策分块+向量 | chunk_id, clause_id, chunk_text, embedding |
-| `case_precedent` | 历史案例库 | case_id, summary, decision, risk_type, risk_level, policy_refs |
-| `case_chunk` / `case_embedding` | 案例分块+向量 | chunk_id, precedent_id, chunk_text, embedding |
-| `eval_dataset` / `eval_case` | 评测集 | dataset_id, name, version / eval_case_id, dataset_id, case_json, expected_json |
-| `eval_run` / `eval_result` | 评测运行 | run_id, scheme(rule/llm/agent), dataset_id, metrics_json / result_id, run_id, eval_case_id, actual_json, is_correct |
+| `review_evidence` | 收集的证据 | evidence_id, run_id, type, source_tool, value, weight, ref_id, extra_json |
+| `review_result` | 最终裁决（每案一行） | case_id, source_run_id, decision, risk_level, risk_type_json, decision_confidence, policy_refs_json, decision_json |
+| `review_signal` | 传统机审信号（**规划，未实现**；当前机审信号随 `review_case.case_json` 的 `screening_signals` 走） | signal_id, case_id, signal_name, result, score |
+| `policy` / `policy_clause` | 政策库（**规划，未实现**；当前政策语料在代码内、经真实 RAG 检索） | policy_id, version, category, risk_type, status, effective_date / clause_id, policy_id, text |
+| `policy_chunk` / `policy_embedding` | 政策分块+向量（**规划，未实现**；向量由 Chroma collection 承载） | chunk_id, clause_id, chunk_text, embedding |
+| `case_precedent` | 历史案例库（**规划，未实现**；当前为 RAG 案例语料） | case_id, summary, decision, risk_type, risk_level, policy_refs |
+| `case_chunk` / `case_embedding` | 案例分块+向量（**规划，未实现**） | chunk_id, precedent_id, chunk_text, embedding |
+| `eval_dataset` / `eval_case` | 评测集（**规划，未实现**；当前评测集为 `eval_data/*.jsonl` + schema 校验） | dataset_id, name, version / eval_case_id, dataset_id, case_json, expected_json |
+| `eval_run` / `eval_result` | 评测运行（**规划，未实现**；当前评测不落 DB，仅内存 EvalRecord + 可选落库路径） | run_id, scheme(rule/llm/agent), dataset_id, metrics_json / result_id, run_id, eval_case_id, actual_json, is_correct |
+
+> 上表前 10 行为 `migrations/001–004` **已落地**表（字段以迁移为准）；其余为**设计蓝图（未实现）**。
 
 ### 9.2 关键 DDL 示例（代表性强，非全量）
+
+> 以下 DDL 为**写法示意**（主键 / 版本 / JSON 列 / 索引风格）；**字段与类型一律以 `migrations/*.sql` 为准**。
 
 ```sql
 CREATE TABLE review_case (
