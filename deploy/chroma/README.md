@@ -15,9 +15,12 @@
   与 `scripts/run_rag_phase2_demo.py` 仍在（docs/10 §2「暂留不删」）。但**本机容器已卸、
   `qdrant_qdrant_storage` 卷亦已删除**（`docker ps -a` / `docker volume ls` 均无）——要复跑
   那 3 个真服务端集成用例得先 `cd deploy/qdrant && docker compose up -d` 重来。
-  两套部署的端口**互不冲突**（Qdrant 6333/6334 vs Chroma 8001），去留待 docs/10 执行完成后定。
-- **检索升级尚未实施**：本目录只交付**部署**。`src/pra/rag/chroma_backend.py` 等
-  （docs/10 §4「新增」清单）目前**尚不存在** —— 本文不构成任何「已接通」声明。
+  两套部署的端口**互不冲突**（Qdrant 6333/6334 vs Chroma 8001）；**Qdrant 暂留不删（去留另定，docs/10 §0）**，
+  迁移期保留其代码与部署以便对照/复跑。
+- **检索升级已实施**：本目录交付**部署**，检索升级（LlamaIndex + BGE 向量路 + BM25(jieba)
+  + RRF）与 `src/pra/rag/chroma_backend.py`（docs/10 §4「新增」清单）**均已落地**，
+  实施契约以 [docs/10-rag-upgrade-spec.md](../../docs/10-rag-upgrade-spec.md) 为准；
+  `factory.py` 已提供 `backend="chroma"` 装配开关（见 §6）。
 
 ## 2. 端口与数据
 
@@ -84,7 +87,7 @@ docker compose down -v          # 停止并删除数据（彻底重置）
 **实测旁注**：本服务端是**共享单实例** —— 任何进程建 collection 都落在同一个
 `chroma_chroma_data` 卷里，`docker compose down -v` 一删全没。排查时可用
 `GET /api/v2/tenants/default_tenant/databases/default_database/collections` 看当前有哪些
-collection（本机写作时除集成测试临时 collection 外，还观察到另一个 subagent 流程留下的
+collection（本机写作时除集成测试临时 collection 外，还观察到此前实测流程留下的
 `probe_filters`，非本目录所建、未清理）。
 
 host 侧探针（**实测输出逐字如下**，2026-09-10，`chroma-chroma-1 Up (healthy)`）：
@@ -153,9 +156,9 @@ client = chromadb.HttpClient(host="127.0.0.1", port=8001)   # 服务端（本目
 # client = chromadb.PersistentClient(path="…")              # 进程内本地持久
 ```
 
-> ⚠️ **接线状态**：`src/pra/rag/chroma_backend.py`（LlamaIndex 装配）是 docs/10 §7 的 **SA-1
-> 交付物，尚未落地**；`src/pra/rag/factory.py` 目前也**没有** `backend="chroma"` 分支。
-> 上面的片段是**客户端契约**（已用 `chromadb 1.5.9` 对本服务端实测通过），不是「仓库已接通」。
+> ⚠️ **接线状态**：`src/pra/rag/chroma_backend.py`（LlamaIndex 装配）与
+> `src/pra/rag/factory.py` 的 `backend="chroma"` 分支**均已落地**（docs/10 为实施契约）。
+> 上面的片段既是**客户端契约**，也是仓库实现的接线方式（已用 `chromadb 1.5.9` 对本服务端实测通过）。
 > `pyproject.toml` 的 `rag` extra 已含 `chromadb` + 三个 LlamaIndex 具体集成包。
 
 > ⚠️ **实测提醒（docs/10 §3 未写、建库必须处理）**：Chroma 的 collection **缺省 `space` 是
@@ -243,8 +246,8 @@ Chroma / Qdrant 的连接参数目前**只能程序化传入**，尚无配置项
   volume**，无备份、无高可用、无迁移方案。
 - 语料仍是 **24 政策 / 67 案例**的小语料（docs/10 §0，沿用不变）→ **不构成能力声明**，
   更不代表 Chroma 在生产规模下的表现。
-- 本目录**只交付部署**；检索升级（LlamaIndex + BGE 向量路 + BM25 + RRF）**尚未实施**，
-  相关代码文件**尚不存在**（见 §1、§6）。
+- 本目录**只交付部署**；检索升级（LlamaIndex + BGE 向量路 + BM25 + RRF）**已实施**，
+  相关代码见 `src/pra/rag/`（`chroma_backend.py` 等；契约以 docs/10 为准，见 §1、§6）。
 - 以上均为 `chromadb/chroma:1.5.9` 镜像 + `chromadb 1.5.9` Python 包（本机 `uv` 环境）
   的实测结果；镜像内 `chroma --version` 自报 **`1.4.4`**（CLI 自报版本与镜像 tag / Python
   包版本不同源，**未深究二者差异**，如需精确对齐请以 tag 与 PyPI 包为准）。

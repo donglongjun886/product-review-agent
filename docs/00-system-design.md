@@ -79,9 +79,9 @@ HUMAN_REVIEW → 人工裁决 → 回流案例库 + 策略库 + 评测集
 | 同步机审 | FastAPI 服务 + 规则引擎 | 高吞吐、低延迟、确定性 |
 | 分流 | 状态机 + 阈值规则 | 明确性决策，不滥用 LLM |
 | 复杂调查 | LangGraph StateGraph（asyncio + Worker） | 预算控制、可恢复状态机 |
-| 工具/RAG | 内部服务 + 向量检索（pgvector / Qdrant） | 多源数据访问 |
+| 工具/RAG | 内部服务 + 向量检索（ChromaDB；Qdrant 暂留） | 多源数据访问 |
 | 人工回流 | 审核工作台 + 反馈 Topic | 闭环、知识沉淀 |
-| 全链路 | MySQL 状态机 + Redis 幂等/限流 + OTel | 可靠性、可观测性 |
+| 全链路 | MySQL 状态机（**已用**）+ Redis 幂等/限流、OTel（**规划，未实现**） | 可靠性、可观测性（现状：可观测性为 Langfuse，见 docs/09） |
 
 ### 1.3 关键架构决策：为什么"同步 + 异步"两段式
 
@@ -216,7 +216,9 @@ Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的�
 ### 3.1 设计要点
 
 1. **Hypothesis 是状态的核心**：Agent 不是"分类器"，而是"假设验证器"。每个假设有 `prior → posterior` 的演变，这是可解释的。
-2. **状态持久化到 MySQL**：`AgentState` 即 LangGraph 的 State（`TypedDict`/Pydantic），由 LangGraph **Checkpointer** 每步后落库，worker 崩溃可恢复、可断点续跑、可复现（eval 重放）。
+2. **状态持久化**：`AgentState` 即 LangGraph 的 State（`TypedDict`/Pydantic），由 LangGraph **Checkpointer** 每步后持久化；
+   **MVP 实现为进程内 `InMemorySaver`**（`src/pra/agent/checkpointer.py`），MySQL Checkpointer 为**规划项（未实现）**
+   ——「worker 崩溃可恢复 / 断点续跑」以持久化落地为前提，当前由内存 checkpointer 支撑 eval 重放。
 3. **`budget` 是状态的硬字段**：条件边路由函数在每轮进入节点前检查预算，超限即路由到转人工止损。
 4. **`evidence` 与 `tool_call_history` 分离**：前者是"结论依据"，后者是"过程审计"，两者都进 trace。
 5. **实现映射（拍板 03 T-8/T-9）**：`run_id/case_id` → LangGraph thread_id；`status` 落 DB `review_run.status`（DECIDED 为图唯一终态）；图内另有 `pending_tool_calls / degraded / failures` 三个内部通道（01 §2.1）。
@@ -290,7 +292,7 @@ graph.add_edge("tools", "reevaluate")
 graph.add_conditional_edges("reevaluate", route_after_reevaluate,
     {"continue": "plan", "decide": "decide"})
 
-app = graph.compile(checkpointer=mysql_checkpointer)  # State 持久化、可恢复、可重放
+app = graph.compile(checkpointer=make_memory_checkpointer())  # MVP：InMemorySaver（MySQL Checkpointer 为规划项）
 ```
 
 ### 4.3 关键分工：LangGraph 只做"编排骨架"，其余是确定性代码 + LLM 节点
@@ -303,7 +305,7 @@ app = graph.compile(checkpointer=mysql_checkpointer)  # State 持久化、可恢
 | Tool 执行、结果反序列化、证据去重合并 | ToolNode + 确定性 Python | 不浪费 LLM token |
 | 假设生成 / 计划 / 证据综合 / 决策推理 | LLM 节点（结构化 JSON + Schema 校验） | 需要语义推理 |
 | 硬规则兜底（黑名单必 REJECT） | `decide` 节点的确定性 overlay | 安全红线 |
-| State 持久化 / 恢复 / 重放 | LangGraph Checkpointer（MySQL） | 崩溃可恢复、eval 重放 |
+| State 持久化 / 恢复 / 重放 | LangGraph Checkpointer（**MVP：`InMemorySaver`**；MySQL 为规划项） | eval 重放（崩溃恢复待持久化落地） |
 
 **为什么选 LangGraph（而非自研 Loop）**：LangGraph 的核心模型（显式 State + Graph + Checkpointer + 条件边）恰好就是本项目 Loop 需要的骨架，直接复用能省掉自写状态机 / 持久化 / 重放的重复劳动。但 LangGraph **只负责编排骨架**，以下仍是自研：预算护栏、硬规则兜底、证据去重、Tool 的 JSON Schema、决策 guardrail、trace 落库——既吃到框架红利，又保留工程可控性。
 
@@ -410,12 +412,12 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 - **混合检索**：BM25（关键词，如"无品牌""模仿""重上架"）+ 向量相似度（语义），加权融合。
 - **元数据过滤**：先按 `类目`、`risk_type`、`政策有效性（当前生效版本）` 过滤，再检索——避免检索到过期政策或不相关类目案例。
-- **Rerank**：粗召回 Top-50 → 精排 Top-5（用重排模型或 LLM 打分），控制注入上下文的量。
+- **融合与截断**：向量 + BM25 混合召回经 **RRF 融合**后取 Top-K，控制注入上下文的量；**当前没有模型 reranker**（v1 明确不做，见 docs/10 §0），此前的"粗召回 Top-50 → 精排 Top-5（重排模型或 LLM 打分）"属**未做**的未来方向。
 - **引用格式**：检索结果必须带 `policy_id + 版本 + 条款原文` / `case_id + 决策`，进 `evidence[]` 时保留可追溯引用。
 
 ### 6.4 向量库选型
 
-- 数据量小（政策几百条、案例几千条），**优先用 MySQL + pgvector 或 ES 的 kNN**，不引入重型向量库，降低工程复杂度。
+- 数据量小（实测：Policy 24 条 / Case 67 条），向量库现状为 **ChromaDB**（Docker 服务端 + HttpClient，LlamaIndex + BGE 向量 + BM25(jieba) + RRF 融合，docs/10 §0）；Qdrant 代码与 `deploy/qdrant` 暂留但容器已卸，**v1 明确不做 ES / Milvus / 知识图谱**，不引入重型向量库，降低工程复杂度。
 - 向量模型：文本用通用 embedding（BGE/OpenAI text-embedding 均可）；**图片向量单独存**（ImageAnalysisTool 用于品牌款相似度检索的向量库，可与文本向量库分开）。
 
 ### 6.5 知识回流（闭环）
@@ -545,7 +547,7 @@ FIELD_CONFLICT        商品字段信息冲突
 
 ## 9. 数据库核心表设计（MySQL 8 / InnoDB / utf8mb4）
 
-> 主键统一 bigint（雪花），版本字段做乐观锁，状态字段加索引。JSON 列用于半结构化（如 attributes、agent_state）。ORM 用 SQLAlchemy 2.0（async）+ Alembic 管理迁移，Pydantic 负责模型校验与序列化。
+> 主键统一 bigint（雪花），版本字段做乐观锁，状态字段加索引。JSON 列用于半结构化（如 attributes、agent_state）。ORM 用 SQLAlchemy 2.0（async），迁移为 `migrations/` 下的**手写 SQL**（Alembic 仅在依赖里、未启用），Pydantic 负责模型校验与序列化。
 
 ### 9.1 核心表清单
 
@@ -639,7 +641,7 @@ CREATE TABLE review_trace (
 
 ## 11. Evaluation Dataset 设计
 
-### 11.1 数据集规模与分布（v1：300–500 Case）
+### 11.1 数据集规模与分布（实测规模：v1 35 Case；v2 320 Case）
 
 | 类型 | 占比 | 说明 |
 |---|---|---|
@@ -672,9 +674,9 @@ CREATE TABLE review_trace (
 ### 11.3 评测指标
 
 **业务指标**
-- Risk Recall（违规召回）、Precision（精确率）、False Positive Rate（误伤率）
-- Decision Accuracy（三分类正确率）
-- Human Review Rate（转人工率）、Automation Rate（自动化率，= 1 - 转人工率）
+- 二分类五指标（真值 `expected.decision ∈ {PASS, REJECT}`）：Accuracy（决策准确率）、Precision（精确率）、Recall（违规召回）、False Positive Rate（FPR，误伤率）、False Negative Rate（FNR，漏放率）
+- Accuracy 口径：**预测 HUMAN_REVIEW 计为错**（HUMAN_REVIEW 不作第三分类混入 Accuracy，只以转人工观测量单列）
+- `human_review_rate`（转人工率，输出 HUMAN_REVIEW 的 case 占比）、`automation_coverage`（自动化覆盖率，= 1 − human_review_rate）
 
 **Agent 指标**
 - Tool Selection Accuracy（选对了工具吗）
@@ -701,7 +703,7 @@ CREATE TABLE review_trace (
 - **threshold sweep**：对 `EVIDENCE_MIN_SIM / EVIDENCE_STRONG` 扫 `0.60 / 0.65 / 0.70 / 0.75 / 0.80 / 0.85 / 0.90`，
   观察 **Risk Recall / Precision / False Positive Rate / Human Review Rate** 四条曲线的 trade-off，在验证集上选取 operating point；
   校准只动配置常量（`EVIDENCE_MIN_SIM / EVIDENCE_STRONG`、`CONFIDENCE_ABSTAIN_THRESHOLD`），不动判定逻辑。
-- 校准结果回写 §7.6 口径表与 03-decisions.md §5 常量表；报告必须附 sweep 曲线而不是只报最终点（证明阈值是"选"出来的，不是拍脑袋）。
+- 校准结果**不回写生产常量**：§7.6 口径表与 03-decisions.md §5 常量表均不改——当前 sweep 只观测评测确定性审查员的读证据视图，把选点写进生产属"写进未测层级"，禁止（docs/02 §5.3）；曲线与选点仅作**评测内部实验记录**。报告必须附 sweep 曲线而不是只报最终点（证明阈值是"选"出来的，不是拍脑袋）。
 
 ---
 
@@ -726,7 +728,7 @@ CREATE TABLE review_trace (
 ### 12.1 Baseline 1：Rule Engine（规则引擎）
 
 - **输入**：仅基础输入（§12.0），纯确定性：黑名单、关键词、敏感词、类目规则、Logo 检测、OCR 关键词、风险分阈值。
-- **输出**：命中规则 → REJECT，否则 PASS（**没有 HUMAN_REVIEW 语义**，或仅"低置信"即转人工）。
+- **输出**：复用 `pra.screening` 三分流——PASS→PASS、REJECT→REJECT、**COMPLEX→HUMAN_REVIEW**（评测语义：无 Agent 时复杂案只能人工；与线上 "COMPLEX→Agent" 是不同口径，docs/02 §3.2/§4.5）。
 - **特点**：快、零 LLM 成本、确定性，但**无法处理"多源交叉验证 + 上下文依赖"的复杂案件**。
 
 ### 12.2 Baseline 2：Single-call LLM（单次 LLM）
@@ -796,7 +798,7 @@ CREATE TABLE review_trace (
 | Agent - ImageTool | 图像相似度/Logo | 没有多模态外观证据时，IP 风险类 Hard Case 是否漏放？ |
 
 - 评价口径：各变体与 Full Agent 在 **Decision Accuracy / Risk Recall / False Positive Rate / Human Review Rate** 上的差异
-  （Agent 无 HUMAN_REVIEW 语义的变体需等价映射后再比）。
+  （5 个变体均保留 Decision Gate，三分类口径一致，无需等价映射）。
 - 判定规则：**去掉某组件后指标几乎不变 → 该组件（或其在 plan 中的使用策略）需要重新审视是否真有必要**；
   显著变差 → 该组件对某类案件是必要能力。结果同时回答"为什么 6 个工具不多不少"。
 - 实现要点：消融只做"图装配层不给该工具注册 / plan prompt 不注入该工具描述"，**不动判定逻辑与评测集**，
@@ -814,7 +816,7 @@ CREATE TABLE review_trace (
 4. LangGraph StateGraph 编排的 Agent Loop（显式状态机 + 预算护栏 + 动态选工具）。
 5. 两类 RAG（Policy KB + Case KB，各几十~几百条种子数据）。
 6. 三分类决策 + 证据链输出。
-7. 评测集 v1（300–500 Case，含 Hard Case）+ 三方案对比 harness。
+7. 评测集（v1 35 Case；v2 320 Case，含 Hard Case）+ 三方案对比 harness。
 8. 全链路 Trace + 指标 + 成本统计。
 
 ### 14.2 支撑场景（第二阶段再加，不阻塞核心）
@@ -838,7 +840,7 @@ CREATE TABLE review_trace (
 ## 15. 最终项目目录结构（Python 3.12 + uv + FastAPI，src 布局）
 
 ```
-content-governance/
+product-review-agent/
 ├── pyproject.toml                   # uv 管理依赖，统一版本
 ├── README.md
 ├── docs/
@@ -858,7 +860,7 @@ content-governance/
 │   │   ├── nodes/                   # hypothesize / plan / reevaluate / decide 节点
 │   │   ├── tools_node.py            # ToolNode + 6 个 Tool 注册
 │   │   ├── guardrails/              # 预算护栏、硬规则兜底、决策校验（确定性）
-│   │   └── checkpointer.py          # MySQL Checkpointer 接入
+│   │   └── checkpointer.py          # Checkpointer 工厂（MVP：InMemorySaver；MySQL 为未来项）
 │   ├── tools/                       # 6 个 Tool + ToolRegistry + 统一 Tool 接口
 │   │   ├── product/
 │   │   ├── image_analysis/
@@ -866,12 +868,13 @@ content-governance/
 │   │   ├── merchant/
 │   │   ├── case_search/
 │   │   └── policy_search/
-│   ├── rag/                         # 政策库 + 案例库：分块、embedding、混合检索、rerank
+│   ├── rag/                         # 政策库 + 案例库：分块、embedding、混合检索（BGE + BM25(jieba) + RRF；ChromaDB；不做 rerank）
 │   ├── evaluation/                  # 评测 harness + 三方案对比 + Hard Case Benchmark
 │   ├── api/                         # FastAPI 路由 + 审核工作台接口
-│   └── infra/                       # MySQL/Redis/MQ/OTel/Langfuse/向量库 集成
+│   ├── infra/                       # MySQL 接入（db / persist_service / rdb_models）
+│   └── observability/               # 可观测性适配层（Langfuse；无凭据 → NullTracer 全 no-op）
 │
-├── migrations/                      # Alembic 数据库迁移
+├── migrations/                      # 手写 SQL 迁移（001_review_core_tables.sql、002_review_case_triage.sql；Alembic 仅在依赖里）
 ├── scripts/                         # 数据初始化、评测集生成、跑分
 └── tests/                           # pytest：单测 + 评测（LLM 响应 mock 保证确定性）
 ```

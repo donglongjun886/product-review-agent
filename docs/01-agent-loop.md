@@ -32,7 +32,7 @@
 
 ### 1.2 前置（已确认，不再讨论）
 
-- 技术栈：Python 3.12、LangGraph `StateGraph`、Pydantic v2（`litellm` 做模型网关，MySQL Checkpointer 持久化）。
+- 技术栈：Python 3.12、LangGraph `StateGraph`、Pydantic v2（`litellm` 做模型网关；线程状态持久化 MVP 用 `InMemorySaver`，MySQL Checkpointer 为规划项（未实现））。
 - 图只有 5 个节点、2 条条件边，与《00》§4.2 草图**严格一致**：
 
 ```
@@ -45,8 +45,8 @@ entry ──> hypothesize ──> plan ──(条件)──> tools ──> reeva
   - `src/pra/agent/graph.py`：节点注册、静态边、`add_conditional_edges`、编译（第 6 章）。
   - `src/pra/agent/nodes/`：hypothesize / plan / reevaluate / decide 四节点（第 3、4、7 章）。
   - `src/pra/agent/tools_node.py`：ToolNode（执行、args 校验、结果→Evidence、预算记账）（第 4、5 章）。
-  - `src/pra/agent/guardrails/`：`budget.py`（budget_check）、`hard_rules.py`、`decision_guardrail.py`、`dedup.py`（第 6、7 章确定性代码）。
-  - `src/pra/agent/checkpointer.py`：MySQL Checkpointer 接入。
+  - `src/pra/agent/guardrails/`：`budget.py`（budget_check）、`hard_rules.py`、`gate.py`（run_decision_overlay，即决策 overlay）、`dedup.py`（第 6、7 章确定性代码）。
+  - `src/pra/agent/checkpointer.py`：线程状态 checkpointer 工厂（MVP 用 `InMemorySaver`；MySQL Checkpointer 为规划项（未实现））。
   - `src/pra/tools/<six>/`：6 个工具子包 + `ToolRegistry` + 统一 `Tool` 接口（第 5 章）。
 
 ### 1.3 三条贯穿性原则（实现时不可违背）
@@ -272,8 +272,8 @@ async def llm_node(state):
 
 ```python
 class HypothesizeOutput(BaseModel):
-    hypotheses: list[HypothesisProposal]     # 上限 MAX_HYPOTHESES（默认 5，见 T-2）
-    investigation_queue: list[QueueProposal] # 上限 MAX_QUEUE（默认 8）
+    hypotheses: list[HypothesisProposal]     # 上限 5（T-2；落地位为 schemas.py 字段约束 max_length=5）
+    investigation_queue: list[QueueProposal] # 上限 8（T-2；落地位为 schemas.py 字段约束 max_length=8）
     rationale: str                           # 一句话说明假设来源（进审计）
 
 class HypothesisProposal(BaseModel):
@@ -625,7 +625,7 @@ graph.add_conditional_edges("plan", route_after_plan,
 graph.add_edge("tools", "reevaluate")
 graph.add_conditional_edges("reevaluate", route_after_reevaluate,
                             {"continue": "plan", "decide": "decide"})
-app = graph.compile(checkpointer=mysql_checkpointer)   # state.py + checkpointer.py
+app = graph.compile(checkpointer=make_memory_checkpointer())   # 线程状态 checkpointer：MVP InMemorySaver（checkpointer.py；MySQL Checkpointer 为规划项）
 ```
 
 LangGraph 映射要点（实现者注意）：
@@ -715,7 +715,7 @@ def budget_exceeded(budget) -> Literal["LLM_CALLS", "TOOL_CALLS", "TOKENS", "LAT
 ### 7.0 结构：LLM 提案 + 确定性 Decision Gate，二层不可合并
 
 decide 节点 = **先**跑 LLM 产出 `DecisionProposal`（第 3.4 章）**后**跑 `run_decision_overlay`。
-overlay 是普通确定性 Python（`guardrails/decision_guardrail.py`），实现《00》§7.2 的
+overlay 是普通确定性 Python（`guardrails/gate.py`），实现《00》§7.2 的
 **PASS Gate / REJECT Gate 与 HUMAN_REVIEW abstention 清单**；规则顺序固定、全部可单测。
 
 **图终态（D 项拍板）**：decide 产出 `decision` 后图即结束——**DECIDED 是图内唯一终态**（worker 落 DB
@@ -836,7 +836,9 @@ def finalize_decision_confidence(state) -> float:
   单独表达"能不能安全自动判"。
 - **0.7 的用法**：仅作为 **REJECT Gate** 的安全门槛（`reject_gate` 里 `dc >= 0.7`）；**PASS 不因低 decision_confidence
   转人工**——PASS 由 `pass_gate` 判定（高优先假设充分证伪 + 关键证据完整 + 无关键矛盾），干净商品低风险置信是正常态。
-- `CONFIDENCE_ABSTAIN_THRESHOLD=0.7` / `MAX_EXPECTED_EVIDENCE=8` 均配置化，validation set 校准（《00》§11.5）。
+- `CONFIDENCE_ABSTAIN_THRESHOLD=0.7` / `MAX_EXPECTED_EVIDENCE=8` 是 `gate.py` 的**模块级常量**；
+  本轮 threshold sweep **只单变量扫相似度两档**，`CONFIDENCE_ABSTAIN_THRESHOLD` 固定 0.7 **不参与扫描**
+  （`src/pra/evaluation/sweep.py` 模块 docstring；《00》§11.5）。
 
 ### 7.6 最终 ReviewDecision 形状（对齐《00》§2.2 与代码 `ReviewDecision`，落库前不变形）
 
@@ -894,26 +896,13 @@ def finalize_decision_confidence(state) -> float:
 
 ## 9. 待定项状态索引（T-1~T-12 已全部拍板，权威值为 docs/03-decisions.md）
 
-> 初版第 9 章曾列 12 项开放问题；**经拍板（docs/03-decisions.md）全部关闭**。本表只留状态与最终值索引，
-> 权威细节（含选项、理由、一致性核查）一律以 03-decisions.md 为准；实现时不要再按本节旧默认值（如 8/12、0.60）开发。
+> 初版第 9 章曾列 12 项开放问题；**经拍板（docs/03-decisions.md）全部关闭**。本表原为转发表，现只作指针，
+> 权威细节（含选项、理由、一致性核查、常量表）一律以 03-decisions.md 为准；实现时不要再按本节旧默认值（如 8/12、0.60）开发。
 
-| ID | 状态 | 最终值（权威：03-decisions.md） |
-|---|---|---|
-| T-1 | 已定 [A] | prior 由 hypothesize LLM 输出（0..1，不归一化）+ 钳制；须含 ≥1 条低风险假设；`HIGH_PRIOR_THRESHOLD=0.3`（仅 PASS Gate / prompt 强调，不用于收敛判定） |
-| T-2 | 已定 [A] | `MAX_HYPOTHESES=5` / `MAX_QUEUE=8` / `MAX_TOOLS_PER_PLAN=3`（配置化） |
-| T-3 | 已定 [A]（代码已落地） | `PENDING / SUPPORTED / REFUTED / UNRESOLVED`；代码 `models.py` 已用 `UNRESOLVED` |
-| T-4 | 已定 [A]（本版按 review 修订为 decision_confidence 口径） | 见 §6.3 收敛谓词 / §7.2 Gate / §7.5 decision_confidence 公式；`CONFIDENCE_ABSTAIN_THRESHOLD=0.7`（仅 REJECT Gate）、`MAX_EXPECTED_EVIDENCE=8` |
-| T-5 | 已定 [A] | 工具转换器写默认权重，reevaluate 不改；weight 仅供审计/展示，不参与 v1 公式 |
-| T-6 | 已定 [A] | hypothesize 仅入口 1 次；新假设走 `reevaluate.new_hypotheses` |
-| T-7 | 已拍板 [B→B] | `10 / 15 / 40000 / 30000`（Guardrail 上界非目标；代码 `BudgetLimits` 默认已改，见 §6.4/§8.1） |
-| T-8 | 已定 [A] | DECIDED 为图唯一终态；ESCALATED/BUDGET_EXCEEDED 不作终态（DB/归因）；`ReviewDecision.overrides` 已落地 |
-| T-9 | 已定 [A]（代码已落地） | `pending_tool_calls / degraded / failures` 通道保留；run_id/case_id→thread、status→DB |
-| T-10 | 已定 [A] | `risk_level=NONE/LOW/MEDIUM/HIGH`（代码已含 NONE，PASS→NONE）；仅展示/队列排序，不参与路由与 Gate |
-| T-11 | 已拍板 [B→B] | `EVIDENCE_MIN_SIM=0.70` / `EVIDENCE_STRONG=0.85`（三档语义 + threshold sweep，见 §5.7；代码常量已落地） |
-| T-12 | 已定 [A] | FIELD_CONFLICT 检测归二期 guardrails；v1 词表保留 |
+**T-1~T-12 参数与语义以 [docs/03-decisions.md](03-decisions.md) 为准**（本文档不再重复该表）。
 
 **使用约定**：T-1~T-12 实现/评测参数一律取 03-decisions.md §5 常量表；本节与 03 冲突处以 03 为准。
 
 ---
 
-> 附：实现顺序建议（与《00》末尾"下一步"呼应）：① `domain/` 各 Pydantic 模型 + `agent/state.py`（第 2 章）→ ② `guardrails/`（budget/dedup/hard_rules/decision_guardrail，第 6/7 章，全部先写单测）→ ③ 4 个 LLM 节点壳 + mock LLM（第 3 章）→ ④ 6 个 Tool 空实现 + ToolRegistry + ToolNode（第 5 章）→ ⑤ graph.py 接线跑通复古运动鞋单链路（第 8 章验证）→ ⑥ Checkpointer 接 MySQL。
+> 附：实现顺序建议（与《00》末尾"下一步"呼应）：① `domain/` 各 Pydantic 模型 + `agent/state.py`（第 2 章）→ ② `guardrails/`（budget/dedup/hard_rules/gate，第 6/7 章，全部先写单测）→ ③ 4 个 LLM 节点壳 + mock LLM（第 3 章）→ ④ 6 个 Tool 空实现 + ToolRegistry + ToolNode（第 5 章）→ ⑤ graph.py 接线跑通复古运动鞋单链路（第 8 章验证）→ ⑥ checkpointer 接 `make_memory_checkpointer()`（MVP InMemorySaver；MySQL Checkpointer 为规划项）。

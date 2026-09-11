@@ -3,7 +3,17 @@
 > 本目录只做一件事：把 **Qdrant 服务端**跑起来，让 `pra.rag` 里那条
 > **`location="http://…"`（`url=` 远端 server）**的装配路径可以被真实验证。
 > 服务端的定位、参数与技术选型以 [docs/06-rag-phase2-qdrant-bge.md](../../docs/06-rag-phase2-qdrant-bge.md)
-> 为准；本文件只记录**部署事实与实测结果**。
+> （历史设计）为准；**当前 RAG 契约以
+> [docs/10-rag-upgrade-spec.md](../../docs/10-rag-upgrade-spec.md) 为准**（见下方取代说明）；
+> 本文件只记录**部署事实与实测结果**。
+
+> ⚠️ **已被取代（superseded）**：本文的 Qdrant 向量库路线已被
+> [docs/10-rag-upgrade-spec.md](../../docs/10-rag-upgrade-spec.md) 取代 —— **向量库切换为
+> ChromaDB**（Docker 服务端 + `HttpClient`），检索升级为 **LlamaIndex + BGE + BM25 + RRF**，
+> 对应部署见 [deploy/chroma](../chroma/README.md)。Qdrant 的代码与 `deploy/qdrant`
+> **保留在仓库中**（不删）、`rag_backend="qdrant"` 仍可用，但**本机容器与数据卷已卸**、
+> **不是默认语义路**（默认仍为 `backend="local"`；docs/06 作为历史记录保留、不改写）。
+> 下面 §1–§8 是当时的部署与实测记录，**恢复服务端**得先 `docker compose up -d`。
 
 ## 1. 定位（勿偏移）
 
@@ -152,7 +162,8 @@ qdrant-client 的**进程内模式对 id 类型宽容**（本地实现不校验�
 服务端不可达则 skip）。
 
 **验证**：真 server 上 policy/case 两个 KB 全量落库成功、检索与 `local` 顶层序一致；
-全量测试 **439 passed, 1 skipped**（服务端不在时 **436 passed, 4 skipped**）；
+全量测试（**2026-09-10 远端 server 实测时点快照**；绝对值随服务/依赖状态变化，勿照抄）
+**439 passed, 1 skipped**（服务端不在时 **436 passed, 4 skipped**）；
 v1/v2 回归双 PASS；lint 违例数与 HEAD 持平（120 vs 120，零新增）。
 
 **仍存在的边界**：CI 既无 Qdrant 服务端、也不装 `rag` extra → 真服务端集成测试与

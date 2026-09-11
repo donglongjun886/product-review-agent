@@ -893,7 +893,7 @@ _POLICY_METADATA_LITERALS = ("POLICY_1.1_v2_c1", "POLICY_1.5", "POTENTIAL_IP_RIS
                              "RAG_CASE_0037")
 
 #: 「毫无信号」的对照查询：latin 乱码，与全库正文/词表零交集（实测原始分恒 0）。
-#: 口径与主 agent 的独立实测一致（``"zzzqqqxxx"``）；本套件另验证过 ``"zzzqqq wwweee"`` 同效。
+#: 口径与独立实测一致（``"zzzqqqxxx"``）；本套件另验证过 ``"zzzqqq wwweee"`` 同效。
 _NO_SIGNAL_QUERY = "zzzqqqxxx"
 
 
@@ -934,7 +934,7 @@ def _bm25_raw_scores(idx: object, candidates: list[int], query: str) -> list[flo
 async def test_chroma_case_bm25_ignores_metadata_literals(literal: str) -> None:
     """**R7 守卫（case）**：纯 metadata 字面值查询在 ``bm25`` 模式下**不产生任何检索信号**。
 
-    背景（R7 用户拍板，实现 ``_build_nodes`` 用 ``TextNode(excluded_embed_metadata_keys=...)``）：
+    背景（R7 决策，实现 ``_build_nodes`` 用 ``TextNode(excluded_embed_metadata_keys=...)``）：
     ``BM25Retriever`` 内部索引的是 ``node.get_content(metadata_mode=MetadataMode.EMBED)`` ——
     不排除 metadata 时索引文本是「``case_id: RAG_CASE_0001`` / ``category: …`` / ``decision: REJECT``
     / ``risk_level: HIGH`` / ``risk_type: ['POTENTIAL_IP_RISK']`` + 正文」，于是**按 metadata 字面值
@@ -968,7 +968,7 @@ async def test_chroma_case_bm25_ignores_metadata_literals(literal: str) -> None:
         h.model_dump(mode="json") for h in control
     ], f"字面值查询 {literal!r} 的结果必须与零信号查询逐字节一致（字面值不得有信号）"
 
-    # 退化区间的具体形态（主 agent 实测口径：该查询返回前 5 行且分全 1.0）
+    # 退化区间的具体形态（实测口径：该查询返回前 5 行且分全 1.0）
     top5 = await idx.search(literal, CaseSearchFilters(), top_k=5)
     assert [(h.case_id, h.retrieval_score) for h in top5] == [
         (row.case_id, 1.0) for row in CASE_ROWS[:5]

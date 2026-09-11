@@ -1,23 +1,23 @@
-# T-1~T-12 拍板表（决策记录 v2 —— 经 Claude review 复核修订）
+# T-1~T-12 决策记录（v2 —— 含复核修订）
 
 > **v2 修订说明（本轮）**：① 决策机制从"单一 confidence<0.7 → HUMAN_REVIEW"升级为 **Decision Gate 口径**
 > （decision_confidence 安全门槛与 risk 分离；PASS/REJECT/HUMAN_REVIEW 三个 Gate，见 T-4）；② T-7 补
 > "Budget 是 Guardrail 非目标 + Budget Utilization 指标"；③ T-11 补三档语义（<0.70 不作证据 /
 > 0.70~0.85 普通 / ≥0.85 Strong）+ threshold sweep；④ T-8/D 确认 DECIDED 为图唯一终态；⑤ 命名统一：
-> 相似度强阈值代码名 **`EVIDENCE_STRONG`**（拍板表 v1 旧名 `SIM_HIGH_CONTRADICT`，同值同义）；⑥ 代码
-> `BudgetLimits` 默认值按 T-7 修订为 10/15/40000/30000。v1 中"[B] 需用户拍板 / 🔧 未改代码"等表述为当时状态，
-> 已随拍板与落地推进更新。
+> 相似度强阈值代码名 **`EVIDENCE_STRONG`**（本表 v1 旧名 `SIM_HIGH_CONTRADICT`，同值同义）；⑥ 代码
+> `BudgetLimits` 默认值按 T-7 修订为 10/15/40000/30000。v1 中"[B] 待定 / 🔧 未改代码"等表述为当时状态，
+> 已随决策与落地推进更新。
 
-> 本文档对《01-agent-loop.md》第 9 章列出的 12 项待定项（T-1~T-12）做**最终拍板**，并核查待定项取值与现有实现
+> 本文档对《01-agent-loop.md》第 9 章列出的 12 项待定项（T-1~T-12）做**最终定稿**，并核查待定项取值与现有实现
 > （`src/pra/domain/models.py`、`src/pra/agent/state.py`、`src/pra/tools/base.py`、`src/pra/tools/image_analysis/tool.py`）的一致性。
 >
-> **判定标准**：取值若改变**面试叙事或业务语义**（对外口径、成本上界、误伤/漏放边界）→ 归 `[B]` 需用户拍板；
+> **判定标准**：取值若改变**对外口径或业务语义**（成本上界、误伤/漏放边界）→ 归 `[B]` 需评审确认；
 > 若只是内部实现参数/机制、对业务语义无影响 → 归 `[A]` 可直接落地。
 >
 > **效力与边界**：本表自生效起作为 graph/domain 实现的**参数与 schema 修订权威依据**；《01-agent-loop.md》与现有代码
 > 凡与本表冲突处，以本表为准（01 文档已在本轮随本表同步修订）。
 >
-> **符号约定**：`[A]` = 已定，直接按最终值落地；`[B]` = 需用户拍板（选项见 §3）；`[已拍板]` = B 类已选定；
+> **符号约定**：`[A]` = 已定，直接按最终值落地；`[B]` = 需评审确认（选项见 §3）；`[已拍板]` = B 类已选定；
 > 🔧 = 涉及代码/文档修订的落地动作。
 
 ---
@@ -29,7 +29,7 @@
 | T-1 | prior 初始值来源 + 高优先阈值 | [A] | hypothesize LLM 输出 prior（0..1，不归一化）；确定性钳制；必须含 ≥1 条低风险假设；`HIGH_PRIOR_THRESHOLD=0.3`（仅用于 PASS 门控与 prompt 强调，**不用于收敛判定**，见 T-4 修正） |
 | T-2 | 假设/队列/每轮工具数量上限 | [A] | `MAX_HYPOTHESES=5`、`MAX_QUEUE=8`、`MAX_TOOLS_PER_PLAN=3`，全部配置化 |
 | T-3 | HypothesisStatus 词表 | [A]（含一致性冲突，见 §4.1） | `PENDING / SUPPORTED / REFUTED / UNRESOLVED`；🔧 代码 `UNVERIFIED` → 改 `UNRESOLVED` |
-| T-4 | confidence（→ decision_confidence 口径）+ 矛盾/收敛确定性定义 | [A]（v2 按 review 修订，见 §2.4） | 区分 **decision_confidence**（自动决策安全门槛）与 **risk_level/risk confidence**；三个 **Decision Gate**（PASS/REJECT/HUMAN_REVIEW，§2.4）；确定性公式产出 decision_confidence（落库 `ReviewDecision.decision_confidence`，O-7 已改名）；abstention 阈值 0.7 **仅约束 REJECT Gate**；PASS 走 Gate 判定 |
+| T-4 | confidence（→ decision_confidence 口径）+ 矛盾/收敛确定性定义 | [A]（v2 修订，见 §2.4） | 区分 **decision_confidence**（自动决策安全门槛）与 **risk_level/risk confidence**；三个 **Decision Gate**（PASS/REJECT/HUMAN_REVIEW，§2.4）；确定性公式产出 decision_confidence（落库 `ReviewDecision.decision_confidence`，O-7 已改名）；abstention 阈值 0.7 **仅约束 REJECT Gate**；PASS 走 Gate 判定 |
 | T-5 | Evidence.weight 来源 | [A] | 工具转换器写默认权重（5.1~5.6 各工具列），reevaluate 不改 weight；weight 仅供审计/展示，不参与 v1 任何公式 |
 | T-6 | hypothesize 是否可重跑 | [A] | 只入口执行 1 次；运行中新假设走 `reevaluate.new_hypotheses`（追加，PENDING）；不加 `decide→hypothesize` 边 |
 | T-7 | 预算阈值与走查余量 | [已拍板] | **B：10 / 15 / 40000 / 30000** —— Guardrail 上界非目标，正常案件明显低于上限；v2 补：Trace 记录四组占用率、Evaluation 增 **Budget Utilization** 指标（见 §3.1 拍板结果） |
@@ -67,7 +67,7 @@
 
 ### 2.4 T-4 — decision_confidence / risk 分离 + 三个 Decision Gate + 矛盾/收敛确定性定义
 
-**v2 修订核心（review A）**：把初版"单一 confidence < 0.7 → HUMAN_REVIEW"的简化，升级为
+**v2 修订核心**：把初版"单一 confidence < 0.7 → HUMAN_REVIEW"的简化，升级为
 **"证据是否足以支持安全自动决策"**的 Gate 判定。最终取值分五个子决定：
 
 **(a) 两个量分离（写进《00》§7.1/§7.4 与 01 §7.5）**：
@@ -118,7 +118,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 
 ### 2.5 T-5 — Evidence.weight 来源
 
-- **最终取值**：weight 由**各 Tool 的结果→Evidence 转换器**写入默认值（01 §5.1~5.6 各工具列的默认：PRODUCT_FACT 0.6、IMAGE_SIMILARITY=similarity 数值、IMAGE_LOGO=logo confidence、OCR_TEXT 0.5、MERCHANT_HISTORY 0.85、CASE_PRECEDENT=检索 similarity、POLICY_REF 0.9），clamp 到 [0,1]；**reevaluate 不修改 weight**（只更新 posterior/status/证据链接）。weight 语义=证据强度，仅供展示/审计，**不参与 v1 的任何确定性公式**（T-4 公式只读存在性、可引用性、矛盾性）。
+- **最终取值**：weight 由**各 Tool 的结果→Evidence 转换器**写入默认值（01 §5.1~5.6 各工具列的默认：PRODUCT_FACT 0.6、IMAGE_SIMILARITY=similarity 数值、IMAGE_LOGO=logo confidence、OCR_TEXT 0.5、MERCHANT_HISTORY 0.85、CASE_PRECEDENT=retrieval_score、POLICY_REF 0.9），clamp 到 [0,1]；**reevaluate 不修改 weight**（只更新 posterior/status/证据链接）。weight 语义=证据强度，仅供展示/审计，**不参与 v1 的任何确定性公式**（T-4 公式只读存在性、可引用性、矛盾性）。
 - **理由**：把 weight 留给"谁产出谁标价"，避免 reevaluate 双重调参造成不可复现；v1 公式不依赖 weight，则 weight 标定误差不影响判决策略（可解释性优先）。
 - **落地动作**：🔧 无（6 个工具转换器实现时照此写默认值）。
 
@@ -153,7 +153,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 
 - **`decision.overrides`**：`ReviewDecision` 增加可选字段 `overrides: list[str] = Field(default_factory=list)`，存放确定性 overlay 的改判/归因原因码（v2 词汇：R1_HARD_RULE / R2_REJECT_GATE_FAIL / R3_BUDGET_EXHAUSTED / R3_CRITICAL_CONFLICT / R3_KEY_TOOL_FAILED / R3_POLICY_UNCERTAIN / R3_HYPOTHESES_INDISTINGUISHABLE / R3_VISUAL_CLAIM_UNSUPPORTED / R4_PASS_GATE_FAIL / R5_DEGRADED_OR_FAILED_STEP）；空=overlay 未改判（LLM 提案即终值）。这是"谁把 PASS/REJECT 改成了 HUMAN_REVIEW"的可审计落点（《00》§8.2-4），且不破坏既有 decision 字段（新增默认空列表，向后兼容）。
 - **理由**：图内每轮运行必然以 decide 产出一个 decision 收尾，因此"DECIDED"是唯一的图终态；把 ESCALATED/BUDGET_EXCEEDED 从主状态机剥出为归因/下游状态，避免状态机出现"决策已出但状态未决"的二义；overrides 可选字段保证 00 §2.2 输出形状兼容。
-- **v2 复核（review D）**：再次确认 **DECIDED 是 Graph 唯一终态**——PASS/REJECT/HUMAN_REVIEW 只是
+- **v2 复核**：再次确认 **DECIDED 是 Graph 唯一终态**——PASS/REJECT/HUMAN_REVIEW 只是
   `ReviewDecision.decision` 的取值，不是图终态；预算耗尽 / 关键 Tool 失败 / 降级 / Gate 改判全部通过
   `decision.overrides`（R1/R2/R3/R4/R5 原因码）记录，**不新增任何图终态**；ESCALATED / BUDGET_EXCEEDED
   仅存在于 DB 运行/下游状态（03 §2.8 上表）与 trace 归因，graph.py 里不存在对应终结点。
@@ -167,7 +167,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
     - `REJECT / HUMAN_REVIEW` → 默认映射：`POTENTIAL_IP_RISK / EVASION_PATTERN` 起步 `HIGH`（《00》走查即 HIGH）；`FALSE_CLAIM / FIELD_CONFLICT` 默认 `MEDIUM`，允许 LLM 提案按证据强弱给 LOW/MEDIUM/HIGH。
   - **该映射仅用于展示与人工队列排序，不参与任何路由/overlay 判定**（避免把展示口径变成判定逻辑；overlay 决策只认 decision/decision_confidence/证据，不认 risk_level）。
   - **v2 落地口径（代码 `gate.py::finalize_risk_level` 已落地，契约 §5.3）**：上表"默认映射"是 **prompt 指导**（供 LLM 提案时参考，非强制）；当提案**未声明** `risk_level` 时，确定性终值按最高 SUPPORTED posterior 派生：`≥0.8 → HIGH / ≥0.5 → MEDIUM / ≥0.2 → LOW / 其余 → NONE`。低危案（派生为 NONE）可产出 `risk_level=NONE` 的 HUMAN_REVIEW —— risk_level 纯展示字段（只进队列排序），无路由影响。
-- **v2 补强（review E，写进《00》§7.5）**：**risk_level ≠ decision** —— 决策由 §2.4(b) 的 Decision Gate 判定（证据 + 政策依据 + decision_confidence），
+- **v2 补强（写进《00》§7.5）**：**risk_level ≠ decision** —— 决策由 §2.4(b) 的 Decision Gate 判定（证据 + 政策依据 + decision_confidence），
   risk_level 高低不改变决策：**HIGH risk + 证据不足 = HUMAN_REVIEW（而非 HIGH → REJECT）**；LOW risk + 证据矛盾同样 HUMAN_REVIEW。
 - **理由**：词表与映射是输出格式问题，不改变判决策略；NONE 让 PASS 在统计/队列里语义干净。
 - **落地动作**：🔧 无（代码已含 NONE；映射表写入 decide 实现注释）。
@@ -202,10 +202,10 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 避免"任何一次重试即把单案推到预算超限转人工"；token/latency 维持《00》原值（40000/30s），
 成本叙事（P50/P95 token 与延迟）不受 LLM/Tool 次数上界调整影响。落地：上限经运行配置注入
 `Budget.limits`（graph 阶段 guardrails 常量层 / worker 初始化），`models.py` `BudgetLimits` 默认已
-按本轮 review 修订为 10/15/40000/30000（与原 docstring"与设计一致 8/12"不再相符，docstring 同步更新）。
-拍板时间/来源：用户决策（Claude review 已复核）
+按 T-7 修订为 10/15/40000/30000（与原 docstring"与设计一致 8/12"不再相符，docstring 同步更新）。
+决策时间/来源：设计评审（已复核）
 
-**v2 复核（review B，写进《00》§8.1/§10.3/§11.3）**：
+**v2 复核（写进《00》§8.1/§10.3/§11.3）**：
 - **Budget 是 Guardrail，不是目标调用次数**：正常案件实际调用应明显低于上限（主链路 8/5 次）；
   上限余量留给 schema 重试、工具失败恢复、防无限循环。
 - **Trace 记录四组占用率**：`llm_calls/max_llm_calls`、`tool_calls/max_tool_calls`、
@@ -237,9 +237,9 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 落地：代码常量已同步（`src/pra/tools/image_analysis/tool.py`：`EVIDENCE_MIN_SIM=0.70`、`EVIDENCE_STRONG=0.85`；
 文档统一使用代码名 `EVIDENCE_STRONG`，本表 v1 旧名 `SIM_HIGH_CONTRADICT` 同值同义，仅在别名注记中出现）；
 工具仍只返回原始相似度，证据过滤/矛盾检测由下游 tools_node/guardrails 确定性层引用这两值。
-拍板时间/来源：用户决策（Claude review 已复核）
+决策时间/来源：设计评审（已复核）
 
-**v2 复核（review C，写进《00》§7.6/§11.5/§13.3 与 01 §5.7）**：
+**v2 复核（写进《00》§7.6/§11.5/§13.3 与 01 §5.7）**：
 - **三档语义**：`similarity < 0.70` 不作 IMAGE_SIMILARITY 证据；`0.70 ~ 0.85` 普通证据；
   `≥ 0.85` **Strong Evidence**（也是矛盾启发式"高相似"判据）。
 - **数值定位**：0.70/0.85 是 **v1 工程初始值、非理论最优**，阈值**配置化**（不写死）。
@@ -289,8 +289,8 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 | 2 | `src/pra/domain/models.py` | `Evidence` 增 `extra: dict = Field(default_factory=dict)`（承载结构化数值） | ✅ 已执行 |
 | 3 | `src/pra/domain/models.py` | `ReviewDecision` 增 `overrides: list[str] = Field(default_factory=list)`（overlay 原因码） | ✅ 已执行 |
 | 4 | `src/pra/agent/state.py` | `AgentState` 增 `pending_tool_calls: list[dict]`（覆盖写）、`degraded: bool`（覆盖写）、`failures`（append）；run_id/case_id 线程维度、status 落 DB | ✅ 已执行 |
-| 5 | guardrails 常量层（graph 阶段新建） | 按 §5 常量表落位；T-7/T-11 值 10/15/40000/30000 与 0.70/0.85 | ⏳ 待 graph 阶段 |
-| 6 | `src/pra/domain/models.py` | **v2（review J）：`BudgetLimits` 默认值 8/12 → `10/15`（max_llm_calls/max_tool_calls），docstring 注明"Guardrail 上界非目标、运行时可由配置覆盖"** | ✅ 本轮执行 |
+| 5 | guardrails 常量层（`src/pra/agent/guardrails/`：常量表 + `gate.py`） | 按 §5 常量表落位；T-7/T-11 值 10/15/40000/30000 与 0.70/0.85 | ✅ 已执行（常量层与 `gate.py` 均已落地） |
+| 6 | `src/pra/domain/models.py` | **v2：`BudgetLimits` 默认值 8/12 → `10/15`（max_llm_calls/max_tool_calls），docstring 注明"Guardrail 上界非目标、运行时可由配置覆盖"** | ✅ 本轮执行 |
 
 > v1 章节 4.3/4.1 的漂移结论仍有效；其中"01 文档需后续同步"已在本轮完成（01 §2/§6/§7/§9 与《00》§7/§8/§11/§12/§13 已按 v2 修订）。
 
@@ -298,7 +298,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 
 ## 5. 可落地参数常量总表（[A] 已定 + [B] 已拍板）
 
-> 供 guardrails/配置实现直接引用；`[B]` 项用户拍板后回填并解锁对应实现。
+> 供 guardrails/配置实现直接引用；`[B]` 项确认后回填并解锁对应实现。
 
 | 常量 | 取值 | 来源 | 备注 |
 |---|---|---|---|
@@ -315,7 +315,7 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 
 ---
 
-## 6. [B] 项上报摘要（2 项 —— 均已拍板，见 §3.1 / §3.2 拍板结果）
+## 6. [B] 项决策记录摘要（2 项 —— 均已拍板，见 §3.1 / §3.2 拍板结果）
 
 **T-7 预算上限**：问题=《00》定 8/12/40000/30s，主链路走查恰耗满 8 次 LLM、零余量，与"schema 校验重试 1 次"既定策略冲突。选项：A 沿用 8/12（与《00》逐字一致，无重试余量）/ **B 推荐 10/15**（上限≠目标，为主链路留 2 次重试余量，常态成本不变）/ C 双档配置（线上 8/12、eval/演示 10/15）。
 
@@ -326,8 +326,8 @@ overlay 记 R3_CRITICAL_CONFLICT 转人工（除非 R1 硬规则 REJECT）。
 ## 7. 结束状态（v2）
 
 - [A] 已定：T-1、T-2、T-3、T-4、T-5、T-6、T-8、T-9、T-10、T-12（10 项，最终值见 §2 / §1 总览）。
-- [已拍板] T-7 → **B（10 / 15 / 40000 / 30000，Guardrail 语义 + Budget Utilization）**、T-11 → **B（EVIDENCE_MIN_SIM=0.70 / EVIDENCE_STRONG=0.85，三档语义 + threshold sweep）**（§3.1 / §3.2；Claude review 已复核）。
-- v2（本轮 review）修订落点：① decision_confidence 与 risk 分离 + 三个 Decision Gate（T-4/《00》§7/01 §7）；② Budget Guardrail 语义 + 四组占用率 + Budget Utilization 指标（T-7/《00》§8/§10.3/§11.3）；③ 相似度三档 + 工程初始值 + threshold sweep（T-11/《00》§7.6/§11.5）；④ DECIDED 图唯一终态复核（T-8）；⑤ risk_level ≠ decision 示例（T-10/《00》§7.5）；⑥ 评测公平性（《00》§12.0）、成本/调查效率指标含 **Marginal Evidence Gain / Investigation Efficiency**（《00》§11.3，契约落 01 §2.4/§5.8 tool_call_history）、**Ablation Evaluation**（《00》§13.4）；⑦ 命名统一 EVIDENCE_STRONG、01 §2 与代码对齐、`BudgetLimits` 默认 10/15。
+- [已拍板] T-7 → **B（10 / 15 / 40000 / 30000，Guardrail 语义 + Budget Utilization）**、T-11 → **B（EVIDENCE_MIN_SIM=0.70 / EVIDENCE_STRONG=0.85，三档语义 + threshold sweep）**（§3.1 / §3.2；已复核）。
+- v2 修订落点：① decision_confidence 与 risk 分离 + 三个 Decision Gate（T-4/《00》§7/01 §7）；② Budget Guardrail 语义 + 四组占用率 + Budget Utilization 指标（T-7/《00》§8/§10.3/§11.3）；③ 相似度三档 + 工程初始值 + threshold sweep（T-11/《00》§7.6/§11.5）；④ DECIDED 图唯一终态复核（T-8）；⑤ risk_level ≠ decision 示例（T-10/《00》§7.5）；⑥ 评测公平性（《00》§12.0）、成本/调查效率指标含 **Marginal Evidence Gain / Investigation Efficiency**（《00》§11.3，契约落 01 §2.4/§5.8 tool_call_history）、**Ablation Evaluation**（《00》§13.4）；⑦ 命名统一 EVIDENCE_STRONG、01 §2 与代码对齐、`BudgetLimits` 默认 10/15。
 - 一致性冲突 1 处（T-3）已通过代码改名解决；代码落地动作 §4.4 已执行（含本轮 BudgetLimits 默认值修订）。
 - [O 拍板] **O-1~O-10 已拍板并落地**（去重 key 稳定 ref / failures severity 分级与 R5 口径 / `args_model`+`parse_args` / `decision_confidence` 改名 / extra 由 tools_node backfill 等）：每条 O 的拍板结果与落地记录见 **docs/04-graph-design.md §10**；代码同步见 models.py / state.py / tools/base.py / tools 各 tool.py。
-- 遗留/待办（graph 阶段实现决策，不阻塞本文档）：guardrails 常量层与 tools_node 的 `backfill_extra`/`quality_filter` 接线（§4.4 行 5）、01-agent-loop.md 若有与 O 表冲突的旧表述以 04 §10 为准。
+- 遗留/待办：01-agent-loop.md 若有与 O 表冲突的旧表述以 04 §10 为准（guardrails 常量层与 `tools_node` 的 `backfill_extra`/`quality_filter` 接线已落地，见 §4.4 行 5）。

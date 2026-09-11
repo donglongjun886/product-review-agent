@@ -3,7 +3,8 @@
 > ⚠️ **已被取代（superseded）**：本文的 Phase 2 设计（**Qdrant 向量库** + BGE）已被
 > [docs/10-rag-upgrade-spec.md](10-rag-upgrade-spec.md) 取代 —— **向量库切换为 ChromaDB**
 > （Docker 服务端 + `HttpClient`），检索升级为 **LlamaIndex + BGE + BM25 + RRF**。
-> 本文**作为历史记录保留**，不改写、不删除，含其**实测结果**（§6 语义 vs 词面 / 三路 Recall@3）
+> 本文**作为历史记录保留**（原设计内容不改写、不删除；仅在个别处**补注当前状态**，如 §2.3 的
+> `backend` 取值、§3 的依赖清单与 §4 的测试数快照），含其**实测结果**（§6 语义 vs 词面 / 三路 Recall@3）
 > 与**如实记录的缺陷**（§7：**128 位 point id**，进程内模式不校验上界，**只在真 server 上
 > 以 400 暴露**——该复盘仍是有效教训）。当前契约以 **docs/10 为准**；Qdrant 的代码与
 > `deploy/qdrant` **保留在仓库中**（不删），但**本机容器已卸**、`rag_backend="qdrant"`
@@ -12,7 +13,7 @@
 > 状态：**已拍板并实施**（2026-09-09，对齐 rag-implementation-plan.md R-1/R-2 的
 > Phase 2 路线：正式向量库 Qdrant + 本地语义 Embedding，经 `Embedder` provider 与
 > 索引工厂替换，**不改检索上层 / 工具契约**）。
-> 验证模式 = 工作区镜像开发 + patch 交付 + 主 agent 真实仓库落地（291 全绿基线 +
+> 验证方式 = 全量回归基线 + 新增用例全绿（**291 为 Phase 2 实施时的基线快照** +
 > 新增用例全绿 + v1/v2 回归 digest 零变化）。
 
 ## 0. 定位（勿偏移）
@@ -95,10 +96,12 @@ tests/test_rag_qdrant.py        ← 新增：qdrant 索引单测 + BGE embedder 
 
 ### 2.3 装配
 
-- `factory.build_policy_index/build_case_index` 增 `backend: Literal["local","qdrant"]="local"`、
+- `factory.build_policy_index/build_case_index` 增 `backend: Literal["local","qdrant","chroma"]="local"`、
   `qdrant_client=None`（外部注入，测试用）、`collection_prefix=None`；`backend="qdrant"`
   时延迟 import `pra.rag.qdrant_index`（无 qdrant-client 环境不 import 失败——
   仅显式开启才需要）。缺省路径与改动前逐字节一致。
+  （`"chroma"` 为 [docs/10](10-rag-upgrade-spec.md) §2 追加的当前默认语义路；本节其余描述
+  为 Phase 2 当时口径。）
 - `build_tools(data_source="rag", rag_backend="local", rag_embedder=None)`：
   `rag_backend="qdrant"` 时经 factory 传 `backend="qdrant"` + `embedder=rag_embedder`
   （None → MockHash，保证 qdrant 后端也可离线单测）。
@@ -107,7 +110,11 @@ tests/test_rag_qdrant.py        ← 新增：qdrant 索引单测 + BGE embedder 
 
 ## 3. 依赖与文件
 
-- `pyproject.toml`：`rag = ["qdrant-client", "fastembed"]`（fastembed 新增）。
+- `pyproject.toml`：Phase 2 当时的 `rag = ["qdrant-client", "fastembed"]`（fastembed 新增）；
+  **当前实际清单**（docs/10 §0 拍板后）为 `chromadb`、`qdrant-client`（迁移期暂留）、
+  `fastembed`、`llama-index-core>=0.13,<0.15`、`llama-index-vector-stores-chroma>=0.6,<0.7`、
+  `llama-index-retrievers-bm25>=0.8,<0.9`、`llama-index-embeddings-fastembed>=0.7,<0.8`、
+  `jieba>=0.42,<0.43`。
 - `.gitignore`：+ `.cache/`（模型缓存与 qdrant 本地索引目录统一落 `.cache/`）。
 - 新增：`docs/06-rag-phase2-qdrant-bge.md`（本文件）、
   `src/pra/rag/qdrant_index.py`、`scripts/run_rag_phase2_demo.py`、
@@ -117,7 +124,7 @@ tests/test_rag_qdrant.py        ← 新增：qdrant 索引单测 + BGE embedder 
 
 ## 4. 验收
 
-1. 291 既有全绿 + 新增用例全绿（qdrant 单测经 `importorskip` 离线可跑；BGE 真模型
+1. 291 既有全绿（Phase 2 实施时快照）+ 新增用例全绿（qdrant 单测经 `importorskip` 离线可跑；BGE 真模型
    用例 `skipif(model_ready()=False)` 不阻塞 CI）。
 2. v1 35 案 + v2 320 案确定性 digest 与改动前**逐字节一致**（默认路径零变化）。
 3. 同构测试：同 rows+同 embedder 下 qdrant ≡ local（同序同 id、score 6 位相等）。
@@ -192,4 +199,5 @@ id 上界** → `:memory:` / `path=` 与既有测试全绿，缺陷被「未实�
 - `tests/test_rag_qdrant_server.py` —— 真 server 端到端（建库 / 全量 upsert 点数 /
   与 local 同口径 / R-4 前缀 / id 接受性）；服务端不可达则 skip，`PRA_QDRANT_URL` 可覆盖。
 
-全量测试：**439 passed, 1 skipped**（服务端不在时 **436 passed, 4 skipped**）；v1/v2 回归双 PASS。
+全量测试（**2026-09-10 远端 server 实测时点快照**；绝对值随服务/依赖状态变化，勿照抄）：
+**439 passed, 1 skipped**（服务端不在时 **436 passed, 4 skipped**）；v1/v2 回归双 PASS。

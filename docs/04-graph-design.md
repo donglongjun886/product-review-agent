@@ -5,7 +5,7 @@
 > LangGraph 图定义草稿 + 各文件实现落点**。只设计"复杂案件调查子图"（screening 分流在子图外）。
 >
 > 文中代码草稿的 API 已按**本机实际安装版本**逐一核对/实测（§1.1），import 路径统一 `pra.*`；
-> 未做任何 git 操作、未写 `src/` 下任何代码（本文档是唯一交付物）。
+> 本文档是 `graph.py` 实现前的设计定稿（落地实现见 `src/pra/agent/graph.py`）。
 
 ---
 
@@ -319,7 +319,7 @@ decide 节点 = 两层（01 §7.0，此处给出函数级落点）：
 # src/pra/agent/nodes/decide.py（草稿）
 async def decide_node(state, config) -> dict:
     from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage, snapshot_budget
-    from pra.agent.guardrails.decision_guardrail import run_decision_overlay
+    from pra.agent.guardrails.gate import run_decision_overlay
     from pra.agent.guardrails.llm_shell import call_structured_llm
 
     proposal = None
@@ -338,7 +338,7 @@ async def decide_node(state, config) -> dict:
 > 说明：各节点的 LLM 输出模型（`DecisionProposal / PlanOutput / ReevaluateOutput / HypothesizeOutput`）随节点模块
 > 定义或放 `guardrails/schemas.py`（统一导入），本文不重复展开其字段（见 01 §3.2/§3.3/§3.4 契约）。
 
-### 3.2 guardrails 模块函数签名（`pra/agent/guardrails/decision_guardrail.py`）
+### 3.2 guardrails 模块函数签名（`pra/agent/guardrails/gate.py`）
 
 ```python
 def run_decision_overlay(state, proposal: DecisionProposal | None) -> ReviewDecision:
@@ -631,12 +631,12 @@ def make_memory_checkpointer():
 # def make_postgres_checkpointer(dsn): from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver; ...
 ```
 
-### 7.4 文档一致性注记（00/01 措辞修订建议，本轮不擅改 00/01/03）
+### 7.4 文档一致性注记（00 措辞修订建议）
 
-- 00 §3.1"由 LangGraph Checkpointer（MySQL）每步后落库"、00 §4.2 草图 `compile(checkpointer=mysql_checkpointer)`、
-  01 §1.2/§6.1 `checkpointer=mysql_checkpointer`、01 §9 与 03 §4.2 关于 "MySQL Checkpointer" 的表述，
+- 00 §3.1"由 LangGraph Checkpointer（MySQL）每步后落库"、00 §4.2 草图 `compile(checkpointer=mysql_checkpointer)`，
+  以及 01 早期版本 §1.2/§6.1/§9 中的同类 "MySQL Checkpointer" 表述（01 已按本节口径修订），
   **最终口径**：`compile(checkpointer=<线程状态 saver，见 §7.2 选型 A>)`；MySQL 承载业务表 review_run/review_trace/review_evidence/review_result——逐步 token·latency（run 级汇总）由 review_trace 承载、终局 budget_used/overrides 随 `review_result.decision_json` 落库（worker 层显式落库，不依赖 langgraph checkpoint 写 MySQL）；线程中间 state 的恢复靠 checkpointer。
-  建议 00/01 后续修订为同一口径（列于 03 §7 遗留/待办）。
+  建议 00 后续修订为同一口径。
 
 ---
 
@@ -673,7 +673,7 @@ budget 超限各走向 decide）。
 | `pra/agent/tools_node.py` | 执行 pending_tool_calls（预算/校验/重试/过滤/转证据/记账/边际增益） | `make_tools_node(tools) -> Callable`（闭包工厂：注册私有 ToolRegistry 后返回 `async tools_node(state, config) -> dict`；tools 经 `build_agent_graph(tools=...)` 注入） |
 | `pra/agent/guardrails/budget.py` | 预算四维检查与记账 | `budget_exceeded(budget)`；`bump_llm_usage`；`bump_tool_usage`；`snapshot_budget` |
 | `pra/agent/guardrails/converge.py` | 收敛判定 | `is_converged(state)` |
-| `pra/agent/guardrails/decision_guardrail.py` | 三 Gate overlay 与 decision 组装 | `run_decision_overlay`；`pass_gate`；`reject_gate`；`finalize_decision_confidence`；`build_decision` |
+| `pra/agent/guardrails/gate.py` | 三 Gate overlay 与 decision 组装 | `run_decision_overlay`；`pass_gate`；`reject_gate`；`finalize_decision_confidence`；`build_decision` |
 | `pra/agent/guardrails/hard_rules.py` | R1 硬规则 | `hard_rule_hit(state) -> HardRuleHit | None` |
 | `pra/agent/guardrails/dedup.py` | plan 输出去重 | `dedup_pending(state, planned) -> list[dict]` |
 | `pra/agent/guardrails/metrics.py` | 边际增益探针（纯函数） | `decision_conf_probe(state)`；`gate_probe(state)` |
@@ -688,9 +688,9 @@ budget 超限各走向 decide）。
 
 ---
 
-## 10. 开放问题（O-1~O-10 —— 均已拍板，本表为决策记录；实现按"拍板结果"列执行）
+## 10. 开放问题（O-1~O-10 —— 均已拍板，本表为决策记录；实现按"决策结果"列执行）
 
-| ID | 问题 | 现状矛盾/出处 | 拍板结果（O-1~O-10 已拍板，2025 用户决策） |
+| ID | 问题 | 现状矛盾/出处 | 决策结果（O-1~O-10 已定） |
 |---|---|---|---|
 | O-1 | **evidence 去重 key** | 01 §2.5 / 03 §4.2 漂移 3 写 `(type, source, ref_id)`；但 ImageAnalysis 对同一品牌、不同图片会产出多条 `ref_id=None` 且 value 不同的证据——纯 `(type,source,ref_id)` 会把第二条丢弃（信息丢失）。落地代码 DTO 无 `evidence_id`，无法在 key 里用稳定业务 id | 已拍板：evidence 去重防丢 —— ref 优先稳定业务标识（image_url / product_id / merchant_id；RAG 工具 case_id / clause_id），无稳定 ref 时去重 key 回退 value。落地：6 个工具 to_evidence 已填稳定 ref_id（工具层不写 extra，见 O-8）；去重口径已同步 01 §2.5 / 03 §4.2 / 本文 §2.3（`_evidence_key` 见 §2.3） |
 | O-2 | **failures 触发 HUMAN 的口径** | 01 §7.2 overlay 写"`failures` 非空一律 R5→HUMAN"；本设计 §5.2 细化：仅 LLM 步失败(critical)与未解决 critical Tool 失败触发，warn 只审计 | 已拍板：failures 非空不一律 HUMAN_REVIEW —— 仅 LLM 步失败（degraded，critical）与未解决的 critical Tool 失败（R3_KEY_TOOL_FAILED）触发；`severity:"warn"` 只审计。01 §7.2 R5 / §7.3 已同步 |

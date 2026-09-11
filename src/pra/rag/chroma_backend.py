@@ -648,7 +648,7 @@ def _build_nodes(
     **检索文本 = 正文**（policy：``title。text``；case：``summary``）—— 与 local 后端
     （``rag/index.py`` 的 ``_texts``）及本模块向量路 embed 的文本**同一份**。
 
-    节点 metadata **不参与任何检索文本**（R7 用户拍板）：
+    节点 metadata **不参与任何检索文本**（R7 决策）：
     ``TextNode(excluded_embed_metadata_keys=<全部 metadata 键>)`` 使
     ``node.get_content(metadata_mode=MetadataMode.EMBED)`` 只返回正文。这一点对 BM25 路是
     **必需**的 —— ``BM25Retriever`` 用的正是 ``MetadataMode.EMBED``（安装源码
@@ -938,7 +938,7 @@ def _make_bm25_retriever(ctx: _RetrievalContext, top_k: int) -> Any:
     ``token_pattern=""``：本模块的 jieba 替身**忽略**该参数（见 :func:`_jieba_bm25s_tokenize`），
     传空串只为显式标注「不启用 bm25s 的正则切词」。
 
-    **索引文本 = 正文**（R7 用户拍板，见 :func:`_build_nodes`）：该库内部取
+    **索引文本 = 正文**（R7 决策，见 :func:`_build_nodes`）：该库内部取
     ``node.get_content(metadata_mode=MetadataMode.EMBED)``，本模块构造 node 时用
     ``excluded_embed_metadata_keys`` 把 metadata 全部排除，故 BM25 路与向量路
     （``title。text`` / ``summary``）**检索同一份文本** —— metadata 字面值

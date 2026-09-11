@@ -8,7 +8,8 @@
 > `sessionId=eval-demo-1`）。解冻范围仍**仅此一项**，不扩到 OTel 全家桶。
 > 口径约定：全文数字均标注来源与口径；未实测的一律写「未验证」，不预支结论。
 > 配套：`deploy/langfuse/README.md`（本机 Docker 部署与镜像源实测）、
-> `docs/07-project-status.md`（内部记忆，gitignore；Langfuse 决策节）。
+> [docs/03-decisions.md](03-decisions.md)（预算 / 语义参数决策）、
+> [docs/10-rag-upgrade-spec.md](10-rag-upgrade-spec.md)（RAG 升级契约）。
 
 ## 1. 定位（勿偏移）
 
@@ -19,13 +20,13 @@
 | LangGraph | Agent **怎么执行**（节点/路由/循环） | `src/pra/agent/graph.py`（5 节点 + 2 条件边） |
 | Tools / RAG | 获取**什么外部信息** | `src/pra/agent/tools_node.py` + `src/pra/tools/` |
 | Guardrails / Gate | 如何**安全收敛**（预算、降级、确定性终裁） | `src/pra/agent/guardrails/`（`gate.run_decision_overlay`） |
-| Evaluation | 效果**好不好**（acc / HRR / abstention） | `src/pra/evaluation/`（口径权威出处 `docs/02-evaluation.md`） |
+| Evaluation | 效果**好不好**（acc / human_review_rate / abstention） | `src/pra/evaluation/`（口径权威出处 `docs/02-evaluation.md`） |
 | **Langfuse** | **实际怎么跑的、为什么成功/失败** | 本文档（`src/pra/observability/`） |
 | MySQL | 业务**审计 / 持久化 / 结果溯源** | `review_run` / `review_trace` / `review_result` / `review_evidence` |
 
 三条硬边界（写进 `src/pra/observability/__init__.py` 模块 docstring）：
 
-1. Langfuse **不替代 Evaluation**：acc / HRR / 消融 / 回归 digest 仍由评测侧算，
+1. Langfuse **不替代 Evaluation**：acc / human_review_rate / 消融 / 回归 digest 仍由评测侧算，
    Langfuse 只提供「这次跑的 span 树长什么样」的观测证据。
 2. Langfuse **不替代 MySQL `review_trace`**：业务审计与合规取证仍在 MySQL（§2）。
 3. Langfuse **不是业务真相源**：裁决值唯一来自 `review_result`；观测数据可丢、
@@ -66,7 +67,7 @@ prompt/response/usage/重试次数。自动埋点在本项目会得到「节点�
 | `src/pra/observability/tracing.py` | 薄接口（`Tracer` / `Observation` / `TraceContext`）+ `NullTracer` + 确定性采样；**不 import 任何 tracing SDK** |
 | `src/pra/observability/langfuse_backend.py` | **唯一 import SDK 的模块**（惰性 import，SDK 缺失 → `NullTracer`） |
 | `src/pra/observability/__init__.py` | 对外导出（业务侧只依赖薄接口） |
-| `tests/test_observability_tracing.py` | 16 用例（假 client，无网络、无 SDK 依赖） |
+| `tests/test_observability_tracing.py` | 适配层用例（假 client，无网络、无 SDK 依赖）；S2 落地时点快照 **16 用例**，2026-09-11 实测 `pytest --collect-only` 收集 **22 个** |
 
 四类观测（与 `tracing.py` 模块 docstring 表一致）：
 
@@ -77,7 +78,7 @@ prompt/response/usage/重试次数。自动埋点在本项目会得到「节点�
 | `llm_generation` | `llm_shell.py` 内层 `backend.complete()`，**每次真实调用一条**（§4.3） | model / input / output / usage / latency / error |
 | `tool_span` | `tools_node.py` 的 `await tool.call()`（§4.4） | tool 名 / args / output / latency / status |
 
-**四条不变式**（`tests/test_observability_tracing.py` 守护，实测 16 passed）：
+**四条不变式**（`tests/test_observability_tracing.py` 守护；S2 时点快照 **16 passed**，2026-09-11 实测收集 **22 个**）：
 
 1. 无凭据 → `NullTracer`，且**不 import `langfuse`**（断言 `sys.modules` 无该键）；
 2. 所有观测调用**绝不抛异常**（观测失败不得影响业务）；
@@ -361,7 +362,7 @@ prompt/response 需 `fields=io`，断言 model/usage 需 `fields=model,usage`，
 |---|---|---|---|
 | S0 | SDK spike（API 形状实测） | ✅ **已完成** | 4 项实测：client 实例入口与签名 / `trace_context` 生效 / contextvar 三种调度嵌套 / `as_type` 类型（§6） |
 | S1 | 本地 Docker Langfuse v4 | ✅ **已完成（`4c3fc94`）** | `deploy/langfuse/docker-compose.yml`（263 行）→ 6 容器运行、health 200 `4.32.0`、`LANGFUSE_INIT_*` 初始化出 project `pra-local`（§9 启动实测） |
-| S2 | 适配层（`tracing.py` + `langfuse_backend.py`） | ✅ **已完成（`288feb8`）** | 16 用例全绿（`uv run pytest tests/test_observability_tracing.py -q` → `16 passed`）；**零业务改动** |
+| S2 | 适配层（`tracing.py` + `langfuse_backend.py`） | ✅ **已完成（`288feb8`）** | S2 时点快照 16 用例全绿（`uv run pytest tests/test_observability_tracing.py -q` → `16 passed`；2026-09-11 实测收集 22 个）；**零业务改动** |
 | S3 | LLM + Tool 埋点 | ✅ **已完成（`55b6220`）** | `llm_shell.py` 内层 `backend.complete()` 每次真实调用一条 generation；`tools_node.py` 每次 `tool.call()` 一条 tool span；`LLMResponse.usage` 透出 |
 | S4 | Node + Root + Gate 埋点 | ✅ **已完成（`af50285`）** | 5 节点统一包装 + 3 处 root（`trace_id = run_id` / uuid5）+ decide 内 gate 子 span；同 commit 修掉 `trace_root` 吞异常缺陷 |
 | S5 | Evaluation 接线 | ✅ **已完成（`6f2e45d`，配套 `0c4fe9b` / `af9a9d0` / `4b945b9`）** | `--experiment` / `--session` / uuid5 确定性 trace_id 全部落地；`flush_tracer` 导出；`scripts/langfuse_smoke.py` 自检；`Settings` 补 7 个可选字段（§8）；读接口改 v4 v2 + `fields=` |
@@ -444,11 +445,11 @@ PRA_LANGFUSE_SESSION=eval-demo-1 \
 
 → **「Evaluation Case → Agent Trace」硬关联成立**（`eval_case_id` 在 trace metadata 里可直接反查）。
 
-#### (4) 测试与回归（主 agent 复跑）
+#### (4) 测试与回归（复跑）
 
 | 项 | 命令 | 结果 |
 |---|---|---|
-| 全量测试 | `uv run pytest tests/ -q` | **432 passed, 1 skipped**（skip = 未装 SDK 才跑的那条用例；本机已装 SDK） |
+| 全量测试 | `uv run pytest tests/ -q` | **432 passed, 1 skipped**（2026-09-09 实测时点快照；2026-09-11 复跑实测 **507 passed, 4 skipped**，跳过量随服务/依赖状态变化。skip = 未装 SDK 才跑的那条用例；本机已装 SDK） |
 | v1 回归 | `uv run python scripts/run_regression.py` | **PASS** |
 | v2 回归 | `uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl` | **PASS**（与上项**双 PASS**） |
 | 依赖 | `pyproject.toml` 的 `observability = ["langfuse>=4.15,<5"]`（去掉未用的 OTel 埋点包） | `uv lock` 125 包；`uv sync --extra observability --extra rag` 装出 `langfuse 4.15.1` |
@@ -505,7 +506,7 @@ af9a9d0 feat(observability): 新增 Langfuse 端到端自检脚本 langfuse_smok
 - **修改 Evaluation metrics**、**修改 Gate 判定**、**修改 Agent 图拓扑**。
 
 理由：本项目解冻范围 = 「把已有的确定性 Agent 链路观测出来」，任何改动评测口径、
-Gate 行为或图结构的工作都会污染既有 347 全绿基线与 v1/v2 回归 digest。
+Gate 行为或图结构的工作都会污染既有 347 全绿基线（接线前时点快照）与 v1/v2 回归 digest。
 
 ## 12. 结论边界
 
@@ -515,8 +516,8 @@ Gate 行为或图结构的工作都会污染既有 347 全绿基线与 v1/v2 回
 - **默认路径（scripted 桩 + InMemory 世界）下 trace 结构完整，但 token / cost 为空**——
   这是**真实情况**（桩无模型、`tokens=0`，§7），不是缺陷，也不得填假值补齐。
 - **真实 LLM 只出现在 real 评测脚本**（`scripts/run_evaluation_real.py`，注入
-  `LiteLLMBackend`）；服务运行时 LLM 恒为 scripted 桩（`AGENTS.md` 口径红线）。
-- real LLM 目前只跑过 **v1 35 案单次抽样**（acc 0.200 / HRR 0.771，出处
+  `LiteLLMBackend`）；服务运行时 LLM 恒为 scripted 桩（口径红线）。
+- real LLM 目前只跑过 **v1 35 案单次抽样**（acc 0.200 / human_review_rate 0.771，出处
   `docs/02-evaluation.md`）：因此「real 路径的 Langfuse 观测」样本极小、非确定性，
   不可当能力证据。
 - S1 服务端与端到端 trace 落库**已实测验证**（§10.1）；SDK 侧结论（§6）与服务端 v4 API
@@ -525,8 +526,8 @@ Gate 行为或图结构的工作都会污染既有 347 全绿基线与 v1/v2 回
 ## 13. 验收命令
 
 ```bash
-# 1) 全量测试（含适配层 16 用例 + observability 相关用例；无需任何 Langfuse key）
-uv run pytest tests/ -q                       # 实测 432 passed, 1 skipped
+# 1) 全量测试（含适配层用例 —— S2 时点快照 16 个、2026-09-11 实测收集 22 个 —— + observability 相关用例；无需任何 Langfuse key）
+uv run pytest tests/ -q                       # 2026-09-09 快照 432 passed, 1 skipped；2026-09-11 复跑 507 passed, 4 skipped
 
 # 2) 评测确定性回归（不烧 key、不联网）—— 实测双 PASS
 uv run python scripts/run_regression.py
@@ -545,7 +546,7 @@ uv run python scripts/langfuse_smoke.py       # 实测 SMOKE PASS / exit=0，7 �
 uv run python scripts/langfuse_smoke.py --no-verify   # 只发不读（服务端未起时看埋点）
 
 # 6) 真实案件 demo：跑 P_88231，打印 run_id / trace_id / 决策 + UI 链接
-#    注意默认 PRA_LANGFUSE_ENABLED=0 → 看 trace 时命令行覆盖为 1
+#    注意：开关未设时凭据齐全即启用（无凭据 → NullTracer）；此处显式 =1 便于复现
 PRA_LANGFUSE_ENABLED=1 uv run python scripts/demo_langfuse_trace.py
 PRA_LANGFUSE_ENABLED=1 uv run python scripts/demo_langfuse_trace.py --run-id <32-hex>
 
@@ -579,9 +580,9 @@ curl -s -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
   仍在，需 `fields=metadata` 回读。**绝不为此填假值**（§7 红线）。
 - **真实 token / latency 只在 real LLM 评测出现**：`scripts/run_evaluation_real.py`
   （注入 `LiteLLMBackend`，**需 API key**）才会产生真实 token 拆分与真实耗时；服务运行时
-  LLM 恒为 scripted 桩。real 路径目前仅 v1 35 案单次抽样（acc 0.200 / HRR 0.771，出处
+  LLM 恒为 scripted 桩。real 路径目前仅 v1 35 案单次抽样（acc 0.200 / human_review_rate 0.771，出处
   `docs/02-evaluation.md`），样本小、非确定性，**不可当能力证据**。
 - **范围不变**：仍是「面试项目级可演示的最小完整闭环」，不是生产级 Observability 平台
   （§11/§12：无采样治理、无容量规划、无多租户、无告警、无 SLA；不扩 OTel 全家桶）。
 - **测试口径**：`tests/conftest.py` 预置 `NullTracer`，测试**永不**向真实 Langfuse 发 trace；
-  432 passed / 1 skipped 的结果不依赖 Langfuse 服务端是否运行。
+  该全量测试结果（2026-09-09 时点快照 432 passed / 1 skipped；2026-09-11 复跑 507 passed / 4 skipped）不依赖 Langfuse 服务端是否运行。

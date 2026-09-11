@@ -1,6 +1,7 @@
 # RAG 真实化升级规格（LlamaIndex + BGE + ChromaDB + BM25 + RRF）
 
-> **状态**：2026-09-10 拍板，待执行。本文是**唯一实施契约**（subagent 按此交付，主 agent 按此验收）。
+> **状态**：**已落地**（2026-09-10 起实施；C1 / C2（收窄已确认）/ C3 / R1 / R2 / R7 / R8 / R9 / R9b / R10 / R6 全部结清，
+> 无未决项）。本文是**唯一实施契约**（实现与验收均以本节口径为准），也是当前 **RAG 权威口径**。
 > 目标：把 RAG 做成「**真实可运行、选型合理、面试可讲清楚**」，然后工程收尾，**不扩 RAG 能力**。
 > 不扩大范围：沿用现有 **24 Policy + 67 Case**；不爬外网、不做 reranker / ES / Milvus / KG / 增量索引平台。
 
@@ -10,7 +11,7 @@
 |---|---|---|---|
 | C1 | `CaseHit.similarity` 口径 | **重命名为 `retrieval_score`**；Hybrid 下允许表示 RRF 分；**不得**把 RRF 分解释成语义相似度 | **Evidence 结构不变**（仍 `weight=retrieval_score`），不牵动 Agent / Gate / Evaluation |
 | C2 | LlamaIndex 边界 | **全量 LlamaIndex**（Index / Node / Retriever 全面接管） | 业务层边界仍由 `PolicyIndex` / `CaseIndex` Protocol 守护 |
-| C3 | BM25 | **换成熟库 + `jieba` 中文分词**（不手搓） | ⚠️ **引擎名与 C2 冲突，见 §6-R1（未决）** |
+| C3 | BM25 | **换成熟库 + `jieba` 中文分词**（不手搓） | 引擎名与 C2 的字面冲突**已定案**（见 §6-R1：取 (a) `bm25s` + `jieba`） |
 | — | 向量库 | **ChromaDB**（Docker 服务端 + HttpClient） | Qdrant **暂不删除**（迁移定稿后再定去留） |
 | — | Embedding | 真实 RAG 默认 **BGE**（`BAAI/bge-small-zh-v1.5` + fastembed）；**测试/回归仍走 `MockHashEmbedder`** | 确定性契约不变 |
 
@@ -68,14 +69,14 @@ Query
   → **`相似度 = 1 − distance` 只在 cosine space 下成立**。实现必须（a）建库时显式指定 cosine；
   （b）**运行期自检**：读 `collection.configuration_json["hnsw"]["space"] == "cosine"`，并用单位向量
   校验 `1 − distance == numpy 余弦`。**不得假设** —— L2 库不报错，只会让 §5-1「与 local 同口径」
-  静默失败（本文件初稿正是漏写了这条，由 subagent 实测发现后回改）。
+  静默失败（本文件初稿正是漏写了这条，由实现期实测发现后回改）。
 
   **⚠️ 更隐蔽的第二层（实测，必须一并防）**：对**已存在**的 l2 collection，
   `get_or_create_collection(..., configuration={"hnsw":{"space":"cosine"}})` **与**
   `metadata={"hnsw:space":"cosine"}` **都不会改建其空间**（实测两次重取仍是 `l2`、距离仍是
   `0.020000005`）→ **只在新库写配置不足以保证语义正确，复用路径必须校验**。
   实现已在**创建与复用两条路径**都断言（不符即 `ValueError` 并给出「删除重建 / 换 prefix」指引）；
-  主 agent 独立验证：埋一个 l2 库 → 同前缀构造 → **被正确拦截**，未静默沿用。
+  独立验证：埋一个 l2 库 → 同前缀构造 → **被正确拦截**，未静默沿用。
 
   **float32 尾差（实测）**：自距离可为 **`-1.1920929e-07`** 而非 `0.0` → 自检须用 `abs() <= 1e-6`；
   经 `1 − distance` 可能得 `1.0000001`，由取分函数夹取保证 ⊂ [0,1]（否则 `CaseHit` 的 `ge=0, le=1`
@@ -168,7 +169,7 @@ Query
    | `bm25` | **不可比**（本地 = 自写 Okapi + CJK 字符 bigram、全库 IDF；Chroma 路 = `bm25s` + jieba 真词、语料 = 候选 node） | 只断言「候选完整、可复现、R-4 隔离」，**并如实记录口径差异** |
    | `hybrid` | **不可比**（本地 = `0.5·norm(bm25)+0.5·cos`，量纲 [0,1]；Chroma 路 = **RRF** `Σ1/(60+rank)`，rank 从 0 起 → 上界 **`2/60 = 1/30 ≈ 0.0333`**，实测 0.033333） | 同上；且 `retrieval_score` 必须标注为 RRF 分（C1） |
 
-   实测记录（2026-09-10，主 agent 独立探针）：修复 R10 后 7 个组合（含 `risk_type` 过滤、
+   实测记录（2026-09-10，独立探针）：修复 R10 后 7 个组合（含 `risk_type` 过滤、
    `effective_only` 切换、无 store 过滤三类）**全部同序同 id**，`max |chroma − local| = 0.000e+00`、
    `vector_bruteforce_fallbacks = 0`、`llm_calls = 0`。
    **验收教训**：初版验收只用「干净 query」测同序同 id —— 那种组合下下推的 `where` 恰好等于候选
@@ -189,11 +190,13 @@ Query
    缺省走 `EphemeralClient`、不碰服务端**（A/B 隔离，见 §6-R9b），要跑服务端路径须显式
    `--chroma-client http`。
 
-## 6. 未决 / 风险（执行前必须处理）
+## 6. 风险与实测结论（R1~R10，**均已结清**）
 
-- **R1（未决，最要紧）**：`llama-index-retrievers-bm25 0.8.0` 实测依赖 **`bm25s` + `pystemmer`**，**不是 `rank_bm25`**。→ C3「换 rank_bm25」与 C2「全量 LlamaIndex」**字面冲突**。需二选一：
+- **R1（已定案）**：`llama-index-retrievers-bm25 0.8.0` 实测依赖 **`bm25s` + `pystemmer`**，**不是 `rank_bm25`**。→ C3「换 rank_bm25」与 C2「全量 LlamaIndex」**字面冲突**。二选一，**取 (a)**：
   - **(a)** 用 LlamaIndex `BM25Retriever`（引擎 = `bm25s`）+ `jieba` 分词 —— 满足「不手搓 + 成熟库 + 中文分词」的**意图**，但引擎不是 rank_bm25；
   - **(b)** 坚持 `rank_bm25` → 自写 Retriever 包一层，LlamaIndex 不再「全量」。
+  - **落地现状**：按 (a) 实施 —— `pyproject.toml` 的 `rag` extra 装 `llama-index-retrievers-bm25`（引擎 `bm25s`）+ `jieba`；
+    `chroma_backend.py` 的 BM25 路即该 Retriever（分词器接入方式见 §3 与 §6-R6）。
 - **R2（口径后果）**：过滤位置分裂（向量路 store 侧 / BM25 路 Python 侧），见 §3。需在文档如实标注。
 - **R3（依赖体量）**：LlamaIndex 最小集成组合实测 **+35 包**（含 `nltk` / `networkx` / `banks` / `aiosqlite` / `bm25s` / `jieba` / `pystemmer`），现项目共 138 包 → 约 +25%。公开仓库需评估是否可接受。
 - **R4（默认嵌入）**：真实 RAG 默认切 BGE 后，**CI / 无模型缓存环境**必须优雅降级或 skip（沿用 `BgeEmbedder.available()` 与「绝不静默回退 mock」约定）。
@@ -204,7 +207,7 @@ Query
   过滤后子集）**实测观测区间约 0.0275–0.0333**，报告不得照抄「0.0167」。已修 `chroma_backend.py` 3 处、
   `scripts/run_rag_eval.py` 2 处、本文件。
 
-**执行期新增（2026-09-10，SA-1 实测与主 agent 复查）**：
+**执行期新增（2026-09-10，实测与复核）**：
 
 - **R6（BM25 分词替换的并发正确性）—— 已实测结清（2026-09-10）：竞态**复现**并最小修正 + 两道守卫**。
   ``llama-index-retrievers-bm25 0.8.0`` 无 tokenizer 注入点 → 本模块只能**受控替换**
@@ -237,7 +240,7 @@ Query
   - **现实暴露面**：RAG **未接 HTTP 主流程**，故当前不是线上故障；一旦按「`build_tools("rag")`
     接进 FastAPI」（同步端点跑在线程池里）即为间歇性真错 —— 这是本轮把它从「理论风险」升级为
     「必修」的理由。
-- **R7（两路检索文本不一致）—— 已解决（用户拍板「裁剪为只索引正文」）**：实现改为在 `TextNode` 上设
+- **R7（两路检索文本不一致）—— 已解决（决策：裁剪为只索引正文）**：实现改为在 `TextNode` 上设
   `excluded_embed_metadata_keys`（`BM25Retriever` 内部用 `MetadataMode.EMBED`），使 BM25 只索引正文
   （policy `title。text` / case `summary`），与向量路口径一致；并已实测该排除设置**随 `_node_content`
   JSON 往返存活**（`BM25Retriever` 正是这样重建节点）。**证据**：仅由 metadata 字面值构成的 query
@@ -283,22 +286,22 @@ Query
   - ⚠️ **口径**：`ephemeral` 与 `http` **不是同一份存储**（前者随进程消失），报告里已如实标注本次客户端；
     **生产/普通 RAG 环境仍用服务端** —— 本开关只影响评测脚本；`http` 模式仍要求服务端在跑。
     `--probe` **仍缺省关闭**（拍板：probe 属诊断能力，不改默认评测路径；缺省输出与改动前逐字节一致）。
-- **R10（🔴 已修复的真缺陷：vector 模式漏召回）—— 由测试套件挖出，主 agent 独立复现，SA-1 修复**：
+- **R10（🔴 已修复的真缺陷：vector 模式漏召回）—— 由测试套件挖出，独立复现并修复**：
   现象 = 结果变成 `local` 的**真子集**、最坏**为空**（policy `risk_type=[FALSE_CLAIM]`：local 3 / chroma **0**；
   case `risk_type=[IP]` k=30：25 / 14；甚至**无 store 过滤**时也会发生 —— policy brand 词 + `effective_only`
   ：21 / 19，纯属 EXPIRED 行抢位）。根因与修法见 §3 最后一条。**验收教训**：初版验收只用干净 query
   （此时 `where` 恰好等于候选谓词）→ 漏洞不暴露；**契约类验收必须覆盖过滤器组合**。
   修复后 7 个组合全部同序同 id（分差 0.000e+00），并已把「带过滤的 vector 同序同 id」写成回归用例。
 
-## 7. Subagent 分派
+## 7. 实现分工（按文件边界拆分）
 
 | 单元 | 交付物 | 依赖 | 文件边界（避免并行冲突） |
 |---|---|---|---|
-| **SA-1** Chroma+LlamaIndex 向量路 | `src/pra/rag/chroma_backend.py`、`llama_embedding.py`、`factory.py`/`tools/__init__.py` 开关 | §3 契约 | 独占 `src/pra/rag/` 新增文件 |
-| **SA-2** BM25 路 + RRF | BM25 Retriever 接线 + RRF + `retrieval_score` 口径 | **R1 拍板** | 独占 `src/pra/rag/rrf.py`（若需要） |
-| **SA-3** 测试 | `tests/test_rag_chroma.py`、`tests/test_rag_chroma_server.py` | SA-1 接口 | 独占两个测试文件 |
-| **SA-4** 部署与文档 | `deploy/chroma/README.md`、docs 同步 | 无（**可立即并行**） | 独占 `deploy/chroma/` 与文档段 |
-| **SA-5** 验收脚本 | `scripts/run_rag_eval.py` 三路对比 + probe 报告 | SA-1/SA-2 | 独占该脚本 |
-| **主 agent** | 字段改名落地、pyproject/lock、回归、验收、提交、CI | 全部 | 冲突合并与最终裁决 |
+| 向量路（Chroma + LlamaIndex） | `src/pra/rag/chroma_backend.py`、`llama_embedding.py`、`factory.py`/`tools/__init__.py` 开关 | §3 契约 | 独占 `src/pra/rag/` 新增文件 |
+| BM25 路 + RRF | BM25 Retriever 接线 + RRF + `retrieval_score` 口径 | R1（已定案） | RRF 实现在 `chroma_backend.py::_fuse_rrf`（**无独立 `rrf.py`**） |
+| 测试 | `tests/test_rag_chroma.py`、`tests/test_rag_chroma_server.py` | 向量路接口 | 两个测试文件 |
+| 部署与文档 | `deploy/chroma/README.md`、docs 同步 | 无 | `deploy/chroma/` 与文档段 |
+| 验收脚本 | `scripts/run_rag_eval.py` 三路对比 + probe 报告 | 向量路 / BM25 路 | 该脚本 |
+| 集成与收口 | 字段改名落地、pyproject/lock、回归、验收、CI | 全部 | 冲突合并 |
 
-> 协作协议（AGENTS.md）：subagent 沙箱通常只覆盖工作区 → **镜像开发 + patch 交付，主 agent 在真实仓库落地并跑验收**；接口冻结（§3）是并行前提。
+> 协作前提：§3 的接口契约冻结后各单元方可并行；文件边界按上表划分，避免同文件并发修改。
