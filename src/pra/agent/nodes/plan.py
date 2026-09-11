@@ -68,15 +68,66 @@ def _case_subset(case) -> dict:
     }
 
 
+def _coverage_gap_lines(state: dict) -> list[str]:
+    """本案必需测量的覆盖清单（人读行，注入 plan 上下文）。
+
+    在**节点侧**用真实 state 计算（case 是 domain 对象、能力表齐备），渲染层只负责打印 ——
+    避免渲染层拿 ``__STATE__`` 里的 case 子集去反序列化（缺字段会炸）。
+
+    除 PASS 必需的四维外，**有阳性证据时额外列出 ``policy_citation`` 缺口**：
+    它不是 PASS 的必要条件（放行不需要引用依据），却是自动 REJECT 的必要条件。
+    不列出来，plan 会因为"必需覆盖已满"而提前 conclude，导致案件以
+    ``R3_POSITIVE_INSUFFICIENT`` 转人工、白白丢掉可自动拒绝的案。
+    """
+    from pra.agent.guardrails.measurements import coverage_report
+    from pra.domain.measurement import DIM_POLICY_CITATION
+
+    evidence = list(state.get("evidence") or [])
+    cov = coverage_report(
+        state.get("case"),
+        evidence,
+        state.get("measurement_capabilities"),
+    )
+    covered = [d for d in cov.required if d in cov.covered]
+    lines = [f"- 必需测量覆盖：{len(covered)}/{len(cov.required)}"]
+    for dim in cov.required:
+        if dim in cov.covered:
+            verdict = "阳性" if dim in cov.positive else "阴性"
+            lines.append(f"  - {dim}：已测（{verdict}）")
+        elif dim in cov.unmeasurable:
+            lines.append(f"  - {dim}：本环境不可测（不要再安排该类工具，重跑无用）")
+        else:
+            lines.append(f"  - {dim}：**尚未取得** —— 优先安排能补齐它的工具")
+    has_citable = any(
+        e.type in ("POLICY_REF", "CASE_PRECEDENT") and e.ref_id for e in evidence
+    )
+    if cov.positive and not has_citable:
+        if (state.get("measurement_capabilities") or {}).get(DIM_POLICY_CITATION, True):
+            lines.append(
+                "  - policy_citation：**尚未取得** —— 已存在阳性证据，自动拒绝必须能引用政策"
+                "条款或同类先例，**请安排先例/政策检索**"
+            )
+        else:
+            lines.append("  - policy_citation：本环境不可测（无检索数据源）")
+    return lines
+
+
 def _build_messages(state: dict) -> list[dict]:
     """组装 LLM 消息：system=规划指令；首条 user 以 "__STATE__ " 携带 state 子集
-    （hypotheses 仪表盘 + evidence 摘要 + case 子集，供 scripted 桩做确定性分支）。"""
+    （hypotheses 仪表盘 + evidence 摘要 + case 子集 + 环境测量能力 + 必需测量缺口，
+    供 scripted 桩做确定性分支）。
+
+    ``measurement_capabilities`` 与覆盖缺口一并注入：让 plan 优先安排能补齐缺口的工具，
+    并区分"没测"（可补）与"本环境不可测"（补不了，别空转）。
+    """
     payload = {
         "hypotheses": [
             h.model_dump(mode="json") for h in (state.get("hypotheses") or [])
         ],
         "evidence": [e.model_dump(mode="json") for e in (state.get("evidence") or [])],
         "case": _case_subset(state["case"]),
+        "measurement_capabilities": dict(state.get("measurement_capabilities") or {}),
+        "required_measurement_coverage": _coverage_gap_lines(state),
     }
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},

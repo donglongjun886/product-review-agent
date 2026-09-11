@@ -290,8 +290,10 @@ async def test_rag_world_eval_runs_and_default_regression_intact() -> None:
     )
 
     # (b) RAG 世界（smoke 子集）可跑通、确定性、且证据来源与 eval GT 隔离
+    # 取 **REJECT 真值案**：收敛判定改为"required 覆盖"后，无阳性的案子在覆盖完成时即收敛，
+    # 不会再为找政策/先例而多跑一轮 ⇒ 只有存在阳性的案才会真的检索先例，隔离断言才有意义。
     scheme = AgentScheme()
-    smoke = load_dataset(EVAL_V1)[:4]
+    smoke = [c for c in load_dataset(EVAL_V1) if c.expected.decision == "REJECT"][:4]
     ctx = EvalContext(tool_world="rag", rag_mode="hybrid")
     recs1 = [await scheme.run(c, ctx) for c in smoke]
     recs2 = [await scheme.run(c, ctx) for c in smoke]

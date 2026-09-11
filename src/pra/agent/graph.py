@@ -25,6 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from pra.agent.guardrails.budget import budget_exceeded
 from pra.agent.guardrails.converge import is_converged
 from pra.agent.guardrails.llm_shell import set_llm_backend
+from pra.agent.guardrails.measurements import capabilities_from_tools
 from pra.agent.nodes.decide import decide_node
 from pra.agent.nodes.hypothesize import hypothesize_node
 from pra.agent.nodes.plan import plan_node
@@ -106,6 +107,32 @@ def _wrap_node(name: str, action: Callable) -> Callable:
     return _node_with_span
 
 
+def _with_capabilities(fn: Callable, capabilities: dict[str, bool]) -> Callable:
+    """把装配期声明的**测量环境能力**注入 state 后再调用 ``fn``（闭包工厂）。
+
+    为什么需要：Gate 与收敛判定必须知道"某维度在本环境是否可测"（生产 image 是 Mock 桩
+    ⇒ ``image_appearance`` 不可测），而能力的权威来源是**实际装配的工具集** —— 只有
+    ``build_agent_graph`` 看得到它。注入只发生在传给被包函数的**副本**上，返回值不含该键，
+    故 LangGraph 的 state schema 不受影响。
+    """
+
+    @functools.wraps(fn)
+    async def _call(state: dict, config) -> dict:
+        return await fn({**state, "measurement_capabilities": capabilities}, config)
+
+    return _call
+
+
+def _route_with_capabilities(fn: Callable, capabilities: dict[str, bool]) -> Callable:
+    """条件边（路由）版本：LangGraph 只传 state、且要求**同步**可调用。"""
+
+    @functools.wraps(fn)
+    def _route(state: dict):
+        return fn({**state, "measurement_capabilities": capabilities})
+
+    return _route
+
+
 def route_after_plan(state: AgentState) -> Literal["tools", "decide"]:
     """``plan`` 之后的条件路由（确定性纯函数）。分支顺序固定：
 
@@ -167,11 +194,15 @@ def build_agent_graph(*, tools: list | None = None, checkpointer=None, llm=None)
     tools_action = make_tools_node(tools)
 
     builder = StateGraph(AgentState)
+    # 测量环境能力：唯一权威来源 = 实际装配的工具集（生产 image 是 Mock 桩 ⇒ 外观维度不可测）。
+    capabilities = capabilities_from_tools(tools)
     builder.add_node(N_HYPOTHESIZE, _wrap_node(N_HYPOTHESIZE, hypothesize_node))
-    builder.add_node(N_PLAN, _wrap_node(N_PLAN, plan_node))
+    builder.add_node(N_PLAN, _wrap_node(N_PLAN, _with_capabilities(plan_node, capabilities)))
     builder.add_node(N_TOOLS, _wrap_node(N_TOOLS, tools_action))
     builder.add_node(N_REEVALUATE, _wrap_node(N_REEVALUATE, reevaluate_node))
-    builder.add_node(N_DECIDE, _wrap_node(N_DECIDE, decide_node))
+    builder.add_node(
+        N_DECIDE, _wrap_node(N_DECIDE, _with_capabilities(decide_node, capabilities))
+    )
 
     # 静态边：START→hypothesize→plan；tools→reevaluate；decide→END（唯一终态出口）
     builder.add_edge(START, N_HYPOTHESIZE)
@@ -186,7 +217,7 @@ def build_agent_graph(*, tools: list | None = None, checkpointer=None, llm=None)
     # reevaluate 条件边：收敛/降级/超限 → decide；否则 continue 回 plan
     builder.add_conditional_edges(
         N_REEVALUATE,
-        route_after_reevaluate,
+        _route_with_capabilities(route_after_reevaluate, capabilities),
         {"continue": N_PLAN, N_DECIDE: N_DECIDE},
     )
     builder.add_edge(N_DECIDE, END)

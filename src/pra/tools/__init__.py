@@ -39,6 +39,7 @@ def build_tools(
     rag_backend_options: dict[str, Any] | None = None,
     product_repo: ProductRepository | None = None,
     merchant_repo: MerchantRepository | None = None,
+    vision_measurement_available: bool = True,
 ) -> list[Tool]:
     """组装并返回 6 个调查工具（默认注入 InMemory/Mock 数据源）。
 
@@ -70,7 +71,7 @@ def build_tools(
 
     tools: list[Tool] = [
         ProductTool(repo=product_repo),
-        ImageAnalysisTool(),
+        ImageAnalysisTool(measurement_available=vision_measurement_available),
         OCRTool(),
         MerchantTool(repo=merchant_repo),
         CaseSearchTool(),
@@ -119,6 +120,9 @@ def build_production_tools() -> list[Tool]:
     tools = build_tools(
         product_repo=MySQLProductRepository(),
         merchant_repo=MySQLMerchantRepository(),
+        # 生产视觉链路仍是**冻结的 Mock 桩**（真实商品图永远空命中）⇒ 声明"外观维度不可测"。
+        # 若不声明，桩的"零命中"会被 gate 当成"测过且阴性"，把"测不出"误判成"证明无风险"。
+        vision_measurement_available=False,
     )
     tools[4] = CaseSearchTool(index=LazyCaseIndex(_build_production_case_index))
     tools[5] = PolicySearchTool(index=LazyPolicyIndex(_build_production_policy_index))

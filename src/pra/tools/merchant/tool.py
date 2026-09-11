@@ -15,12 +15,21 @@ from typing import Any, Mapping, Protocol
 
 from pydantic import BaseModel, Field
 
+from ...domain.measurement import (
+    DIM_MERCHANT_PROFILE,
+    VERDICT_NEGATIVE,
+    VERDICT_POSITIVE,
+    make_measurement,
+)
 from ...domain.models import Evidence
 from ..base import ToolArgs, ToolContext, ToolResult
 
 # ---- 受控证据类型 & 默认证据强度 ----
 MERCHANT_HISTORY_TYPE = "MERCHANT_HISTORY"
 MERCHANT_HISTORY_WEIGHT = 0.85  # 多信号聚合型证据默认高权重（暂定默认，可调）
+# 「系统性规避行为」的确定性阈值：removals 或 title-relisting 达到该值即视为行为模式成立。
+# 单一来源：measurements 的阳性映射与 gate 的 risk_type 派生都引用本常量。
+MERCHANT_DIRTY_MIN = 3
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +132,8 @@ class MerchantTool:
     name = "MerchantTool"
     description = "查询商家的系统性行为画像：在架商品数、相似商品数、历史违规/下架/改标题重上架次数、信用分"
     args_model = MerchantArgs
+    measured_dimensions: frozenset[str] = frozenset({DIM_MERCHANT_PROFILE})
+    measurement_available: bool = True
 
     def __init__(self, repo: MerchantRepository | None = None) -> None:
         self._repo: MerchantRepository = repo or InMemoryMerchantRepository()
@@ -134,11 +145,15 @@ class MerchantTool:
         return MerchantResult(profile=profile)
 
     def to_evidence(self, result: MerchantResult) -> list[Evidence]:
-        """结果 → Evidence：1 条聚合 MERCHANT_HISTORY。
+        """结果 → Evidence：1 条聚合 ``MERCHANT_HISTORY`` + 1 条 ``MEASUREMENT``。
 
         value 拼成 ``"23 similar / 5 removals / 3 title-relisting, credit=62"``；
         ``ref_id=merchant_id``（稳定业务标识）；「规避行为模式」的判定由 guardrails
         确定性层基于 backfill_extra 后的 extra 数据完成，本工具只交付画像事实。
+
+        测量结论按 ``MERCHANT_DIRTY_MIN`` 硬阈值给出：达到阈值 → ``POSITIVE``（行为模式成立），
+        否则 → ``NEGATIVE``（**画像全 0 是有效的阴性测量，不是"没查到"**）。
+        **商家查无（``ok=False``）刻意不产任何证据**：那是 ``NOT_MEASURED``，与"全 0"不可混。
         """
         if not result.ok or result.profile is None:
             return []
@@ -147,6 +162,7 @@ class MerchantTool:
             f"{p.similar_product_count} similar / {p.removals} removals / "
             f"{p.title_relisting_count} title-relisting, credit={p.credit_score}"
         )
+        dirty = p.removals >= MERCHANT_DIRTY_MIN or p.title_relisting_count >= MERCHANT_DIRTY_MIN
         return [
             Evidence(
                 type=MERCHANT_HISTORY_TYPE,
@@ -154,5 +170,16 @@ class MerchantTool:
                 value=value,
                 weight=MERCHANT_HISTORY_WEIGHT,
                 ref_id=p.merchant_id,
-            )
+            ),
+            make_measurement(
+                dimension=DIM_MERCHANT_PROFILE,
+                source=self.name,
+                source_ref=p.merchant_id,
+                verdict=VERDICT_POSITIVE if dirty else VERDICT_NEGATIVE,
+                weight=MERCHANT_HISTORY_WEIGHT,
+                value=(
+                    f"商家行为画像已测：removals={p.removals}, "
+                    f"title-relisting={p.title_relisting_count}（阈值 {MERCHANT_DIRTY_MIN}）"
+                ),
+            ),
         ]

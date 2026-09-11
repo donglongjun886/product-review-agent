@@ -163,6 +163,6 @@ async def test_render_report_v1_numeric_rows_unchanged() -> None:
     )
     assert (
         "agent             1.000  1.000  1.000  0.000  0.000  0.000  1.000  20/0/15/0  "
-        "llm=6.37 tool=5.0 tok=0.0" in text
+        "llm=5.14 tool=4.14 tok=0.0" in text
     )
     assert "真值案: 共 35 条（PASS=15 / REJECT=20 / HUMAN_REVIEW=0）" in text

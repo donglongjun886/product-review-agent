@@ -720,3 +720,120 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
   并给出可复现的归因。
 - **后续可选实验**（P1）：`--llm-budget 12/15` 跑同批数据 —— 抬高预算后转人工率显著下降 ⇒ 瓶颈是预算；
   仍打满 ⇒ 瓶颈是收敛。该实验不改任何判定规则与数据集。
+
+---
+
+## 13. Gate 语义重构：三态测量 + 事实侧裁决（2026-09-11）
+
+> **与 §11/§12 的关系**：§11（scripted 封板）与 §12（real 单次）是**重构前**的历史基线，
+> **原样保留、不覆盖、不改写**。本节记录重构后的语义与验证结果，供与 `--git` 历史对照。
+> 本节数字由 HEAD 实测产出（`run_evaluation.py` / `pytest`），产出命令写在 13.4。
+
+### 13.1 改什么、为什么
+
+原链路 `LLM Hypothesis → prior → high_priority → 必须 REFUTED → PASS` 有三处结构性问题
+（归因见 §12.7 与错误分析）：
+
+1. **`prior` 是 LLM 自由生成的调查优先级**，却被当成 Gate 的"高优先风险集合"依据；
+   实测 0.25/0.30 两个刻度占全部假设的 39.8%，阈值正好压在其间；
+2. **normal 假设与 risk 假设语义混用**：被强制产出的"正常假设"一旦 `prior>=0.3` 进入
+   `hp`，Gate 就要求它被"证伪"，而"商品正常"只可能被证据**支持**；
+3. **Evidence 无法区分"没测"与"测过且阴性"**：干净图 `to_evidence()` 返回 `[]`，
+   与"根本没调工具"在证据层完全同形 —— 证据只能停留在 `UNRESOLVED`。
+
+### 13.2 新语义
+
+**Evidence 三态**（`domain/measurement.py`）：`MEASURED_POSITIVE` / `MEASURED_NEGATIVE`
+由证据承载（新增 `MEASUREMENT` 类型，含阴性结论）；`NOT_MEASURED` / `UNMEASURABLE`
+**不是证据**，由 Gate 用 `required × 证据存在性 × 环境能力` 推导 —— 不为"缺席"造证据，
+以保住"查不到 ≠ 证明无"。
+
+**required measurement set**（`guardrails/measurements.py`）：只由**案件可观测事实**导出，
+不读 `expected/annotation/family`（有 AST 守卫测试）：`listing_registry` / `merchant_profile` /
+`text_compliance` 恒必需；`image_appearance` 仅当案件带图；`policy_citation` **仅 REJECT 候选**必需。
+
+**两道 Gate 只读事实通道**（证据链 + 覆盖 + 规则命中 + 冲突），**不读** `prior` / `posterior` /
+`Hypothesis.status` / `evidence_for`（有参数化不变量测试逐字段篡改后断言结果不变）：
+
+| 终裁 | 判据 |
+|---|---|
+| **PASS** | 无维度匹配阳性 ∧ 无规则阳性（R-102/R-302）∧ required 全覆盖（无 NOT_MEASURED / UNMEASURABLE）∧ 无关键工具失败 ∧ 无证据冲突 |
+| **REJECT** | ∃ 真实证据链中**与风险维度匹配的硬阳性**（强相似 ≥0.85 / Logo / 商家 removals 或 title-relisting ≥3 / 显式 POSITIVE 测量）∧ ∃ 带 `ref_id` 的可引用依据 ∧ `dc≥0.7` ∧ 无冲突 |
+| **HUMAN_REVIEW** | 上述任一不满足；归因码区分：`R3_MEASUREMENT_MISSING`（未测，**可补救**，路由先回环补测）/ `R3_DIMENSION_UNMEASURABLE`（环境缺失，**不回环**）/ `R3_POSITIVE_INSUFFICIENT`（只有弱信号）/ `R3_EVIDENCE_CONFLICT`（冲突） |
+
+**弱相似 0.70~0.85 的显式处置**：不算阳性 ⇒ 单独不足以自动 REJECT（`EC_V2_0163`/`EC_V2_0219`
+两例误杀的成因）；其应然处置是"与商品事实交叉"，由 required 维度 `listing_registry` 承担 ——
+商品在库不可核验时该维度落 `NOT_MEASURED`，案件自然转人工（对应 `weak_sim_noinfo` 一族）。
+
+**`decision_confidence` 重算**：主项从"LLM posterior"改为事实侧
+（`0.40*coverage + 0.30*strength + 0.20*citation + 0.10 - 0.20*conflict`）；
+`MAX_EXPECTED_EVIDENCE` 的 `len(evidence)/8` 完整性项已废弃（测量证据会使其饱和）。
+系数为结构性给定，**未用任何数据集拟合**；`CONFIDENCE_ABSTAIN_THRESHOLD = 0.7` 未改。
+
+**归因码变更**：新增 `R3_MEASUREMENT_MISSING` / `R3_DIMENSION_UNMEASURABLE` /
+`R3_POSITIVE_INSUFFICIENT` / `R3_EVIDENCE_CONFLICT`；移除 `R3_POLICY_UNCERTAIN` /
+`R3_HYPOTHESES_INDISTINGUISHABLE` / `R3_VISUAL_CLAIM_UNSUPPORTED`（均以假设状态为前提）。
+⇒ **§12.6 的 overrides 分布与本节不可直接比数**。
+
+### 13.3 环境能力声明（生产与评测不同）
+
+生产的 `image_analysis` / `ocr` 仍是**冻结 Mock 桩**（真实商品图永远空命中）⇒
+`build_production_tools()` 显式声明 `image_appearance` 为 **UNMEASURABLE**。
+不声明会把"桩测不出"误判成"测过且阴性"。**后果（如实声明）**：生产入口对带图案件
+在拿到真实视觉数据源之前不会自动放行 —— 这是已声明的覆盖缺口，不是静默降级。
+
+### 13.4 验证记录（重构后）
+
+命令：`uv run pytest tests/ -q` / `uv run ruff check src/ scripts/ tests/` /
+`uv run python scripts/run_evaluation.py --data eval_data/v2/cases_v2.jsonl --schemes agent`
+
+| 项 | 重构前 | 重构后 |
+|---|---|---|
+| pytest | 566 passed, 4 skipped | **576 passed, 4 skipped** |
+| ruff | 118 | **112** |
+| scripted v2 agent（§11 口径） | 0.964 / 1.000 / 1.000 / FPR 0 / FNR 0 / hrr 0.036 / 140-0-124-0 | **完全一致**（含混淆矩阵） |
+| scripted v2 **逐案决策变化** | — | **0 / 320** |
+| 安全单调性（GT=PASS→REJECT / GT=REJECT→PASS / SHOULD_ABSTAIN 被自动终裁 / 丢历史 REJECT） | — | **0 / 0 / 0 / 0** |
+| abstention_recall | 46/46 = 1.000 | **46/46 = 1.000** |
+| scripted v2 成本/案 | llm 6.79 · tool 5.09 | **llm 5.45 · tool 4.19** |
+| v1 35 案 agent | acc 1.000 · llm 6.37 · tool 5.00 | acc **1.000** · llm **5.14** · tool **4.14** |
+
+> **结论**：本次重构在 scripted 基线（v2 320 / v1 35）上**决策零变化**、四项安全单调性全 0、
+> 而单案 LLM/工具调用下降约 20%/18% —— 即"用事实侧判据替换 LLM 自报判据"未改变已有行为，
+> 只削减了空转。**历史基线 §11 保持可对照，未被本次改动覆盖。**
+
+### 13.5 real 臂分层小样本复验（16 案；单次、不可重放）
+
+命令：`run_evaluation_real.py --data eval_data/v2 --ids <16 个分层案> --concurrency 4`
+（按 scene × GT 分层各 2 案 + 两例历史误杀案；**不跑 320 全量**、不重复采样）。
+
+| 指标 | §12（重构前 320 全量） | 本次 16 案样本 |
+|---|---|---|
+| GT=PASS → PASS | **0 / 64** | **5 / 5** |
+| GT=REJECT → REJECT | 30 / 140 | 5 / 6 |
+| GT=HUMAN_REVIEW → HUMAN_REVIEW | 46 / 46 | 5 / 5 |
+| 漏放（GT=REJECT → PASS） | 0 | **0** |
+| 误杀（GT=PASS → REJECT） | **2** | **0** |
+| SHOULD_ABSTAIN 被自动终裁 | 0 | **0** |
+| 撞 `LLM_CALLS=10` | 157 / 320（49%） | 4 / 16（25%） |
+| `token=0` 案（静默回退审计） | 0 | 0 |
+
+- 两例历史误杀（`EC_V2_0163` / `EC_V2_0219`，均 `weak_sim_own`）本次**均为 PASS** ——
+  弱相似不再授权自动拒绝，其应然处置（与商品事实交叉）由 required 维度承担。
+- 样本内出现的 1 例 `GT=REJECT → HUMAN_REVIEW` 与 4 例预算截胡均**不是 PASS 漏放**（安全侧无损）。
+- 单案工具调用 4.12（§12 为 5.6 量级）；`llm/案` 6.5 与 §12 的 9.17 相比下降，但本样本按分层取案，
+  **成本数字不可与 §12 直接比数**。
+
+> **不可外推**：16 案、单次、单模型、非确定性、InMemory 工具世界且生产视觉不可测。
+> 本表只用于验证"两个已知结构性问题在真实 LLM 下是否消失"，**不得**当作 real 能力的估计。
+
+### 13.6 尚未做与边界
+
+- **预算调优未做**（第二阶段）：`is_converged` 改为覆盖判定后收敛提前，但 `LLM_CALLS=10` 上限未动。
+- 110 例 `GT=REJECT → HUMAN_REVIEW`（§12.3）属回环/取证问题，**不在本次语义重构范围**。
+- `listing_registry` 的**阳性路径**（案件声明与在库事实不一致的确定性比对）未实现，
+  仍是既有已知边界；该维度只判"事实取到了没有"。
+- **"仅商家行为脏"不授权自动拒绝**（需本 listing 外观信号佐证）—— 该收严来自 reviewer 语义
+  （"疑似规避但图/文本无确证 → 克制转人工"，GT 家族 `dirty_brand_missing_cleanimg`），
+  由 `measurements.reject_positive_dims` 实现，并有单测锁定；若后续业务改判该族，
+  必须先改这条语义再改实现。

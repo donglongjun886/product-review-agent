@@ -33,6 +33,12 @@ from pra.tools.merchant.mysql_repo import (
     MySQLMerchantRepository,
     to_profile,
 )
+from pra.domain.measurement import (
+    DIM_MERCHANT_PROFILE,
+    MEASUREMENT_TYPE,
+    VERDICT_NEGATIVE,
+    VERDICT_POSITIVE,
+)
 from pra.tools.merchant.tool import (
     _DEFAULT_MERCHANTS,
     MERCHANT_HISTORY_TYPE,
@@ -348,11 +354,16 @@ async def test_mysql_merchant_repository_roundtrip_against_real_db():
         res = await tool.call(MerchantArgs(merchant_id=merchant_id), _ctx())
         assert res.ok is True
         evs = tool.to_evidence(res)
-        assert len(evs) == 1
-        assert evs[0].type == MERCHANT_HISTORY_TYPE
-        assert evs[0].ref_id == merchant_id
-        assert evs[0].weight == MERCHANT_HISTORY_WEIGHT
-        assert evs[0].source == "MerchantTool"
+        # 1 条聚合画像事实 + 1 条测量结论（含阳性/阴性判定）
+        history = [e for e in evs if e.type == MERCHANT_HISTORY_TYPE]
+        assert len(history) == 1
+        assert history[0].ref_id == merchant_id
+        assert history[0].weight == MERCHANT_HISTORY_WEIGHT
+        assert history[0].source == "MerchantTool"
+        measurements = [e for e in evs if e.type == MEASUREMENT_TYPE]
+        assert len(measurements) == 1
+        assert measurements[0].extra["dimension"] == DIM_MERCHANT_PROFILE
+        assert measurements[0].extra["verdict"] in (VERDICT_NEGATIVE, VERDICT_POSITIVE)
 
         missing = await MySQLMerchantRepository().get_profile(
             f"{merchant_id}_NOPE", window_days=90

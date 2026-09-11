@@ -127,7 +127,9 @@ async def test_override_isolated_to_injected_arm_scripted_control_stays_default(
     r_ctl = await control.run(case, ctx)
 
     assert r_real.cost["llm_calls"] == 2 and r_real.decision == "HUMAN_REVIEW"
-    assert r_real.detail["overrides"] == ["R3_BUDGET_EXHAUSTED"]
+    # 预算截胡为**首因**；因调查被腰斩，关键测量必然有缺口 → 追加 R3_MEASUREMENT_MISSING
+    assert r_real.detail["overrides"][0] == "R3_BUDGET_EXHAUSTED"
+    assert set(r_real.detail["overrides"]) <= {"R3_BUDGET_EXHAUSTED", "R3_MEASUREMENT_MISSING"}
     # 对照臂跑满自然调查（无 R3、调用数 > 被截胡臂）—— 覆盖不跨实例泄漏
     assert r_ctl.detail["overrides"] == []
     assert r_ctl.cost["llm_calls"] > r_real.cost["llm_calls"]

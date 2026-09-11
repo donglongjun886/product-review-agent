@@ -35,6 +35,11 @@ from pra.tools.product.mysql_repo import (
     ProductSkuORM,
     to_snapshot,
 )
+from pra.domain.measurement import (
+    DIM_LISTING_REGISTRY,
+    MEASUREMENT_TYPE,
+    VERDICT_NEGATIVE,
+)
 from pra.tools.product.tool import (
     _DEFAULT_PRODUCTS,
     PRODUCT_FACT_TYPE,
@@ -215,8 +220,9 @@ def test_brand_sql_null_is_not_normalised_to_empty_string():
     assert snap.brand != "null"
 
     evs = ProductTool().to_evidence(ProductResult(product=snap))
-    assert len(evs) == 1
-    assert "brand=null" in evs[0].value
+    facts = [e for e in evs if e.type == PRODUCT_FACT_TYPE]
+    assert len(facts) == 1
+    assert "brand=null" in facts[0].value
 
 
 @pytest.mark.parametrize("attributes", [None, {}])
@@ -468,15 +474,19 @@ async def test_mysql_product_repository_roundtrip_against_real_db():
         assert res_missing.ok is False
         assert res_missing.product is None
 
-        # ③ 命中 → to_evidence() 恰好 1 条 PRODUCT_FACT
+        # ③ 命中 → to_evidence() = 1 条 PRODUCT_FACT + 1 条 MEASUREMENT(listing_registry)
         res = await tool.call(ProductArgs(product_id=product_id), _ctx())
         assert res.ok is True
         evs = tool.to_evidence(res)
-        assert len(evs) == 1
-        assert evs[0].type == PRODUCT_FACT_TYPE
-        assert evs[0].ref_id == product_id
-        assert evs[0].weight == PRODUCT_FACT_WEIGHT
-        assert evs[0].source == "ProductTool"
+        facts = [e for e in evs if e.type == PRODUCT_FACT_TYPE]
+        assert len(facts) == 1
+        assert facts[0].ref_id == product_id
+        assert facts[0].weight == PRODUCT_FACT_WEIGHT
+        assert facts[0].source == "ProductTool"
+        measurements = [e for e in evs if e.type == MEASUREMENT_TYPE]
+        assert len(measurements) == 1
+        assert measurements[0].extra["dimension"] == DIM_LISTING_REGISTRY
+        assert measurements[0].extra["verdict"] == VERDICT_NEGATIVE
     finally:
         await _delete_seed(product_id)
 

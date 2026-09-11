@@ -273,7 +273,7 @@ async def test_decide_llm_failure_r5_override():
 
 
 async def test_decide_success_path_adopts_reject():
-    """成功路径：REJECT 提案过 Gate → 采纳（overrides=[]、dc=0.87）、failures=[]。"""
+    """成功路径：REJECT 提案过 Gate → 采纳（overrides=[]、dc=0.95）、failures=[]。"""
     backend = NodePayloadBackend(payloads={"decide": decide_reject_json()})
     set_llm_backend(backend)
     st = dc_anchor_state()
@@ -283,7 +283,7 @@ async def test_decide_success_path_adopts_reject():
     decision = out["decision"]
     assert decision.decision == Decision.REJECT
     assert decision.overrides == []
-    assert decision.decision_confidence == 0.87
+    assert decision.decision_confidence == 0.95
     assert decision.risk_level == RiskLevel.HIGH
     assert decision.risk_type == [RiskType.POTENTIAL_IP_RISK]
     assert decision.policy == ["POLICY_3.2"]

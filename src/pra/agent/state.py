@@ -75,6 +75,10 @@ class AgentState(TypedDict, total=False):
     pending_tool_calls: list[dict]  # plan 写、tools 消费后置 []；元素 {tool, args, reason, priority}
     degraded: bool  # 上一 LLM 步 schema 校验失败降级标记；覆盖写（True 后不再调 LLM）
     failures: Annotated[list[dict], add]  # 步骤失败审计 {step_type, tool?, severity, reason, ts}
+    # 测量环境能力（维度 → 本环境是否可测）。**由 build_agent_graph 从实际工具集注入**到
+    # decide 节点与 reevaluate 路由的入参副本上，不写回图状态；缺失时按"可测"保守处理
+    # ⇒ 未测维度落 NOT_MEASURED（弃权），而不是被误当成"测过且阴性"。
+    measurement_capabilities: dict[str, bool]
 
 
 def build_initial_state(case: ProductReviewCase) -> AgentState:
@@ -94,4 +98,5 @@ def build_initial_state(case: ProductReviewCase) -> AgentState:
         pending_tool_calls=[],
         degraded=False,
         failures=[],
+        measurement_capabilities={},
     )

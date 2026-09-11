@@ -90,8 +90,9 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "输出要求（硬性约束）：\n"
         "1. hypotheses 至少 1 条，每条**一句话可验证**，聚焦可取证的风险维度（外观相似"
         " / 品牌规避 / 商家行为 / 字段冲突 / 虚假宣传等）；\n"
-        "2. **必须包含至少 1 条「低风险/正常」假设**（避免只报风险、预设违规）—— 这是"
-        " PASS 成立的前提之一；\n"
+        "2. **必须包含至少 1 条「低风险/正常」假设**（避免只报风险、预设违规）—— 它的作用是"
+        "让调查方向保持平衡；**它不参与终裁**（放行与否由证据侧的关键测量覆盖决定，不看假设的"
+        "状态或先验）；\n"
         "3. prior = 未经任何调查时的先验怀疑度（0..1），**不要求归一化、不要求总和为 "
         "1**；对上下文中的可疑信号（如品牌字段空缺、类目与标题不符、机审命中）给更高"
         "先验；\n"
@@ -138,7 +139,11 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "「验证哪条假设 → 要补哪类证据」；\n"
         "5. 工具名只能取自 user 上下文「可用取证工具目录」；args 必须符合该工具入参"
         " Schema（字段名/类型/必填一致）；目录为空 = 本轮无工具可调，应优先 conclude；\n"
-        "6. 只输出符合 PlanOutput JSON Schema 的 JSON（next_action / tools / "
+        "6. **优先补齐必需测量缺口**：user 上下文「本案必需测量覆盖」里标注**尚未取得**的"
+        "维度，优先安排能补齐它的工具；若连续多轮无法补齐（工具失败/无数据），说明该维度"
+        "在本环境不可得，应停止重试并 conclude —— 由确定性 Gate 按「关键测量缺失」转人工。"
+        "标注**本环境不可测**的维度不要安排任何工具；\n"
+        "7. 只输出符合 PlanOutput JSON Schema 的 JSON（next_action / tools / "
         "rationale），不要输出解释文字。"
     ),
     "reevaluate": (
@@ -179,25 +184,24 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "11. 只输出符合 ReevaluateOutput JSON Schema 的 JSON，不要输出解释文字。"
     ),
     "decide": (
-        "你是商品审核 Agent 的「最终决策提案器」（decide）。基于 user 上下文中的假设"
-        "仪表盘与完整证据链，给出**裁决提案**。注意：你只产提案 —— 确定性 overlay "
-        "随后还会做 Gate 校验、风险/置信度重算与兜底改判；你负责给出最合理、可被证据"
-        "支撑的三分类提案。\n"
-        "三分类语义：\n"
-        "1) PASS：所有高优先（high prior）假设均被证据证伪（REFUTED），且无未解决的"
-        "证据缺口 —— 放行；\n"
-        "2) REJECT：存在被证据支持（SUPPORTED）的高优先假设，证据链充分，且能引用"
-        "上下文证据中**真实出现**的政策条款（POLICY_REF）或同类先例（CASE_PRECEDENT）"
-        "支撑 —— 拒绝上架；无据可依时宁可转人工，绝不无依据拒绝；\n"
-        "3) HUMAN_REVIEW：证据不足 / 置信不足 / 证据矛盾 / 政策模糊 / 关键取证失败 / "
-        "系统降级 —— **克制地转人工不是失败**，不确定就不要硬判 PASS/REJECT。\n"
-        "**证据充分即裁决（硬性）**：当高优先假设的证据链已充分、无未解决疑点、无证据"
-        "矛盾，且 PASS 侧无证据缺口、REJECT 侧有上下文证据中**真实出现**的政策条款"
-        "（POLICY_REF）或同类先例（CASE_PRECEDENT）支撑 —— 本轮就应直接给出 PASS / "
-        "REJECT 裁决提案，**不要把本可裁决的案件推给 HUMAN_REVIEW**；HUMAN_REVIEW 仍"
-        "只留给真正的证据不足 / 证据矛盾 / 政策模糊 / 关键取证失败 / 系统降级场景。"
-        "裁决依据只能取自上下文真实存在的证据（引用串 / 条款号 / 先例），**禁止凭标题"
-        "、类目或先例脑补上下文没有的事实**；\n"
+        "你是商品审核 Agent 的「最终决策提案器」（decide）。基于 user 上下文中的完整"
+        "证据链，给出**裁决提案**。注意：你只产提案 —— 确定性 overlay 随后会用**事实侧"
+        "判据**（证据链 + 必需测量覆盖 + 规则命中 + 冲突）做 Gate 校验与兜底改判；"
+        "假设的状态与先验**不参与**终裁，你不要依据它们下结论。\n"
+        "三分类语义（以证据为准）：\n"
+        "1) PASS：本案必需的关键测量（商品在库核验 / 商家行为 / 文本合规 / 带图时的外观"
+        "比对）**都已取得明确阴性结论**，且证据链中不存在达处置阈值的阳性、无规则命中 "
+        "—— 放行；\n"
+        "2) REJECT：证据链中存在**与风险维度匹配且达阈值**的阳性证据（如外观相似度 "
+        ">= 0.85、检出品牌 Logo、商家 removals 或 title-relisting >= 3），并且能引用"
+        "上下文中**真实出现**的政策条款（POLICY_REF）或同类先例（CASE_PRECEDENT）支撑"
+        " —— 拒绝上架；\n"
+        "3) HUMAN_REVIEW：必需测量尚缺或本环境不可测 / 只有**未达阈值**的弱信号（如相似度 "
+        "0.70~0.85）/ 证据互相矛盾 / 缺少可引用依据 / 系统降级 —— **克制地转人工不是失败**。\n"
+        "**两条硬性边界**：① 只有弱信号（例如相似度 0.70~0.85、仅命中品牌词而无法核验"
+        "授权）时**不得**提 REJECT，应转人工复核；② 存在未取得的关键测量时**不得**提 "
+        "PASS（「没查到」不等于「证明不存在」）。裁决依据只能取自上下文真实存在的证据"
+        "（引用串 / 条款号 / 先例），**禁止凭标题、类目或先例脑补上下文没有的事实**；\n"
         "硬性约束：\n"
         "1. decision ∈ PASS | REJECT | HUMAN_REVIEW；risk_level ∈ NONE | LOW | MEDIUM | "
         "HIGH；risk_type 只能从 POTENTIAL_IP_RISK / EVASION_PATTERN / FALSE_CLAIM / "
@@ -707,6 +711,14 @@ def build_user_prompt(
         parts.append(_section("四、已收集证据摘要", "\n".join(_evidence_lines(state.get("evidence"), full_value=False, limit=120))))
         parts.append(_section("五、调查队列", "\n".join(_queue_lines(state.get("investigation_queue")))))
         parts.append(_section("六、可用取证工具目录", _tool_catalog_text(catalog)))
+        gap = state.get("required_measurement_coverage")
+        if isinstance(gap, list) and gap:
+            parts.append(
+                _section(
+                    "七、本案必需测量覆盖（Missing = 必须补测；不可测的不要再安排）",
+                    "\n".join(str(line) for line in gap),
+                )
+            )
     elif node == "reevaluate":
         parts.append(_section("一、假设仪表盘", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
         parts.append(_section("二、本轮已收集证据（全部）", "\n".join(_evidence_lines(state.get("evidence")))))

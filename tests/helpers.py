@@ -9,6 +9,15 @@ import json
 from datetime import datetime
 
 from pra.agent.guardrails.llm_shell import LLMBackendError, LLMResponse
+from pra.domain.measurement import (
+    ALL_DIMENSIONS,
+    DIM_IMAGE_APPEARANCE,
+    DIM_LISTING_REGISTRY,
+    DIM_MERCHANT_PROFILE,
+    VERDICT_NEGATIVE,
+    VERDICT_POSITIVE,
+    make_measurement,
+)
 from pra.domain.models import (
     Budget,
     Evidence,
@@ -20,7 +29,6 @@ from pra.domain.models import (
     ScreeningSignal,
     SkuInfo,
 )
-
 
 # domain 对象工厂
 
@@ -102,25 +110,84 @@ def make_case(
 # 常用 state 骨架（确定性纯函数/节点测试复用）
 
 
+def measurement(
+    dimension: str,
+    *,
+    source: str = "TestTool",
+    source_ref: str = "REF_1",
+    verdict: str = VERDICT_NEGATIVE,
+    weight: float = 0.85,
+    value: str = "测量完成",
+) -> Evidence:
+    """一条 ``MEASUREMENT`` 证据（走领域构造器，保证与生产同形）。"""
+    return make_measurement(
+        dimension=dimension,
+        source=source,
+        source_ref=source_ref,
+        verdict=verdict,
+        weight=weight,
+        value=value,
+    )
+
+
+def all_measureable_caps() -> dict[str, bool]:
+    """全部维度可测的能力表（评测/演示世界口径）。"""
+    return {dim: True for dim in ALL_DIMENSIONS}
+
+
+def covered_evidence(
+    *,
+    image_url: str = "https://cdn.example.com/products/P_TEST/img1.jpg",
+    product_id: str = "P_TEST",
+    merchant_id: str = "M_TEST",
+    merchant_removals: int = 0,
+    similarity: float | None = None,
+) -> list[Evidence]:
+    """一套**覆盖完整**的证据链（required 维度全部有一个测量结论）。
+
+    ``similarity=None`` → 外观阴性；给值则产 ``IMAGE_SIMILARITY``（>=0.85 才算阳性）。
+    """
+    evs: list[Evidence] = [
+        ev("PRODUCT_FACT", source="ProductTool", value="brand=山丘, version=3（库中最新）",
+           weight=0.6, ref_id=product_id),
+        measurement(DIM_LISTING_REGISTRY, source="ProductTool", source_ref=product_id, weight=0.6),
+        ev("MERCHANT_HISTORY", source="MerchantTool",
+           value=f"0 similar / {merchant_removals} removals / 0 title-relisting, credit=90",
+           weight=0.85, ref_id=merchant_id,
+           extra={"similar": 0, "removals": merchant_removals, "title": 0, "credit": 90}),
+        measurement(
+            DIM_MERCHANT_PROFILE,
+            source="MerchantTool",
+            source_ref=merchant_id,
+            verdict=VERDICT_POSITIVE if merchant_removals >= 3 else VERDICT_NEGATIVE,
+        ),
+        measurement(DIM_IMAGE_APPEARANCE, source="ImageAnalysisTool", source_ref=image_url),
+    ]
+    if similarity is not None:
+        evs.append(
+            ev("IMAGE_SIMILARITY", source="ImageAnalysisTool",
+               value=f"similarity={similarity:.2f}, match=某品牌经典鞋款",
+               weight=similarity, ref_id=image_url)
+        )
+    return evs
+
+
 def dc_anchor_state() -> dict:
-    """锚点 state：5 条证据（含 citable POLICY_REF/CASE_PRECEDENT）+ H2 SUPPORTED posterior=0.91。"""
+    """锚点 state：覆盖完整的证据链 + 强相似 0.91 + 商家脏 + 可引用依据。
+
+    相对于旧锚点（5 条证据 / posterior=0.91），本锚点改为**事实侧锚点**：
+    required 四维全覆盖 + 两个维度阳性 + 带 ref_id 的 POLICY_REF/CASE_PRECEDENT。
+    """
     hypotheses = [
         hp("H1", prior=0.5, status=HypothesisStatus.REFUTED, posterior=0.05,
            evidence_against=["IMAGE_SIMILARITY similarity=0.42, match=某品牌条纹运动鞋"]),
         hp("H2", prior=0.4, status=HypothesisStatus.SUPPORTED, posterior=0.91,
            evidence_for=["IMAGE_SIMILARITY similarity=0.91, match=某品牌经典鞋款"]),
     ]
+    image_url = "https://cdn.example.com/products/P_88231/img1.jpg"
     evidence = [
-        ev("IMAGE_SIMILARITY", source="ImageAnalysisTool",
-           value="similarity=0.91, match=某品牌经典鞋款", weight=0.91,
-           ref_id="https://cdn.example.com/products/P_88231/img1.jpg"),
-        ev("PRODUCT_FACT", source="ProductTool",
-           value="brand=null, version=3（库中最新）, status=ON_SALE, category=女鞋/运动鞋",
-           weight=0.6, ref_id="P_88231"),
-        ev("MERCHANT_HISTORY", source="MerchantTool",
-           value="23 similar / 5 removals / 3 title-relisting, credit=62",
-           weight=0.85, ref_id="M_5512",
-           extra={"similar": 23, "removals": 5, "title": 3, "credit": 62}),
+        *covered_evidence(image_url=image_url, product_id="P_88231", merchant_id="M_5512",
+                          merchant_removals=5, similarity=0.91),
         ev("CASE_PRECEDENT", source="CaseSearchTool",
            value="case_1001 无品牌标识+外观高度模仿", weight=0.8, ref_id="case_1001"),
         ev("POLICY_REF", source="PolicySearchTool",
@@ -129,17 +196,20 @@ def dc_anchor_state() -> dict:
            extra={"policy_id": "POLICY_3.2", "policy_version": 2}),
     ]
     return {
+        "case": make_case(brand=None, product_id="P_88231", merchant_id="M_5512"),
         "hypotheses": hypotheses,
         "evidence": evidence,
         "budget": Budget(),
         "failures": [],
         "tool_call_history": [],
         "degraded": False,
+        "measurement_capabilities": all_measureable_caps(),
     }
 
 
 def budget_exhausted_state() -> dict:
     return {
+        "case": None,
         "hypotheses": [],
         "evidence": [],
         "budget": Budget(llm_calls=10),  # BudgetLimits().max_llm_calls == 10

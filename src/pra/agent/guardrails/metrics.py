@@ -11,8 +11,7 @@ state 缺字段时安全返回确定性取值。
 
 from __future__ import annotations
 
-from pra.agent.guardrails import errors, gate, hard_rules
-from pra.agent.guardrails.budget import budget_exceeded
+from pra.agent.guardrails import gate, hard_rules
 
 
 def decision_conf_probe(state) -> float:
@@ -29,23 +28,15 @@ def gate_probe(state) -> str:
     与 ``run_decision_overlay`` 同序：硬规则 → "REJECT"；弃权清单任一命中 → "HUMAN"；
     pass_gate → "PASS"；reject_gate(dc) → "REJECT"；否则 "UNDECIDED"。
     ``decision_changed = gate_probe(before) != gate_probe(after)``，**不驱动路由**。
+
+    弃权清单与 overlay 共用 ``gate.abstention_codes``（含关键测量缺口 / 不可测维度两类），
+    故探针与真实终裁不会因清单漂移而分叉。
     """
     if hard_rules.hard_rule_hit(state) is not None:
         return "REJECT"
 
-    # 弃权清单：任一命中 → HUMAN
-    budget = state.get("budget")
-    if budget is not None and budget_exceeded(budget) is not None:
-        return "HUMAN"
-    if gate.contradiction_detect(state):
-        return "HUMAN"
-    if errors.key_tool_failure(state, state.get("failures") or []):
-        return "HUMAN"
-    if gate.policy_indeterminate(state):
-        return "HUMAN"
-    if gate.indistinguishable_hypotheses(state):
-        return "HUMAN"
-    if state.get("degraded"):
+    cov = gate.coverage_of(state)
+    if gate.abstention_codes(state, cov):
         return "HUMAN"
 
     if gate.pass_gate(state):

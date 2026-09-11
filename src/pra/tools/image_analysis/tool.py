@@ -18,6 +18,12 @@ from typing import Any, Mapping, Protocol
 
 from pydantic import BaseModel, Field
 
+from ...domain.measurement import (
+    DIM_IMAGE_APPEARANCE,
+    VERDICT_NEGATIVE,
+    VERDICT_POSITIVE,
+    make_measurement,
+)
 from ...domain.models import Evidence
 from ..base import ToolArgs, ToolContext, ToolResult
 
@@ -136,9 +142,20 @@ class ImageAnalysisTool:
     name = "ImageAnalysisTool"
     description = "分析商品图片外观是否与知名品牌款/违禁视觉高度相似；返回相似度 Top-K、Logo 检测、视觉风险描述"
     args_model = ImageAnalysisArgs
+    measured_dimensions: frozenset[str] = frozenset({DIM_IMAGE_APPEARANCE})
+    # 本部署是否真的能产出外观测量：评测/演示世界用**种子数据源**（Mock 即数据源）→ True；
+    # 生产装配是**冻结的 Mock 桩**（真实商品图永远空命中）→ build_production_tools() 传 False
+    # ⇒ gate 侧判 UNMEASURABLE（不得把"桩测不出"当成"测过且阴性"）。
+    measurement_available: bool = True
 
-    def __init__(self, provider: ImageAnalysisProvider | None = None) -> None:
+    def __init__(
+        self,
+        provider: ImageAnalysisProvider | None = None,
+        *,
+        measurement_available: bool = True,
+    ) -> None:
         self._provider: ImageAnalysisProvider = provider or MockImageAnalysisProvider()
+        self.measurement_available = measurement_available
 
     async def call(self, args: ImageAnalysisArgs, ctx: ToolContext) -> ImageAnalysisResult:
         items = [
@@ -148,16 +165,25 @@ class ImageAnalysisTool:
         return ImageAnalysisResult(items=items)
 
     def to_evidence(self, result: ImageAnalysisResult) -> list[Evidence]:
-        """结果 → Evidence：每个品牌命中 → IMAGE_SIMILARITY，每个 Logo 命中 → IMAGE_LOGO。
+        """结果 → Evidence：命中 → 阳性类型；每张图**必产 1 条** ``MEASUREMENT``。
 
         weight 分别取 ``similarity`` / ``confidence``。**不套 EVIDENCE_MIN_SIM 下限**，下游按
         上述常量做证据质量过滤。``ref_id=item.image_url``（源图片为稳定业务
         标识，去重 key 以它为准 —— 同一品牌多图命中不会因 ref=None 互相吞并）；
         ``extra.similarity`` 等派生数值由 tools_node 的 backfill_extra 回填，本工具不写。
+
+        ``MEASUREMENT`` 的 verdict 相对 ``EVIDENCE_STRONG`` **硬阈值**判定：
+        有 ``similarity >= EVIDENCE_STRONG`` 或任一 Logo → ``POSITIVE``；否则 ``NEGATIVE``。
+        故**弱相似（0.70~0.85）算 NEGATIVE**（未达处置阈值）—— 它仍作为 ``IMAGE_SIMILARITY``
+        证据留在链里供 LLM 参考，但不构成"风险阳性"，也不会阻塞 PASS（其应然处置是
+        "需与商品事实交叉"，由 required set 的 listing_registry 覆盖承担）。
         """
         evidences: list[Evidence] = []
         for item in result.items:
+            strong_hit = False
             for m in item.top_similar:
+                if m.similarity >= EVIDENCE_STRONG:
+                    strong_hit = True
                 evidences.append(
                     Evidence(
                         type=IMAGE_SIMILARITY_TYPE,
@@ -168,6 +194,7 @@ class ImageAnalysisTool:
                     )
                 )
             for logo in item.logos:
+                strong_hit = True
                 evidences.append(
                     Evidence(
                         type=IMAGE_LOGO_TYPE,
@@ -177,4 +204,19 @@ class ImageAnalysisTool:
                         ref_id=item.image_url,
                     )
                 )
+            top = max((m.similarity for m in item.top_similar), default=0.0)
+            evidences.append(
+                make_measurement(
+                    dimension=DIM_IMAGE_APPEARANCE,
+                    source=self.name,
+                    source_ref=item.image_url,
+                    verdict=VERDICT_POSITIVE if strong_hit else VERDICT_NEGATIVE,
+                    # 测量可信度按"该图确实被分析过"给固定高值；风险强度由阳性证据自身承载。
+                    weight=EVIDENCE_STRONG,
+                    value=(
+                        f"外观比对完成：最高相似度 {top:.2f}、Logo 命中 {len(item.logos)} 个"
+                        f"（处置阈值 {EVIDENCE_STRONG}）"
+                    ),
+                )
+            )
         return evidences

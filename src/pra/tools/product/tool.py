@@ -17,6 +17,11 @@ from typing import Any, Mapping, Protocol
 
 from pydantic import BaseModel, Field
 
+from ...domain.measurement import (
+    DIM_LISTING_REGISTRY,
+    VERDICT_NEGATIVE,
+    make_measurement,
+)
 from ...domain.models import Evidence
 from ..base import ToolArgs, ToolContext, ToolResult
 
@@ -144,6 +149,9 @@ class ProductTool:
     name = "ProductTool"
     description = "读取商品在库最新事实快照（标题/描述/属性/品牌/SKU/图片/版本），用于确认 brand 真空缺、字段冲突、版本漂移"
     args_model = ProductArgs
+    # 本工具覆盖的风险维度 + 本部署是否真的能测（gate 的 required/coverage 判定读它）
+    measured_dimensions: frozenset[str] = frozenset({DIM_LISTING_REGISTRY})
+    measurement_available: bool = True
 
     def __init__(self, repo: ProductRepository | None = None) -> None:
         self._repo: ProductRepository = repo or InMemoryProductRepository()
@@ -155,11 +163,17 @@ class ProductTool:
         return ProductResult(product=product)
 
     def to_evidence(self, result: ProductResult) -> list[Evidence]:
-        """结果 → Evidence：每商品 1 条 PRODUCT_FACT。
+        """结果 → Evidence：1 条 ``PRODUCT_FACT`` + 1 条 ``MEASUREMENT``（listing_registry）。
 
         ``source`` = 工具名；``ref_id=product_id``（稳定业务标识，供去重/回溯）。value 只陈述
         库中事实（brand/version/status）；「标题/描述是否含品牌词」的措辞需规则引擎词表支撑，
         本工具不臆断。``version_drift`` 判定归 tools_node（需 case 快照比对），本工具不产。
+
+        **查无商品（``ok=False``）刻意不产任何证据** —— 包括不产 ``MEASUREMENT``：
+        "没测到"不是"测过且阴性"，gate 侧按 ``NOT_MEASURED`` 处理（`domain/measurement.py`）。
+
+        ``listing_registry`` 是**可核验性维度**，本次只判"事实取到了没有"，
+        不存在阳性路径（案件声明与在库事实不一致的确定性比对是既有已知边界，另行设计）。
         """
         if not result.ok or result.product is None:
             return []
@@ -176,5 +190,13 @@ class ProductTool:
                 value=value,
                 weight=PRODUCT_FACT_WEIGHT,
                 ref_id=p.product_id,
-            )
+            ),
+            make_measurement(
+                dimension=DIM_LISTING_REGISTRY,
+                source=self.name,
+                source_ref=p.product_id,
+                verdict=VERDICT_NEGATIVE,
+                weight=PRODUCT_FACT_WEIGHT,
+                value=f"商品事实已在库核验：brand={brand_repr}, category={p.category}",
+            ),
         ]

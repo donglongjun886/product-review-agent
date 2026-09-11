@@ -169,13 +169,19 @@ def test_reevaluate_system_new_hypotheses_no_duplicate_and_policy_one_shot():
 
 
 def test_decide_system_rule_when_evidence_sufficient():
+    """decide 的三分类语义以**证据**为准，且明确两条硬性边界。"""
     prompt = build_system_prompt("decide")
-    assert "证据充分即裁决（硬性）" in prompt
-    assert "PASS 侧无证据缺口" in prompt
-    assert "REJECT 侧有上下文证据中**真实出现**的政策条款" in prompt
-    assert "不要把本可裁决的案件推给 HUMAN_REVIEW" in prompt
-    assert "HUMAN_REVIEW 仍只留给真正的证据不足" in prompt
+    # PASS 依据 = 必需测量全部取得明确阴性结论（不再依赖假设状态/先验）
+    assert "必需的关键测量" in prompt and "明确阴性结论" in prompt
+    # REJECT 依据 = 维度匹配且达阈值的阳性 + 可引用依据
+    assert "与风险维度匹配且达阈值" in prompt
+    assert "**真实出现**的政策条款" in prompt
+    # 两条硬性边界
+    assert "只有弱信号" in prompt
+    assert "未取得的关键测量时**不得**提 PASS" in prompt
     assert "禁止凭标题、类目或先例脑补上下文没有的事实" in prompt
+    # 旧口径（假设被证伪 → PASS）必须已从决定语义中移除
+    assert "所有高优先（high prior）假设均被证据证伪" not in prompt
 
 
 def test_output_schema_contracts_unchanged():
