@@ -606,3 +606,117 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
   Ablation / Sweep / real 冒烟为 P1（不做不影响 eval 完整性）；P2 不做项见 §5.3、§4.2、§7.2
   与 README「当前实现边界」。**此后除非 §11 的任一输入改变（数据集 / 判定逻辑 / 指标口径 / RAG 组件），
   不再重跑这三条命令。**
+
+---
+
+## 12. real-LLM 结果（v2 320 案；**与 §11 是不同世界，不可混读**）
+
+> **本节记录 v2 在真实 LLM 下的单次运行结果**，与 §11 的 scripted 封板表**并列但不可混算**：
+> §11 是确定性桩 + 同源标注世界（衡量实现一致性、可逐字节重放）；本节是真实 LLM（非确定性、不可重放、
+> 单次抽样，不代表模型固定水平）。两表指标名相同但含义不同，**引用时必须带世界标签**。
+> 运行：`uv run python scripts/run_evaluation_real.py --data eval_data/v2 --concurrency 8`（2026-09-11）；
+> 数据 `eval_data/v2/cases_v2.jsonl`（320 案）· world=eval（与 §11 同一 InMemory 种子世界，LLM 是唯一变量）·
+> Agent/Gate/指标口径代码为 `c60d578`（本次仅评测驱动脚本新增 `--concurrency` 与 Agent 级指标输出）。
+> **模型**：配置串 `deepseek/deepseek-chat` → 网关实际服务 **DeepSeek-V4.1-Flash**（`resp.model` 实测）。
+> 交叉验证：**同一次运行的 scripted 臂复现了 §11 的全部指标**（0.964 / 1.000 / 1.000 / hrr 0.036 等），
+> 说明两臂确为同一 harness 与同一工具世界。
+> 复现命令：`--concurrency N` 只改调度（用例间天然隔离）；**并发必须依赖脚本内的"钉住进程级 LLM 后端"
+> 守卫**——`AgentScheme.run` 的 finally 会 `set_llm_backend(None)`，并发下会让在飞案件静默退回 scripted
+> 桩；报告含 `real 臂 token=0 案数` 审计（桩恒 0 / real 恒 >0），**该值必须为 0 才可用**。
+
+### 12.1 主结果（业务分母 = 二值真值 274，口径同 §4.1）
+
+| Strategy | Accuracy | Precision | Recall | FPR | FNR | 漏放 | 误杀 | TP/FP/TN/FN |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| scripted（= §11） | 0.964 | 1.000 | 1.000 | 0.000 | 0.000 | 0 | 0 | 140/0/124/0 |
+| **real-LLM（单次）** | **0.109** | 0.938 | 1.000 | **1.000** | 0.000 | **0** | **2** | 30/2/0/0 |
+
+> ⚠ real 的 FPR=1.000 是**退化值**：real 臂 `TN=0`（320 案中**一例 PASS 都没自动放行**），故 FPR=2/2。
+> 读 real 行必须配 TP/FP 一起看，不能单独引用 FPR。
+> ⚠ real 与 scripted 相差 **−85.5pp**；归因见 §12.6，**不是「模型不会判」**。
+
+### 12.2 全量 320 口径（口径同 §4.4）
+
+| Strategy | human_review_rate | automation_coverage | SHOULD_ABSTAIN 正确转人工 | pred 分布 |
+|---|---:|---:|---:|---|
+| scripted（= §11） | 0.175 (56) | 0.825 (264) | 46/46 | PASS 124 / REJECT 140 / HUMAN 56 |
+| **real-LLM（单次）** | **0.900 (288)** | **0.100 (32)** | 46/46 | PASS **0** / REJECT 32 / HUMAN 288 |
+
+### 12.3 三分类混淆矩阵（行 = pred，列 = truth）
+
+| real-LLM | PASS | REJECT | HUMAN |
+|---|---:|---:|---:|
+| PASS | 0 | 0 | 0 |
+| REJECT | **2** | 30 | 0 |
+| HUMAN_REVIEW | 132 | 110 | 46 |
+
+> 全量三分类命中：scripted 310/320、real 76/320 —— **该口径不参与方案排名**（会把"多转人工"算成命中，§11.3）。
+> real 的 46 例 HUMAN 真值案全部正确转人工；**0 例 SHOULD_ABSTAIN 被自动终裁**。
+
+### 12.4 按 scene（二值真值案）
+
+| scene | n | scripted acc | real acc | real hrr | real TP/FP |
+|---|---:|---:|---:|---:|---:|
+| normal | 64 | 1.000 | **0.000** | 1.000 | 0/0 |
+| violation | 64 | 1.000 | 0.172 | 0.828 | 11/0 |
+| boundary | 70 | 0.857 | **0.000** | 0.971 | 0/2 |
+| multi-signal | 56 | 1.000 | 0.250 | 0.750 | 14/0 |
+| evasion | 20 | 1.000 | 0.250 | 0.750 | 5/0 |
+
+> real 在 `normal` 上 0 例自动放行（64 案全转人工）——保守度不是按场景分布的，而是全场景统一退缩。
+
+### 12.5 调用 / token / 工具 / 证据链（两臂同口径）
+
+| 统计项 | scripted | **real-LLM** |
+|---|---|---|
+| LLM 调用 均值 / P50 / P95 | 6.79 / 7 / 10（合计 ≈2,173） | **8.78 / 9 / 10（合计 2,810）** |
+| tool 调用 均值 / P50 / P95 | 5.09 / 5 / 6 | **5.37 / 5 / 8（合计 1,719）** |
+| tokens 均值 / P50 / P95 | 0 / 0 / 0（桩不烧 token） | **22,891 / 24,179 / 28,873（合计 7,325,188；min 10,332 / max 31,457）** |
+| 单案墙钟 均值 / P50 / P95 | – | **22.6s / 23.6s / 29.1s** |
+| tool_selection_accuracy（覆盖口径） | 0.870 (188/216) | **0.486 (105/216)** |
+| redundant_tool_rate | 0.222 (48/320) | 0.338 (73/320) |
+| evidence_type_coverage（micro） | 1.000 (345/345) | **1.000 (345/345)** |
+| reject_evidence_gate_pass_rate | 1.000 (140/140) | **1.000 (32/32)** |
+| risk_type_coverage | 1.000 (140/140) | 0.850 (119/140) |
+| risk_level_agreement | 0.775 (248/320) | 0.466 (149/320) |
+| evidence_gain_rate | 0.910 (1380/1516) | 0.817 (1314/1608) |
+| decision_changed_rate | 0.100 (152/1516) | 0.040 (65/1608) |
+
+> **成本口径**：`EvalRecord.cost` 只有 token **总量**（`usage.total_tokens`，含缓存命中），
+> **input/output 拆分不落 record**（只进 Langfuse），**金额完全未采集**。本次用一次性诊断
+> （运行时包装 `litellm.acompletion`，1 案 10 次调用）实测拆分为 **input 78.2% / output 21.8%**；
+> 据此按 Flash 官方价（输入按最贵档 cache-miss）估算 **7.33M tokens ≈ $3.63（峰价）/ $1.82（谷价）**，
+> 墙钟 ≈16 分钟（`--concurrency 8`）。**金额是估算，token 总量是硬数。**
+
+### 12.6 overrides 归因与异常审计
+
+| 项 | scripted | **real-LLM** |
+|---|---:|---:|
+| 带 overrides 案数 | 28/320 | **212/320** |
+| R3_BUDGET_EXHAUSTED（先撞维度） | 28（全 LLM_CALLS） | **157（全 LLM_CALLS）** |
+| R3_POLICY_UNCERTAIN | 0 | 79 |
+| R3_HYPOTHESES_INDISTINGUISHABLE | 0 | 11 |
+| R2_REJECT_GATE_FAIL | 0 | 11 |
+| R3_CRITICAL_CONFLICT | 4 | 4 |
+| R4_PASS_GATE_FAIL | 0 | 1 |
+| **R5_DEGRADED_OR_FAILED_STEP** | 0 | **0** |
+
+> **异常审计（可证伪）**：R5 降级 **0 案**（无 LLM 失败/降级兜底）；`token=0` 案 **0**（无静默退回桩）；
+> 320/320 全部产出裁决；运行日志无 traceback / 超时 / 连接错误。
+> **口径限制（不谎称 0 重试）**：`llm_calls` 与 `tokens` 按 `attempts` 累计（一次 schema 重试占 2 格），
+> 因此**单次重试次数无法从 record 分离**——能证明的只有"无最终降级、无静默回退、无异常中止"。
+
+### 12.7 结论与不可外推边界
+
+- **真实 LLM 下系统按设计退化为保守转人工**：90% 转人工、**0 例自动放行**、漏放 0；但出现 **2 例高置信误杀**
+  （`EC_V2_0163` conf 0.89 / `EC_V2_0219` conf 0.87，均 boundary 且 Gate 未拦 —— 与 v1 35 案 real 抽样的
+  EC_0007 同类：真实 LLM 会产出能通过 Gate 的幻觉性 SUPPORTED 假设）。
+- **瓶颈是收敛/预算，不是工具或证据链**：49%（157/320）的案件在 10 次 LLM 调用预算内不收敛而被截胡转人工
+  （scripted 仅 28 案）；同时工具侧指标正常（证据类型覆盖 1.000、REJECT 依据前置 1.000），
+  仅工具选择准确性下降（0.870 → 0.486）。
+- **方向与 v1 35 案 real 抽样一致**（v1: acc 0.200 / hrr 0.771；本节: acc 0.109 / hrr 0.900），互为佐证。
+- **不可外推**：单次运行、单模型、无 prompt 调优、生产预算未放宽、InMemory 工具世界、非确定性。
+  本节**不得**用于暗示 §11 的 0.964 是真实能力；它的价值是**量化了 scripted 评测的高估幅度（−85.5pp）**
+  并给出可复现的归因。
+- **后续可选实验**（P1）：`--llm-budget 12/15` 跑同批数据 —— 抬高预算后转人工率显著下降 ⇒ 瓶颈是预算；
+  仍打满 ⇒ 瓶颈是收敛。该实验不改任何判定规则与数据集。

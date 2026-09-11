@@ -58,6 +58,7 @@ from pra.evaluation.harness.agent_scheme import (
     make_rag_world_tools,
 )
 from pra.evaluation.harness.base import EvalContext, EvalRecord
+from pra.evaluation.metrics.agent import AgentMetricsBundle
 from pra.evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
 from pra.evaluation.metrics.engineering import EngineeringEvaluator
 from pra.evaluation.runner import expected_index
@@ -208,6 +209,69 @@ async def _run_scheme_records(
     return records
 
 
+async def _run_scheme_records_concurrent(
+    scheme: AgentScheme,
+    cases: list[EvalCase],
+    ctx: EvalContext,
+    *,
+    concurrency: int,
+    pin_backend: object | None = None,
+    progress_prefix: str | None = None,
+    latencies_ms: list[float] | None = None,
+) -> list[EvalRecord]:
+    """并发跑同一 scheme（仅 real 臂用；结果按用例原序返回）。
+
+    为什么安全：用例之间天然隔离 —— 每案在 ``AgentScheme.run`` 内独立
+    ``build_agent_graph`` + ``compile``（checkpointer=InMemory、thread_id 唯一）、
+    工具也每案新建，不跨案共享可变状态。
+
+    ⚠️ **必须钉住进程级 LLM 后端**：``AgentScheme.run`` 的 finally 会执行
+    ``llm_shell.set_llm_backend(None)``（恢复默认 scripted 桩），而节点是在**调用时**
+    读该模块级全局（``get_llm_backend()``）。串行无害；并发时先完成的案件会重置全局，
+    **仍在飞的案件会静默退回 scripted 桩 → real 结果里混入桩结果**。故并发期间把全局
+    钉在 real 后端上、并让 ``None`` 复位成为 no-op，收尾统一恢复默认桩。
+    仅 ``agent_scheme.run`` 一处会复位（全仓唯一调用点），因此该守卫是充分的。
+    """
+    pin = getattr(pin_backend, "name", None) is not None or pin_backend is not None
+    origin_set = None
+    if pin:
+        from pra.agent.guardrails import llm_shell as _llm_shell
+
+        origin_set = _llm_shell.set_llm_backend
+        origin_set(pin_backend)  # 钉住 real 后端
+        _llm_shell.set_llm_backend = lambda backend: None if backend is None else origin_set(backend)
+
+    sem = asyncio.Semaphore(concurrency)
+    total = len(cases)
+    done = 0
+
+    async def _one(case: EvalCase) -> EvalRecord:
+        nonlocal done
+        async with sem:
+            t0 = time.monotonic()
+            rec = await scheme.run(case, ctx)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            if latencies_ms is not None:
+                latencies_ms.append(elapsed_ms)  # list.append 原子；并发下顺序不定，只影响分位渲染
+            done += 1
+            if progress_prefix is not None:
+                print(
+                    f"  [{done}/{total}] {case.eval_case_id:<9} → {rec.decision:<12} "
+                    f"({elapsed_ms / 1000:.1f}s)",
+                    flush=True,
+                )
+            return rec
+
+    try:
+        return list(await asyncio.gather(*[_one(c) for c in cases]))
+    finally:
+        if origin_set is not None:
+            from pra.agent.guardrails import llm_shell as _llm_shell
+
+            _llm_shell.set_llm_backend = origin_set
+            origin_set(None)  # 恢复默认 scripted 桩（与串行路径收尾一致）
+
+
 def _compare_rows(
     cases: list[EvalCase],
     scripted_records: list[EvalRecord],
@@ -254,8 +318,12 @@ async def run_comparison(
     world: str = "eval",
     data_path: str = "",
     budget_limits: dict | None = None,
+    real_concurrency: int = 1,
 ) -> tuple[dict, dict]:
     """核心对比：scripted（确定性桩，先行、可复现）→ real（注入后端，逐案串行）。
+
+    ``real_concurrency > 1`` 时 real 臂并发跑（scripted 臂恒串行 —— 它毫秒级完成且是
+    可复现基线，不需要并发）；并发只改**调度**，不改判定 / 指标 / 数据。
 
     返回 ``(payload, extra)``：``payload`` 可直接落 JSON（real 侧含 REAL_NOTE）；
     ``extra`` 是报告渲染用中间物（rows / by_scene / 两臂 DecisionMetrics /
@@ -272,16 +340,33 @@ async def run_comparison(
     print("① scripted（确定性审查员桩 EvalScriptedLLMBackend · 可复现基线）")
     scripted_records = await _run_scheme_records(scripted, cases, ctx)
     print("-" * 100)
-    print(f"② real（{model_label} · 真实 LLM · 非确定性 · 逐案串行）")
+    real_mode = f"并发 {real_concurrency}" if real_concurrency > 1 else "逐案串行"
+    print(f"② real（{model_label} · 真实 LLM · 非确定性 · {real_mode}）")
     real_latencies_ms: list[float] = []
-    real_records = await _run_scheme_records(
-        real, cases, ctx, progress_prefix="real", latencies_ms=real_latencies_ms
-    )
+    if real_concurrency > 1:
+        real_records = await _run_scheme_records_concurrent(
+            real,
+            cases,
+            ctx,
+            concurrency=real_concurrency,
+            pin_backend=real_backend,
+            progress_prefix="real",
+            latencies_ms=real_latencies_ms,
+        )
+    else:
+        real_records = await _run_scheme_records(
+            real, cases, ctx, progress_prefix="real", latencies_ms=real_latencies_ms
+        )
 
     rows, disagree, by_scene = _compare_rows(cases, scripted_records, real_records, exp)
     scripted_metrics = DecisionEvaluator.evaluate(scripted_records, exp)
     real_metrics = DecisionEvaluator.evaluate(real_records, exp)
     truth_human = sum(1 for e in exp.values() if e.get("decision") == "HUMAN_REVIEW")
+    # Agent 级指标（两臂同口径）：只读统计，不改判定 / 不进任何既有指标分母。
+    # real 臂的 tool_calls / evidence / tool_history 由真实 LLM 决策产生 → 本区是
+    # 「真实 LLM 的工具选择与证据链行为」唯一入口。
+    scripted_agent_metrics = AgentMetricsBundle.evaluate(scripted_records, exp)
+    real_agent_metrics = AgentMetricsBundle.evaluate(real_records, exp)
 
     payload = {
         "data": data_path,
@@ -289,6 +374,10 @@ async def run_comparison(
         "world": world,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "count": len(cases),
+        "real_concurrency": real_concurrency,
+        # 静默回退探测：real 臂若某案 token=0，说明该案的 LLM 调用落到了 scripted 桩上
+        # （并发复位竞态 / 后端未生效）—— 该卷不可用，报告会显式标红该计数。
+        "real_zero_token_cases": sum(1 for r in real_records if not (r.cost.get("tokens") or 0)),
         "agree": len(rows) - len(disagree),
         "disagree": disagree,
         "real_records": [r.model_dump() for r in real_records],
@@ -302,6 +391,11 @@ async def run_comparison(
             }
             for r in scripted_records
         ],
+        # Agent 级指标（两臂）：JSON 侧与 Console 报告同数，供事后审计/复算
+        "agent_metrics": {
+            "real": real_agent_metrics.model_dump(),
+            "scripted": scripted_agent_metrics.model_dump(),
+        },
         # overrides 汇总：R5 降级 / R3 截胡 / 混合案 —— 「整卷全 HUMAN = 链路降级」
         # 在 JSON 里也一眼可见，不只在 Console 报告。
         "overrides_summary": {
@@ -320,6 +414,8 @@ async def run_comparison(
         "scene_stats": scene_stats(cases),
         "scripted_cost": _cost_summary(scripted_records),
         "real_cost": _cost_summary(real_records),
+        "scripted_agent_metrics": scripted_agent_metrics,
+        "real_agent_metrics": real_agent_metrics,
         "real_overrides": _overrides_summary(real_records),  # 渲染用
         "scripted_overrides": _overrides_summary(scripted_records),
         # 工程指标：scripted 臂 token 恒 0（桩不烧 token）；延迟只在 real 臂有
@@ -418,6 +514,103 @@ def _risk_cell(row: dict) -> str:
     return f"{row['real_risk_level'] or '-'}/{types}/conf={conf}"
 
 
+def _agent_cell(triple: tuple) -> str:
+    """指标单元格：``(值, 分子, 分母)``；值 None → 未定义显示 ``-``（不填 0 冒充）。"""
+    value, numer, denom = triple
+    body = "-" if value is None else f"{value:.3f}"
+    return f"{body}（{numer}/{denom}）"
+
+
+def _add_agent_metrics_section(add, extra: dict) -> None:
+    """Agent 级指标（两臂并排）：工具选择 / 证据充分性 / 推理正确性 / 边际增益。
+
+    与 ``pra.evaluation.report`` 的 Agent 级区**同一** ``AgentMetricsBundle`` 口径（只读
+    统计，不改判定、不进任何既有指标分母）；空真值案不进分母，无法映射的期望标签与
+    被剔除案数行内显式给出（不静默丢弃）。real 臂的值来自真实 LLM 的工具调用与证据链。
+    """
+    sc, rl = extra["scripted_agent_metrics"], extra["real_agent_metrics"]
+    ts_s, es_s, rc_s, mg_s = (
+        sc.tool_selection,
+        sc.evidence_sufficiency,
+        sc.reasoning_correctness,
+        sc.marginal_gain,
+    )
+    ts_r, es_r, rc_r, mg_r = (
+        rl.tool_selection,
+        rl.evidence_sufficiency,
+        rl.reasoning_correctness,
+        rl.marginal_gain,
+    )
+    rows = [
+        (
+            "tool_selection_accuracy",
+            (ts_s.tool_selection_accuracy, ts_s.covered_cases, ts_s.cases_with_expectation),
+            (ts_r.tool_selection_accuracy, ts_r.covered_cases, ts_r.cases_with_expectation),
+        ),
+        (
+            "redundant_tool_rate",
+            (ts_s.redundant_tool_rate, ts_s.redundant_cases, ts_s.total_records),
+            (ts_r.redundant_tool_rate, ts_r.redundant_cases, ts_r.total_records),
+        ),
+        (
+            "evidence_type_coverage",
+            (es_s.evidence_type_coverage, es_s.covered_expected_types, es_s.total_expected_types),
+            (es_r.evidence_type_coverage, es_r.covered_expected_types, es_r.total_expected_types),
+        ),
+        (
+            "reject_evidence_gate_pass_rate",
+            (
+                es_s.reject_evidence_gate_pass_rate,
+                es_s.reject_cases_with_citable,
+                es_s.reject_cases_pred_reject,
+            ),
+            (
+                es_r.reject_evidence_gate_pass_rate,
+                es_r.reject_cases_with_citable,
+                es_r.reject_cases_pred_reject,
+            ),
+        ),
+        (
+            "risk_type_coverage",
+            (rc_s.risk_type_coverage, rc_s.risk_type_covered_cases, rc_s.cases_with_expected_risk_type),
+            (rc_r.risk_type_coverage, rc_r.risk_type_covered_cases, rc_r.cases_with_expected_risk_type),
+        ),
+        (
+            "risk_level_agreement",
+            (
+                rc_s.risk_level_agreement,
+                rc_s.risk_level_agreement_cases,
+                rc_s.cases_with_expected_risk_level,
+            ),
+            (
+                rc_r.risk_level_agreement,
+                rc_r.risk_level_agreement_cases,
+                rc_r.cases_with_expected_risk_level,
+            ),
+        ),
+        (
+            "evidence_gain_rate",
+            (mg_s.evidence_gain_rate, mg_s.calls_with_new_evidence, mg_s.ok_tool_calls),
+            (mg_r.evidence_gain_rate, mg_r.calls_with_new_evidence, mg_r.ok_tool_calls),
+        ),
+        (
+            "decision_changed_rate",
+            (mg_s.decision_changed_rate, mg_s.calls_decision_changed, mg_s.ok_tool_calls),
+            (mg_r.decision_changed_rate, mg_r.calls_decision_changed, mg_r.ok_tool_calls),
+        ),
+    ]
+    add("-" * 100)
+    add("Agent 级指标（两臂同口径 · 只读统计；空真值案不进分母，分子/分母行内给出）:")
+    add(f"  {'指标':<32}{'scripted':<26}{'real':<26}")
+    for name, s_triple, r_triple in rows:
+        add(f"  {name:<32}{_agent_cell(s_triple):<26}{_agent_cell(r_triple):<26}")
+    add(
+        f"  {'unmapped 期望标签':<32}"
+        f"实例 {es_s.unmapped_label_instances} / 剔除 {es_s.cases_excluded_unmapped_only} 案"
+        f"    |    实例 {es_r.unmapped_label_instances} / 剔除 {es_r.cases_excluded_unmapped_only} 案"
+    )
+
+
 def _overrides_cell(row: dict) -> str:
     """逐案 real overrides 缩写（R3=R3_BUDGET_EXHAUSTED / R5=R5_DEGRADED_OR_FAILED_STEP）。"""
     ovs = row.get("real_overrides") or []
@@ -466,6 +659,18 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
     add(f"  · real = {payload['model']}（真实 LLM —— 非确定性、不可重放、需 API key 与费用；")
     add("    本报告 real 数字 = 单次运行抽样，不代表模型固定水平；回归基线恒以 scripted 为准）")
     add(f"  · 工具数据源: {_world_label(payload['world'])}（两臂同一世界 → LLM 是唯一变量）")
+    conc = payload.get("real_concurrency") or 1
+    add(
+        "  · real 臂调度: "
+        + ("并发 " + str(conc) + "（只改调度；用例间天然隔离，进程级 LLM 后端在并发期间被钉住，"
+           "防先完成案件复位全局后端导致在飞案件静默退回 scripted 桩）"
+           if conc > 1 else "逐案串行")
+    )
+    zero_tok = payload.get("real_zero_token_cases") or 0
+    add(
+        f"  · 静默回退审计: real 臂 token=0 案 = {zero_tok}"
+        + ("（正常：每案都真实调用了 LLM）" if zero_tok == 0 else "（⚠ 异常：有案件落到 scripted 桩，该卷不可用）")
+    )
     add("  · 一致性口径: scripted.decision == real.decision 判为一致（risk/evidence 差异不参与）")
     add("  · 指标口径（DecisionEvaluator）: Accuracy=(TP+TN)/真值总数，预测 HUMAN_REVIEW 计为未命中")
     add("    真值(判错，入分母不入分子)；Precision/Recall/FPR/FNR 只在自动判出(pred∈{PASS,REJECT})子集计算")
@@ -549,6 +754,9 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
                 ]
             )
         )
+
+    add("-" * 100)
+    _add_agent_metrics_section(add, extra)
 
     add("-" * 100)
     add("overrides 汇总（审计：R5=LLM 步降级兜底转 HUMAN、R3=预算截胡 —— P1-6c）:")
@@ -660,6 +868,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="结果 JSON 写出路径（目录需已存在；默认不写文件只打印）",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help=(
+            "real 臂并发度（默认 1 = 逐案串行，行为与既有跑法一致）。>1 时并发跑 real 臂："
+            "用例之间天然隔离（每案独立 build+compile 图、thread_id 唯一、工具每案新建），"
+            "只改调度、不改判定/指标/数据；scripted 对照臂恒串行。进程级 LLM 后端在并发期间"
+            "被钉住（否则先完成案件的 finally 复位会让在飞案件静默退回 scripted 桩）。"
+            "报告含 token=0 案审计以证明未发生静默回退"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -750,6 +970,7 @@ async def _main(argv: list[str] | None = None) -> int:
         world=args.world,
         data_path=str(data_path),
         budget_limits=budget_limits,
+        real_concurrency=args.concurrency,
     )
 
     out_path: str | None = None
