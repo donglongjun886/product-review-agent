@@ -37,7 +37,6 @@ from pra.agent.guardrails.gate import (
     R5_DEGRADED_OR_FAILED_STEP,
     contradiction_detect,
     finalize_decision_confidence,
-    high_priority,
     pass_gate,
     reject_gate,
     run_decision_overlay,
@@ -130,12 +129,6 @@ def test_contradiction_requires_strong_sim_and_clean_merchant():
     assert contradiction_detect({"evidence": [strong, clean]}) is True
     assert contradiction_detect({"evidence": [strong, dirty]}) is False
     assert contradiction_detect({"evidence": [ev("IMAGE_SIMILARITY", weight=0.72), clean]}) is False
-
-
-def test_high_priority_is_display_only_threshold():
-    hyps = [hp("H1", prior=0.5), hp("H2", prior=0.2), hp("H3", prior=0.3)]
-    assert [h.id for h in high_priority(hyps)] == ["H1", "H3"]
-    assert high_priority([]) == []
 
 
 # ---- PASS Gate ----

@@ -19,8 +19,8 @@ Logo / 商家达阈值 / 显式 ``MEASUREMENT=POSITIVE``）∧ ∃ 带 ``ref_id`
 ∧ 无证据冲突。**弱相似 0.70~0.85 不是硬阳性** —— 它要靠"商品事实"维度交叉，不能单独撑起自动拒绝。
 
 不变量：``risk_level`` / ``risk_type`` 不参与判定（仅供人工队列排序）；``policy`` 只从
-``POLICY_REF`` 证据的 ``extra["policy_id"]`` 读，不采信提案；``high_priority`` 仅保留为
-展示/排序工具，Gate 不调用它。
+``POLICY_REF`` 证据的 ``extra["policy_id"]`` 读，不采信提案。本模块**不含任何读 ``prior``
+的出口**（连"仅供参考"的排序工具也不在此）—— 「终裁不读 LLM 生成量」由结构而非注释保证。
 """
 
 from __future__ import annotations
@@ -49,7 +49,6 @@ from pra.domain.models import (
 
 # 常量：本地声明，不与其它模块共享可变状态。
 
-HIGH_PRIOR_THRESHOLD = 0.3  # **仅**用于人工队列排序/展示；Gate 不消费
 CONFIDENCE_ABSTAIN_THRESHOLD = 0.7  # REJECT Gate 安全门槛（decision_confidence）
 CITABLE_TYPES = {"CASE_PRECEDENT", "POLICY_REF"}  # 可引用依据类型
 
@@ -99,18 +98,6 @@ def weak_similarity(evidence) -> bool:
 # 谓词（全部纯函数、确定性、可单测；空/缺失安全）
 
 
-def high_priority(hypotheses) -> list:
-    """``prior >= HIGH_PRIOR_THRESHOLD``（0.3）的假设。
-
-    **仅供人工队列排序/展示**；两道 Gate 都不消费本函数（终裁不读 LLM 生成的 prior）。
-    """
-    return [
-        h
-        for h in (hypotheses or [])
-        if h.prior is not None and h.prior >= HIGH_PRIOR_THRESHOLD
-    ]
-
-
 def contradiction_detect(state) -> bool:
     """证据冲突：「相似度极高但商家历史干净」。
 
@@ -131,7 +118,7 @@ def contradiction_detect(state) -> bool:
     return bool(has_strong_sim and has_clean_merchant)
 
 
-def key_evidence_complete(state) -> bool:
+def _key_evidence_complete(state) -> bool:
     """关键证据完整 = 无未解决的 critical Tool 失败。"""
     return not key_tool_failure(state, state.get("failures") or [])
 
@@ -176,7 +163,7 @@ def pass_gate(state) -> bool:
         return False
     if cov.missing or cov.unmeasurable:
         return False
-    if not key_evidence_complete(state):
+    if not _key_evidence_complete(state):
         return False
     return not contradiction_detect(state)
 
@@ -244,7 +231,7 @@ def _dc_from(cov: CoverageReport, *, citation: bool, conflict: bool) -> float:
     return round(min(max(c, 0.0), 1.0), 2)
 
 
-def finalize_risk_level(state, proposal) -> RiskLevel:
+def _finalize_risk_level(state, proposal) -> RiskLevel:
     """风险等级：**仅供展示与人工队列排序**，不参与 Gate。
 
     提案声明了 ``risk_level`` → 用之（展示）；否则按证据链中最高**阳性**权重派生
@@ -265,7 +252,7 @@ def finalize_risk_level(state, proposal) -> RiskLevel:
     return RiskLevel.NONE
 
 
-def finalize_risk_type(state, proposal) -> list:
+def _finalize_risk_type(state, proposal) -> list:
     """风险类型：**仅供展示与人工队列排序**，不参与 Gate。
 
     提案有非空 ``risk_type`` → 用之；否则按阳性证据所在维度派生：外观 → POTENTIAL_IP_RISK、
@@ -287,7 +274,7 @@ def finalize_risk_type(state, proposal) -> list:
 # 组装与 overlay 收口
 
 
-def build_decision(
+def _build_decision(
     state: dict,
     proposal,
     *,
@@ -350,13 +337,13 @@ def abstention_codes(state, cov: CoverageReport) -> list:
 
 
 def _human_review(state, proposal, dc: float, overrides: list) -> ReviewDecision:
-    """转人工的统一组装：risk/risk_type 用 ``finalize_risk_*``（展示），confidence 用 dc。"""
-    return build_decision(
+    """转人工的统一组装：risk/risk_type 用 ``_finalize_risk_*``（展示），confidence 用 dc。"""
+    return _build_decision(
         state,
         proposal,
         decision=Decision.HUMAN_REVIEW,
-        risk_level=finalize_risk_level(state, proposal),
-        risk_type=finalize_risk_type(state, proposal),
+        risk_level=_finalize_risk_level(state, proposal),
+        risk_type=_finalize_risk_type(state, proposal),
         decision_confidence=dc,
         overrides=overrides,
     )
@@ -370,7 +357,7 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
     # 1) 硬规则优先（不可被 LLM 覆盖；防漏放）
     hit = hard_rule_hit(state)
     if hit is not None:
-        return build_decision(
+        return _build_decision(
             state,
             proposal,
             decision=Decision.REJECT,
@@ -410,7 +397,7 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
         return _human_review(state, proposal, dc, codes)
 
     # 6) 采纳：HUMAN 提案或 Gate 通过
-    return build_decision(
+    return _build_decision(
         state,
         proposal,
         decision=Decision(proposal.decision),
@@ -422,8 +409,8 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
 
 
 __all__ = [
+    # 对外契约 = 阈值 + 归因码 + 判定入口；组装/派生辅助（`_` 前缀）不导出。
     "CONFIDENCE_ABSTAIN_THRESHOLD",
-    "HIGH_PRIOR_THRESHOLD",
     "R1_HARD_RULE",
     "R2_REJECT_GATE_FAIL",
     "R3_BUDGET_EXHAUSTED",
@@ -435,14 +422,9 @@ __all__ = [
     "R4_PASS_GATE_FAIL",
     "R5_DEGRADED_OR_FAILED_STEP",
     "abstention_codes",
-    "build_decision",
     "contradiction_detect",
     "coverage_of",
     "finalize_decision_confidence",
-    "finalize_risk_level",
-    "finalize_risk_type",
-    "high_priority",
-    "key_evidence_complete",
     "pass_gate",
     "reject_gate",
     "run_decision_overlay",

@@ -174,7 +174,6 @@ src/pra/
   evaluation/      评测 harness、数据集、指标、消融、扫描、回归
   infra/           MySQL 五表落库（SQLAlchemy 2.0 async）
   observability/   Tracer 适配层（Langfuse / Null）
-  common/          通用工具
 docs/              系统设计与评测口径 · migrations/ DDL · scripts/ 演示与评测脚本 · tests/ pytest 用例
 ```
 

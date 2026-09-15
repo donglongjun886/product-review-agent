@@ -543,7 +543,7 @@ _T_POLICY = "POLICY_REF"
 _SIM_STRONG = 0.85  # 与 image_analysis.EVIDENCE_STRONG 同口径
 _SIM_MIN = 0.70  # 与 image_analysis.EVIDENCE_MIN_SIM 同口径（评测审查员读证据视图的下限）
 _LOGO_CONF = 0.70  # Logo 视为强视觉信号的置信下限
-_HIGH_PRIOR = 0.3  # 与 gate.HIGH_PRIOR_THRESHOLD 同口径（Gate 只看 >=0.3 的假设）
+_HIGH_PRIOR = 0.3  # 评测审查员桩的假设门槛（SUPPORTED/PENDING+UNRESOLVED 且 prior>=0.3 才算关注）
 _MERCHANT_DIRTY = 3  # removals/title >= 3 = 系统性（gate extra 口径一致）
 
 # 假设 statement 标记（hypothesize 写、reevaluate/decide 读 —— 表面事实经它跨节点传递）

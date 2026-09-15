@@ -236,7 +236,8 @@ Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的�
 - **不使用 `MessagesState`**：四个 LLM 节点每次调用都从 state 重新组装 prompt，不累积 message 历史——可序列化、token 可预算、重放确定；
   单次调用内部的对话（含 schema 重试的修正提示）只存在于该次节点调用内，随 `review_trace` 落库。
 - **数量上限用 schema 约束**（`src/pra/agent/guardrails/schemas.py`）：假设 ≤5、调查队列 ≤8、单轮计划工具 ≤3（Pydantic `max_length` 字面约束，
-  无独立常量）；`HIGH_PRIOR_THRESHOLD = 0.3`（`guardrails/gate.py`）**只用于人工队列排序/展示**，两道 Gate 与收敛判定都不消费它。
+  无独立常量）；`guardrails/gate.py` **不提供任何读 `prior` 的出口**，两道 Gate 与收敛判定都不消费它
+  （`prior` 只由评测侧审查员桩用于假设筛选，见 `evaluation/harness/agent_scheme.py`）。
 - **LLM 步失败降级**（`guardrails/llm_shell.py`）：Pydantic schema 校验失败自动重试 **1 次**（把校验错误回喂修正），仍失败则该节点返回降级结果并置
   `degraded=True`，后续 LLM 节点不再调用 LLM（只做必要透传），统一按「证据不足」路由到 decide，由确定性 overlay 产出 `HUMAN_REVIEW`（硬规则命中除外）。
 - **假设生命周期**：`PENDING → SUPPORTED / REFUTED / UNRESOLVED`（`UNRESOLVED` = 已查证但未能证实也未证伪，与「还没查」区分）；假设状态**只引导调查与留痕**，终裁由证据事实决定（§7.2），不由假设状态推导；
@@ -946,11 +947,9 @@ product-review-agent/
 │   └── 02-evaluation.md             # 评测数字与口径边界（全部数字的权威出处）
 │
 ├── src/pra/                         # 主包
-│   ├── common/                      # 通用：雪花ID、JSON工具、错误码
 │   ├── domain/                      # 领域模型：Case/AgentState/Evidence/Decision（Pydantic）
-│   ├── screening/                   # 传统机审初筛 + 三分流
-│   │   ├── rule_engine/             # 规则引擎（黑名单/关键词/类目/阈值）
-│   │   └── triage/                  # 三分类分流逻辑
+│   ├── screening/                   # 传统机审初筛 + 三分流（triage 为 engine.py 里的纯函数）
+│   │   └── rule_engine/             # 规则引擎（黑名单/关键词/类目/阈值）
 │   ├── agent/                       # Agent 核心（LangGraph StateGraph）
 │   │   ├── state.py                 # AgentState（TypedDict / Pydantic）
 │   │   ├── graph.py                 # StateGraph：节点 + 边 + 条件边 + 路由

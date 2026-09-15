@@ -737,7 +737,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 ### 13.1 改什么、为什么
 
 原链路 `LLM Hypothesis → prior → high_priority → 必须 REFUTED → PASS` 有三处结构性问题
-（归因见 §12.7 与错误分析）：
+（归因见 §12.7 与错误分析；`high_priority` 及其阈值常量已随重构删除，`gate.py` 不再有读 `prior` 的出口）：
 
 1. **`prior` 是 LLM 自由生成的调查优先级**，却被当成 Gate 的"高优先风险集合"依据；
    实测 0.25/0.30 两个刻度占全部假设的 39.8%，阈值正好压在其间；
