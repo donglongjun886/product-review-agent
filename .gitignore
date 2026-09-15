@@ -40,3 +40,4 @@ htmlcov/
 # 本地记忆（不进公开仓库；DSH 直接从磁盘加载 AGENTS.md，无需入库）
 AGENTS.md
 .memory/
+.workbuddy/
