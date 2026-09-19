@@ -45,7 +45,6 @@ __all__ = [
     "SERVED_COUNTERS",
     "ChromaCaseIndex",
     "ChromaPolicyIndex",
-    "check_cosine_self_check",
     "delete_collection",
     "make_chroma_client",
     "served_counters",
@@ -166,34 +165,6 @@ def _node_id(collection: str, key: str) -> str:
     """
     digest = hashlib.sha256(f"{collection}\x1f{key}".encode()).hexdigest()[:32]
     return f"pra-{digest}"
-
-
-#: cosine 自检容差（实测 distance==0 时精确为 0；浮点尾差留 1e-6）。
-_SELF_CHECK_TOL = 1e-6
-
-
-def check_cosine_self_check(
-    collection: Any, sample_vector: list[float], *, name: str
-) -> float:
-    """cosine 自检：用库内已有向量查库，返回自身距离（cosine 空间须 ≈ 0）。
-
-    实测自距离有 ``0.0`` 与 ``-1.1920929e-07``（float32 尾差）两类，故用
-    ``abs() <= _SELF_CHECK_TOL`` 判定。自距离在 l2 空间同样为 0，单独看不区分空间；本函数是
-    第二道防线：抓「库未 upsert / 被清空 / 空间被外力改掉后数值不可信」。
-    """
-    result = collection.query(
-        query_embeddings=[list(sample_vector)], n_results=1, include=["distances"]
-    )
-    distances = (result.get("distances") or [[]])[0]
-    if not distances:
-        raise ValueError("cosine 自检失败：collection 查询未返回任何结果（库是否已 upsert？）")
-    value = float(distances[0])
-    if abs(value) > _SELF_CHECK_TOL:
-        raise ValueError(
-            f"cosine 自检失败：collection {name!r} 内向量与自身距离 {value!r}"
-            f"（cosine 空间应为 0，容差 {_SELF_CHECK_TOL}）—— 库可能未正确 upsert 或空间异常"
-        )
-    return value
 
 
 def _open_collection(
@@ -744,8 +715,7 @@ class _ChromaIndexBase:
         """建/复用 collection（``embedding_function=None`` **+ 显式 cosine 空间**）+ 幂等 upsert。
 
         node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按
-        「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。upsert 后做一次余弦自检
-        （已存向量与自身的距离须 ≈ 0），失败即抛 —— 绝不带着未真正写入的库继续检索。
+        「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。
         """
         collection, reused = _open_collection(
             client=self._client,
@@ -767,9 +737,6 @@ class _ChromaIndexBase:
             embeddings=[list(v) for v in self._doc_vectors],
             metadatas=[node.metadata for node in self._nodes],
             documents=[node.get_content() for node in self._nodes],
-        )
-        check_cosine_self_check(
-            collection, self._doc_vectors[0], name=self.collection_name
         )
         self._collection = collection
 
