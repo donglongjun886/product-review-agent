@@ -41,10 +41,10 @@ from langgraph.graph.state import CompiledStateGraph
 from pra.agent.checkpointer import make_memory_checkpointer
 from pra.agent.graph import build_agent_graph
 from pra.agent.guardrails.budget import (  # 预算超限维度常量（P2-16 记录侧复用）
-    DIM_LLM_CALLS,
-    DIM_TOOL_CALLS,
-    DIM_TOKENS,
     DIM_LATENCY,
+    DIM_LLM_CALLS,
+    DIM_TOKENS,
+    DIM_TOOL_CALLS,
 )
 from pra.agent.guardrails.llm_shell import LLMResponse
 from pra.agent.scripted_llm import (  # __STATE__ 解析/引用串格式
@@ -503,8 +503,9 @@ def make_rag_world_tools(
         "chroma"（ChromaDB + LlamaIndex；缺 ``rag`` extra 依赖时构造即抛，
         不静默降级）。只影响索引装配，零判定逻辑改动。
     :param backend_options: 后端装配参数透传（缺省 None = 不传 → 装配与改动前逐字节
-        等价）；键名与 ``pra.rag.factory`` 构造参数逐字对应（如 chroma 的
-        ``collection_prefix``），非法键由 factory 抛错。
+        等价）；键名与 ``pra.rag.factory`` 构造参数逐字对应 —— chroma 臂收 ``embedding_model``
+        （LlamaIndex ``BaseEmbedding``，缺省 None → 类内自建 fastembed）与 ``collection_prefix``
+        等，local 臂收 ``embedder``（自家 ``Embedder``）。未知键照旧由 factory 抛错（不吞键）。
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index
@@ -519,6 +520,9 @@ def make_rag_world_tools(
     from pra.tools.product.tool import InMemoryProductRepository, ProductTool
 
     options = dict(backend_options or {})
+    # 编码器按后端路由由 factory 承担：chroma 臂收 embedding_model（LlamaIndex BaseEmbedding，
+    # 缺省 None → 类内自建 fastembed）、local 臂收 embedder（自家 Embedder）；此处只逐字透传
+    # options，未知键仍由 factory 抛错（不吞键、不静默忽略拼错字）。
     tools: list[Tool] = [
         ProductTool(repo=InMemoryProductRepository(EVAL_PRODUCTS)),
         ImageAnalysisTool(provider=MockImageAnalysisProvider(EVAL_IMAGE_MATCHES)),

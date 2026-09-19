@@ -58,7 +58,7 @@ from pra.rag.chroma_backend import (
     served_counters,
 )
 from pra.rag.corpus import load_cases, load_policies
-from pra.rag.embedder import MockHashEmbedder
+from pra.rag.embedder import MockHashEmbedder, build_embedding_model
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.rag.index import RagCaseIndex, RagPolicyIndex
 from pra.rag.vectors import cosine_similarity
@@ -68,6 +68,38 @@ from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
 POLICY_ROWS = load_policies()[0]
 CASE_ROWS = load_cases()[0]
+
+# 本文件统一编码器：chroma 线现在直接吃 LlamaIndex ``BaseEmbedding``（``build_embedding_model``
+# 的 ``kind="test"``：确定性、默认 256 维）。**256 维必须钉死** —— 多处断言写死 collection 名
+# （``pra_policy_256`` / ``f"{prefix}_case_256"``）与 ``col.metadata["pra_dim"] == 256``。
+_TEST_EMBED_DIM = 256
+
+
+def _test_embedding_model() -> Any:
+    """chroma 索引构造用的确定性 ``BaseEmbedding``（256 维，零模型下载）。"""
+    return build_embedding_model("test", embed_dim=_TEST_EMBED_DIM)
+
+
+class _LocalEmbedderShim:
+    """**测试内**桥接：把 ``BaseEmbedding``（确定性 test 编码）包成 local 后端要的
+    ``embed(text) -> list[float]``。
+
+    为什么必须存在：跨后端等价性用例把**同一语料**同时建 local 与 chroma 两个索引并逐条比对，
+    而两侧现在接受的编码器类型不同（local 要 ``Embedder``（窄接口 ``embed``）／chroma 要
+    ``BaseEmbedding``）。shim 让两侧共用**同一份**确定编码，等价性断言才有意义。它只在
+    tests/ 内存在，**不进 src/**。
+    """
+
+    def __init__(self, model: Any) -> None:
+        self._model = model
+
+    def embed(self, text: str) -> list[float]:
+        return list(self._model.get_text_embedding(text))
+
+
+def _local_embedder() -> _LocalEmbedderShim:
+    """local 后端用的编码器（与 :func:`_test_embedding_model` 同源的 test 编码）。"""
+    return _LocalEmbedderShim(_test_embedding_model())
 
 #: RRF 常数：本文件用**独立常量**做 oracle，改 k 就该让断言失败（不跟着实现漂移）。
 _RRF_K = 60
@@ -105,7 +137,7 @@ def _policy_chroma(
 ) -> ChromaPolicyIndex:
     return ChromaPolicyIndex(
         POLICY_ROWS,
-        embedder=MockHashEmbedder(),
+        embedding_model=_test_embedding_model(),
         mode=mode,
         chroma_client=client if client is not None else chromadb.EphemeralClient(),
         collection_prefix=prefix or _prefix(f"p{mode}"),
@@ -117,7 +149,7 @@ def _case_chroma(
 ) -> ChromaCaseIndex:
     return ChromaCaseIndex(
         CASE_ROWS,
-        embedder=MockHashEmbedder(),
+        embedding_model=_test_embedding_model(),
         mode=mode,
         chroma_client=client if client is not None else chromadb.EphemeralClient(),
         collection_prefix=prefix or _prefix(f"c{mode}"),
@@ -125,11 +157,11 @@ def _case_chroma(
 
 
 def _policy_local(mode: str) -> RagPolicyIndex:
-    return RagPolicyIndex(POLICY_ROWS, embedder=MockHashEmbedder(), mode=mode)
+    return RagPolicyIndex(POLICY_ROWS, embedder=_local_embedder(), mode=mode)
 
 
 def _case_local(mode: str) -> RagCaseIndex:
-    return RagCaseIndex(CASE_ROWS, embedder=MockHashEmbedder(), mode=mode)
+    return RagCaseIndex(CASE_ROWS, embedder=_local_embedder(), mode=mode)
 
 
 def _eligible_policy(filters: PolicySearchFilters, effective_only: bool) -> int:
@@ -255,7 +287,7 @@ def test_chroma_collection_name_shape_and_metadata() -> None:
     assert COLLECTION_NAME_TEMPLATE == "<prefix or 'pra'>_<policy|case>_<dim>"
     client = chromadb.EphemeralClient()
     # prefix 缺省 → "pra"
-    p_default = ChromaPolicyIndex(POLICY_ROWS, embedder=MockHashEmbedder(), chroma_client=client)
+    p_default = ChromaPolicyIndex(POLICY_ROWS, embedding_model=_test_embedding_model(), chroma_client=client)
     assert p_default.collection_name == "pra_policy_256"
     assert client.get_collection("pra_policy_256").count() == len(POLICY_ROWS)
 
@@ -418,7 +450,7 @@ def test_chroma_vector_bruteforce_fallback_scores_missing_candidates() -> None:
 
     覆盖率自检 3 次重试后仍缺候选时，``_rank_vector`` 改走
     ``_score_missing_by_stored_vectors``（按已存 doc 向量现算 ``cosine_similarity``）。
-    该路径正常永不执行，故直测：① 补算分 == 同一 embedder 现算的余弦；② 取不到向量的 id
+    该路径正常永不执行，故直测：① 补算分 == 同一 embedding model 现算的余弦；② 取不到向量的 id
     → **抛 RuntimeError，绝不静默少返**。
     """
     idx = _case_chroma("vector")
@@ -427,11 +459,13 @@ def test_chroma_vector_bruteforce_fallback_scores_missing_candidates() -> None:
     missing = [idx.node_ids[0], idx.node_ids[7]]
     scored = idx._score_missing_by_stored_vectors(sub_ctx, query_bundle, missing)
     assert set(scored) == set(missing)
-    embedder = MockHashEmbedder()
-    query_vec = embedder.embed("外观模仿")
+    # oracle 必须与索引同一份编码（test 编码）：query 走 get_query_embedding（同
+    # ``_score_missing_by_stored_vectors``），doc 走 get_text_embedding（同建库路径）。
+    model = _test_embedding_model()
+    query_vec = model.get_query_embedding("外观模仿")
     for node_id, score in scored.items():
         row = CASE_ROWS[idx.node_ids.index(node_id)]
-        expected = cosine_similarity(query_vec, embedder.embed(row.summary))
+        expected = cosine_similarity(query_vec, model.get_text_embedding(row.summary))
         assert abs(score - expected) <= _SCORE_TOL, (
             node_id,
             score,
@@ -745,7 +779,7 @@ def test_chroma_existing_l2_collection_is_rejected_not_silently_reused() -> None
     with pytest.raises(ValueError, match="cosine"):
         ChromaPolicyIndex(
             POLICY_ROWS,
-            embedder=MockHashEmbedder(),
+            embedding_model=_test_embedding_model(),
             chroma_client=client,
             collection_prefix="l2reuse",
         )
@@ -763,7 +797,7 @@ def test_chroma_dim_mismatch_on_reuse_is_rejected() -> None:
     with pytest.raises(ValueError, match="维度"):
         ChromaCaseIndex(
             CASE_ROWS,
-            embedder=MockHashEmbedder(),
+            embedding_model=_test_embedding_model(),
             chroma_client=client,
             collection_prefix="dimmix",
         )
@@ -1075,15 +1109,44 @@ def test_factory_backend_chroma_returns_chroma_index() -> None:
     client = chromadb.EphemeralClient()
     prefix = _prefix("factory")
     p_idx = build_policy_index(
-        rows=POLICY_ROWS, embedder=MockHashEmbedder(), backend="chroma",
+        rows=POLICY_ROWS, embedding_model=_test_embedding_model(), backend="chroma",
         chroma_client=client, collection_prefix=prefix,
     )
     c_idx = build_case_index(
-        rows=CASE_ROWS, embedder=MockHashEmbedder(), backend="chroma",
+        rows=CASE_ROWS, embedding_model=_test_embedding_model(), backend="chroma",
         chroma_client=client, collection_prefix=prefix,
     )
     assert isinstance(p_idx, ChromaPolicyIndex)
     assert isinstance(c_idx, ChromaCaseIndex)
+
+
+def test_factory_chroma_rejects_local_embedder_kwarg() -> None:
+    """**错配不许静默**：``backend="chroma"`` 的编码器参数名是 ``embedding_model``
+    （``BaseEmbedding``）。显式传 local 的 ``embedder=``（``Embedder``）必须抛 ``ValueError``
+    —— 否则旧行为会「收下了却静默丢弃」，让调用方误以为换了编码器。文案须点名 ``embedder``。
+    """
+    client = chromadb.EphemeralClient()
+    with pytest.raises(ValueError, match="embedder"):
+        build_policy_index(
+            rows=POLICY_ROWS,
+            backend="chroma",
+            embedder=MockHashEmbedder(),  # local 侧才用的窄接口 Embedder
+            chroma_client=client,
+            collection_prefix=_prefix("mismatch"),
+        )
+
+
+def test_factory_local_rejects_chroma_embedding_model_kwarg() -> None:
+    """**错配不许静默**：``backend="local"`` 的编码器参数名是 ``embedder``（``Embedder``）。
+    显式传 chroma 的 ``embedding_model=``（``BaseEmbedding``）必须抛 ``ValueError``，文案须点名
+    ``embedding_model``。锁的是「wrong-backend 编码器不许被静默丢弃」这条不变量。
+    """
+    with pytest.raises(ValueError, match="embedding_model"):
+        build_policy_index(
+            rows=POLICY_ROWS,
+            backend="local",
+            embedding_model=_test_embedding_model(),
+        )
 
 
 async def test_build_tools_rag_backend_chroma_injects_chroma_index() -> None:
@@ -1092,8 +1155,13 @@ async def test_build_tools_rag_backend_chroma_injects_chroma_index() -> None:
     tools = build_tools(
         "rag",
         rag_backend="chroma",
-        rag_embedder=MockHashEmbedder(),
-        rag_backend_options={"chroma_client": client, "collection_prefix": _prefix("tools")},
+        # chroma 侧编码器经 ``rag_backend_options["embedding_model"]`` 注入（``rag_embedder`` 只
+        # 服务 local 后端：build_tools 恒以 ``embedder=`` 转发，chroma 分支不读它）。
+        rag_backend_options={
+            "embedding_model": _test_embedding_model(),
+            "chroma_client": client,
+            "collection_prefix": _prefix("tools"),
+        },
     )
     assert [t.name for t in tools] == [
         "ProductTool", "ImageAnalysisTool", "OCRTool", "MerchantTool",

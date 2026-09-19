@@ -17,7 +17,8 @@ CI 上真正跑得动的守护是 ``tests/test_rag_default_path_no_extra.py``。
 
 起服务：``cd deploy/chroma && docker compose up -d``（仅绑 ``127.0.0.1:8001``，容器内 8000；
 ``/api/v1`` 已废弃返回 410，只用 ``/api/v2``）。URL 可用 ``PRA_CHROMA_URL`` 覆盖；
-embedder 一律 ``MockHashEmbedder``（确定性、零模型下载）。
+chroma 侧编码器一律 ``build_embedding_model("test", embed_dim=256)``（确定性、零模型下载），
+local 侧用测试内 shim 包同一份 test 编码 —— 两侧共用同一确定编码才能逐条比对。
 """
 
 from __future__ import annotations
@@ -44,11 +45,40 @@ from pra.rag.chroma_backend import (
     served_counters,
 )
 from pra.rag.corpus import load_cases, load_policies
-from pra.rag.embedder import MockHashEmbedder
+from pra.rag.embedder import build_embedding_model
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.rag.index import RagCaseIndex, RagPolicyIndex
 from pra.tools.case_search.tool import CaseSearchFilters
 from pra.tools.policy_search.tool import PolicySearchFilters
+
+#: chroma 线编码器 = LlamaIndex ``BaseEmbedding``（``build_embedding_model("test")``，确定性
+#: 256 维、零模型下载）。维度写死 256：断言依赖 collection 名 ``…_policy_256`` / ``…_case_256``。
+_TEST_EMBED_DIM = 256
+
+
+def _test_embedding_model():
+    """chroma 侧编码器（确定性 test 编码，256 维）。"""
+    return build_embedding_model("test", embed_dim=_TEST_EMBED_DIM)
+
+
+class _LocalEmbedderShim:
+    """**测试内**桥接：把 ``BaseEmbedding`` 包成 local 后端要的 ``embed(text)``。
+
+    跨后端等价性用例（同一语料同时建 local + chroma，逐条比对同序同 id/同分）要求两侧吃
+    **同一份**确定编码：local 只认 ``Embedder``（窄接口 ``embed``），chroma 只认
+    ``BaseEmbedding``。shim 仅存在于 tests/，不进 src/。
+    """
+
+    def __init__(self, model) -> None:
+        self._model = model
+
+    def embed(self, text: str) -> list[float]:
+        return list(self._model.get_text_embedding(text))
+
+
+def _local_embedder() -> _LocalEmbedderShim:
+    """local 侧编码器（与 :func:`_test_embedding_model` 同源的 test 编码）。"""
+    return _LocalEmbedderShim(_test_embedding_model())
 
 _CHROMA_URL = os.environ.get("PRA_CHROMA_URL", "http://127.0.0.1:8001")
 _PARSED = urlparse(_CHROMA_URL)
@@ -112,13 +142,13 @@ async def test_chroma_policy_index_against_real_server() -> None:
     try:
         remote = build_policy_index(
             backend="chroma",
-            embedder=MockHashEmbedder(),
+            embedding_model=_test_embedding_model(),
             mode="vector",
             chroma_host=_HOST,
             chroma_port=_PORT,
             collection_prefix=prefix,
         )
-        local = RagPolicyIndex(POLICY_ROWS, embedder=MockHashEmbedder(), mode="vector")
+        local = RagPolicyIndex(POLICY_ROWS, embedder=_local_embedder(), mode="vector")
         assert isinstance(remote, ChromaPolicyIndex), "factory backend='chroma' 应给出 ChromaPolicyIndex"
 
         cols = _names_with_prefix(reader, prefix)
@@ -161,13 +191,13 @@ async def test_chroma_case_index_against_real_server() -> None:
     try:
         remote = build_case_index(
             backend="chroma",
-            embedder=MockHashEmbedder(),
+            embedding_model=_test_embedding_model(),
             mode="vector",
             chroma_host=_HOST,
             chroma_port=_PORT,
             collection_prefix=prefix,
         )
-        local = RagCaseIndex(CASE_ROWS, embedder=MockHashEmbedder(), mode="vector")
+        local = RagCaseIndex(CASE_ROWS, embedder=_local_embedder(), mode="vector")
         assert isinstance(remote, ChromaCaseIndex), "factory backend='chroma' 应给出 ChromaCaseIndex"
 
         cols = _names_with_prefix(reader, prefix)
@@ -211,7 +241,7 @@ async def test_chroma_server_reuses_same_prefix_collection_idempotently() -> Non
         for _ in range(2):
             build_case_index(
                 backend="chroma",
-                embedder=MockHashEmbedder(),
+                embedding_model=_test_embedding_model(),
                 mode="bm25",
                 chroma_host=_HOST,
                 chroma_port=_PORT,

@@ -29,8 +29,7 @@ from typing import Any
 # 顶层只 import 仓库内模块 + 标准库；chroma / llama_index / jieba 一律延迟 import
 # （默认 local 路径零额外依赖，构造/检索时才拉起）。
 from pra.rag.corpus.schema import CasePrecedentRecord, PolicyClauseRecord
-from pra.rag.embedder import Embedder, MockHashEmbedder
-from pra.rag.llama_embedding import LlamaIndexEmbeddingAdapter
+from pra.rag.embedder import build_embedding_model
 from pra.rag.retrieval import (
     DEFAULT_WEIGHTS,
     MODES,
@@ -185,16 +184,22 @@ def _node_id(collection: str, key: str) -> str:
     return f"pra-{digest}"
 
 
-def _resolve_dim(embedder: Embedder, doc_vectors: list[list[float]]) -> int:
-    dim = getattr(embedder, "dim", None)
+def _resolve_dim(embedding_model: Any, doc_vectors: list[list[float]]) -> int:
+    """解析向量维度：优先模型声明的维度，否则回落到首条 doc 向量长度。
+
+    声明维度的属性名随集成而异 —— 官方集成（如 ``MockEmbedding``）用 ``embed_dim``，本仓自有
+    provider 用 ``dim``；两者都无（如 ``FastEmbedEmbedding``）时 doc 向量长度是唯一来源。
+    声明与实测不一致即抛，不静默取错维。
+    """
+    dim = getattr(embedding_model, "dim", None) or getattr(embedding_model, "embed_dim", None)
     if isinstance(dim, int) and dim > 0:
         if doc_vectors and len(doc_vectors[0]) != dim:
             raise ValueError(
-                f"embedder 声明维度 {dim} 与 doc 向量长度 {len(doc_vectors[0])} 不一致"
+                f"embedding 模型声明维度 {dim} 与 doc 向量长度 {len(doc_vectors[0])} 不一致"
             )
         return dim
     if not doc_vectors:
-        raise ValueError("无法确定向量维度：corpus 为空且 embedder 未声明 dim")
+        raise ValueError("无法确定向量维度：corpus 为空且 embedding 模型未声明 dim/embed_dim")
     return len(doc_vectors[0])
 
 
@@ -804,7 +809,7 @@ class _ChromaIndexBase:
     """两个 Chroma 索引的装配 / 检索骨架；子类只需在类体里声明 ``_spec``。
 
     构造顺序是「先 embed 全部文本、再建/校验 collection」：collection 名要带向量维度，而维度
-    通常只有拿到向量后才知道（embedder 自己声明了 ``dim`` 才能提前），故不为省一轮 embed 把构造
+    通常只有拿到向量后才知道（embedding 模型自己声明了 ``dim`` 才能提前），故不为省一轮 embed 把构造
     拆成两段 —— space 校验失败的代价就是白跑一轮 embed。
     """
 
@@ -814,7 +819,7 @@ class _ChromaIndexBase:
         self,
         rows: Iterable[dict | Any],
         *,
-        embedder: Embedder | None = None,
+        embedding_model: Any | None = None,
         mode: RetrievalMode = "hybrid",
         weights: tuple[float, float] = DEFAULT_WEIGHTS,  # 仅为与 local 后端同签名，本实现不消费
         chroma_client: Any | None = None,
@@ -825,28 +830,33 @@ class _ChromaIndexBase:
     ) -> None:
         self._rows: list[Any] = _normalize_rows(rows, self._spec.record_type)
         self.mode: RetrievalMode = _validate_mode(mode)
-        self.embedder: Embedder = embedder or MockHashEmbedder()
         self.collection_prefix = collection_prefix
-        # 空语料不建库（collection_name = ""）：这两个可见属性必须先有默认值，否则空 KB 上读
-        # ``index.space`` 会抛 AttributeError，与「空 KB 未建库则为 None」的口径不符。
+        # 空语料不建库（collection_name 保持 ""）：这几个可见属性必须先有默认值，否则空 KB 上读
+        # ``index.space`` / ``collection_name`` 会抛 AttributeError，与「空 KB 未建库则为 None/""」
+        # 的口径不符。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算），见下方 if 分支。
         self.collection_space: str | None = None
         self._self_check_distance: float | None = None
         self._collection: Any | None = None
         self._nodes: list[Any] = []
         self._node_ids: list[str] = []
+        self._dim = 0
+        self.collection_name = ""
+        self._doc_vectors: list[list[float]] = []
         self._llama = _import_llama()
         self._client = make_chroma_client(
             chroma_client, host=host, port=port, ephemeral=ephemeral
         )
-        self._embed_model = LlamaIndexEmbeddingAdapter(self.embedder)
-        self._doc_vectors: list[list[float]] = [
-            self._embed_model.get_text_embedding(self._spec.text_of(r)) for r in self._rows
-        ]
-        self._dim = _resolve_dim(self.embedder, self._doc_vectors)
-        self.collection_name = (
-            _collection_name(collection_prefix, self._spec.kind, self._dim) if self._rows else ""
-        )
+        # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
+        self._embed_model: Any = embedding_model or build_embedding_model("fastembed")
         if self._rows:
+            # 空 KB 走不到这里（不建库，故不 embed / 不解析维度 / 不留 collection_name）。
+            self._doc_vectors = [
+                self._embed_model.get_text_embedding(self._spec.text_of(r)) for r in self._rows
+            ]
+            self._dim = _resolve_dim(self._embed_model, self._doc_vectors)
+            self.collection_name = _collection_name(
+                collection_prefix, self._spec.kind, self._dim
+            )
             self._seed()
 
     # -- 装配 ---------------------------------------------------------------
@@ -854,7 +864,7 @@ class _ChromaIndexBase:
     def _seed(self) -> None:
         """建/复用 collection（``embedding_function=None`` **+ 显式 cosine 空间**）+ 幂等 upsert。
 
-        node 向量 = 文本向量（与 local 后端同一 embedder/同一文本，逐位一致）；节点按
+        node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按
         「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。
 
         空间闸：``_open_collection`` 对**新建与复用两条路径**都断言

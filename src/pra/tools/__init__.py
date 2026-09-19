@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from .base import Tool, ToolArgs, ToolContext, ToolRegistry, ToolResult
 
 if TYPE_CHECKING:  # 仅注解用：默认装配路径不 import 这些工具子包
-    from pra.rag.embedder import BgeEmbedder
     from pra.rag.retrieval import RetrievalMode
 
     from .case_search.tool import CaseIndex
@@ -48,7 +47,11 @@ def build_tools(
         RAG 索引经 ``pra.rag.factory`` **延迟 import**（默认 memory 路径零额外 import）。
     :param rag_backend: 仅 ``data_source="rag"`` 生效 —— ``"local"``（默认）/ ``"chroma"``；
         后者经 factory **延迟 import**，缺依赖时抛 ``RuntimeError``。
-    :param rag_embedder: RAG 检索 embedder（默认 None → factory 缺省 ``MockHashEmbedder``）。
+    :param rag_embedder: **local 后端**的 RAG 编码器（自家 ``Embedder``；默认 None → factory
+        缺省 ``MockHashEmbedder``），恒以 ``embedder=`` 转发。chroma 后端不收它（编码器只经
+        ``rag_backend_options["embedding_model"]``），错配由 factory 闸拒 —— 两协议互不兼容
+        （``Embedder`` 只有 ``embed()`` vs ``BaseEmbedding`` 只有 ``get_text_embedding()``），
+        故不按 backend 自动分发，避免错误被推迟到运行期 ``AttributeError``。
     :param rag_backend_options: 后端专属装配参数透传字典；键名与 ``pra.rag.factory`` 参数
         **逐字对应**，未给键走 factory 缺省。
     :param product_repo: ProductTool 的数据源；默认 **None → InMemory**（CI 不连库、评测可
@@ -83,6 +86,8 @@ def build_tools(
         from pra.rag.factory import build_case_index, build_policy_index
 
         options = dict(rag_backend_options or {})
+        # 编码器：恒以 embedder=rag_embedder 转发（chroma 的编码器只经 options["embedding_model"]）；
+        # 错配由 factory 闸拒（唯一把关点），不在此重复把关、更不静默择一。
         tools[4] = CaseSearchTool(
             index=build_case_index(backend=rag_backend, embedder=rag_embedder, **options)
         )
@@ -98,8 +103,8 @@ def build_production_tools() -> list[Tool]:
     相对 ``build_tools()`` 的差别（共 3 个工具的数据源）：
     ``ProductTool`` → ``MySQLProductRepository``、``MerchantTool`` → ``MySQLMerchantRepository``、
     ``CaseSearchTool`` / ``PolicySearchTool`` → 真实 RAG 索引（``rag_backend="chroma"`` +
-    ``BgeEmbedder`` + hybrid 检索，经 ``Lazy*Index`` **惰性构建**：装配期零 import/零 IO，
-    首次检索才建库连服务端）。其余 2 个（image_analysis / ocr）仍是 Mock 桩。
+    LlamaIndex 官方 FastEmbed 编码器 + hybrid 检索，经 ``Lazy*Index`` **惰性构建**：装配期零
+    import/零 IO，首次检索才建库连服务端）。其余 2 个（image_analysis / ocr）仍是 Mock 桩。
 
     **默认装配路径（``build_tools()`` 与 ``build_agent_graph()`` 缺省）仍是 InMemory** ——
     单测与 CI 不连库/不连 Chroma、评测可重放；只有生产入口（HTTP 路由 / 落库编排）走本函数。
@@ -129,34 +134,36 @@ def build_production_tools() -> list[Tool]:
     return tools
 
 
-# 生产 RAG 检索口径：真实后端（ChromaDB + LlamaIndex 装配 + BGE + BM25(jieba) + RRF）与
-# hybrid 三路融合。**不在这里给 embedder 兜底 mock** —— 真模型失败要显式报错（见 BgeEmbedder），
+# 生产 RAG 检索口径：真实后端（ChromaDB + LlamaIndex 装配 + FastEmbed 编码器 + BM25(jieba) +
+# RRF）与 hybrid 三路融合。**不在这里给编码器兜底 mock** —— 真模型失败要显式报错，
 # 缺 ``--extra rag`` / 服务端不可达 / 模型未缓存都会在首次检索时抛出带指引的错误。
 _PRODUCTION_RAG_BACKEND: Literal["chroma"] = "chroma"
 _PRODUCTION_RAG_MODE: RetrievalMode = "hybrid"
 
 
-def _production_rag_embedder() -> BgeEmbedder:
-    """生产检索用真语义 embedder；**请求期绝不下载模型**（缺依赖/未缓存即快速报错）。
+def _production_embedding_model() -> Any:
+    """生产检索用真语义编码器（LlamaIndex 官方 FastEmbed 集成）；**请求期绝不下载模型**。
 
-    服务器请求线程里下载 ~90MB 模型会把一次审核拖成分钟级并可能被墙挂死。首次部署须预热一次
-    （设 ``HF_ENDPOINT`` 下载到 ``PRA_EMBED_CACHE_DIR`` 指向的目录），否则这里抛错 → 工具层记
-    warn failure，检索降级但不阻塞审核，也**不静默回退 MockHashEmbedder**。
+    先以 ``BgeEmbedder`` 的可用性/缓存探测做**只读预检**（同一 fastembed 模型、零联网）：
+    缺依赖或模型未缓存即快速报错 —— 服务器请求线程里下载 ~90MB 模型会把一次审核拖成分钟级并
+    可能被墙挂死。预检通过后再 ``build_embedding_model("fastembed")`` 构造 BaseEmbedding
+    （此时模型已缓存，构造不触发下载）。失败原样上抛 → 工具层记 warn failure，检索降级但不阻塞
+    审核，也**不静默回退 mock**。首次部署须预热一次（设 ``HF_ENDPOINT`` 下载到
+    ``PRA_EMBED_CACHE_DIR``）。
     """
-    from pra.rag.embedder import BgeEmbedder
+    from pra.rag.embedder import BgeEmbedder, build_embedding_model
 
     if not BgeEmbedder.available():
         raise RuntimeError(
             "生产 RAG 需要 rag extra：`uv sync --extra rag --extra observability`"
         )
-    embedder = BgeEmbedder()
-    if not embedder.model_ready():
+    if not BgeEmbedder().model_ready():
         raise RuntimeError(
             "生产 RAG 的 BGE 模型未缓存（生产路径不在请求期下载模型）。预热一次：设 "
             "`HF_ENDPOINT=https://hf-mirror.com` 并让 `BgeEmbedder().embed('预热')` 跑通，"
             "或用 `PRA_EMBED_CACHE_DIR` 指向已缓存的模型目录。"
         )
-    return embedder
+    return build_embedding_model("fastembed")
 
 
 def _build_production_case_index() -> CaseIndex:
@@ -166,7 +173,7 @@ def _build_production_case_index() -> CaseIndex:
     return build_case_index(
         backend=_PRODUCTION_RAG_BACKEND,
         mode=_PRODUCTION_RAG_MODE,
-        embedder=_production_rag_embedder(),
+        embedding_model=_production_embedding_model(),
     )
 
 
@@ -177,5 +184,5 @@ def _build_production_policy_index() -> PolicyIndex:
     return build_policy_index(
         backend=_PRODUCTION_RAG_BACKEND,
         mode=_PRODUCTION_RAG_MODE,
-        embedder=_production_rag_embedder(),
+        embedding_model=_production_embedding_model(),
     )
