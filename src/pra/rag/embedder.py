@@ -18,6 +18,7 @@ __all__ = [
     "BGE_DEFAULT_MODEL",
     "BGE_DIM",
     "build_embedding_model",
+    "build_production_embedder",
 ]
 
 
@@ -71,3 +72,29 @@ def build_embedding_model(
     raise ValueError(
         f"build_embedding_model: 未知 kind={kind!r}（仅支持 'fastembed'），不静默回退。"
     )
+
+
+def build_production_embedder() -> Any:
+    """生产与 RAG 评测世界共用的真语义编码器：``PRA_EMBED_CACHE_DIR`` + ``local_files_only``。
+
+    **请求期绝不下载模型** —— fastembed 只解析本地缓存，缺 rag extra 或模型未缓存即抛；服务器
+    请求线程里下载 ~90MB 会把一次审核拖成分钟级，被墙还会挂死。失败转成带指引的
+    ``RuntimeError``（由调用方记 warn failure），**不静默回退任何编码器**。
+    """
+    import os
+
+    try:
+        return build_embedding_model(
+            "fastembed",
+            cache_dir=os.environ.get("PRA_EMBED_CACHE_DIR"),
+            local_files_only=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "真语义编码器不可用（缺 rag extra 或 BGE 模型未缓存；本路径不在请求期下载模型）。"
+            "排查：1) `uv sync --extra rag --extra observability` 装上 fastembed；"
+            "2) 首次部署联网预热一次：设 `HF_ENDPOINT=https://hf-mirror.com` 后跑通一次真实检索"
+            "（或 `uv run python scripts/run_rag_demo.py`）把模型下到 `PRA_EMBED_CACHE_DIR`；"
+            "3) 已缓存时用 `PRA_EMBED_CACHE_DIR` 指向该目录。"
+            f"原始错误: {type(exc).__name__}: {exc}"
+        ) from exc

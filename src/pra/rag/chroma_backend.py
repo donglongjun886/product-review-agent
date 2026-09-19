@@ -30,7 +30,6 @@ from typing import Any
 # 顶层只 import 仓库内模块 + 标准库；chroma / llama_index / jieba 一律延迟 import
 # （import 本模块不拉起重依赖，装配/检索时才拉起）。
 from pra.rag.corpus.schema import CasePrecedentRecord, PolicyClauseRecord
-from pra.rag.embedder import build_embedding_model
 from pra.rag.retrieval import (
     MODES,
     RetrievalMode,
@@ -665,7 +664,7 @@ class _ChromaIndexBase:
         self,
         rows: Iterable[dict | Any],
         *,
-        embedding_model: Any | None = None,
+        embedding_model: Any,
         mode: RetrievalMode = "hybrid",
         config: ChromaConfig | None = None,
     ) -> None:
@@ -687,7 +686,10 @@ class _ChromaIndexBase:
         # LlamaIndex 装配面同样在构造期解析（空 KB 也不例外 —— 缺 rag extra 不推迟到检索期）。
         _llama()
         # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
-        self._embed_model: Any = embedding_model or build_embedding_model("fastembed")
+        # **必填、无兜底** —— 这里曾 `or build_embedding_model("fastembed")`，那个兜底不传
+        # `cache_dir` / `local_files_only`，等于偷偷允许请求期联网下载模型。构造编码器的唯一
+        # 位置是 ``embedder.build_production_embedder``（或调用方自己注入）。
+        self._embed_model: Any = embedding_model
         if self._rows:
             # 空 KB 走不到这里（不建库，故不 embed / 不留 collection_name）。
             self._doc_vectors = [

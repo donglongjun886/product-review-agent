@@ -56,6 +56,12 @@ def _build_index(
         record_rows, _meta = loader(corpus_path)
     else:
         record_rows = list(rows)
+    if embedding_model is None:
+        # 编码器的唯一构造点：带 ``PRA_EMBED_CACHE_DIR`` + ``local_files_only`` 的工厂。
+        # 不在后端里兜底 —— 那种兜底不传这两个参数，等于允许请求期联网下载模型。
+        from pra.rag.embedder import build_production_embedder
+
+        embedding_model = build_production_embedder()
     return index_cls(
         record_rows, embedding_model=embedding_model, mode=mode, config=config
     )
