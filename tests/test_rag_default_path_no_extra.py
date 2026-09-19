@@ -5,9 +5,8 @@
 ``sys.modules``（真实检索后端统一在「显式装配 chroma 索引」或「首次检索」时才延迟 import）。
 
 为什么这是 CI 上唯一跑得动的 RAG 守护：CI 只跑 ``uv sync --frozen``（不装任何 extra），
-而 ``tests/test_rag_chroma.py`` / ``tests/test_rag_chroma_server.py`` 顶层
-``pytest.importorskip("chromadb")`` → 整文件 skip，在 CI 上不执行任何一行断言
-（故不得声称「CI 覆盖了 chroma」）。
+真实检索（chroma）的用例需要 ``chromadb`` / ``fastembed`` 与已缓存模型，在 CI 上不执行任何
+一行断言（故不得声称「CI 覆盖了 chroma」）。
 
 注意：默认 ``build_policy_index()`` / ``build_case_index()`` **已不再是零依赖路径** —— 它们只保留
 chroma 后端（缺 rag extra 时构造即抛），故不在本文件的守护范围内；本文件钉的是「默认 memory 装配
