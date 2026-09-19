@@ -41,9 +41,9 @@ def _build_index(
     index_cls: type,
     *,
     loader: Callable[[str | Path | None], tuple[list[Any], dict]],
+    embedding_model: Any,
     corpus_path: str | Path | None = None,
     rows: Iterable[Any] | None = None,
-    embedding_model: Any | None = None,
     mode: RetrievalMode = "hybrid",
     config: ChromaConfig | None = None,
 ) -> Any:
@@ -51,17 +51,14 @@ def _build_index(
 
     ``rows`` 显式注入时优先（跳过文件 IO，``corpus_path`` 随之失效）；否则 ``loader(corpus_path)``
     （``corpus_path=None`` → 加载器自带的缺省语料文件）。
+
+    ``embedding_model`` **必填**：本层不构造任何编码器 —— 谁要 RAG，谁给编码器（`build_bge_embedder`
+    或自备 ``BaseEmbedding``）。漏传即为 ``TypeError``，不会悄悄替你造一个。
     """
     if rows is None:
         record_rows, _meta = loader(corpus_path)
     else:
         record_rows = list(rows)
-    if embedding_model is None:
-        # 编码器的唯一构造点：带 ``PRA_EMBED_CACHE_DIR`` + ``local_files_only`` 的工厂。
-        # 不在后端里兜底 —— 那种兜底不传这两个参数，等于允许请求期联网下载模型。
-        from pra.rag.embedder import build_bge_embedder
-
-        embedding_model = build_bge_embedder()
     return index_cls(
         record_rows, embedding_model=embedding_model, mode=mode, config=config
     )
@@ -70,16 +67,15 @@ def _build_index(
 def build_policy_index(
     rows: Iterable[Any] | None = None,
     *,
+    embedding_model: Any,
     corpus_path: str | Path | None = None,
-    embedding_model: Any | None = None,
     mode: RetrievalMode = "hybrid",
     config: ChromaConfig | None = None,
 ) -> PolicyIndex:
     """构造 PolicyIndex（corpus_path 缺省 = rag/corpus/policies.json）。
 
-    ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` 缺省 None → 类内自建
-    ``build_bge_embedder()``（真语义、需 rag extra 与已缓存模型）；显式传入时须为
-    真实语义 ``BaseEmbedding``（``src/`` 内已无任何确定性 / mock 编码器）。
+    ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` **必填**（``BaseEmbedding``；
+    常用 ``pra.rag.embedder.build_bge_embedder()``）—— 本函数不替你构造。
     ``config`` = Chroma 连接 / collection 参数（见 :class:`~pra.rag.chroma_backend.ChromaConfig`；
     缺省 None → 全取默认值）。
     """
@@ -100,8 +96,8 @@ def build_policy_index(
 def build_case_index(
     rows: Iterable[Any] | None = None,
     *,
+    embedding_model: Any,
     corpus_path: str | Path | None = None,
-    embedding_model: Any | None = None,
     mode: RetrievalMode = "hybrid",
     config: ChromaConfig | None = None,
 ) -> CaseIndex:

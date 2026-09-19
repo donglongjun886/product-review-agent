@@ -504,6 +504,7 @@ def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
         编码器）。未知键由 factory 抛错（不吞键）。
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
+    from pra.rag.embedder import build_bge_embedder
     from pra.rag.factory import build_case_index, build_policy_index
     from pra.tools.base import Tool
     from pra.tools.case_search.tool import CaseSearchTool
@@ -516,6 +517,10 @@ def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
     from pra.tools.product.tool import InMemoryProductRepository, ProductTool
 
     opts = dict(options or {})
+    # RAG 世界的编码器必须显式给出（factory 不再代为构造）。调用方可在 options 里覆盖；
+    # 缺省用只读本地缓存的 BGE 工厂 —— 这里就是"决定用 RAG 世界"的那一层。
+    if "embedding_model" not in opts:
+        opts["embedding_model"] = build_bge_embedder()
     # 装配参数逐字透传给 factory（未知键由它抛错：不吞键、不静默忽略拼错字）。
     tools: list[Tool] = [
         ProductTool(repo=InMemoryProductRepository(EVAL_PRODUCTS)),
