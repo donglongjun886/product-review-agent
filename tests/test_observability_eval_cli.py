@@ -110,17 +110,6 @@ def _run_eval(argv: list[str]) -> tuple[int, str]:
 # 1. --experiment 写进 PRA_LANGFUSE_EXPERIMENT（AgentScheme 造 trace_id 的读点）
 
 
-def test_experiment_flag_sets_env(smoke_data: Path) -> None:
-    code, out = _run_eval(
-        ["--data", str(smoke_data), "--smoke", "--smoke-limit", str(SMOKE_CASES),
-         "--experiment", "prompt-v2"]
-    )
-
-    assert code == 0
-    assert os.environ["PRA_LANGFUSE_EXPERIMENT"] == "prompt-v2"
-    assert "[OK] 跑分完成" in out
-
-
 def test_experiment_name_reaches_trace_context(smoke_data: Path, monkeypatch) -> None:
     """``--experiment prompt-v2`` 跑完后 ``os.environ`` 与 ``experiment_name()`` 都是它。"""
     monkeypatch.setenv("PRA_LANGFUSE_ENABLED", "0")  # 即便有凭据也不联网

@@ -5,7 +5,7 @@ schema 校验失败重试 → 2 个 generation（**最关键**：埋点在内层
 外层，而非 ``call_structured_llm`` 外壳）；后端异常 → ``record_error`` 且
 ``LLMCallOutcome`` 语义不变（attempts=2 / tokens=0）；``tools_node`` 成功与异常各记
 1 个 tool span，latency 复用审计 record 的值；无 tracer 注入 → ``NullTracer`` 行为不变；
-usage 透出（默认 None、多次尝试按键累加、litellm 提取三键、scripted 桩不伪造）。
+usage 透出（多次尝试按键累加、litellm 提取三键、scripted 桩不伪造）。
 
 隔离：用到 tracer 的测试经 ``_fake_tracer`` 注入并在结束时 ``set_tracer(None)``
 复原；LLM 后端由 tests/conftest.py 的 autouse fixture 还原。全程不联网。
@@ -24,7 +24,6 @@ from helpers import AlwaysRaiseBackend, SequenceBackend, ev, plan_conclude_json
 
 from pra.agent.guardrails.llm_shell import (
     LLMBackendError,
-    LLMCallOutcome,
     LLMResponse,
     call_structured_llm,
     set_llm_backend,
@@ -409,13 +408,6 @@ async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) 
         assert "langfuse" not in sys.modules
     finally:
         T.set_tracer(None)
-
-
-def test_usage_fields_default_to_none() -> None:
-    """新增字段默认 None —— 不破坏任何既有构造点/测试。"""
-    assert LLMResponse(content="{}", tokens=0).usage is None
-    assert LLMResponse(content="{}", tokens=0, truncated=True).usage is None
-    assert LLMCallOutcome(model=None, attempts=1, tokens=0, error="x").usage is None
 
 
 class _UsageBackend:

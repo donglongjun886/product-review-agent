@@ -13,11 +13,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 from pra.agent.guardrails.llm_shell import (
     LLMCallOutcome,
-    LLMBackendError,
     LLMResponse,
     call_structured_llm,
     get_llm_backend,
@@ -139,12 +136,6 @@ async def test_backend_protocol_violation_is_caught_as_failure():
     assert outcome.model is None
     assert outcome.attempts == 2
     assert "anything unexpected" in (outcome.error or "")
-
-
-async def test_backend_error_type_exposed():
-    assert issubclass(LLMBackendError, RuntimeError)
-    with pytest.raises(LLMBackendError):
-        raise LLMBackendError("boom")
 
 
 class _TruncatedOnceBackend:

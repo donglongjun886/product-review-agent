@@ -40,6 +40,7 @@ from pra.domain.measurement import (
     MEASUREMENT_TYPE,
     VERDICT_NEGATIVE,
 )
+from pra.tools.merchant.tool import InMemoryMerchantRepository
 from pra.tools.product.tool import (
     _DEFAULT_PRODUCTS,
     PRODUCT_FACT_TYPE,
@@ -330,9 +331,7 @@ async def test_missing_product_flows_to_ok_false_and_no_evidence():
 
 
 def test_default_product_tool_is_still_inmemory():
-    assert type(ProductTool()._repo).__name__ == "InMemoryProductRepository"
-    assert type(build_tools()[0]._repo).__name__ == "InMemoryProductRepository"
-    assert isinstance(ProductTool()._repo, InMemoryProductRepository)
+    assert isinstance(build_tools()[0]._repo, InMemoryProductRepository)
 
 
 def test_build_tools_uses_mysql_repo_only_when_explicitly_injected():
@@ -515,10 +514,10 @@ def test_tests_are_pinned_to_the_inmemory_world():
     import pra.tools as tools_pkg
 
     tools = tools_pkg.build_production_tools()
-    assert type(tools[0]._repo).__name__ == "InMemoryProductRepository", (
+    assert isinstance(tools[0]._repo, InMemoryProductRepository), (
         "conftest 的 InMemory 钉回 fixture 失效了 —— 测试会去连真库"
     )
-    assert type(tools[3]._repo).__name__ == "InMemoryMerchantRepository", (
+    assert isinstance(tools[3]._repo, InMemoryMerchantRepository), (
         "conftest 的 InMemory 钉回 fixture 失效了 —— 测试会去连真库"
     )
 

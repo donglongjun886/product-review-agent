@@ -86,7 +86,7 @@ async def test_runner_v1_no_should_abstention_empty_abstention() -> None:
 # --- 2) 正式集（320 案）五指标与固化数字对齐
 
 
-async def test_v2_full_run_abstention_matches_docs_s44() -> None:
+async def test_v2_full_run_abstention_matches_docs() -> None:
     result = await EvaluationRunner(data_path=str(DATA_V2)).run()
     assert result.total_cases == 320 and result.has_should_abstain is True
 

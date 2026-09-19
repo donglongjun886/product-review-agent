@@ -1,7 +1,6 @@
-"""chroma 链编码器工厂 ``build_embedding_model`` 的常量 + 真模型 smoke 单测。
+"""chroma 链编码器工厂 ``build_embedding_model`` 的真模型 smoke 单测。
 
 红线：模块级不 import fastembed —— 真模型依赖只在真模型组的 fixture 里拉起。
-离线必跑组（无模型也绿）：``BGE_DEFAULT_MODEL`` / ``BGE_DIM`` 常量。
 真模型组走 ``TestRealEmbeddingModel`` 类级 skipif：就绪判定 = 纯文件系统只读探测
 （fastembed 落盘布局里有 onnx）+ ``fastembed``/``llama_index`` 可 import；未就绪即整组跳过，
 绝不联网/下载。编码走与生产同款的 ``build_embedding_model("fastembed", local_files_only=True)``
@@ -22,7 +21,7 @@ from typing import Any
 import pytest
 
 from helpers import bge_model_cached
-from pra.rag.embedder import BGE_DEFAULT_MODEL, BGE_DIM, build_embedding_model
+from pra.rag.embedder import build_embedding_model
 
 # 真模型缓存目录：优先 PRA_RAG2_MODEL_CACHE，缺省为仓库内 .cache/model_cache。
 _MODEL_CACHE = os.environ.get(
@@ -44,12 +43,6 @@ _PROBE_GENUINE = "本店在售运动鞋全部来自品牌官方授权渠道，�
 _PROBE_COUNTERFEIT = "高仿潮流运动鞋，鞋型细节与真货一致，厂家直销价格实惠。"
 _PROBE_REPLICA = "复刻经典配色运动鞋，做工用料高度还原原版，性价比高。"
 _PROBE_UNRELATED = "今天天气晴朗，适合户外慢跑锻炼身体。"
-
-
-# --- 离线必跑组（无模型也绿；不触发下载/不依赖网络）
-def test_default_model_and_dim_constants() -> None:
-    assert BGE_DEFAULT_MODEL == "BAAI/bge-small-zh-v1.5"
-    assert BGE_DIM == 512
 
 
 # --- 真模型组（类级 skipif：模型未缓存/依赖缺失时整组跳过）

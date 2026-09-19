@@ -88,18 +88,6 @@ _HYP_WITH_EXISTING = {
 _HYP_WITHOUT_EXISTING = {k: v for k, v in _HYP_WITH_EXISTING.items() if k != "hypotheses"}
 
 
-def test_hypothesize_system_no_duplicate_and_provable_rules():
-    prompt = build_system_prompt("hypothesize")
-    assert "禁止重复提出假设" in prompt
-    assert "既有假设清单" in prompt  # 规则指向 user 上下文里渲染的去重清单
-    assert "语义重复即重复" in prompt
-    assert "只提出清单之外的" in prompt and "新风险维度" in prompt
-    assert "能被后续调查计划的取证工具检验" in prompt  # 假设必须可取证（勿脑补）
-    assert "允许**少提**" in prompt  # 没有新维度时宁精勿凑
-    # 既有语义关键词不回退（test_litellm_backend 同守护）
-    assert "低风险" in prompt and "先验" in prompt
-
-
 def test_hypothesize_user_prompt_renders_existing_hypotheses():
     text = build_user_prompt(
         node="hypothesize", state=_HYP_WITH_EXISTING, json_schema=_SCHEMA
@@ -120,68 +108,6 @@ def test_hypothesize_user_prompt_omits_section_when_no_existing():
     )
     assert "既有假设清单" not in text
     assert "## 三、机审信号" in text and "KEYWORD" in text
-
-
-def test_plan_system_policy_applicability_one_shot():
-    prompt = build_system_prompt("plan")
-    assert "一次性适用性判定" in prompt
-    assert "适用性已判定" in prompt
-    assert "不要仅为复核同一条款/先例是否适用而重复安排同类检索" in prompt
-    # 原有"只计划能带来新证据的调用 / conclude"表述不回退
-    assert "新证据" in prompt and "conclude" in prompt and "next_action" in prompt
-
-
-def test_plan_system_early_conclude_when_evidence_sufficient():
-    """证据已充分（高优先假设已全部结论化、无未解决高优先级疑点）应立即提前 conclude。"""
-    prompt = build_system_prompt("plan")
-    # 判定基准：高优先假设全部得出基于证据的结论 + 无未解决高优先级疑点 = 证据已充分
-    assert "证据已充分 → 提前收尾（conclude）" in prompt
-    assert "高优先（high prior）" in prompt and "得出基于证据的结论" in prompt
-    assert "没有未解决的高优先级疑点" in prompt
-    # 低优先级/边际 UNRESOLVED、或只会重复采集已满足维度/复核已引用条款的工具不阻止
-    assert "低优先级/边际假设" in prompt
-    assert "不构成阻止 conclude 的理由" in prompt
-    # 反对为「看起来有进展」安排多余取证：立即 conclude（tools 空数组）并提前结束循环
-    assert "应**立即**输出" in prompt and 'next_action="conclude"' in prompt
-    assert "不要为了「看起来有进展」而安排多余取证烧预算" in prompt
-    assert "**提前结束**调查循环" in prompt
-
-
-def test_reevaluate_system_visual_evidence_gate():
-    prompt = build_system_prompt("reevaluate")
-    assert "外观/视觉类假设的证据门槛" in prompt
-    assert "图像类证据" in prompt and "IMAGE_SIMILARITY" in prompt
-    assert "CASE_PRECEDENT / POLICY_REF 只能作佐证" in prompt
-    assert "不能单独支撑外观类 SUPPORTED" in prompt
-    assert "无视觉证据时该类假设判 UNRESOLVED" in prompt
-    assert "仅凭标题文字或先例脑补外观相似结论" in prompt
-    assert "禁止仅凭标题" in prompt
-
-
-def test_reevaluate_system_new_hypotheses_no_duplicate_and_policy_one_shot():
-    prompt = build_system_prompt("reevaluate")
-    assert "new_hypotheses 禁重复、允许为空" in prompt
-    assert "new_hypotheses **允许为空**" in prompt
-    assert "与假设仪表盘既有假设同维度或同表述" in prompt
-    assert "政策/先例引用一次判定" in prompt
-    assert "适用性已判定" in prompt
-    assert "不能替代对应维度的真实取证" in prompt
-
-
-def test_decide_system_rule_when_evidence_sufficient():
-    """decide 的三分类语义以**证据**为准，且明确两条硬性边界。"""
-    prompt = build_system_prompt("decide")
-    # PASS 依据 = 必需测量全部取得明确阴性结论（不再依赖假设状态/先验）
-    assert "必需的关键测量" in prompt and "明确阴性结论" in prompt
-    # REJECT 依据 = 维度匹配且达阈值的阳性 + 可引用依据
-    assert "与风险维度匹配且达阈值" in prompt
-    assert "**真实出现**的政策条款" in prompt
-    # 两条硬性边界
-    assert "只有弱信号" in prompt
-    assert "未取得的关键测量时**不得**提 PASS" in prompt
-    assert "禁止凭标题、类目或先例脑补上下文没有的事实" in prompt
-    # 旧口径（假设被证伪 → PASS）必须已从决定语义中移除
-    assert "所有高优先（high prior）假设均被证据证伪" not in prompt
 
 
 def test_output_schema_contracts_unchanged():

@@ -305,20 +305,6 @@ def decide_reject_json() -> str:
     )
 
 
-def decide_human_json() -> str:
-    return json_dumps(
-        {
-            "decision": "HUMAN_REVIEW",
-            "risk_level": "HIGH",
-            "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
-            "confidence": 0.8,
-            "evidence_ids": [],
-            "policy": [],
-            "rationale": "test",
-        }
-    )
-
-
 class SequenceBackend:
     # contents 元素为 JSON 字符串（返回该串）或 None（该次抛后端异常）；calls 记录每次 messages 副本
     name = "test-sequence"

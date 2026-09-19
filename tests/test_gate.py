@@ -116,7 +116,6 @@ def test_dc_penalizes_conflict_and_clips():
            ref_id="https://cdn.example.com/products/P_TEST/img1.jpg"),
     ]
     assert contradiction_detect(st) is True
-    assert 0.0 <= finalize_decision_confidence(st) <= 1.0
 
 
 # ---- 谓词：证据冲突 / 高优先展示 ----

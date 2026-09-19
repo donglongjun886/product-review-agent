@@ -54,7 +54,7 @@ def test_production_assembly_injects_lazy_rag_indices():
     # 惰性的全部意义：装配完还没建库（未 import 后端、未连服务端、未加载模型）
     assert prod[4]._index.index is None and prod[4]._index.is_built is False
     assert prod[5]._index.index is None and prod[5]._index.is_built is False
-    # 其余两个仍是 Mock 桩（本轮未动 image/ocr）
+    # 其余两个仍走 Mock 桩（image/ocr 无真实数据源）
     assert type(prod[1]).__name__ == type(default[1]).__name__ == "ImageAnalysisTool"
     assert type(prod[2]).__name__ == type(default[2]).__name__ == "OCRTool"
 

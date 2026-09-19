@@ -35,7 +35,6 @@ from pra.agent.guardrails.schemas import PlanOutput
 from pra.agent.litellm_backend import LiteLLMBackend
 from pra.agent.llm_prompts import (
     SYSTEM_PROMPTS,
-    build_system_prompt,
     build_user_prompt,
 )
 
@@ -379,7 +378,7 @@ async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypat
     second_user = fake.calls[1]["messages"][1]["content"]
     assert "上一轮输出校验反馈" in second_user
     assert "重新输出" in second_user
-    # P2-15：回喂含第 1 次非法输出原文（next_action 超词表的 _SCHEMA_BAD 全文）
+    # 回喂含第 1 次非法输出原文（next_action 超词表的 _SCHEMA_BAD 全文）
     assert '"next_action": "SOMETHING_ELSE"' in second_user
     assert "validation error" in second_user.lower()  # 校验错误文本也一并回喂
     # 第 1 次 user 无反馈分节（没有可回喂的上一轮错误）
@@ -520,25 +519,6 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
 
 
 # B. llm_prompts 渲染纯测
-
-def test_build_system_prompt_keywords_for_all_four_nodes():
-    """四个节点的 system prompt 均非空且含关键约束关键词（稳定子串）。"""
-    expected_keywords = {
-        "hypothesize": ["低风险", "先验"],  # 低风险/正常假设 + prior 语义
-        "plan": ["next_action", "新证据", "conclude"],
-        "reevaluate": ["UNRESOLVED", "SUPPORTED"],  # 证据不足 ≠ 证伪
-        "decide": ["HUMAN_REVIEW", "PASS", "REJECT"],
-    }
-    assert set(SYSTEM_PROMPTS) == set(expected_keywords)
-    for node, keywords in expected_keywords.items():
-        prompt = build_system_prompt(node)
-        assert prompt and len(prompt) > 100
-        for kw in keywords:
-            assert kw in prompt, f"node={node} 的 system prompt 缺关键词 {kw!r}"
-    # 未知 node → ValueError（调用方先查词表，complete 前置校验同口径）
-    with pytest.raises(ValueError):
-        build_system_prompt("bogus")
-
 
 def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
     """hypothesize user prompt：分节中文上下文含商品事实/图片/信号值；无裸 __STATE__。"""

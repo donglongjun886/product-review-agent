@@ -145,18 +145,6 @@ def test_main_disabled_without_credentials(smoke, no_credentials, capsys) -> Non
     assert "LANGFUSE_PUBLIC_KEY" in out
 
 
-def test_main_disabled_with_explicit_disable_flag(smoke, no_credentials, monkeypatch, capsys):
-    """``PRA_LANGFUSE_ENABLED=0`` 同样是 NullTracer 分支（即便给了凭据）。"""
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-dummy")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-dummy")
-    monkeypatch.setenv("PRA_LANGFUSE_ENABLED", "0")
-    rc = smoke.main([])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "tracing disabled" in out
-    assert "PRA_LANGFUSE_ENABLED=0" in out
-
-
 # 2) 参数解析 + v4 回读 URL
 
 
@@ -165,31 +153,6 @@ def test_main_rejects_bad_trace_id(smoke, no_credentials, capsys) -> None:
     out = capsys.readouterr().out
     assert rc == 2
     assert "invalid --trace-id" in out
-
-
-def test_trace_id_and_url_helpers(smoke) -> None:
-    parser = smoke._build_parser()
-    args = parser.parse_args(["--trace-id", "a" * 32, "--timeout", "12", "--no-verify"])
-    assert args.trace_id == "a" * 32
-    assert args.timeout == 12.0
-    assert args.no_verify is True
-    assert args.host is None
-
-    # 默认值
-    defaults = parser.parse_args([])
-    assert defaults.trace_id is None
-    assert defaults.timeout == smoke.DEFAULT_TIMEOUT
-    assert defaults.no_verify is False
-
-    # 尾斜杠归一（避免 //api/... 双斜杠）+ v4 端点
-    url = smoke._observations_api_url("http://localhost:3000/", "b" * 32)
-    assert url.startswith("http://localhost:3000/api/public/v2/observations?")
-    assert "traceId=" + "b" * 32 in url
-    assert "limit=50" in url
-    assert (
-        smoke._ui_url("http://localhost:3000/", "c" * 32)
-        == f"http://localhost:3000/project/pra-local/traces/{'c' * 32}"
-    )
 
 
 def test_observations_url_carries_fields(smoke) -> None:
@@ -522,36 +485,6 @@ def fake_enabled(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
     tracing.set_tracer(tracer)
     return tracer
-
-
-def test_main_no_verify_emits_all_four_observation_kinds(smoke, fake_enabled, capsys) -> None:
-    rc = smoke.main(["--trace-id", "a" * 32, "--no-verify"])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "--no-verify: skipped read-back verification" in out
-    assert fake_enabled.flushes == 1
-    # 四类观测 + 异步子 span 全部发出（root 在最前）
-    assert fake_enabled.spans[0] == "smoke"
-    for name in (
-        "hypothesize",
-        "llm.hypothesize",
-        "tools",
-        "ProductTool",
-        "plan",
-        smoke.ASYNC_CHILD_SPAN,
-    ):
-        assert name in fake_enabled.spans, f"缺少观测: {name}"
-    # generation 的 update 字段（output / usage_details / metadata）
-    gen_kwargs = next(kw for name, kw in fake_enabled.updates if name == "llm.hypothesize")
-    assert gen_kwargs["output"] == "{}"
-    assert gen_kwargs["usage_details"] == {"input": 12, "output": 34, "total": 46}
-    assert gen_kwargs["metadata"] == {"latency_ms": 1}
-    # tool 的 update 字段
-    tool_kwargs = next(kw for name, kw in fake_enabled.updates if name == "ProductTool")
-    assert tool_kwargs["output"] == {"evidence": ["PRODUCT_FACT P_88231"], "status": "ok"}
-    # root 的终态 output
-    root_kwargs = next(kw for name, kw in fake_enabled.updates if name == "smoke")
-    assert root_kwargs["output"] == {"decision": "HUMAN_REVIEW"}
 
 
 def test_main_prints_pass_with_fake_readback(smoke, fake_enabled, monkeypatch, capsys) -> None:

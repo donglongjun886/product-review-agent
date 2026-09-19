@@ -452,7 +452,7 @@ EVAL_POLICY_CLAUSES: list[dict[str, Any]] = [
 # 评测世界标识（报告"结论边界"标注用）
 EVAL_WORLD_LABEL = "InMemory 种子世界 v1（含 P_88231/M_5512 演示种子扩展）"
 # RAG 世界标识：真实 Policy KB / Case KB + 确定性 mock embedding + BM25 + 余弦
-# （mode 由运行 ctx 注入，报告里拼上实际 mode —— 见 run_rag_eval.py）
+# （mode 由运行 ctx 注入，报告里拼上实际 mode）
 RAG_WORLD_LABEL = "RAG 世界（真实 Policy/Case KB · 确定性 mock embedding + BM25 + 余弦）"
 
 

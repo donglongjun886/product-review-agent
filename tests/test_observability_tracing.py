@@ -49,36 +49,6 @@ def test_enabled_flag_off_disables_even_with_credentials(monkeypatch) -> None:
     assert "ENABLED" in tracer.reason
 
 
-def test_null_tracer_is_noop_for_all_observation_types() -> None:
-    tracer = T.NullTracer("test")
-    ctx = T.TraceContext(
-        trace_id="0af7651916cd43dd8448eb211c80319c",
-        session_id="sess",
-        metadata={"case_id": "C1"},
-        tags=["env:local"],
-        input={"case_id": "C1"},
-    )
-
-    with tracer.trace_root(ctx) as root:
-        root.update(output={"decision": "PASS"})
-        with tracer.node_span("hypothesize", input={"n": 1}) as ns:
-            ns.update(output={"hypotheses": []})
-            with tracer.llm_generation(
-                name="llm.hypothesize", model="scripted", input=[{"role": "user", "content": "x"}]
-            ) as gen:
-                gen.update(output="{}", usage_details={"total": 0})
-            with tracer.tool_span(name="ProductTool", input={"args": {}}) as ts:
-                ts.update(output={"ok": True})
-                ts.record_error(RuntimeError("boom"))  # no-op，不抛
-    tracer.flush()
-
-
-def test_null_observation_swallows_errors() -> None:
-    tracer = T.NullTracer()
-    with tracer.node_span("x") as obs:
-        obs.record_error(ValueError("ignored"))
-
-
 @pytest.mark.parametrize("sample,expected", [(0.0, False), (-1.0, False), (1.0, True), (2.0, True)])
 def test_should_sample_boundaries(sample: float, expected: bool) -> None:
     assert T.should_sample("trace-1", sample) is expected

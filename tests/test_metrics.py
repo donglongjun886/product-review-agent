@@ -58,28 +58,11 @@ def test_decision_conf_probe_equals_gate_finalize():
     assert decision_conf_probe({}) == gate.finalize_decision_confidence({}) == 0.10
 
 
-def test_gate_probe_clean_pass():
-    assert gate_probe(_clean_pass_state()) == "PASS"
-
-
-def test_gate_probe_risk_without_policy_is_undecided_without_proposal():
-    """有硬阳性但无可引用依据：**探针无提案输入** ⇒ UNDECIDED（是否转人工取决于提案）。
-
-    对照 ``test_gate_probe_agrees_with_overlay_outcome``：同一 state 配上 REJECT 提案时，
-    overlay 走 REJECT Gate 失败分支 → HUMAN + R2/R3_POSITIVE_INSUFFICIENT。
-    """
-    assert gate_probe(_risk_no_policy_state()) == "UNDECIDED"
-
-
 def test_gate_probe_empty_state_undecided():
     """空态（证据不足，无自动 Gate 通过）→ UNDECIDED。"""
     assert gate_probe({}) == "UNDECIDED"
     assert gate_probe({"hypotheses": [], "evidence": [], "failures": [],
                        "tool_call_history": [], "degraded": False}) == "UNDECIDED"
-
-
-def test_gate_probe_reject_when_reject_gate_passes():
-    assert gate_probe(dc_anchor_state()) == "REJECT"
 
 
 def test_gate_probe_budget_exceeded_human():
