@@ -36,11 +36,6 @@ def _fmt(v) -> str:
     return str(v)
 
 
-def _row(cells: list) -> str:
-    """单行格式化：数字列等宽；None → '-'。"""
-    return "  ".join(_fmt(c) for c in cells)
-
-
 def _overall_row(scheme: str, m: DecisionMetrics, cost: dict) -> str:
     return "  ".join(
         [

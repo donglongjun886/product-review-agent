@@ -20,7 +20,6 @@ token 记账：tokens = 后端 ``usage.total_tokens``（input+output 合计，�
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
 
 from pra.domain.models import Budget
@@ -30,11 +29,6 @@ DIM_LLM_CALLS = "LLM_CALLS"
 DIM_TOOL_CALLS = "TOOL_CALLS"
 DIM_TOKENS = "TOKENS"
 DIM_LATENCY = "LATENCY"
-
-
-def _now_ms() -> int:
-    """当前 UTC 毫秒（与 ``Budget.start_time`` 同口径）。"""
-    return int(time.time() * 1000)
 
 
 def elapsed_ms(budget: Budget) -> int:

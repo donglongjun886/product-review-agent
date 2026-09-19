@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from pra.agent.guardrails.llm_shell import LLMBackend, LLMBackendError, LLMResponse
+from pra.agent.guardrails.llm_shell import LLMBackendError, LLMResponse
 
 # 剧本常量（只读，进程内不变）
 

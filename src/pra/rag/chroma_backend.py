@@ -116,8 +116,6 @@ def _import_llama() -> dict[str, Any]:
     """
     try:
         from llama_index.core.base.base_retriever import BaseRetriever
-        from llama_index.core.llms import MockLLM
-        from llama_index.core.retrievers import QueryFusionRetriever
         from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
         from llama_index.core.vector_stores import MetadataFilter, MetadataFilters
         from llama_index.core.vector_stores.types import FilterOperator
@@ -129,8 +127,6 @@ def _import_llama() -> dict[str, Any]:
         ) from exc
     return {
         "BaseRetriever": BaseRetriever,
-        "MockLLM": MockLLM,
-        "QueryFusionRetriever": QueryFusionRetriever,
         "NodeWithScore": NodeWithScore,
         "QueryBundle": QueryBundle,
         "TextNode": TextNode,
@@ -730,28 +726,6 @@ def _make_bm25_retriever(ctx: _RetrievalContext, top_k: int) -> Any:
             token_pattern="",
             verbose=False,
         )
-
-
-def _make_fusion_retriever(
-    ctx: _RetrievalContext, vector_retriever: Any, bm25_retriever: Any, top_k: int
-) -> Any:
-    """RRF 融合检索器 = ``QueryFusionRetriever(mode="reciprocal_rerank", num_queries=1)``。
-
-    ⚠️ ``num_queries=1`` **必填**：默认 4 会调用 LLM 生成 query 变体，而本项目检索侧零 LLM
-    调用；不传 ``llm`` 时该库回落 ``Settings.llm`` → ``ImportError:
-    llama-index-llms-openai package not found``（项目刻意不装该集成），故显式传 ``MockLLM()``
-    守卫（``num_queries=1`` 下永不被调用）。**本函数不参与本模块检索链路** —— 该实现会原地改写
-    共享 node 的 score，理由见 :func:`_fuse_rrf`。
-    """
-    return ctx.llama["QueryFusionRetriever"](
-        retrievers=[vector_retriever, bm25_retriever],
-        llm=ctx.llama["MockLLM"](),
-        mode="reciprocal_rerank",
-        similarity_top_k=min(top_k, len(ctx.nodes)),
-        num_queries=1,
-        use_async=False,
-        verbose=False,
-    )
 
 
 def _fuse_rrf(
