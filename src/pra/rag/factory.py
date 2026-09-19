@@ -59,9 +59,9 @@ def _build_index(
     if embedding_model is None:
         # 编码器的唯一构造点：带 ``PRA_EMBED_CACHE_DIR`` + ``local_files_only`` 的工厂。
         # 不在后端里兜底 —— 那种兜底不传这两个参数，等于允许请求期联网下载模型。
-        from pra.rag.embedder import build_production_embedder
+        from pra.rag.embedder import build_bge_embedder
 
-        embedding_model = build_production_embedder()
+        embedding_model = build_bge_embedder()
     return index_cls(
         record_rows, embedding_model=embedding_model, mode=mode, config=config
     )
@@ -78,7 +78,7 @@ def build_policy_index(
     """构造 PolicyIndex（corpus_path 缺省 = rag/corpus/policies.json）。
 
     ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` 缺省 None → 类内自建
-    ``build_embedding_model("fastembed")``（真语义、需 rag extra 与已缓存模型）；显式传入时须为
+    ``build_bge_embedder()``（真语义、需 rag extra 与已缓存模型）；显式传入时须为
     真实语义 ``BaseEmbedding``（``src/`` 内已无任何确定性 / mock 编码器）。
     ``config`` = Chroma 连接 / collection 参数（见 :class:`~pra.rag.chroma_backend.ChromaConfig`；
     缺省 None → 全取默认值）。

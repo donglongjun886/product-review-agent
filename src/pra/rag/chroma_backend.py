@@ -686,9 +686,9 @@ class _ChromaIndexBase:
         # LlamaIndex 装配面同样在构造期解析（空 KB 也不例外 —— 缺 rag extra 不推迟到检索期）。
         _llama()
         # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
-        # **必填、无兜底** —— 这里曾 `or build_embedding_model("fastembed")`，那个兜底不传
+        # **必填、无兜底** —— 这里曾有 `or build_embedding_model("fastembed")` 兜底，但它不传
         # `cache_dir` / `local_files_only`，等于偷偷允许请求期联网下载模型。构造编码器的唯一
-        # 位置是 ``embedder.build_production_embedder``（或调用方自己注入）。
+        # 位置是 ``embedder.build_bge_embedder``（或调用方自己注入）。
         self._embed_model: Any = embedding_model
         if self._rows:
             # 空 KB 走不到这里（不建库，故不 embed / 不留 collection_name）。

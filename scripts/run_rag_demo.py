@@ -12,9 +12,9 @@
 weight=retrieval_score / ref_id=case_id —— 与 InMemory 世界同一引用格式。
 
 后端 = chroma（ChromaDB + LlamaIndex + BM25(jieba) + RRF；需 ``uv sync --extra rag``）。
-demo **显式注入真实语义编码器** ``build_embedding_model("fastembed")``（BAAI/bge-small-zh-v1.5，
-dim 512）并配 ``ChromaConfig(ephemeral=True)``（进程内内存库）—— 故无需起服务端；但需 BGE 模型已缓存
-（首次运行会联网下载 onnx，~90MB，huggingface.co 被墙时可设 ``HF_ENDPOINT`` 镜像）。
+demo **显式注入真实语义编码器** ``build_bge_embedder()``（BAAI/bge-small-zh-v1.5，dim 512）
+并配 ``ChromaConfig(ephemeral=True)``（进程内内存库）—— 故无需起服务端；但需 BGE 模型**已缓存**
+（缺省 ``local_files_only=True`` 只读本地、不联网；预热须显式 ``local_files_only=False``）。
 
 全链路确定性：无真 LLM、固定 corpus + 真语义编码器；同输入可重放（编码器确定性）。
 """
@@ -27,7 +27,7 @@ import sys
 
 from pra.domain.models import Budget
 from pra.rag.chroma_backend import ChromaConfig
-from pra.rag.embedder import build_embedding_model
+from pra.rag.embedder import build_bge_embedder
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.tools.base import ToolContext
 from pra.tools.case_search.tool import (
@@ -47,14 +47,13 @@ MODES = ("bm25", "vector", "hybrid")
 def _build(mode: str, kind: str):
     """装配一个 chroma 索引：真实语义编码器 + 进程内 EphemeralClient（不连服务端）。
 
-    ``embedding_model`` 显式传 ``build_embedding_model("fastembed")`` —— LlamaIndex 官方集成的
-    真语义 BGE 编码器（``BaseEmbedding``）；缺省 ``None`` 时 chroma 类内也是同一 fastembed 集成，
-    这里显式传入只为让 demo 的编码来源一目了然。
+    显式传 ``embedding_model=build_bge_embedder()`` —— LlamaIndex 官方集成的真语义 BGE 编码器
+    （``BaseEmbedding``）；只为让 demo 的编码来源一目了然。
     """
     build = build_policy_index if kind == "policy" else build_case_index
     return build(
         mode=mode,
-        embedding_model=build_embedding_model("fastembed"),
+        embedding_model=build_bge_embedder(),
         config=ChromaConfig(ephemeral=True),
     )
 

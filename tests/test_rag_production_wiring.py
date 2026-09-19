@@ -253,7 +253,7 @@ async def test_production_rag_reaches_real_knowledge_base(monkeypatch):
     ``POLICY_3.2_v2_c1``）—— 后半段是本用例的回退反证。
 
     用 uuid 前缀隔离 collection（共享服务端上自建自删）；embedder 走生产默认
-    ``build_embedding_model("fastembed", local_files_only=True)``（缓存目录经
+    ``build_bge_embedder()``（缺省只读本地缓存；缓存目录经
     ``PRA_EMBED_CACHE_DIR`` 指向仓库内 ``.cache/model_cache``，未缓存即本地报错、不下载）。
     """
     reason = _e2e_skip_reason()

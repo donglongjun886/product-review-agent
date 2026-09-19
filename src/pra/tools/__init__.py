@@ -130,15 +130,15 @@ _PRODUCTION_RAG_MODE: RetrievalMode = "hybrid"
 
 
 def _production_embedding_model() -> Any:
-    """生产检索用真语义编码器；实现见 ``pra.rag.embedder.build_production_embedder``。
+    """生产检索用真语义编码器；实现见 ``pra.rag.embedder.build_bge_embedder``。
 
-    **请求期绝不下载模型**：该工厂带 ``PRA_EMBED_CACHE_DIR`` + ``local_files_only=True``，
+    **请求期绝不下载模型**：该工厂缺省 ``local_files_only=True`` + 读 ``PRA_EMBED_CACHE_DIR``，
     fastembed 只查本地缓存，缺 rag extra / 模型未缓存即抛带指引的 ``RuntimeError`` →
     工具层记 warn failure，检索降级但不阻塞审核，也**不静默回退 mock**。
     """
-    from pra.rag.embedder import build_production_embedder
+    from pra.rag.embedder import build_bge_embedder
 
-    return build_production_embedder()
+    return build_bge_embedder()
 
 
 def _build_production_case_index() -> CaseIndex:

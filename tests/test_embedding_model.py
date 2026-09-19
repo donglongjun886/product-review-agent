@@ -1,10 +1,9 @@
-"""chroma 链编码器工厂 ``build_embedding_model`` 的真模型 smoke 单测。
+"""BGE 编码器构造点 ``build_bge_embedder`` 的真模型 smoke 单测。
 
 红线：模块级不 import fastembed —— 真模型依赖只在真模型组的 fixture 里拉起。
 真模型组走 ``TestRealEmbeddingModel`` 类级 skipif：就绪判定 = 纯文件系统只读探测
 （fastembed 落盘布局里有 onnx）+ ``fastembed``/``llama_index`` 可 import；未就绪即整组跳过，
-绝不联网/下载。编码走与生产同款的 ``build_embedding_model("fastembed", local_files_only=True)``
-+ ``get_text_embedding``。
+绝不联网/下载。编码走与生产同款的 ``build_bge_embedder(cache_dir=...)`` + ``get_text_embedding``。
 
 语义 smoke 断言 cos(仿冒, 复刻) > cos(仿冒, 正品) 与 > cos(仿冒, 无关)，
 探针见 ``_PROBE_*`` 常量。
@@ -21,7 +20,7 @@ from typing import Any
 import pytest
 
 from helpers import bge_model_cached
-from pra.rag.embedder import build_embedding_model
+from pra.rag.embedder import build_bge_embedder
 
 # 真模型缓存目录：优先 PRA_RAG2_MODEL_CACHE，缺省为仓库内 .cache/model_cache。
 _MODEL_CACHE = os.environ.get(
@@ -58,7 +57,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 @pytest.fixture(scope="module")
 def _embedding_model() -> Any:
     # 与生产同一构造路径：local_files_only=True（只读本地缓存，绝不联网下载）。
-    return build_embedding_model("fastembed", cache_dir=_MODEL_CACHE, local_files_only=True)
+    return build_bge_embedder(cache_dir=_MODEL_CACHE)
 
 
 @pytest.mark.skipif(not _REAL_MODEL_READY, reason="BGE 模型未缓存（或缺 rag extra），跳过真模型用例")
