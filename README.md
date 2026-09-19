@@ -139,13 +139,11 @@ uv run python scripts/run_evaluation_real.py --limit 10   # 真实 LLM 对照（
 `data_source="rag"` 才走真实检索。
 
 ```bash
-uv run python scripts/run_rag_demo.py                  # 三模式（bm25/vector/hybrid）Top-K 检索演示（离线确定性编码器）
-uv run python scripts/run_rag_eval.py                  # RAG 评测：三模式 Recall@K 对比
-uv run python scripts/run_rag_eval.py --probe          # 人工标注 probe 的 Recall@K（缺省关）
+uv run python scripts/run_rag_demo.py                  # 三模式（bm25/vector/hybrid）Top-K 检索演示
 ```
 
-默认使用进程内 `EphemeralClient`（每臂独立、无需本机服务端），连接服务端请加
-`--chroma-client http`，部署见 [deploy/chroma/README.md](deploy/chroma/README.md)。
+`run_rag_demo.py` 默认使用进程内 `EphemeralClient`（无需本机服务端）；
+部署 Chroma 服务端见 [deploy/chroma/README.md](deploy/chroma/README.md)。
 
 ## 可观测性（Langfuse，可选）
 

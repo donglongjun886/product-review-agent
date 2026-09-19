@@ -456,43 +456,6 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > 本节收集原先散落在设计文档里的**实测数字**，避免随文档收敛而丢失。数值口径与限制条件必须同框阅读；
 > 绝对值随语料 / 模型 / 服务状态变化，**勿照抄为结论**。
 
-### 10.1 RAG 三路 Recall@3（小 probe；如实并排，不预设 hybrid 最优）
-
-**A. 真实 BGE + 进程内向量库（2026-09-09；当时后端为 Qdrant 进程内，该后端已移除；`bge-small-zh-v1.5`，hybrid 权重 0.5/0.5，Policy/Case 各 8 条 probe = 5 keyword + 3 同义改写）**
-
-| KB | bm25 | vector | hybrid |
-|---|---|---|---|
-| Policy (8) | 6/8 (75%) | 8/8 (100%) | 8/8 (100%) |
-| Case (8) | 6/8 (75%) | 8/8 (100%) | 8/8 (100%) |
-
-- 语义 vs 词面（同义改写 query 与目标文本零/近零共享关键词，已用 `bm25.tokenize` 程序化验证 token 交集）：
-  bm25 **全漏**、vector 命中 @1~@2、hybrid 基本同 vector（`RAG_CASE_0011`「冒用双 G logo 先例」hybrid 漏，如实呈现）。
-- 本 probe 下 **hybrid 未单独优于 vector**（N=8 小样本定向观测）。
-
-**B. MockHash 8+8（2026-09-10；`scripts/run_rag_eval.py --probe`，粒度 12.5%）**
-
-> ⚠️ **历史记录**：表中 `local` 行是**当时已移除的 local 后端**（纯 Python 余弦内存索引）产出的数字，
-> 按「已发布数字不改写」的口径**原样保留**。`run_rag_eval.py` 已不再支持 `--backend`，现在只跑 chroma 后端。
-
-| KB | backend | bm25 / vector / hybrid |
-|---|---|---|
-| Policy | local | 6 / 5 / **6** |
-| Policy | chroma | 6 / 5 / **7** |
-| Case | local | 6 / 4 / **7** |
-| Case | chroma | 6 / 4 / **6** |
-
-- **两个 KB 上 hybrid 的相对位置相反** → 实证「不预设 RRF 最优」。
-- ⚠️ 该组用 **MockHash 而非 BGE**：para 类失败**不得**解读为「语义检索不行」；`--probe` **缺省关闭**
-  （诊断能力不进默认评测路径）。
-
-### 10.2 Chroma 臂客户端等价性（A/B 隔离）
-
-- 16 probe × 3 模式 × 2 KB + 4 组过滤组合：`ephemeral` 与 `http` 两种客户端**报告数据行 diff 为空**，
-  vector parity 分差 `0.000e+00`。
-- `--backend chroma`（`EphemeralClient`）35 案 A/B 报告与 `local` 臂**逐字节一致**（digest `50351888fd8bd605`；该开关与 local 臂均已于 2026-09-19 移除，此条为历史记录）。
-- ⚠️ `ephemeral`（进程内、随进程消失）与 `http`（服务端）**不是同一份存储**；生产 RAG 仍用服务端，
-  该开关只影响评测脚本。
-
 ### 10.3 可观测性实测（Langfuse）
 
 - 本地 Docker 自托管 Langfuse **4.32.0**，**6 个常驻容器**（另加一次性 `minio-init`）；health 200；project `pra-local`。
