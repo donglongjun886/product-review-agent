@@ -1,8 +1,6 @@
 """RAG 真实检索链路（Policy KB + Case KB）。
 
 - ``corpus/``：静态 corpus 数据 + 校验 schema；
-- ``embedder.py``：编码器 ``build_bge_embedder``（chroma 链的 LlamaIndex 官方 FastEmbed
-  集成；``local_files_only=True`` 让模型未缓存即本地报错，不联网下载）；
 - ``retrieval.py``：检索模式枚举与 BM25 分归一化等公共件；
 - ``chroma_backend.py``：ChromaDB + LlamaIndex 检索后端（唯一后端），向量路 + BM25(jieba) 路 RRF 融合；
 - ``lazy_index.py``：把索引构建推迟到首次检索的代理；

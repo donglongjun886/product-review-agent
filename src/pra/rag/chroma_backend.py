@@ -688,7 +688,7 @@ class _ChromaIndexBase:
         # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
         # **必填、无兜底** —— 这里曾有 `or build_embedding_model("fastembed")` 兜底，但它不传
         # `cache_dir` / `local_files_only`，等于偷偷允许请求期联网下载模型。构造编码器的唯一
-        # 位置是 ``embedder.build_bge_embedder``（或调用方自己注入）。
+        # 位置是 ``pra.tools.production_embedder``（或调用方自己注入）。
         self._embed_model: Any = embedding_model
         if self._rows:
             # 空 KB 走不到这里（不建库，故不 embed / 不留 collection_name）。

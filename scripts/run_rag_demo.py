@@ -12,7 +12,7 @@
 weight=retrieval_score / ref_id=case_id —— 与 InMemory 世界同一引用格式。
 
 后端 = chroma（ChromaDB + LlamaIndex + BM25(jieba) + RRF；需 ``uv sync --extra rag``）。
-demo **显式注入真实语义编码器** ``build_bge_embedder()``（BAAI/bge-small-zh-v1.5，dim 512）
+demo **显式注入真实语义编码器** ``production_embedder()``（BAAI/bge-small-zh-v1.5，dim 512）
 并配 ``ChromaConfig(ephemeral=True)``（进程内内存库）—— 故无需起服务端；但需 BGE 模型**已缓存**
 （缺省 ``local_files_only=True`` 只读本地、不联网；预热须显式 ``local_files_only=False``）。
 
@@ -27,8 +27,8 @@ import sys
 
 from pra.domain.models import Budget
 from pra.rag.chroma_backend import ChromaConfig
-from pra.rag.embedder import build_bge_embedder
 from pra.rag.factory import build_case_index, build_policy_index
+from pra.tools import production_embedder
 from pra.tools.base import ToolContext
 from pra.tools.case_search.tool import (
     CaseSearchArgs,
@@ -47,13 +47,13 @@ MODES = ("bm25", "vector", "hybrid")
 def _build(mode: str, kind: str):
     """装配一个 chroma 索引：真实语义编码器 + 进程内 EphemeralClient（不连服务端）。
 
-    显式传 ``embedding_model=build_bge_embedder()`` —— LlamaIndex 官方集成的真语义 BGE 编码器
+    显式传 ``embedding_model=production_embedder()`` —— 只读本地缓存的 BGE 编码器
     （``BaseEmbedding``）；只为让 demo 的编码来源一目了然。
     """
     build = build_policy_index if kind == "policy" else build_case_index
     return build(
         mode=mode,
-        embedding_model=build_bge_embedder(),
+        embedding_model=production_embedder(),
         config=ChromaConfig(ephemeral=True),
     )
 

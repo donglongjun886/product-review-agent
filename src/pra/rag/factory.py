@@ -52,8 +52,8 @@ def _build_index(
     ``rows`` 显式注入时优先（跳过文件 IO，``corpus_path`` 随之失效）；否则 ``loader(corpus_path)``
     （``corpus_path=None`` → 加载器自带的缺省语料文件）。
 
-    ``embedding_model`` **必填**：本层不构造任何编码器 —— 谁要 RAG，谁给编码器（`build_bge_embedder`
-    或自备 ``BaseEmbedding``）。漏传即为 ``TypeError``，不会悄悄替你造一个。
+    ``embedding_model`` **必填**：本层不构造任何编码器 —— 谁要 RAG，谁给编码器（``pra.tools.
+    production_embedder`` 或自备 ``BaseEmbedding``）。漏传即为 ``TypeError``，不会悄悄替你造一个。
     """
     if rows is None:
         record_rows, _meta = loader(corpus_path)
@@ -75,7 +75,7 @@ def build_policy_index(
     """构造 PolicyIndex（corpus_path 缺省 = rag/corpus/policies.json）。
 
     ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` **必填**（``BaseEmbedding``；
-    常用 ``pra.rag.embedder.build_bge_embedder()``）—— 本函数不替你构造。
+    常用 ``pra.tools.production_embedder()``）—— 本函数不替你构造。
     ``config`` = Chroma 连接 / collection 参数（见 :class:`~pra.rag.chroma_backend.ChromaConfig`；
     缺省 None → 全取默认值）。
     """

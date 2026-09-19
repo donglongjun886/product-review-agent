@@ -148,13 +148,13 @@ def test_production_embedder_fails_fast_instead_of_downloading(monkeypatch, tmp_
     """**生产请求期绝不下载模型**：缓存目录里没有模型时，``local_files_only=True`` 让 fastembed
     只读本地并**立刻**抛错（否则请求线程会挂在首次下载上——这正是 e2e / 演示脚本子进程挂死的根因）。
 
-    非空转：不打桩任何被测函数，真实调用 ``_production_embedding_model()``，只把
+    非空转：不打桩任何被测函数，真实调用 ``production_embedder()``，只把
     ``PRA_EMBED_CACHE_DIR``（生产代码实际读取的缓存目录开关）指到一个空的临时目录。
     """
     monkeypatch.setenv("PRA_EMBED_CACHE_DIR", str(tmp_path))
     started = time.monotonic()
     with pytest.raises(RuntimeError, match="不在请求期下载模型"):
-        tools_pkg._production_embedding_model()
+        tools_pkg.production_embedder()
     assert time.monotonic() - started < 15, "必须是本地立即失败，而不是卡在下载/联网超时上"
     assert not any(tmp_path.rglob("*.onnx")), "失败路径不得在缓存目录留下模型下载产物"
 
@@ -253,7 +253,7 @@ async def test_production_rag_reaches_real_knowledge_base(monkeypatch):
     ``POLICY_3.2_v2_c1``）—— 后半段是本用例的回退反证。
 
     用 uuid 前缀隔离 collection（共享服务端上自建自删）；embedder 走生产默认
-    ``build_bge_embedder()``（缺省只读本地缓存；缓存目录经
+    ``production_embedder()``（缺省只读本地缓存；缓存目录经
     ``PRA_EMBED_CACHE_DIR`` 指向仓库内 ``.cache/model_cache``，未缓存即本地报错、不下载）。
     """
     reason = _e2e_skip_reason()

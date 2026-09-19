@@ -30,7 +30,7 @@ from pra.domain.models import (
     ScreeningSignal,
     SkuInfo,
 )
-from pra.rag.embedder import BGE_DEFAULT_MODEL
+from pra.tools import BGE_MODEL as BGE_DEFAULT_MODEL
 
 # 真模型缓存探测（只读文件系统；生产路径本身**不做**磁盘预检，靠 fastembed 的
 # ``local_files_only=True`` —— 本探测只用于决定真模型用例是否 skip）
