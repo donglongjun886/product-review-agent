@@ -1,8 +1,7 @@
 """向量余弦相似度 —— 纯 Python 实现，零第三方依赖。
 
-本机 venv 无 numpy（已实测 ``ModuleNotFoundError``），故 MVP 用纯 Python 实现点积/范数/余弦；
-policy 几十条 / case 几百条 × dim=256 的规模下开销可忽略。若将来升级 numpy，替换本模块内部
-实现即可（接口不变）。
+chroma 后端在**向量路覆盖率自检未通过**时用它补算候选与 query 的余弦（正常路径恒为 0 次，见
+``chroma_backend.SERVED_COUNTERS["vector_bruteforce_fallbacks"]``）。
 
 确定性：浮点运算是 IEEE-754 可重复的（无随机、无并行归约），满足评测逐字节可重放的硬约束。
 """

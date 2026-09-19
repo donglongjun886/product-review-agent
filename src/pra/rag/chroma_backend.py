@@ -27,11 +27,10 @@ from datetime import date
 from typing import Any
 
 # 顶层只 import 仓库内模块 + 标准库；chroma / llama_index / jieba 一律延迟 import
-# （默认 local 路径零额外依赖，构造/检索时才拉起）。
+# （import 本模块不拉起重依赖，装配/检索时才拉起）。
 from pra.rag.corpus.schema import CasePrecedentRecord, PolicyClauseRecord
 from pra.rag.embedder import build_embedding_model
 from pra.rag.retrieval import (
-    DEFAULT_WEIGHTS,
     MODES,
     RetrievalMode,
     normalize_minmax,
@@ -104,8 +103,7 @@ def _import_chroma() -> tuple[Any, Any]:
         from chromadb.errors import NotFoundError as ChromaNotFoundError
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
         raise RuntimeError(
-            "chroma 后端需要 chromadb 与 llama-index 集成包：请运行 `uv sync --extra rag` 安装；"
-            '默认本地检索用 backend="local" 即可（无需该依赖）'
+            "chroma 后端需要 chromadb 与 llama-index 集成包：请运行 `uv sync --extra rag` 安装。"
         ) from exc
     return chromadb, ChromaNotFoundError
 
@@ -126,9 +124,8 @@ def _import_llama() -> dict[str, Any]:
         from llama_index.retrievers.bm25 import BM25Retriever
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
         raise RuntimeError(
-            "chroma 后端需要 llama-index-core / llama-index-retrievers-bm25："
-            "请运行 `uv sync --extra rag` 安装；"
-            '默认本地检索用 backend="local" 即可（无需该依赖）'
+            "RAG 检索需要 llama-index-core / llama-index-retrievers-bm25："
+            "请运行 `uv sync --extra rag` 安装。"
         ) from exc
     return {
         "BaseRetriever": BaseRetriever,
@@ -505,7 +502,7 @@ def _build_nodes(
     """corpus 行 → (TextNode 列表, node id 列表)。**1 行 = 1 Node，不切分**。
 
     检索文本 = 正文（``spec.text_of``：policy 为 ``title。text``、case 为 ``summary``），
-    与向量路 embed 的文本、local 后端同一份。
+    与向量路 embed 的文本同一份。
 
     **metadata 不进检索文本**：``excluded_embed_metadata_keys`` / ``excluded_llm_metadata_keys``
     设为全部 metadata 键，使 ``get_content(metadata_mode=EMBED)`` 只返回正文 —— 这对 BM25 路
@@ -539,7 +536,7 @@ def _build_nodes(
 
 
 def _policy_candidates(rows: list[PolicyClauseRecord], filters: PolicySearchFilters, effective_only: bool) -> list[int]:
-    """候选行索引（与 local 后端逐条一致）：``effective_only`` → ``status ==
+    """候选行索引：``effective_only`` → ``status ==
     "EFFECTIVE"``；``category`` ∈ {None, 值, 全类目}；``risk_type`` 交叠非空。
     """
     candidates: list[int] = []
@@ -821,7 +818,6 @@ class _ChromaIndexBase:
         *,
         embedding_model: Any | None = None,
         mode: RetrievalMode = "hybrid",
-        weights: tuple[float, float] = DEFAULT_WEIGHTS,  # 仅为与 local 后端同签名，本实现不消费
         chroma_client: Any | None = None,
         host: str = CHROMA_DEFAULT_HOST,
         port: int = CHROMA_DEFAULT_PORT,
@@ -961,7 +957,7 @@ class _ChromaIndexBase:
     ) -> list[tuple[int, float]]:
         """向量路排名：``[(行索引, 1 − distance)]``（精确候选 id 集 + store 侧 category 下推）。
 
-        与 local 后端的等价性由三件事保证：打分域 = 精确候选集（不让非候选行抢名额）；覆盖率
+        三件事保证结果完整：打分域 = 精确候选集（不让非候选行抢名额）；覆盖率
         自检（返回 id 必须覆盖候选 id，否则重试/抛）；覆盖率失败时用 Chroma 已存的 doc 向量
         兜底现算 cos，并累加 ``SERVED_COUNTERS["vector_bruteforce_fallbacks"]`` 使其可见。
         ``count_search`` 控制本次是否记一次 ``vector_searches``（重试/兜底不重复计数）。
@@ -993,8 +989,8 @@ class _ChromaIndexBase:
         """兜底：对未取回的候选，用 Chroma 里**已存 doc 向量**与 query 向量现算余弦。
 
         - 向量来源 ``collection.get(ids=missing, include=["embeddings"])``（本地读取，无 ANN 近似）；
-        - 余弦用仓库既有 ``rag/vectors.cosine_similarity``（纯 Python，零第三方依赖；
-          与 local numpy/纯 Python 后端同源码），再按 ``_cosine_from_distance`` 同口径 clamp 到 [0,1]；
+        - 余弦用仓库既有 ``rag/vectors.cosine_similarity``（纯 Python，零第三方依赖），
+          再按 ``_cosine_from_distance`` 同口径 clamp 到 [0,1]；
         - 任一步失败（缺向量/长度不符）即抛，**不静默少返** —— 少返正是本次要修的 bug。
         """
         raise_on_missing = (
@@ -1027,7 +1023,7 @@ class _ChromaIndexBase:
     ) -> list[tuple[int, float]]:
         """BM25 路排名：候选集内 min-max 归一化 BM25 分（Python 侧过滤 = 只喂候选 node）。
 
-        归一化口径与 local 后端 ``rank_documents(mode="bm25")`` 同函数（``normalize_minmax``）：
+        归一化用 ``retrieval.normalize_minmax``：
         候选集内最高分 = 1.0，分数恒 ⊂ [0,1]（``CaseHit.retrieval_score`` 的 ``le=1`` 约束成立）。
         """
         retriever = _make_bm25_retriever(sub_ctx, top_k)
@@ -1144,7 +1140,7 @@ def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
 class ChromaPolicyIndex(_ChromaIndexBase):
     """``PolicyIndex`` Protocol 的 Chroma + LlamaIndex 实现。
 
-    构造参数与 local 后端对齐，另加 Chroma 装配参数（``chroma_client`` 注入 /
+    构造参数为 Chroma 装配参数（``chroma_client`` 注入 /
     ``host``+``port`` 自建 / ``ephemeral`` 离线内存库 / ``collection_prefix``）—— 签名见
     :meth:`_ChromaIndexBase.__init__`。检索签名与工具契约逐字一致：
     ``async def search(query, filters, top_k, effective_only) -> list[PolicyClauseHit]``。

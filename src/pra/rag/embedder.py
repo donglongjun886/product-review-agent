@@ -1,7 +1,8 @@
 """Embedding Provider —— ``Embedder`` 抽象 + 确定性 mock + chroma 编码器工厂。
 
-``Embedder`` Protocol 只有 ``embed(text) -> list[float]``，local 检索只依赖这个窄接口。``MockHashEmbedder`` 是
-**确定性 mock（非语义检索）**：同输入同输出、离线、维度固定，向量刻画**词面特征**（CJK bigram / 拉丁词，与
+``Embedder`` Protocol 只有 ``embed(text) -> list[float]``；生产装配用它做语义模型的可用性/缓存**只读预检**
+（``BgeEmbedder.available()`` / ``model_ready()``），请求期绝不下载模型。``MockHashEmbedder`` 是**确定性 mock
+（非语义检索）**：同输入同输出、离线、维度固定，向量刻画**词面特征**（CJK bigram / 拉丁词，与
 ``bm25.tokenize`` 同口径）。特征哈希用 ``hashlib.sha256`` 而非内置 ``hash()``（后者受 PYTHONHASHSEED 影响跨
 进程漂移，破坏逐字节重放）。
 
@@ -9,7 +10,7 @@
 不可用时**显式抛带指引的 RuntimeError，绝不静默回退 mock**；构造期不 import、不联网、不下载。
 
 ``build_embedding_model``：chroma 链的 LlamaIndex 官方集成编码器工厂（``fastembed`` / ``test``）；函数体**延迟
-import** ``llama_index``/``fastembed``，本模块被 local 路径 import、顶层须零额外依赖。"""
+import** ``llama_index``/``fastembed``，本模块被装配路径 import、顶层须零额外依赖。"""
 
 from __future__ import annotations
 
@@ -225,7 +226,7 @@ def build_embedding_model(
     为什么：chroma 走 LlamaIndex 原生向量存储，其编码器须为 ``BaseEmbedding``；本工厂统一产出
     官方集成实例，省去自维护手写适配层。**不变量**：
 
-    - 函数体**延迟 import** ``llama_index`` / ``fastembed`` —— 本模块被 local 路径 import，顶层
+    - 函数体**延迟 import** ``llama_index`` / ``fastembed`` —— 本模块被装配路径 import，顶层
       须零额外依赖（``kind="fastembed"`` 仅在显式选用时才拉起这些包）。
     - ``kind="fastembed"`` 真语义（BAAI/bge-small-zh-v1.5 → dim 512）；``kind="test"`` 确定性、
       可离线、零模型下载、维度 = ``embed_dim``（默认 256，与 collection 名 ``*_256`` 一致）。
@@ -251,8 +252,7 @@ def build_embedding_model(
     if kind == "test":
         from llama_index.core.embeddings import BaseEmbedding
 
-        # 复用 ``MockHashEmbedder`` 的词面 sha256 特征哈希，让 chroma 与 local 两路编码**逐位一致**：
-        # 跨后端等价性（同 query 同 id、同序、分差 ≤1e-6）依赖这一点；同时保证向量**可区分**
+        # 复用 ``MockHashEmbedder`` 的词面 sha256 特征哈希：向量**可区分**且**跨进程逐位可重放**
         # （官方 ``MockEmbedding`` 只返回常量 ``[0.5]*dim``，会让检索排序退化为全 ties）。
         mock = MockHashEmbedder(dim=embed_dim)
 

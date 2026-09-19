@@ -488,9 +488,7 @@ def make_eval_world_tools():
     return tools
 
 
-def make_rag_world_tools(
-    *, mode: str = "hybrid", backend: str = "local", backend_options: dict | None = None
-):
+def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
     """构造 RAG 世界的 Agent 工具（评测 RAG 单独模式）。
 
     与 ``make_eval_world_tools`` 只差两个"知识库检索"工具：CaseSearchTool /
@@ -498,14 +496,11 @@ def make_rag_world_tools(
     可切换）；Product / Image / Merchant 仍沿用 eval 世界种子（事实锚点，两世界共用 →
     差异只归因于检索数据源）。
 
-    :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid 0.5/0.5）。
-    :param backend: 索引后端（缺省 "local" 行为不变）—— "local"（纯 Python 余弦内存实现）/
-        "chroma"（ChromaDB + LlamaIndex；缺 ``rag`` extra 依赖时构造即抛，
-        不静默降级）。只影响索引装配，零判定逻辑改动。
-    :param backend_options: 后端装配参数透传（缺省 None = 不传 → 装配与改动前逐字节
-        等价）；键名与 ``pra.rag.factory`` 构造参数逐字对应 —— chroma 臂收 ``embedding_model``
-        （LlamaIndex ``BaseEmbedding``，缺省 None → 类内自建 fastembed）与 ``collection_prefix``
-        等，local 臂收 ``embedder``（自家 ``Embedder``）。未知键照旧由 factory 抛错（不吞键）。
+    :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid）。
+    :param options: 索引装配参数透传（缺省 None = 不传 → 全走 factory 缺省）；键名与
+        ``pra.rag.factory`` 构造参数逐字对应（``embedding_model`` / ``collection_prefix`` /
+        ``chroma_client`` …）。``embedding_model`` 缺省 None → 类内自建 fastembed；要确定性
+        离线可传 ``build_embedding_model("test")``。未知键由 factory 抛错（不吞键）。
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index
@@ -519,16 +514,14 @@ def make_rag_world_tools(
     from pra.tools.policy_search.tool import PolicySearchTool
     from pra.tools.product.tool import InMemoryProductRepository, ProductTool
 
-    options = dict(backend_options or {})
-    # 编码器按后端路由由 factory 承担：chroma 臂收 embedding_model（LlamaIndex BaseEmbedding，
-    # 缺省 None → 类内自建 fastembed）、local 臂收 embedder（自家 Embedder）；此处只逐字透传
-    # options，未知键仍由 factory 抛错（不吞键、不静默忽略拼错字）。
+    opts = dict(options or {})
+    # 装配参数逐字透传给 factory（未知键由它抛错：不吞键、不静默忽略拼错字）。
     tools: list[Tool] = [
         ProductTool(repo=InMemoryProductRepository(EVAL_PRODUCTS)),
         ImageAnalysisTool(provider=MockImageAnalysisProvider(EVAL_IMAGE_MATCHES)),
         MerchantTool(repo=InMemoryMerchantRepository(EVAL_MERCHANTS)),
-        CaseSearchTool(index=build_case_index(mode=mode, backend=backend, **options)),
-        PolicySearchTool(index=build_policy_index(mode=mode, backend=backend, **options)),
+        CaseSearchTool(index=build_case_index(mode=mode, **opts)),
+        PolicySearchTool(index=build_policy_index(mode=mode, **opts)),
     ]
     return tools
 
@@ -1300,13 +1293,12 @@ class AgentScheme(SchemeRunner):
         if ctx.tool_world == "eval":
             tools = make_eval_world_tools()
         elif ctx.tool_world == "rag":
-            # RAG 世界（R-4/R-6）：先例/政策检索注入真实 RAG 索引，检索模式可切换
-            # （EvalContext.rag_mode，默认 None → hybrid）、索引后端可切换
-            # （EvalContext.rag_backend，默认 "local" → 装配不变）—— 评测默认路径不动。
+            # RAG 世界：先例/政策检索注入真实 RAG 索引；检索模式（rag_mode，默认 None →
+            # hybrid）与索引装配参数（rag_options，默认 None → factory 缺省）由 ctx 注入，
+            # 评测默认路径（tool_world="eval"）不动。
             tools = make_rag_world_tools(
                 mode=ctx.rag_mode or "hybrid",
-                backend=ctx.rag_backend,
-                backend_options=ctx.rag_backend_options,
+                options=ctx.rag_options,
             )
         if tools is not None and self._allowed_tools is not None:
             # 工具注册层裁剪（只保留允许子集；连同 plan 侧裁剪 = 完整装配裁剪）

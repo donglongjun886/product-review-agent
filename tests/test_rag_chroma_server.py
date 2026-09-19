@@ -2,11 +2,11 @@
 
 内存库（``EphemeralClient``）与真服务端的差异不只是连接串：进程内模式对 id / 维度等约束更宽松，
 缺陷可能在全绿单测下潜伏、只在真 server 炸。本文件钉住真服务端路径：建库 → 全量 upsert →
-服务端点数校验 → 检索与 local 同口径。覆盖点：
+服务端点数校验 → 检索候选完整 + R-4 隔离。覆盖点：
 
-1. ``build_*_index(backend="chroma", chroma_host=…, chroma_port=…)`` 的 ``HttpClient`` 分支真连上；
+1. ``build_*_index(chroma_host=…, chroma_port=…)`` 的 ``HttpClient`` 分支真连上；
 2. 点数落在服务端（24 policy / 67 case）—— 用另开的 client 读 ``collection.count()``，防本地假象；
-3. vector 模式与 local 同序同 id（组合含过滤），case 侧另断言 R-4 隔离；
+3. vector 模式命中候选完整（组合含过滤），case 侧另断言 R-4 隔离；
 4. 建库用 ``configuration={"hnsw": {"space": "cosine"}}``：服务端缺省 ``l2``，会让
    「相似度 = 1 − distance」静默失效 → 回读配置断言；
 5. ``collection_prefix`` 带 uuid4 后缀 → 自建自删；``finally`` 中断言本前缀库已清空，
@@ -17,8 +17,7 @@ CI 上真正跑得动的守护是 ``tests/test_rag_default_path_no_extra.py``。
 
 起服务：``cd deploy/chroma && docker compose up -d``（仅绑 ``127.0.0.1:8001``，容器内 8000；
 ``/api/v1`` 已废弃返回 410，只用 ``/api/v2``）。URL 可用 ``PRA_CHROMA_URL`` 覆盖；
-chroma 侧编码器一律 ``build_embedding_model("test", embed_dim=256)``（确定性、零模型下载），
-local 侧用测试内 shim 包同一份 test 编码 —— 两侧共用同一确定编码才能逐条比对。
+chroma 侧编码器一律 ``build_embedding_model("test", embed_dim=256)``（确定性、零模型下载）。
 """
 
 from __future__ import annotations
@@ -47,7 +46,6 @@ from pra.rag.chroma_backend import (
 from pra.rag.corpus import load_cases, load_policies
 from pra.rag.embedder import build_embedding_model
 from pra.rag.factory import build_case_index, build_policy_index
-from pra.rag.index import RagCaseIndex, RagPolicyIndex
 from pra.tools.case_search.tool import CaseSearchFilters
 from pra.tools.policy_search.tool import PolicySearchFilters
 
@@ -61,25 +59,6 @@ def _test_embedding_model():
     return build_embedding_model("test", embed_dim=_TEST_EMBED_DIM)
 
 
-class _LocalEmbedderShim:
-    """**测试内**桥接：把 ``BaseEmbedding`` 包成 local 后端要的 ``embed(text)``。
-
-    跨后端等价性用例（同一语料同时建 local + chroma，逐条比对同序同 id/同分）要求两侧吃
-    **同一份**确定编码：local 只认 ``Embedder``（窄接口 ``embed``），chroma 只认
-    ``BaseEmbedding``。shim 仅存在于 tests/，不进 src/。
-    """
-
-    def __init__(self, model) -> None:
-        self._model = model
-
-    def embed(self, text: str) -> list[float]:
-        return list(self._model.get_text_embedding(text))
-
-
-def _local_embedder() -> _LocalEmbedderShim:
-    """local 侧编码器（与 :func:`_test_embedding_model` 同源的 test 编码）。"""
-    return _LocalEmbedderShim(_test_embedding_model())
-
 _CHROMA_URL = os.environ.get("PRA_CHROMA_URL", "http://127.0.0.1:8001")
 _PARSED = urlparse(_CHROMA_URL)
 _HOST = _PARSED.hostname or "127.0.0.1"
@@ -90,7 +69,6 @@ CASE_ROWS = load_cases()[0]
 
 _QUERY = "外观高度模仿知名品牌"
 _BAG_CATEGORY = "箱包/女包"
-_SCORE_TOL = 1e-6
 
 
 def _server_reachable() -> bool:
@@ -134,22 +112,20 @@ def _delete_mine(client: object, prefix: str) -> None:
 
 async def test_chroma_policy_index_against_real_server() -> None:
     """① ``chroma_host``/``chroma_port`` 分支真连上；② 24 个 node 落在服务端；③ 向量空间回读
-    cosine；④ vector 命中序/id 与 local 一致（组合含过滤，``risk_type`` 是修复前漏召回的那类）。"""
+    cosine；④ vector 检索非空、受 ``effective_only`` 约束、可复现、不动用兜底补算。"""
     prefix = _prefix("policy")
     # 独立连接（走被测的 make_chroma_client 装配路径）：读的是服务端真实状态
     reader = make_chroma_client(host=_HOST, port=_PORT)
     before = _all_names(reader)
     try:
         remote = build_policy_index(
-            backend="chroma",
             embedding_model=_test_embedding_model(),
             mode="vector",
             chroma_host=_HOST,
             chroma_port=_PORT,
             collection_prefix=prefix,
         )
-        local = RagPolicyIndex(POLICY_ROWS, embedder=_local_embedder(), mode="vector")
-        assert isinstance(remote, ChromaPolicyIndex), "factory backend='chroma' 应给出 ChromaPolicyIndex"
+        assert isinstance(remote, ChromaPolicyIndex), "factory 应给出 ChromaPolicyIndex"
 
         cols = _names_with_prefix(reader, prefix)
         assert cols == [f"{prefix}_policy_256"], f"应恰好建 1 个 collection，实际 {cols}"
@@ -160,20 +136,24 @@ async def test_chroma_policy_index_against_real_server() -> None:
         )
         assert remote_col.metadata["pra_dim"] == 256
 
+        reset_served_counters()
         for query, filters, effective_only, top_k in (
             (_QUERY, PolicySearchFilters(), False, 5),
             (_QUERY, PolicySearchFilters(), True, 5),
-            # 修复前的漏召回组合（real server 版对照；当时 local 3 / chroma 0 类情形）
+            # 修复前的漏召回组合（real server 版对照）
             ("外观模仿", PolicySearchFilters(risk_type=[RiskType.FALSE_CLAIM]), True, 6),
             ("外观模仿", PolicySearchFilters(risk_type=[RiskType.POTENTIAL_IP_RISK]), True, 6),
             ("外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), True, 20),
         ):
             rh = await remote.search(query, filters, top_k, effective_only)
-            lh = await local.search(query, filters, top_k, effective_only)
-            assert [h.clause_id for h in rh] == [h.clause_id for h in lh], (
-                f"真服务端 vector 模式应与 local 同序同 id："
-                f"q={query!r} filters={filters} eff={effective_only} k={top_k}"
-            )
+            assert rh, f"真服务端 vector 检索不应为空：q={query!r} filters={filters}"
+            assert len(rh) <= top_k
+            if effective_only:
+                assert all(h.status == "EFFECTIVE" for h in rh)
+            again = await remote.search(query, filters, top_k, effective_only)
+            assert [h.model_dump(mode="json") for h in rh] == [
+                h.model_dump(mode="json") for h in again
+            ], "真服务端同 query 两次结果须逐字节一致"
         assert served_counters()["vector_bruteforce_fallbacks"] == 0, (
             "真服务端上向量路动用了兜底补算 —— 精确 id 取数 / 覆盖率自检失效"
         )
@@ -190,15 +170,13 @@ async def test_chroma_case_index_against_real_server() -> None:
     before = _all_names(reader)
     try:
         remote = build_case_index(
-            backend="chroma",
             embedding_model=_test_embedding_model(),
             mode="vector",
             chroma_host=_HOST,
             chroma_port=_PORT,
             collection_prefix=prefix,
         )
-        local = RagCaseIndex(CASE_ROWS, embedder=_local_embedder(), mode="vector")
-        assert isinstance(remote, ChromaCaseIndex), "factory backend='chroma' 应给出 ChromaCaseIndex"
+        assert isinstance(remote, ChromaCaseIndex), "factory 应给出 ChromaCaseIndex"
 
         cols = _names_with_prefix(reader, prefix)
         assert cols == [f"{prefix}_case_256"], f"应恰好建 1 个 collection，实际 {cols}"
@@ -214,14 +192,11 @@ async def test_chroma_case_index_against_real_server() -> None:
             (CaseSearchFilters(category="女鞋/运动鞋",
                                risk_type=[RiskType.POTENTIAL_IP_RISK]), 10),
         ):
-            rh = await remote.search(_QUERY if top_k == 5 else "外观模仿", filters, top_k)
-            lh = await local.search(_QUERY if top_k == 5 else "外观模仿", filters, top_k)
+            query = _QUERY if top_k == 5 else "外观模仿"
+            rh = await remote.search(query, filters, top_k)
             assert rh, "真服务端检索不应为空"
-            assert [h.case_id for h in rh] == [h.case_id for h in lh], (
-                f"case 真服务端应与 local 同序同 id：filters={filters} k={top_k}"
-            )
-            for a, b in zip(lh, rh):
-                assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= _SCORE_TOL
+            assert len(rh) <= top_k
+            assert all(0.0 <= h.retrieval_score <= 1.0 for h in rh)
             assert all(str(h.case_id).startswith("RAG_CASE_") for h in rh), "R-4：Case KB 隔离"
         assert served_counters()["vector_bruteforce_fallbacks"] == 0, (
             "真服务端上向量路动用了兜底补算 —— 精确 id 取数 / 覆盖率自检失效"
@@ -240,7 +215,6 @@ async def test_chroma_server_reuses_same_prefix_collection_idempotently() -> Non
     try:
         for _ in range(2):
             build_case_index(
-                backend="chroma",
                 embedding_model=_test_embedding_model(),
                 mode="bm25",
                 chroma_host=_HOST,

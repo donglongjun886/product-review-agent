@@ -32,10 +32,8 @@ __all__ = [
 
 def build_tools(
     data_source: Literal["memory", "rag"] = "memory",
-    rag_backend: Literal["local", "chroma"] = "local",
-    rag_embedder: Any | None = None,
     *,
-    rag_backend_options: dict[str, Any] | None = None,
+    rag_options: dict[str, Any] | None = None,
     product_repo: ProductRepository | None = None,
     merchant_repo: MerchantRepository | None = None,
     vision_measurement_available: bool = True,
@@ -43,23 +41,20 @@ def build_tools(
     """组装并返回 6 个调查工具（默认注入 InMemory/Mock 数据源）。
 
     :param data_source: ``"memory"``（默认）= 6 工具 InMemory 种子世界；``"rag"`` =
-        CaseSearchTool / PolicySearchTool 注入真实 RAG 索引，其余 4 工具仍为 InMemory 事实世界。
-        RAG 索引经 ``pra.rag.factory`` **延迟 import**（默认 memory 路径零额外 import）。
-    :param rag_backend: 仅 ``data_source="rag"`` 生效 —— ``"local"``（默认）/ ``"chroma"``；
-        后者经 factory **延迟 import**，缺依赖时抛 ``RuntimeError``。
-    :param rag_embedder: **local 后端**的 RAG 编码器（自家 ``Embedder``；默认 None → factory
-        缺省 ``MockHashEmbedder``），恒以 ``embedder=`` 转发。chroma 后端不收它（编码器只经
-        ``rag_backend_options["embedding_model"]``），错配由 factory 闸拒 —— 两协议互不兼容
-        （``Embedder`` 只有 ``embed()`` vs ``BaseEmbedding`` 只有 ``get_text_embedding()``），
-        故不按 backend 自动分发，避免错误被推迟到运行期 ``AttributeError``。
-    :param rag_backend_options: 后端专属装配参数透传字典；键名与 ``pra.rag.factory`` 参数
-        **逐字对应**，未给键走 factory 缺省。
+        CaseSearchTool / PolicySearchTool 注入真实 RAG（chroma）索引，其余 4 工具仍为 InMemory
+        事实世界。RAG 索引经 ``pra.rag.factory`` **延迟 import**（默认 memory 路径零额外 import）。
+    :param rag_options: 仅 ``data_source="rag"`` 生效的索引装配参数透传字典；键名与
+        ``pra.rag.factory`` 参数**逐字对应**（``mode`` / ``embedding_model`` /
+        ``collection_prefix`` / ``chroma_client`` …），未给键走 factory 缺省（``embedding_model``
+        缺省 None → chroma 类内自建 fastembed 集成）。
     :param product_repo: ProductTool 的数据源；默认 **None → InMemory**（CI 不连库、评测可
         重放）。要读真库须**显式**传入 ``pra.tools.product.mysql_repo.MySQLProductRepository()``
         —— 该模块自身不在本函数里 import，连库与否由此入参单点决定。生产/HTTP 装配即
         ``build_production_tools()``（调用方持有 repo 生命周期）。
     :param merchant_repo: MerchantTool 的数据源，语义同 ``product_repo``（默认 InMemory，
         显式传 ``pra.tools.merchant.mysql_repo.MySQLMerchantRepository()`` 才读真库）。
+    :param vision_measurement_available: 传 False 声明「外观维度不可测」（视觉桩的零命中不等于
+        「测过且阴性」，否则 gate 会把「测不出」误判成「证明无风险」）。
 
     每个工具类可用作结构性 ``Tool``，经 ``ToolRegistry.register`` 注册后由 tools_node 调度；
     替换真实数据源只需换构造入参，本函数保持不变。
@@ -85,15 +80,9 @@ def build_tools(
         # 延迟 import：pra.rag 只有在显式选择 rag 数据源时才被拉起（防循环/省启动）。
         from pra.rag.factory import build_case_index, build_policy_index
 
-        options = dict(rag_backend_options or {})
-        # 编码器：恒以 embedder=rag_embedder 转发（chroma 的编码器只经 options["embedding_model"]）；
-        # 错配由 factory 闸拒（唯一把关点），不在此重复把关、更不静默择一。
-        tools[4] = CaseSearchTool(
-            index=build_case_index(backend=rag_backend, embedder=rag_embedder, **options)
-        )
-        tools[5] = PolicySearchTool(
-            index=build_policy_index(backend=rag_backend, embedder=rag_embedder, **options)
-        )
+        options = dict(rag_options or {})
+        tools[4] = CaseSearchTool(index=build_case_index(**options))
+        tools[5] = PolicySearchTool(index=build_policy_index(**options))
     return tools
 
 
@@ -102,9 +91,9 @@ def build_production_tools() -> list[Tool]:
 
     相对 ``build_tools()`` 的差别（共 3 个工具的数据源）：
     ``ProductTool`` → ``MySQLProductRepository``、``MerchantTool`` → ``MySQLMerchantRepository``、
-    ``CaseSearchTool`` / ``PolicySearchTool`` → 真实 RAG 索引（``rag_backend="chroma"`` +
-    LlamaIndex 官方 FastEmbed 编码器 + hybrid 检索，经 ``Lazy*Index`` **惰性构建**：装配期零
-    import/零 IO，首次检索才建库连服务端）。其余 2 个（image_analysis / ocr）仍是 Mock 桩。
+    ``CaseSearchTool`` / ``PolicySearchTool`` → 真实 RAG 索引（llama-index 官方 FastEmbed 编码器
+    + hybrid 检索，经 ``Lazy*Index`` **惰性构建**：装配期零 import/零 IO，首次检索才建库连服务端）。
+    其余 2 个（image_analysis / ocr）仍是 Mock 桩。
 
     **默认装配路径（``build_tools()`` 与 ``build_agent_graph()`` 缺省）仍是 InMemory** ——
     单测与 CI 不连库/不连 Chroma、评测可重放；只有生产入口（HTTP 路由 / 落库编排）走本函数。
@@ -134,10 +123,8 @@ def build_production_tools() -> list[Tool]:
     return tools
 
 
-# 生产 RAG 检索口径：真实后端（ChromaDB + LlamaIndex 装配 + FastEmbed 编码器 + BM25(jieba) +
-# RRF）与 hybrid 三路融合。**不在这里给编码器兜底 mock** —— 真模型失败要显式报错，
+# 生产 RAG 检索口径：hybrid 三路融合。**不在这里给编码器兜底 mock** —— 真模型失败要显式报错，
 # 缺 ``--extra rag`` / 服务端不可达 / 模型未缓存都会在首次检索时抛出带指引的错误。
-_PRODUCTION_RAG_BACKEND: Literal["chroma"] = "chroma"
 _PRODUCTION_RAG_MODE: RetrievalMode = "hybrid"
 
 
@@ -171,7 +158,6 @@ def _build_production_case_index() -> CaseIndex:
     from pra.rag.factory import build_case_index
 
     return build_case_index(
-        backend=_PRODUCTION_RAG_BACKEND,
         mode=_PRODUCTION_RAG_MODE,
         embedding_model=_production_embedding_model(),
     )
@@ -182,7 +168,6 @@ def _build_production_policy_index() -> PolicyIndex:
     from pra.rag.factory import build_policy_index
 
     return build_policy_index(
-        backend=_PRODUCTION_RAG_BACKEND,
         mode=_PRODUCTION_RAG_MODE,
         embedding_model=_production_embedding_model(),
     )

@@ -37,8 +37,8 @@
 - **6 个可插拔调查工具**：商品事实、商家历史、图像分析、OCR、案例检索、政策检索，统一 `Tool` 抽象。
 - **确定性可重放**：默认使用 scripted LLM 桩 + InMemory 数据源 + InMemory Checkpointer，
   无 API key、无网络即可跑通全链路与评测。
-- **检索增强（RAG）**：政策库与案例库支持 `local`（numpy + MockHash，确定性）与 `chroma`
-  （ChromaDB + LlamaIndex + BGE + BM25/jieba + RRF 混合检索）两种后端。
+- **检索增强（RAG）**：政策库与案例库由 ChromaDB + LlamaIndex + BGE + BM25/jieba + RRF
+  混合检索提供（需 `--extra rag`）。
 - **评测体系**：三方案对比（Rule / Single-call LLM / Agent）、业务与 abstention 指标、消融、阈值扫描、
   决策序列回归。
 - **可选可观测性**：Langfuse 适配层上报 root / node / generation / tool / gate span 树，
@@ -133,17 +133,18 @@ uv run python scripts/run_evaluation_real.py --limit 10   # 真实 LLM 对照（
 
 ## 检索（Policy KB / Case KB）
 
-默认后端为 `local`（纯 Python 余弦内存索引 + `MockHashEmbedder`，确定性、无外部依赖）。安装 `--extra rag`
-后可切换 `rag_backend="chroma"`：ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF，检索口径见
+检索后端为 ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF（需 `--extra rag`），检索口径见
 [docs/00-system-design.md](docs/00-system-design.md) 与 `src/pra/rag/chroma_backend.py` 模块注释。
+**默认装配路径（`build_tools()` 与评测世界）仍是 InMemory 种子、不连向量库** —— 只有生产入口与显式
+`data_source="rag"` 才走真实检索。
 
 ```bash
-uv run python scripts/run_rag_demo.py                            # 三模式（bm25/vector/hybrid）Top-K 检索演示
-uv run python scripts/run_rag_eval.py --backend chroma           # RAG 评测：local / chroma
-uv run python scripts/run_rag_eval.py --backend chroma --probe   # 人工标注 probe 的 Recall@K（缺省关）
+uv run python scripts/run_rag_demo.py                  # 三模式（bm25/vector/hybrid）Top-K 检索演示（离线确定性编码器）
+uv run python scripts/run_rag_eval.py                  # RAG 评测：三模式 Recall@K 对比
+uv run python scripts/run_rag_eval.py --probe          # 人工标注 probe 的 Recall@K（缺省关）
 ```
 
-`--backend chroma` 默认使用进程内 `EphemeralClient`（每臂独立、无需本机服务端），连接服务端请加
+默认使用进程内 `EphemeralClient`（每臂独立、无需本机服务端），连接服务端请加
 `--chroma-client http`，部署见 [deploy/chroma/README.md](deploy/chroma/README.md)。
 
 ## 可观测性（Langfuse，可选）
@@ -169,7 +170,7 @@ src/pra/
   domain/          Pydantic 契约（ProductReviewCase / ReviewDecision / Evidence …）
   tools/           6 个调查工具：product / merchant / image_analysis / ocr / case_search / policy_search
   screening/       机审引擎与三分流
-  rag/             知识库检索：local / chroma、BM25、embedder、惰性索引
+  rag/             知识库检索：chroma 后端（ChromaDB + LlamaIndex）、BM25、embedder、惰性索引
   evaluation/      评测 harness、数据集、指标、消融、扫描、回归
   infra/           MySQL 五表落库（SQLAlchemy 2.0 async）
   observability/   Tracer 适配层（Langfuse / Null）
@@ -197,7 +198,7 @@ docs/              系统设计与评测口径 · migrations/ DDL · scripts/ �
 | 接入层 | FastAPI + uvicorn |
 | 调查编排 | LangGraph StateGraph（5 节点 7 边单回环）+ InMemory Checkpointer |
 | LLM | `LLMBackend` 抽象：默认确定性 scripted 桩；`LiteLLMBackend` 经 `set_llm_backend` / `build_agent_graph(llm=)` 注入 |
-| 检索 | local（纯 Python 余弦 + MockHash）/ chroma（ChromaDB + LlamaIndex + BGE + BM25 + RRF） |
+| 检索 | chroma（ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF）；默认装配与评测世界为 InMemory 种子 |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL |
 | 可观测性 | Langfuse v4（自托管）· Null Object 兜底 |
 | 质量 | pytest（含超时守护）· ruff · GitHub Actions |

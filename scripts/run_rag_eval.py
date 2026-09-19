@@ -1,4 +1,4 @@
-"""RAG 世界评测入口：InMemory vs RAG + BM25/Vector/Hybrid 三路。
+"""RAG 世界评测入口：InMemory vs RAG(chroma) + BM25/Vector/Hybrid 三路。
 
 评测默认仍 InMemory（回归不破坏）。对同一 eval_data 分别以 ``tool_world="eval"``（InMemory）
 与 ``tool_world="rag"`` + mode ∈ {bm25, vector, hybrid}（``--modes``）跑 ``agent`` 方案，输出
@@ -6,24 +6,26 @@
 （如实呈现，不预设 Hybrid 优于单路），以及运行时证据级隔离抽查：RAG 世界引用的先例 ref_id
 必须全部是 ``RAG_CASE_*``，不得引用 eval GT / InMemory 种子先例。
 
+检索后端**只有 chroma**（ChromaDB + LlamaIndex + BM25(jieba) + RRF；需 ``uv sync --extra rag``）
+—— 无 backend 维度、不比较后端。评测用显式注入的**离线确定性编码器**
+``build_embedding_model("test")``（词面 sha256 特征，**非语义模型、零下载**），故评测可重放、
+不需要 BGE 模型缓存；生产语义模型（BGE）路径不在评测内。
+
 ``--probe`` 追加检索层报告（不跑 LLM/agent）：人工标注 probe 集在三模式下的 ``Recall@K``
 （默认 K=3，``--probe-top-k`` 可改），Policy KB 与 Case KB 并排；``--probe-only`` 只跑该报告。
-``--backend {local,chroma}``（缺省 local，缺省路径输出与改动前逐字节一致）同时作用于
-agent A/B 的 RAG 臂与 probe 报告；``--smoke`` / ``--smoke-limit`` 跑确定性子集。
+``--smoke`` / ``--smoke-limit`` 跑确定性子集。
 
-A/B 隔离（``--chroma-client``，默认 ``ephemeral``）：chroma 臂缺省用
-``chromadb.EphemeralClient()``（进程内内存库），每个索引实例都是全新的库、随进程消失，各臂
-之间零状态传递，也不要求本机起 Chroma 服务端；只有 ``--chroma-client http`` 才连本机服务端
-（127.0.0.1:8001），那时用独占前缀建库并在结束前删除（服务端是共享单实例）。两种客户端实测
-结果逐字节一致（probe 报告 diff 为空、vector parity 分差 0.000e+00），但不是同一份存储。
+索引装配客户端（``--chroma-client``，默认 ``ephemeral``）：缺省用 ``chromadb.EphemeralClient()``
+（进程内内存库），每个索引实例都是全新的库、随进程消失，各臂之间零状态传递，也不要求本机起
+Chroma 服务端；只有 ``--chroma-client http`` 才连本机服务端（127.0.0.1:8001），那时用独占前缀
+建库并在结束前删除（服务端是共享单实例）。
 
-分数口径（量纲不可比，报告不做归一化）：``CaseHit.retrieval_score`` 是检索分 —— local 后端
-hybrid 是 [0,1] 加权融合分，chroma 后端 hybrid 是 RRF 分 ``Σ 1/(60 + rank)``（k=60，rank 从
-0 起 → 上界 ``2/60 = 1/30 ≈ 0.0333``，实测观测区间约 0.0275~0.0333）；RRF 分是排名融合分，
-**不是相似度、不是概率**，禁止跨模式/跨后端比大小。
+分数口径（量纲不可比，报告不做归一化）：``CaseHit.retrieval_score`` 是检索分 —— chroma 后端
+hybrid 是 RRF 分 ``Σ 1/(60 + rank)``（k=60，rank 从 0 起 → 上界 ``2/60 = 1/30 ≈ 0.0333``，实测
+观测区间约 0.0275~0.0333）；bm25 = 候选集内 min-max 归一化 bm25s 分；vector = ``1 − cosine
+distance``。RRF 分是排名融合分，**不是相似度、不是概率**，禁止跨模式比大小。
 
-全链路确定性：无真 LLM / 无 API key / 无 LLM 调用；``chroma`` 后端只在 ``http`` 模式下连
-本机服务端。
+全链路确定性：无真 LLM / 无 API key / 无 LLM 调用；``http`` 模式只在连本机服务端时触网。
 """
 
 from __future__ import annotations
@@ -39,18 +41,17 @@ from typing import Protocol
 
 from pra.evaluation.harness.base import EvalContext
 from pra.evaluation.runner import EvaluationRunner
+from pra.rag.embedder import build_embedding_model
 
 MODES = ("bm25", "vector", "hybrid")
-BACKENDS = ("local", "chroma")
-#: chroma 臂的客户端选择：ephemeral = 进程内内存库（默认），http = 本机服务端。
-#: 默认选 ephemeral 的理由 = A/B 隔离（见模块 docstring）。
+#: 索引客户端选择：ephemeral = 进程内内存库（默认），http = 本机服务端（见模块 docstring）。
 CHROMA_CLIENTS = ("ephemeral", "http")
 CHROMA_DEFAULT_PORT = 8001  # 与 pra.rag.chroma_backend 的服务端默认端口一致（宿主机侧）
 DEFAULT_DATA = "eval_data/v1/cases_v1.jsonl"
 DIFF_HEAD = 12  # 差异明细打印条数上限
 PROBE_TOP_K = 3  # probe Recall@K 的 K（与 phase2 demo 同口径）
 PROBE_SOURCE = "scripts/run_rag_phase2_demo.py"  # probe 集来源（复用，不新造）
-PROBE_COLLECTION_PREFIX = "pra_eval_probe"  # chroma probe 独占 collection 前缀
+PROBE_COLLECTION_PREFIX = "pra_eval_probe"  # 评测占用 collection 前缀
 
 
 def _decision_digest(records) -> str:
@@ -144,41 +145,46 @@ def _score_of(hit) -> float | None:
     return getattr(hit, "retrieval_score", None)
 
 
-def _build_probe_index(backend: str, kind: str, mode: str, options: dict):
-    """按 (backend, kind, mode) 装配一个索引（每 combo 独立实例；缺省 = MockHashEmbedder）。"""
+def _build_probe_index(kind: str, mode: str, options: dict):
+    """按 (kind, mode) 装配一个 chroma 索引（每 combo 独立实例；确定性 test 编码器）。"""
     from pra.rag.factory import build_case_index, build_policy_index
 
     build = build_policy_index if kind == "policy" else build_case_index
-    if backend == "local":
-        return build(mode=mode, **options)
-    return build(mode=mode, backend=backend, **options)
+    return build(mode=mode, **options)
 
 
-def _chroma_options(args: argparse.Namespace, prefix: str) -> dict:
-    """chroma 臂的装配参数（缺省 EphemeralClient，见模块 docstring 「A/B 隔离」段）。
+def _index_options(args: argparse.Namespace, prefix: str) -> dict:
+    """RAG 索引装配参数（确定性编码器 + 客户端选择）。
 
-    ``collection_prefix`` 两种模式都传：node id 由 ``hash(collection + row_key)`` 决定，
-    固定前缀 → 两次运行 id 稳定（确定性契约）。
+    - ``embedding_model`` = ``build_embedding_model("test")``：离线、确定性、**非语义**、零模型
+      下载（评测可重放，不需要 BGE 缓存）；
+    - ``collection_prefix`` 两种客户端都传：node id 由 ``hash(collection + row_key)`` 决定，
+      固定前缀 → 两次运行 id 稳定（确定性契约）；
+    - ``chroma_ephemeral``（缺省）→ 进程内内存库；缺省不传 → 连本机服务端（srv 模式）。
     """
-    if args.chroma_client == "http":
-        return {"collection_prefix": prefix}
-    return {"collection_prefix": prefix, "chroma_ephemeral": True}
+    options: dict = {
+        "embedding_model": build_embedding_model("test"),
+        "collection_prefix": prefix,
+    }
+    if args.chroma_client != "http":
+        options["chroma_ephemeral"] = True
+    return options
 
 
 def _chroma_client_label(args: argparse.Namespace) -> str:
-    """报告里如实标注本次 chroma 臂用的客户端（ephemeral 不得被读成「真服务端」）。"""
+    """报告里如实标注本次用的客户端（ephemeral 不得被读成「真服务端」）。"""
     if args.chroma_client == "http":
         return f"HttpClient(127.0.0.1:{CHROMA_DEFAULT_PORT} 服务端)"
     return "EphemeralClient(进程内内存库，随进程消失)"
 
 
 async def _probe_report(
-    backend: str, modes: list[str], top_k: int, *, chroma_options: dict,
+    modes: list[str], top_k: int, *, options: dict,
     client_label: str = "", probe_only: bool = False,
 ) -> None:
     """三模式 × 两 KB 的 probe Recall@K 并排报告（不预设任何模式最优）。
 
-    只打印实测命中数与分数量纲；不同模式/后端的分数不可比。
+    只打印实测命中数与分数量纲；不同模式的分数不可比。
     """
     from pra.rag.chroma_backend import served_counters
 
@@ -186,15 +192,13 @@ async def _probe_report(
         ("policy", _load_probe_source()._POLICY_PROBES),
         ("case", _load_probe_source()._CASE_PROBES),
     )
-    options: dict = dict(chroma_options) if backend == "chroma" else {}
 
     print("\n" + "=" * 100)
-    print(f"人工标注 probe 集 · 三模式 Recall@{top_k} 并排（backend={backend}；不预设任何模式最优）")
+    print(f"人工标注 probe 集 · 三模式 Recall@{top_k} 并排（不预设任何模式最优）")
     print("=" * 100)
     print(f"probe 来源（**复用，未新造**）: {PROBE_SOURCE} —— Part C 的 _POLICY_PROBES / _CASE_PROBES")
-    print("embedder = MockHashEmbedder（确定性、离线；**不是语义模型** —— 词面特征 hash）")
-    if backend == "chroma":
-        print(f"chroma 客户端 = {client_label}；collection 前缀 = {options.get('collection_prefix')}")
+    print("embedder = build_embedding_model('test')（确定性、离线；**不是语义模型** —— 词面特征 hash）")
+    print(f"chroma 客户端 = {client_label}；collection 前缀 = {options.get('collection_prefix')}")
 
     for kind, probes in probes_by_kind:
         kb = "Policy KB" if kind == "policy" else "Case KB"
@@ -214,7 +218,7 @@ async def _probe_report(
         for i, p in enumerate(probes, 1):
             cells = []
             for mode in modes:
-                index = _build_probe_index(backend, kind, mode, options)
+                index = _build_probe_index(kind, mode, options)
                 hits = await _search(index, kind, p["query"], top_k)
                 ids = [_id_of(h) for h in hits]
                 poss = [ids.index(e) + 1 for e in p["expected"] if e in ids]
@@ -249,23 +253,21 @@ async def _probe_report(
     # --- 分数口径（量纲差异必须同框声明；不归一化、不当相似度） ----------
     print("\n" + "-" * 100)
     print("分数口径（**量纲不可比 → 本报告不做任何归一化**）")
-    print("  - local 后端：hybrid = 0.5·norm(bm25) + 0.5·cos，量纲 [0,1]（加权融合分）；")
-    print("    bm25/vector 两列也是各自归一化分 —— 与 chroma 的分数**不是同一把尺**。")
     print("  - chroma 后端：hybrid = **RRF 融合分** Σ 1/(60 + rank)（k=60），rank 从 0 起 → 上界 2/60 ≈ 0.0333；")
     print("    vector = 1 − Chroma cosine distance（余弦相似度）；bm25 = 候选集内 min-max 归一化 bm25s 分。")
-    print("  - ⚠️ RRF 分是**排名融合分，不是相似度、不是概率**；禁止跨模式/跨后端比大小。")
+    print("  - ⚠️ RRF 分是**排名融合分，不是相似度、不是概率**；禁止跨模式比大小。")
     print("  - CaseHit.retrieval_score = 检索分；PolicyClauseHit 契约不含分。")
 
     # --- 运行期自检（确定性证据 + 零 LLM + collection 清理） --------------------
     print("\n" + "-" * 100)
     print("probe 运行期自检")
-    print(f"  - backend={backend} modes={list(modes)} top_k={top_k} probe_only={probe_only}")
+    print(f"  - modes={list(modes)} top_k={top_k} probe_only={probe_only}")
     print(f"  - 本进程 chroma_backend 发出的 LLM 调用数（须为 0）: {served_counters()['llm_calls']}")
-    if backend == "chroma" and chroma_options.get("chroma_ephemeral"):
+    if options.get("chroma_ephemeral"):
         # EphemeralClient = 进程内内存库：**无需清理**（随进程消失），也不该去连服务端。
         print("  - chroma 客户端 = EphemeralClient（进程内）→ 无需清理服务端；本进程结束即释放")
-    elif backend == "chroma":
-        _cleanup_chroma_collections(chroma_options["collection_prefix"], label="probe")
+    else:
+        _cleanup_chroma_collections(options["collection_prefix"], label="probe")
 
 
 def _cleanup_chroma_collections(prefix: str, *, label: str) -> None:
@@ -287,40 +289,34 @@ def _cleanup_chroma_collections(prefix: str, *, label: str) -> None:
 async def _main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     modes = list(args.modes)
-    backend = args.backend
-    # 独占 collection 前缀（仅 chroma 用）：同一进程内 A/B 与 probe 共用，只建一套库。
+    # 独占 collection 前缀（http 客户端用）：同一进程内 A/B 与 probe 共用，只建一套库。
     prefix = f"{PROBE_COLLECTION_PREFIX}_{os.getpid()}"
-    chroma_options = _chroma_options(args, prefix)
+    options = _index_options(args, prefix)
     client_label = _chroma_client_label(args)
 
     print("=" * 100)
     print("商品审核 Agent · RAG 世界 vs InMemory（agent 方案 · 决策序列 digest + 指标）")
     print("=" * 100)
     print(f"数据集: {args.data}（smoke={args.smoke}）| 世界: eval(InMemory) + rag×{len(modes)} 模式")
-    if backend != "local":
-        # 缺省（local）不打印这一行：缺省路径输出与改动前逐字节一致。
-        print(f"backend: {backend}（RAG 索引装配；chroma = ChromaDB + LlamaIndex + BGE + BM25 + RRF）")
-    if backend == "chroma":
-        print(f"chroma 客户端 = {client_label}；collection 前缀 = {prefix}")
+    print("检索后端: chroma（ChromaDB + LlamaIndex + BM25(jieba) + RRF）")
+    print(f"chroma 客户端 = {client_label}；collection 前缀 = {prefix}")
 
     if not args.probe_only:
         configs: list[tuple[str, dict]] = [("InMemory(eval)", {})]
-        rag_overrides: dict = {"tool_world": "rag", "rag_backend": backend}
-        if backend == "chroma":
-            # A/B 隔离：每臂独立装配（ephemeral 每实例一个全新内存库 → 零状态传递）。
-            rag_overrides["rag_backend_options"] = chroma_options
+        # A/B 隔离：每臂独立装配（ephemeral 每实例一个全新内存库 → 零状态传递）。
+        rag_overrides: dict = {"tool_world": "rag", "rag_options": options}
         configs += [
             (f"RAG-{mode}", {**rag_overrides, "rag_mode": mode}) for mode in modes
         ]
         results = await _run_ab(configs, args)
         _report_ab(results, modes)
-        if backend == "chroma" and not chroma_options.get("chroma_ephemeral"):
+        if not options.get("chroma_ephemeral"):
             # 仅 http 客户端需要在共享服务端上清理（ephemeral 随进程消失，不连服务端）。
             _cleanup_chroma_collections(prefix, label="agent-ab")
 
     if args.probe:
         await _probe_report(
-            backend, modes, args.probe_top_k, chroma_options=chroma_options,
+            modes, args.probe_top_k, options=options,
             client_label=client_label, probe_only=args.probe_only,
         )
 
@@ -421,10 +417,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="要跑的 RAG 检索模式（默认全三路）")
     parser.add_argument("--smoke", action="store_true", help="冒烟：只跑前 N 条（确定性）")
     parser.add_argument("--smoke-limit", type=int, default=10, help="smoke 上限（默认 10）")
-    parser.add_argument("--backend", default="local", choices=list(BACKENDS),
-                        help="RAG 索引后端（默认 local = numpy + MockHash；chroma = ChromaDB + LlamaIndex + BM25 + RRF）")
     parser.add_argument("--chroma-client", default=CHROMA_CLIENTS[0], choices=list(CHROMA_CLIENTS),
-                        help=("chroma 臂的客户端：ephemeral（默认）= 进程内内存库，每臂独立、"
+                        help=("索引客户端：ephemeral（默认）= 进程内内存库，每臂独立、"
                               "无需本机服务端；http = 本机 127.0.0.1:8001 服务端（独占前缀建库、"
                               "用完即删）"))
     parser.add_argument("--probe", action="store_true",

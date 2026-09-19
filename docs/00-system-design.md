@@ -414,7 +414,7 @@ class Tool(Protocol):
 | Tool | 默认实现（`build_tools()` / 评测世界） | 生产 / HTTP 入口（`build_production_tools()`） |
 |---|---|---|
 | ProductTool / MerchantTool | InMemory 种子（`InMemoryProductRepository` / `InMemoryMerchantRepository`） | 真库：`MySQLProductRepository`（`product/product_sku/product_image`）/ `MySQLMerchantRepository`（`merchant/merchant_event`） |
-| CaseSearchTool / PolicySearchTool | InMemory 种子（`InMemoryCaseIndex` / `InMemoryPolicyIndex`） | 真实 RAG（`rag_backend="chroma"` + `BgeEmbedder` + hybrid）；经 `Lazy*Index` **惰性构建**——装配期零 import/零 IO，首次检索才建库连 Chroma |
+| CaseSearchTool / PolicySearchTool | InMemory 种子（`InMemoryCaseIndex` / `InMemoryPolicyIndex`） | 真实 RAG（chroma 后端 + FastEmbed 编码器 + hybrid）；经 `Lazy*Index` **惰性构建**——装配期零 import/零 IO，首次检索才建库连 Chroma |
 | ImageAnalysisTool / OCRTool | Mock 桩（`MockImageAnalysisProvider` / `MockOcrProvider`） | 同左（未接真实视觉模型 / OCR 服务） |
 
 > 边界：**默认装配路径（`build_tools()` 与 `build_agent_graph()` 缺省）与两个评测世界仍是 InMemory**（评测确定性红线，CI 不连 MySQL / Chroma）；
@@ -472,19 +472,20 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 **链路**：`Query → 双路召回（ChromaDB(cosine) + BGE 向量 / BM25(bm25s + jieba)）→ RRF 融合 → Top-K → CaseSearch / PolicySearch Tool → Evidence → Agent`。
 
-- **默认后端仍是 `local`**（纯 Python 余弦内存索引 + `MockHashEmbedder`，确定性、无外部依赖）；装 `--extra rag` 后可切 `rag_backend="chroma"`
-  （LlamaIndex 装配 + ChromaDB + BGE）；`factory.py` 的 `backend` 取值为 `local | chroma`。
+- **唯一检索后端是 chroma**：`factory.py` 的 `build_policy_index` / `build_case_index` 不再有 `backend` 开关，直接装配
+  ChromaDB(cosine) + LlamaIndex + FastEmbed 编码器；原先的 `local` 后端（纯 Python 余弦内存索引 + `MockHashEmbedder`）已整体移除。
   生产 / HTTP 入口（`build_production_tools()`）即用 **chroma + BGE + hybrid**，但经 `Lazy*Index` 惰性构建（首次检索才建库）。
+  装 `--extra rag` 才可用；**默认 `build_tools()` 与评测世界仍是 InMemory 种子**（见 §6.4 工具装配），要跑真实检索须显式 `data_source="rag"`。
 - 🔴 **Chroma 建库必须显式 `space="cosine"`**：缺省是 `l2`，会让「相似度 = 1 − distance」**静默失效**；且对**已存在**的 l2 collection
   传 cosine 配置**不生效**——创建与复用两条路径都必须校验，不符即报错（不静默沿用）。
 - 🔴 **`ChromaVectorStore.query` 返回的分是 `exp(-distance)`，不是 `1 − distance`** → 向量取数走 Chroma 原生 `collection.query` 的 distance 自行换算。
 - 🔴 **向量取数必须传「精确候选 id 集合」(`ids=`) + 覆盖率断言**，不能靠 `where` 近似 + `n_results=N`：否则非候选行会按距离抢占名额，
-  取回后被 Python 侧复检剔除且不补位 → 结果是 `local` 的**真子集**（最坏为空）。这就是曾经的漏召回缺陷；**契约类验收必须覆盖过滤器组合**，
+  取回后被 Python 侧复检剔除且不补位 → 结果是精确候选集的**真子集**（最坏为空）。这就是曾经的漏召回缺陷；**契约类验收必须覆盖过滤器组合**，
   只测无过滤的干净 query 不会暴露它。
 - **`retrieval_score` 是检索分**（hybrid 下即 RRF 分 `Σ1/(60+rank)`，rank 从 0 起 → 上界 `2/60 ≈ 0.0333`），**任何场合不得称为「语义相似度」**；
   `image_analysis` 的外观相似度是另一回事：它在 evidence 里叫 `IMAGE_SIMILARITY`。
-- **同构等价按模式分别断言**：`vector` 与 `local` **无条件同序同 id**（含各种过滤组合）；`bm25` / `hybrid` 与 `local` **不可比**
-  （引擎与量纲不同），只断言「候选完整 + 可复现 + 案例库与评测真值零交集」。
+- **三模式分数量纲互不可比**（`vector` = `1 − distance`、`bm25` = 候选集内 min-max、`hybrid` = RRF 分），
+  只断言「候选完整 + 可复现 + 案例库与评测真值零交集」。
 - 🔴 **BM25 分词是受控替换**（`llama-index-retrievers-bm25` 无 tokenizer 注入点）：调用点必须写成 `with _TOKENIZER_LOCK, _jieba_tokenizer():`
   （**锁在前**），否则补丁落在临界区外 → 并发下在飞线程会用错分词器检索 jieba 索引并抛错，且符号会**进程级永久泄漏**。
   **口径红线：不得称该实现「天然线程安全」**——它仍是全局符号替换，已验证的只是「同进程内本模块两个调用点在并发下互不污染、不泄漏」。
@@ -964,7 +965,7 @@ product-review-agent/
 │   │   ├── merchant/
 │   │   ├── case_search/
 │   │   └── policy_search/
-│   ├── rag/                         # 政策库 + 案例库：默认 local（numpy + MockHashEmbedder）；装 --extra rag 可切 chroma（LlamaIndex + BGE + BM25(jieba) + RRF）；不做 rerank
+│   ├── rag/                         # 政策库 + 案例库：chroma（ChromaDB + LlamaIndex + FastEmbed + BM25(jieba) + RRF）；不做 rerank
 │   ├── evaluation/                  # 评测 harness + 三方案对比 + Hard Case Benchmark
 │   ├── api/                         # FastAPI 路由 + 审核工作台接口
 │   ├── infra/                       # MySQL 接入（db / persist_service / rdb_models）

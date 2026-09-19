@@ -471,6 +471,9 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 **B. MockHash 8+8（2026-09-10；`scripts/run_rag_eval.py --probe`，粒度 12.5%）**
 
+> ⚠️ **历史记录**：表中 `local` 行是**当时已移除的 local 后端**（纯 Python 余弦内存索引）产出的数字，
+> 按「已发布数字不改写」的口径**原样保留**。`run_rag_eval.py` 已不再支持 `--backend`，现在只跑 chroma 后端。
+
 | KB | backend | bm25 / vector / hybrid |
 |---|---|---|
 | Policy | local | 6 / 5 / **6** |
@@ -486,7 +489,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 - 16 probe × 3 模式 × 2 KB + 4 组过滤组合：`ephemeral` 与 `http` 两种客户端**报告数据行 diff 为空**，
   vector parity 分差 `0.000e+00`。
-- `--backend chroma`（`EphemeralClient`）35 案 A/B 报告与 `local` 臂**逐字节一致**（digest `50351888fd8bd605`）。
+- `--backend chroma`（`EphemeralClient`）35 案 A/B 报告与 `local` 臂**逐字节一致**（digest `50351888fd8bd605`；该开关与 local 臂均已于 2026-09-19 移除，此条为历史记录）。
 - ⚠️ `ephemeral`（进程内、随进程消失）与 `http`（服务端）**不是同一份存储**；生产 RAG 仍用服务端，
   该开关只影响评测脚本。
 
@@ -501,7 +504,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 - 阻断缺陷：point id 取 sha256 前 16 字节 → **128 位整数**，而 Qdrant 服务端只接受 u64/UUID；
   其**进程内模式不校验上界**，**只在真 server 上以 400 暴露**。
-- 修复（截为 u64）后：真 server 落库 **24 / 67 点**，与 `local` 后端 top3 逐条一致。
+- 修复（截为 u64）后：真 server 落库 **24 / 67 点**，与当时的 `local` 后端 top3 逐条一致（local 已于 2026-09-19 移除，此条为历史记录）。
 - **该后端与 `deploy/qdrant` 已从仓库移除**，此条只保留教训：进程内模式的约束比真服务端宽松，
   缺陷可潜伏于全绿单测 ⇒ 真服务端集成用例不可省（当前 chroma 后端同样适用）。
 

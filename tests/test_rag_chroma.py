@@ -1,13 +1,15 @@
 """Chroma 后端离线测试 —— ``EphemeralClient`` 内存库，**零网络**、零模型下载。
 
+**唯一后端**（local 已移除）：本文件是真实检索链路的验收面，全部断言**只针对 chroma**，
+不再有「与 local 同序同 id」的跨后端等价对照。
+
 1. **协议形状**：``search`` 分别返回 ``PolicyClauseHit`` / ``CaseHit``。1 条款/先例 = 1 Node
    （不切碎）：语料行数、node id 数、``collection.count()`` 三者相等。
-2. **vector 模式**：与 local **无条件同序同 id** + 打分 6 位一致（容差 1e-6，float32 尾差）；
-   断言覆盖**过滤组合** —— 干净 query 测不出漏召回。
-3. **bm25 / hybrid 与 local 不可比**，只断言「候选完整（长度 == ``min(top_k, 可用候选数)``）
-   + 可复现 + R-4 隔离（``case_id`` 全 ``RAG_CASE_``）」。local bm25 = 自写 Okapi + CJK 字符
-   bigram + 全库 IDF，Chroma 路 = ``bm25s`` + jieba 真词 + 语料 = 候选 node；hybrid 本地 =
-   ``0.5·norm(bm25) + 0.5·cos``（量纲 [0,1]），Chroma 路 = RRF（量纲 ~0.0167–0.0333）。
+2. **候选完整性**：vector / bm25 / hybrid 三模式都断言「候选完整（长度 == ``min(top_k, 可用
+   候选数)``）+ 可复现」，且组合覆盖**过滤组合**（干净 query 测不出漏召回）。可用候选数由本文件
+   **独立复算**（``_eligible_*`` 直接从 corpus 行按过滤谓词算），不依赖实现。
+3. **候选集合等价**：``top_k ≥ 可用候选数`` 时命中的**集合** == 独立复算的可用候选 id 集合
+   （比「只看长度」更强：漏掉/多出一条立刻红）。
 4. **``retrieval_score`` 语义**：bm25 = 候选集内 min-max；vector = ``1 − distance`` 余弦；
    hybrid = RRF ``Σ1/(60+rank)``，rank **从 0 起** → 上界 ``2/60 ≈ 0.0333``，不是 ``2/61``。
    它是检索分，**不得**表述成「语义相似度」；同 query 两次 ``model_dump(mode="json")`` 逐字节
@@ -58,9 +60,8 @@ from pra.rag.chroma_backend import (
     served_counters,
 )
 from pra.rag.corpus import load_cases, load_policies
-from pra.rag.embedder import MockHashEmbedder, build_embedding_model
+from pra.rag.embedder import build_embedding_model
 from pra.rag.factory import build_case_index, build_policy_index
-from pra.rag.index import RagCaseIndex, RagPolicyIndex
 from pra.rag.vectors import cosine_similarity
 from pra.tools import build_tools
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
@@ -79,27 +80,6 @@ def _test_embedding_model() -> Any:
     """chroma 索引构造用的确定性 ``BaseEmbedding``（256 维，零模型下载）。"""
     return build_embedding_model("test", embed_dim=_TEST_EMBED_DIM)
 
-
-class _LocalEmbedderShim:
-    """**测试内**桥接：把 ``BaseEmbedding``（确定性 test 编码）包成 local 后端要的
-    ``embed(text) -> list[float]``。
-
-    为什么必须存在：跨后端等价性用例把**同一语料**同时建 local 与 chroma 两个索引并逐条比对，
-    而两侧现在接受的编码器类型不同（local 要 ``Embedder``（窄接口 ``embed``）／chroma 要
-    ``BaseEmbedding``）。shim 让两侧共用**同一份**确定编码，等价性断言才有意义。它只在
-    tests/ 内存在，**不进 src/**。
-    """
-
-    def __init__(self, model: Any) -> None:
-        self._model = model
-
-    def embed(self, text: str) -> list[float]:
-        return list(self._model.get_text_embedding(text))
-
-
-def _local_embedder() -> _LocalEmbedderShim:
-    """local 后端用的编码器（与 :func:`_test_embedding_model` 同源的 test 编码）。"""
-    return _LocalEmbedderShim(_test_embedding_model())
 
 #: RRF 常数：本文件用**独立常量**做 oracle，改 k 就该让断言失败（不跟着实现漂移）。
 _RRF_K = 60
@@ -156,21 +136,15 @@ def _case_chroma(
     )
 
 
-def _policy_local(mode: str) -> RagPolicyIndex:
-    return RagPolicyIndex(POLICY_ROWS, embedder=_local_embedder(), mode=mode)
-
-
-def _case_local(mode: str) -> RagCaseIndex:
-    return RagCaseIndex(CASE_ROWS, embedder=_local_embedder(), mode=mode)
-
-
-def _eligible_policy(filters: PolicySearchFilters, effective_only: bool) -> int:
-    """**独立**复算 policy 可用候选数（不调实现）—— 供「候选完整」断言当 oracle。
+def _eligible_policy_ids(
+    filters: PolicySearchFilters, effective_only: bool
+) -> set[str]:
+    """**独立**复算 policy 可用候选 id 集（不调实现）—— 「候选完整 / 集合等价」断言的 oracle。
 
     ``effective_only`` → ``status == "EFFECTIVE"``；``category`` ∈ {None, 目标, 全类目}
     （全类目是通配，故「不存在的类目」**不是空候选**）；``risk_type`` 与给定集合交叠非空。
     """
-    count = 0
+    ids: set[str] = set()
     for r in POLICY_ROWS:
         if effective_only and r.status != "EFFECTIVE":
             continue
@@ -178,20 +152,30 @@ def _eligible_policy(filters: PolicySearchFilters, effective_only: bool) -> int:
             continue
         if filters.risk_type and not (set(filters.risk_type) & set(r.risk_type)):
             continue
-        count += 1
-    return count
+        ids.add(r.clause_id)
+    return ids
 
 
-def _eligible_case(filters: CaseSearchFilters) -> int:
-    """**独立**复算 case 可用候选数（category 精确匹配 / risk_type 交叠）。"""
-    count = 0
+def _eligible_policy(filters: PolicySearchFilters, effective_only: bool) -> int:
+    """**独立**复算 policy 可用候选数（= :func:`_eligible_policy_ids` 的基数）。"""
+    return len(_eligible_policy_ids(filters, effective_only))
+
+
+def _eligible_case_ids(filters: CaseSearchFilters) -> set[str]:
+    """**独立**复算 case 可用候选 id 集（category 精确匹配 / risk_type 交叠）。"""
+    ids: set[str] = set()
     for r in CASE_ROWS:
         if filters.category and r.category != filters.category:
             continue
         if filters.risk_type and not (set(filters.risk_type) & set(r.risk_type)):
             continue
-        count += 1
-    return count
+        ids.add(r.case_id)
+    return ids
+
+
+def _eligible_case(filters: CaseSearchFilters) -> int:
+    """**独立**复算 case 可用候选数（= :func:`_eligible_case_ids` 的基数）。"""
+    return len(_eligible_case_ids(filters))
 
 
 def _rrf_achievable_scores(n: int = len(CASE_ROWS)) -> set[float]:
@@ -316,9 +300,9 @@ def test_chroma_collection_name_shape_and_metadata() -> None:
     )
 
 
-# 2) 同构等价 —— vector 与 local 同序同 id；bm25/hybrid **不可比**
+# 2) vector 模式候选完整性（组合覆盖过滤）；bm25/hybrid 见第 3 段
 
-#: **vector 与 local 的同序同 id 组合（含过滤组合）** —— 逐条参数化。
+#: **vector 模式候选完整性组合（含过滤组合）** —— 逐条参数化。
 #: 为什么必须带过滤组合：只有 **下推的 where 只是候选谓词的真超集** 时才暴露漏召回
 #: （``risk_type`` 无法下推：Chroma 列表字段没有成员算子；``effective_only`` 也不在 where 里）。
 _VECTOR_PARITY_POLICY: list[tuple[str, str, PolicySearchFilters, bool, int]] = [
@@ -326,13 +310,13 @@ _VECTOR_PARITY_POLICY: list[tuple[str, str, PolicySearchFilters, bool, int]] = [
     ("no_filter_eff", "外观高度模仿知名品牌无授权", PolicySearchFilters(), True, 5),
     ("no_filter_all", "永久去皱 根治脚气 功效夸大", PolicySearchFilters(), False, 10),
     ("category_only", "外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), False, 20),
-    # 修复前 local 21 / chroma 19：EXPIRED 行抢占 n_results 名额，无 store 过滤也中招
+    # 历史上候选不完整：EXPIRED 行抢占 n_results 名额（无 store 过滤也中招）
     ("brand_eff_k30", "外观高度模仿知名品牌无授权", PolicySearchFilters(), True, 30),
-    # 修复前 local 3 / chroma 0：risk_type 不可下推 → 候选行没取到
+    # 历史上 risk_type 不可下推 → 候选行没取到
     ("risk_type_false_claim", "外观模仿", PolicySearchFilters(risk_type=[_FALSE_CLAIM]), True, 6),
     ("risk_type_ip", "外观模仿", PolicySearchFilters(risk_type=[_IP]), True, 6),
     ("risk_type_evasion", "规避 换链接 重上架", PolicySearchFilters(risk_type=[_EVASION]), True, 6),
-    # 修复前 local 16 / chroma 13（保住前缀但漏 3 条）
+    # 历史上候选不完整（保住前缀但漏 3 条）
     ("category_eff_k20", "外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), True, 20),
     ("category_plus_risk_type", "外观模仿",
      PolicySearchFilters(category=_SHOE_CATEGORY, risk_type=[_IP]), True, 20),
@@ -343,7 +327,7 @@ _VECTOR_PARITY_CASE: list[tuple[str, str, CaseSearchFilters, int]] = [
     ("category_only", "无品牌高相似商家多次上架", CaseSearchFilters(category=_SHOE_CATEGORY), 5),
     ("category_all_candidates", "外观模仿", CaseSearchFilters(category=_BAG_CATEGORY), 30),
     ("no_match_category", "食品 不存在类目", CaseSearchFilters(category="食品"), 5),
-    # 修复前 local 25 / chroma 14：库里匹配 67 条，取数上限被非候选行占满
+    # 历史上库里匹配 67 条，取数上限被非候选行占满
     ("risk_type_k30", "外观模仿", CaseSearchFilters(risk_type=[_IP]), 30),
     ("category_plus_risk_type", "外观模仿",
      CaseSearchFilters(category=_SHOE_CATEGORY, risk_type=[_IP]), 10),
@@ -355,29 +339,28 @@ _VECTOR_PARITY_CASE: list[tuple[str, str, CaseSearchFilters, int]] = [
     _VECTOR_PARITY_POLICY,
     ids=[case[0] for case in _VECTOR_PARITY_POLICY],
 )
-async def test_chroma_policy_vector_equivalent_to_local(
+async def test_chroma_policy_vector_candidates_complete(
     label: str, query: str, filters: PolicySearchFilters, effective_only: bool, top_k: int
 ) -> None:
-    """**vector 模式 policy：与 local 同序同 id（无条件），组合覆盖过滤**。
+    """**vector 模式 policy：候选完整 + 可复现（组合覆盖过滤）**。
 
     vector 路走 Chroma 原生 ``collection.query`` → ``1 − distance``（**不是** ``exp(-distance)``），
-    排序 tie-break = 「分降序 + corpus 原序」→ 与 local ``rank_documents`` 同口径；分差只来自
-    float32 尾差（⊂ 1e-6，故这里只断 id 序）。另断言长度 == ``min(top_k, 可用候选数)``。
+    排序 tie-break = 「分降序 + corpus 原序」。断言长度 == ``min(top_k, 独立复算可用候选数)``，
+    且同输入两次结果逐字节一致（浮点排序不漂移）。
     """
-    local = _policy_local("vector")
-    chroma_idx = _policy_chroma("vector")
-    lh = await local.search(query, filters, top_k, effective_only)
-    ch = await chroma_idx.search(query, filters, top_k, effective_only)
-    assert [h.clause_id for h in lh] == [h.clause_id for h in ch], (
-        f"policy vector[{label}] q={query!r} filters={filters} eff={effective_only} k={top_k}: "
-        f"与 local 命中序/id 不一致\nlocal ={[(h.clause_id, getattr(h, 'retrieval_score', '-')) for h in lh]}\n"
-        f"chroma={[h.clause_id for h in ch]}"
-    )
+    idx = _policy_chroma("vector")
+    hits = await idx.search(query, filters, top_k, effective_only)
     eligible = _eligible_policy(filters, effective_only)
-    assert len(ch) == min(top_k, eligible), (
-        f"policy vector[{label}]: 候选不完整 {len(ch)} != min({top_k}, {eligible})"
+    assert len(hits) == min(top_k, eligible), (
+        f"policy vector[{label}] q={query!r} filters={filters} eff={effective_only} k={top_k}: "
+        f"候选不完整 {len(hits)} != min({top_k}, {eligible})"
     )
-    assert all(h.status == "EFFECTIVE" for h in ch) if effective_only else True
+    if effective_only:
+        assert all(h.status == "EFFECTIVE" for h in hits)
+    again = await idx.search(query, filters, top_k, effective_only)
+    assert [h.model_dump(mode="json") for h in hits] == [
+        h.model_dump(mode="json") for h in again
+    ], "同输入两次 vector 结果必须逐字节一致"
 
 
 @pytest.mark.parametrize(
@@ -385,32 +368,25 @@ async def test_chroma_policy_vector_equivalent_to_local(
     _VECTOR_PARITY_CASE,
     ids=[case[0] for case in _VECTOR_PARITY_CASE],
 )
-async def test_chroma_case_vector_equivalent_to_local(
+async def test_chroma_case_vector_candidates_complete(
     label: str, query: str, filters: CaseSearchFilters, top_k: int
 ) -> None:
-    """**vector 模式 case：与 local 同序同 id + ``retrieval_score`` 差 ≤ 1e-6（无条件）**。
+    """**vector 模式 case：候选完整 + 可复现**（组合覆盖 ``risk_type`` / category 过滤）。
 
-    组合覆盖 ``risk_type`` / category 过滤；额外断言结果长度 == ``min(top_k, 可用候选数)``。
+    断言结果长度 == ``min(top_k, 独立复算可用候选数)``、``retrieval_score`` ⊂ [0,1]、
+    同输入两次逐字节一致。
     """
-    local = _case_local("vector")
-    chroma_idx = _case_chroma("vector")
-    lh = await local.search(query, filters, top_k)
-    ch = await chroma_idx.search(query, filters, top_k)
-    assert [h.case_id for h in lh] == [h.case_id for h in ch], (
-        f"case vector[{label}] q={query!r} filters={filters} k={top_k}: 与 local 命中序/id 不一致"
-    )
+    idx = _case_chroma("vector")
+    hits = await idx.search(query, filters, top_k)
     eligible = _eligible_case(filters)
-    assert len(ch) == min(top_k, eligible), (
-        f"case vector[{label}]: 候选不完整 {len(ch)} != min({top_k}, {eligible})"
+    assert len(hits) == min(top_k, eligible), (
+        f"case vector[{label}]: 候选不完整 {len(hits)} != min({top_k}, {eligible})"
     )
-    for a, b in zip(lh, ch):
-        assert round(abs(a.retrieval_score - b.retrieval_score), 9) <= _SCORE_TOL, (
-            "Chroma float32 存算尾差应 ⊂ 1e-6（实测 case 分差 [0,0,0,0,1e-6]）",
-            label,
-            a.case_id,
-            a.retrieval_score,
-            b.retrieval_score,
-        )
+    assert all(0.0 <= h.retrieval_score <= 1.0 for h in hits)
+    again = await idx.search(query, filters, top_k)
+    assert [h.model_dump(mode="json") for h in hits] == [
+        h.model_dump(mode="json") for h in again
+    ], "同输入两次 vector 结果必须逐字节一致"
 
 
 async def test_chroma_vector_path_covers_candidates_without_bruteforce_fallback() -> None:
@@ -423,7 +399,6 @@ async def test_chroma_vector_path_covers_candidates_without_bruteforce_fallback(
     """
     reset_served_counters()
     idx = _policy_chroma("vector")
-    local = _policy_local("vector")
     probes = [
         ("外观模仿", PolicySearchFilters(risk_type=[_FALSE_CLAIM]), True, 6),
         ("外观模仿", PolicySearchFilters(risk_type=[_IP]), True, 6),
@@ -432,11 +407,9 @@ async def test_chroma_vector_path_covers_candidates_without_bruteforce_fallback(
     ]
     for query, filters, effective_only, top_k in probes:
         ch = await idx.search(query, filters, top_k, effective_only)
-        lh = await local.search(query, filters, top_k, effective_only)
         assert len(ch) == min(top_k, _eligible_policy(filters, effective_only)), (
             f"q={query!r} filters={filters}: 候选不完整（结果靠兜底补齐即说明精确取数失效）"
         )
-        assert [h.clause_id for h in ch] == [h.clause_id for h in lh]
     counters = served_counters()
     assert counters["vector_bruteforce_fallbacks"] == 0, (
         "vector 路动用了「按已存向量补算」兜底 —— 精确 id 取数 / 覆盖率自检在真实环境失效："
@@ -480,12 +453,10 @@ def test_chroma_vector_bruteforce_fallback_scores_missing_candidates() -> None:
 async def test_chroma_policy_bm25_hybrid_candidates_complete_and_documented(
     mode: str,
 ) -> None:
-    """**bm25 / hybrid policy：只断言「候选完整 + 可复现」，不断言与 local 同序**。
+    """**bm25 / hybrid policy：断言「候选完整 + 可复现」**。
 
-    为什么不比对 local（防止后来者误读成回归）：``bm25`` 的 local = 自写 Okapi + CJK 字符
-    bigram + 全库 IDF，Chroma 路 = ``bm25s`` + **jieba 真词** + 语料 = 候选 node（IDF 口径不同）
-    → 分数与序都不可比；``hybrid`` 的 local = ``0.5·norm(bm25) + 0.5·cos``（量纲 [0,1]），
-    Chroma 路 = **RRF** ``Σ1/(60+rank)``（量纲 ~0.0167–0.0333）→ 连量纲都不同。
+    ``bm25`` 路 = ``bm25s`` + **jieba 真词** + 语料 = 候选 node；``hybrid`` 路 = **RRF**
+    ``Σ1/(60+rank)``（量纲 ~0.0167–0.0333，见第 3 段的分值语义用例）。
 
     必须断言的是：**候选完整**（结果长度 == min(top_k, 可用候选数)；两路都覆盖完整候选集，
     hybrid 的 RRF 才有意义）与**同 query 可复现**。
@@ -508,8 +479,7 @@ async def test_chroma_policy_bm25_hybrid_candidates_complete_and_documented(
 async def test_chroma_case_bm25_hybrid_candidates_complete_and_isolated(mode: str) -> None:
     """**bm25 / hybrid case：候选完整 + 可复现 + R-4 隔离**。
 
-    同样不与 local 比对（引擎与量纲都不同）；额外断言 R-4 —— 命中 ``case_id``
-    全部 ``RAG_CASE_`` 前缀，且任何过滤组合下都成立。
+    额外断言 R-4 —— 命中 ``case_id`` 全部 ``RAG_CASE_`` 前缀，且任何过滤组合下都成立。
     """
     idx = _case_chroma(mode)
     for query, filters, top_k in _CASE_COMBOS:
@@ -527,40 +497,41 @@ async def test_chroma_case_bm25_hybrid_candidates_complete_and_isolated(mode: st
 
 
 @pytest.mark.parametrize("mode", ["bm25", "hybrid"])
-async def test_chroma_bm25_hybrid_candidate_set_equals_local_when_topk_covers_all(
+async def test_chroma_bm25_hybrid_candidate_set_equals_eligible_when_topk_covers_all(
     mode: str,
 ) -> None:
-    """候选完整性的**加强版**：``top_k ≥ 可用候选数`` 时，命中的**集合**与 local 完全相同。
+    """候选完整性的**加强版**：``top_k ≥ 可用候选数`` 时，命中的**集合** == 独立复算的可用候选 id 集。
 
-    这是允许范围内最强的等价断言 —— 不比对分数（引擎/量纲不同）、不比对**顺序**，但把「候选
-    谓词与 local 逐条一致」钉死：漏掉或多出一条候选，集合比较立刻红。
+    这是允许范围内最强的候选断言 —— 不比对分数（引擎/量纲不同）、不比对**顺序**，但把「候选谓词
+    逐条正确」钉死：漏掉或多出一条候选，集合比较立刻红（oracle 由本文件直接从 corpus 行按过滤
+    谓词复算，不调实现）。
     """
-    p_local, p_chroma = _policy_local(mode), _policy_chroma(mode)
+    p_chroma = _policy_chroma(mode)
     for query, filters, effective_only in (
         ("仿冒 高仿 复刻 原单", PolicySearchFilters(risk_type=[_IP]), True),   # 8 条候选
         ("外观模仿", PolicySearchFilters(category=_BAG_CATEGORY), True),        # 16 条候选
         ("外观模仿", PolicySearchFilters(category=_MISSING_CATEGORY), True),    # 14 条候选（全类目）
     ):
-        eligible = _eligible_policy(filters, effective_only)
-        lh = await p_local.search(query, filters, top_k=eligible, effective_only=effective_only)
-        ch = await p_chroma.search(query, filters, top_k=eligible, effective_only=effective_only)
-        assert {h.clause_id for h in lh} == {h.clause_id for h in ch}, (
-            f"policy {mode} q={query!r} filters={filters}: 候选集合与 local 不一致"
-            f"（local {len(lh)} / chroma {len(ch)}）"
+        expected = _eligible_policy_ids(filters, effective_only)
+        ch = await p_chroma.search(
+            query, filters, top_k=len(expected), effective_only=effective_only
+        )
+        assert {h.clause_id for h in ch} == expected, (
+            f"policy {mode} q={query!r} filters={filters}: 候选集合 != 独立复算可用候选"
+            f"（expected {len(expected)} / chroma {len(ch)}）"
         )
 
-    c_local, c_chroma = _case_local(mode), _case_chroma(mode)
+    c_chroma = _case_chroma(mode)
     for query, filters in (
         ("外观模仿", CaseSearchFilters(category=_SHOE_CATEGORY)),      # 25 条候选
         ("外观模仿", CaseSearchFilters(risk_type=[_IP])),              # 25 条候选
-        ("食品 不存在类目", CaseSearchFilters(category="食品")),        # 0 条候选 → 两边都空
+        ("食品 不存在类目", CaseSearchFilters(category="食品")),        # 0 条候选 → []
     ):
-        eligible = _eligible_case(filters)
-        lh = await c_local.search(query, filters, top_k=max(eligible, 1))
-        ch = await c_chroma.search(query, filters, top_k=max(eligible, 1))
-        assert {h.case_id for h in lh} == {h.case_id for h in ch}, (
-            f"case {mode} q={query!r} filters={filters}: 候选集合与 local 不一致"
-            f"（local {len(lh)} / chroma {len(ch)}）"
+        expected = _eligible_case_ids(filters)
+        ch = await c_chroma.search(query, filters, top_k=max(len(expected), 1))
+        assert {h.case_id for h in ch} == expected, (
+            f"case {mode} q={query!r} filters={filters}: 候选集合 != 独立复算可用候选"
+            f"（expected {len(expected)} / chroma {len(ch)}）"
         )
 
 
@@ -571,12 +542,11 @@ async def test_chroma_retrieval_score_is_rrf_for_hybrid_not_similarity() -> None
     """**hybrid 的 ``retrieval_score`` 是 RRF 融合分，不是相似度**。
 
     断言（强于只看区间）：每个分都落在**可达 RRF 值集合** ``{1/(60+r)} ∪ {1/(60+a)+1/(60+b)}``
-    内、恒 > 0、上界 ``2/60``；并对照 local hybrid（量纲 [0,1]，实测 top-1 ≈ 0.61 > 2/60）
-    证明两者量纲不同。上界：rank 从 **0** 起 → 两路都排首位即 ``2/60 ≈ 0.03333``，**不是 2/61**；
-    与 llama-index ``QueryFusionRetriever._reciprocal_rerank_fusion`` 的 ``1.0/(rank + k)`` 一致。
+    内、恒 > 0、上界 ``2/60``。上界：rank 从 **0** 起 → 两路都排首位即 ``2/60 ≈ 0.03333``，
+    **不是 2/61**；与 llama-index ``QueryFusionRetriever._reciprocal_rerank_fusion`` 的
+    ``1.0/(rank + k)`` 一致。量纲远小于 [0,1] 的相似度，勿以「相似度」口径解读。
     """
     case_idx = _case_chroma("hybrid")
-    local = _case_local("hybrid")
     achievable = _rrf_achievable_scores()
     # 该组合实测 top-1 两路都排第 0 → RRF = 1/60 + 1/60 = 0.033333（= 上界 2/60）
     query = "外观模仿"
@@ -603,18 +573,12 @@ async def test_chroma_retrieval_score_is_rrf_for_hybrid_not_similarity() -> None
     assert max(h.retrieval_score for h in hits) > _DOC_CLAIMED_RRF_MAX_LEGACY, (
         "实测最高分必须 > 历史文档所写的 2/61 —— 这条同时钉住「上界写 2/61 是错的」这一更正依据"
     )
-    # local hybrid 是另一套量纲（0.5·norm(RRF 化前的 bm25) + 0.5·cos）→ 不可比
-    local_hits = await local.search(query, filters, top_k=25)
-    assert max(h.retrieval_score for h in local_hits) > _RRF_MAX, (
-        "local hybrid 量纲 [0,1]，应显著大于 RRF 上界 —— 两者不可互读"
-    )
 
 
 async def test_chroma_retrieval_score_scale_per_mode() -> None:
     """三模式打分口径：bm25 候选集内 min-max ⊂ [0,1]；vector = 1−distance ⊂ [0,1]。
     最高分恒 1.0；无命中时（原始分全 0）``normalize_minmax`` 给全 1.0（防除零）。
 
-    ``vector`` 与 local 余弦逐位同口径（尾差 ≤ 1e-6），故直接与 local 对读。
     ``PolicyClauseHit`` **没有** retrieval_score 字段 —— 「检索分」只出现在 CaseHit 上。
     """
     assert "retrieval_score" in CaseHit.model_fields
@@ -633,16 +597,10 @@ async def test_chroma_retrieval_score_scale_per_mode() -> None:
     flat = await bm25_idx.search("zzzqqq wwweee", CaseSearchFilters(risk_type=[_IP]), top_k=5)
     assert flat and {h.retrieval_score for h in flat} == {1.0}
 
-    # vector：与 local 余弦同口径（⊂ [0,1] 且逐条 ≤1e-6）
+    # vector：1 − Chroma cosine distance ⊂ [0,1]
     vec_idx = _case_chroma("vector")
-    local = _case_local("vector")
     vh = await vec_idx.search("无品牌高相似商家多次上架", CaseSearchFilters(), top_k=10)
-    lh = await local.search("无品牌高相似商家多次上架", CaseSearchFilters(), top_k=10)
     assert vh and all(0.0 <= h.retrieval_score <= 1.0 for h in vh)
-    assert [h.case_id for h in vh] == [h.case_id for h in lh]
-    assert all(
-        round(abs(a.retrieval_score - b.retrieval_score), 9) <= _SCORE_TOL for a, b in zip(lh, vh)
-    )
 
 
 # 4) 确定性 + 零 LLM
@@ -713,7 +671,7 @@ def test_chroma_created_collection_is_cosine_and_numerically_verified() -> None:
     Chroma 的**默认向量空间是 l2**；只写 ``embedding_function=None`` 并不会变成 cosine。实测
     单位向量 ``[1,0,0]`` vs ``[0.9,0.1,0]``：缺省 l2 → ``1 − distance`` = ``0.97999999``
     ≠ numpy 余弦 ``0.99388373``；显式 cosine → ``0.006116271``（= ``0.99388373``）。L2 库不报错，
-    只会让「与 local 同口径」静默失败。两条断言：① ``configuration_json["hnsw"]["space"] ==
+    只会让「相似度 = 1 − distance」静默失效。两条断言：① ``configuration_json["hnsw"]["space"] ==
     "cosine"``；② 已知单位向量查询的 ``1 − distance`` == 命中向量与探针的 numpy 余弦（光看
     配置字段不足以证明空间语义）。
 
@@ -894,14 +852,6 @@ async def test_chroma_case_bm25_ignores_metadata_literals(literal: str) -> None:
         (row.case_id, 1.0) for row in CASE_ROWS[:5]
     ], "零信号查询应退化为「corpus 原序 + 全 1.0」（不是按字面值相关度排序）"
 
-    # 跨后端对照**仅在全零分退化区间**成立（无区分度 → 两边都退化为 corpus 原序 + 全 1.0），
-    # 不是对「bm25 与 local 不可比」的反例 —— 那条针对有信号的检索结果。
-    local = _case_local("bm25")
-    local_literal = await local.search(literal, CaseSearchFilters(), top_k=len(CASE_ROWS))
-    assert [h.model_dump(mode="json") for h in local_literal] == [
-        h.model_dump(mode="json") for h in literal_hits
-    ], "零信号退化区间下 chroma 与 local 都应「无区分度」"
-
     # 对照：正文查询必须是**有区分度**的（否则上面的「平坦」可能只是整条链路都失灵）
     body_raw = _bm25_raw_scores(idx, all_rows, "无品牌高相似商家多次上架")
     assert max(body_raw) > 0.0, "正文查询应当有非零 BM25 原始分 —— 否则本用例前提不成立"
@@ -935,13 +885,6 @@ async def test_chroma_policy_bm25_ignores_metadata_literals(literal: str) -> Non
     assert [h.model_dump(mode="json") for h in literal_hits] == [
         h.model_dump(mode="json") for h in control
     ], f"字面值查询 {literal!r} 的结果必须与零信号查询逐字节一致（字面值不得有信号）"
-    # 跨后端对照**仅在全零分退化区间**成立（理由见 case 侧用例）
-    local = _policy_local("bm25")
-    local_literal = await local.search(literal, PolicySearchFilters(), top_k=len(POLICY_ROWS),
-                                       effective_only=False)
-    assert [h.model_dump(mode="json") for h in local_literal] == [
-        h.model_dump(mode="json") for h in literal_hits
-    ], "零信号退化区间下 chroma 与 local 都应「无区分度」"
 
     body_raw = _bm25_raw_scores(idx, all_rows, "仿冒 高仿 复刻")
     assert max(body_raw) > 0.0, "正文查询应当有非零 BM25 原始分 —— 否则本用例前提不成立"
@@ -1101,63 +1044,32 @@ async def test_chroma_case_metadata_semantics_and_empty_candidates() -> None:
     assert await p_idx.search("外观模仿", PolicySearchFilters(), top_k=0, effective_only=True) == []
 
 
-# 8) 装配开关：factory backend="chroma" + build_tools rag_backend="chroma"
+# 8) 装配入口：factory 构造 Chroma 索引 + build_tools("rag", rag_options=...) 注入
 
 
-def test_factory_backend_chroma_returns_chroma_index() -> None:
-    """factory ``backend="chroma"``：延迟 import 构造 ``Chroma*Index``（离线注入 EphemeralClient）。"""
+def test_factory_builds_chroma_indexes() -> None:
+    """factory 延迟 import 构造 ``Chroma*Index``（离线注入 EphemeralClient + 确定性编码器）。"""
     client = chromadb.EphemeralClient()
     prefix = _prefix("factory")
     p_idx = build_policy_index(
-        rows=POLICY_ROWS, embedding_model=_test_embedding_model(), backend="chroma",
+        rows=POLICY_ROWS, embedding_model=_test_embedding_model(),
         chroma_client=client, collection_prefix=prefix,
     )
     c_idx = build_case_index(
-        rows=CASE_ROWS, embedding_model=_test_embedding_model(), backend="chroma",
+        rows=CASE_ROWS, embedding_model=_test_embedding_model(),
         chroma_client=client, collection_prefix=prefix,
     )
     assert isinstance(p_idx, ChromaPolicyIndex)
     assert isinstance(c_idx, ChromaCaseIndex)
 
 
-def test_factory_chroma_rejects_local_embedder_kwarg() -> None:
-    """**错配不许静默**：``backend="chroma"`` 的编码器参数名是 ``embedding_model``
-    （``BaseEmbedding``）。显式传 local 的 ``embedder=``（``Embedder``）必须抛 ``ValueError``
-    —— 否则旧行为会「收下了却静默丢弃」，让调用方误以为换了编码器。文案须点名 ``embedder``。
-    """
-    client = chromadb.EphemeralClient()
-    with pytest.raises(ValueError, match="embedder"):
-        build_policy_index(
-            rows=POLICY_ROWS,
-            backend="chroma",
-            embedder=MockHashEmbedder(),  # local 侧才用的窄接口 Embedder
-            chroma_client=client,
-            collection_prefix=_prefix("mismatch"),
-        )
-
-
-def test_factory_local_rejects_chroma_embedding_model_kwarg() -> None:
-    """**错配不许静默**：``backend="local"`` 的编码器参数名是 ``embedder``（``Embedder``）。
-    显式传 chroma 的 ``embedding_model=``（``BaseEmbedding``）必须抛 ``ValueError``，文案须点名
-    ``embedding_model``。锁的是「wrong-backend 编码器不许被静默丢弃」这条不变量。
-    """
-    with pytest.raises(ValueError, match="embedding_model"):
-        build_policy_index(
-            rows=POLICY_ROWS,
-            backend="local",
-            embedding_model=_test_embedding_model(),
-        )
-
-
-async def test_build_tools_rag_backend_chroma_injects_chroma_index() -> None:
-    """``build_tools("rag", rag_backend="chroma")`` 注入 Chroma 索引；其余 4 工具仍是 InMemory。"""
+async def test_build_tools_rag_injects_chroma_index() -> None:
+    """``build_tools("rag", rag_options=...)`` 注入 Chroma 索引；其余 4 工具仍是 InMemory。"""
     client = chromadb.EphemeralClient()
     tools = build_tools(
         "rag",
-        rag_backend="chroma",
-        # chroma 侧编码器经 ``rag_backend_options["embedding_model"]`` 注入（``rag_embedder`` 只
-        # 服务 local 后端：build_tools 恒以 ``embedder=`` 转发，chroma 分支不读它）。
-        rag_backend_options={
+        # 索引装配参数经 ``rag_options`` 逐字透传给 ``pra.rag.factory``（含确定性编码器与 client）。
+        rag_options={
             "embedding_model": _test_embedding_model(),
             "chroma_client": client,
             "collection_prefix": _prefix("tools"),

@@ -11,7 +11,12 @@
 索引）检索后的证据引用：``POLICY_REF`` weight=0.9 / ref_id=clause_id，``CASE_PRECEDENT``
 weight=retrieval_score / ref_id=case_id —— 与 InMemory 世界同一引用格式。
 
-全链路确定性：无网络、无真 LLM、固定 corpus + mock embedding；同输入可重放。
+后端 = chroma（ChromaDB + LlamaIndex + BM25(jieba) + RRF；需 ``uv sync --extra rag``）。
+demo **显式注入离线确定性编码器** ``build_embedding_model("test")``（词面特征哈希，**非语义
+模型、零下载**）并配 ``chroma_ephemeral=True``（进程内内存库）—— 故无需起服务端、无需模型
+缓存即可跑；真语义模型（BGE）的路径由生产装配 / e2e 覆盖，不在本 demo。
+
+全链路确定性：无网络、无真 LLM、固定 corpus + 确定性编码器；同输入可重放。
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import asyncio
 import sys
 
 from pra.domain.models import Budget
+from pra.rag.embedder import build_embedding_model
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.tools.base import ToolContext
 from pra.tools.case_search.tool import (
@@ -35,6 +41,19 @@ from pra.tools.policy_search.tool import (
 )
 
 MODES = ("bm25", "vector", "hybrid")
+
+
+def _build(mode: str, kind: str):
+    """离线装配一个 chroma 索引：确定性编码器 + 进程内 EphemeralClient（不连服务端）。
+
+    ``embedding_model`` 必须显式传 ``build_embedding_model("test")`` —— 它是词面 sha256 特征的
+    **确定性、非语义、零下载**编码器（LlamaIndex ``BaseEmbedding``）；缺省 ``None`` 会让 chroma
+    类内自建 fastembed（真语义 BGE，需 rag extra + 已缓存模型），与 demo「离线可重放」相悖。
+    """
+    build = build_policy_index if kind == "policy" else build_case_index
+    return build(
+        mode=mode, embedding_model=build_embedding_model("test"), chroma_ephemeral=True
+    )
 
 _POLICY_QUERIES = [
     "外观高度模仿知名品牌，无授权",  # 期望命中 IP 条款
@@ -58,7 +77,7 @@ def _clip(text: str, n: int = 46) -> str:
 async def _policy_table(query: str, top_k: int) -> None:
     print(f"\n▶ 政策检索   query = {query}")
     for mode in MODES:
-        idx = build_policy_index(mode=mode)
+        idx = _build(mode, "policy")
         hits = await idx.search(
             query, PolicySearchFilters(), top_k=top_k, effective_only=True
         )
@@ -72,7 +91,7 @@ async def _policy_table(query: str, top_k: int) -> None:
 async def _case_table(query: str, top_k: int) -> None:
     print(f"\n▶ 先例检索   query = {query}")
     for mode in MODES:
-        idx = build_case_index(mode=mode)
+        idx = _build(mode, "case")
         hits = await idx.search(query, CaseSearchFilters(), top_k=top_k)
         cells = []
         for h in hits:
@@ -89,7 +108,7 @@ def _tool_ctx() -> ToolContext:
 
 async def _evidence_demo() -> None:
     print("\n▶ 工具引用（真实 Tool 注入 RAG 索引 → Evidence 引用格式）")
-    policy_tool = PolicySearchTool(index=build_policy_index())
+    policy_tool = PolicySearchTool(index=_build("hybrid", "policy"))
     p_res = await policy_tool.call(
         PolicySearchArgs(query="外观高度模仿知名品牌，无授权", top_k=3),
         _tool_ctx(),
@@ -98,7 +117,7 @@ async def _evidence_demo() -> None:
     for ev in policy_tool.to_evidence(p_res):
         print(f"    {ev.type:<14} weight={ev.weight} ref_id={ev.ref_id} | {_clip(ev.value, 66)}")
 
-    case_tool = CaseSearchTool(index=build_case_index())
+    case_tool = CaseSearchTool(index=_build("hybrid", "case"))
     c_res = await case_tool.call(
         CaseSearchArgs(query="无品牌 + 高相似 + 商家多次上架", top_k=3),
         _tool_ctx(),
@@ -122,7 +141,7 @@ async def _main(argv: list[str] | None = None) -> int:
     for q in _CASE_QUERIES + args.query:
         await _case_table(q, args.top_k)
     await _evidence_demo()
-    print("\n[OK] RAG demo 完成（确定性 mock embedding + BM25 + 余弦；真语义模型见 chroma 后端）")
+    print("\n[OK] RAG demo 完成（chroma 后端 · 确定性 test 编码器 + BM25 + RRF；非语义模型）")
     return 0
 
 

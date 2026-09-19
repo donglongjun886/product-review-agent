@@ -144,11 +144,12 @@ async def test_lazy_build_failure_is_not_cached_and_is_retried():
 
 
 async def test_lazy_default_production_builders_target_chroma_bge(monkeypatch):
-    """生产 builder 的真实口径：``backend="chroma"`` + 官方 FastEmbed/BGE 编码器 + hybrid。
+    """生产 builder 的真实口径：官方 FastEmbed/BGE 编码器 + hybrid。
 
     用假 factory + 假 ``build_embedding_model`` 记录调用参数 —— 不 import llama_index/fastembed、
-    不连服务端，CI 恒跑；真链路在下面的 e2e。chroma 线的编码器参数名 = ``embedding_model``
-    （local 才用 ``embedder``），其值来自 ``build_embedding_model("fastembed")``（官方集成 = BGE）。
+    不连服务端，CI 恒跑；真链路在下面的 e2e。编码器参数名 = ``embedding_model``，其值来自
+    ``build_embedding_model("fastembed")``（官方集成 = BGE）；factory 已无 ``backend`` / ``embedder``
+    开关。
     """
     from pra.rag import embedder as embedder_mod
     from pra.rag import factory
@@ -183,11 +184,11 @@ async def test_lazy_default_production_builders_target_chroma_bge(monkeypatch):
     assert tools_pkg._build_production_policy_index() is sentinel
     assert [kind for kind, _ in seen] == ["case", "policy"]
     for _, kwargs in seen:
-        assert kwargs["backend"] == "chroma"
         assert kwargs["mode"] == "hybrid"
-        # chroma 线编码器参数 = ``embedding_model``（不再是 ``embedder``）
+        # chroma 线编码器参数 = ``embedding_model``（唯一后端，factory 已无 backend / embedder）
         assert kwargs["embedding_model"] is sentinel
-        assert kwargs.get("embedder") is None, "chroma 分支不应再复用 local 的 embedder 参数"
+        assert "backend" not in kwargs, "factory 已无 backend 开关"
+        assert "embedder" not in kwargs, "factory 已无 embedder 参数"
     # 编码器经 ``build_embedding_model("fastembed")`` 构造（官方 FastEmbed 集成 = BGE 语义）
     assert [args for args, _kw in built] == [("fastembed",), ("fastembed",)]
 

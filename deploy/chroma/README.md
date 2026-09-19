@@ -16,7 +16,7 @@
   + RRF）与 `src/pra/rag/chroma_backend.py` **均已落地**；
   检索口径以 [docs/00-system-design.md](../../docs/00-system-design.md) 的 RAG 节与
   `src/pra/rag/chroma_backend.py` 的模块注释为准；
-  `factory.py` 已提供 `backend="chroma"` 装配开关（见 §6）。
+  `factory.py` 直接装配 chroma 索引（**已无 `backend` 开关** —— 原 `local` 后端已移除）。
 
 ## 2. 端口与数据
 
@@ -151,14 +151,14 @@ client = chromadb.HttpClient(host="127.0.0.1", port=8001)   # 服务端（本目
 ```
 
 > ⚠️ **接线状态**：`src/pra/rag/chroma_backend.py`（LlamaIndex 装配）与
-> `src/pra/rag/factory.py` 的 `backend="chroma"` 分支**均已落地**（检索口径见 docs/00 与 `chroma_backend.py`）。
+> `src/pra/rag/factory.py` 的 chroma 装配路径**均已落地**（检索口径见 docs/00 与 `chroma_backend.py`）。
 > 上面的片段既是**客户端契约**，也是仓库实现的接线方式（已用 `chromadb 1.5.9` 对本服务端实测通过）。
 > `pyproject.toml` 的 `rag` extra 已含 `chromadb` + 三个 LlamaIndex 具体集成包。
 
 > ⚠️ **实测提醒（建库必须处理）**：Chroma 的 collection **缺省 `space` 是
 > `l2` 而不是 `cosine`**（实测）。除了「建库需显式 `embedding_function=None`」，
-> 但**同时必须显式设 `space="cosine"`**，否则 `api/v2` 返回的是 L2 距离、与 `local` 后端
-> 口径不一致且**不会报错**。详见 §6.2。
+> 但**同时必须显式设 `space="cosine"`**，否则 `api/v2` 返回的是 L2 距离，让「相似度 = 1 − distance」
+> **静默失效**且**不会报错**。详见 §6.2。
 
 ### 6.1 建库必须显式 `embedding_function=None`
 
@@ -232,7 +232,7 @@ Chroma 的连接参数目前**只能程序化传入**，尚无配置项或 CLI �
 | `curl 127.0.0.1:8001` 连不上 | `docker compose ps` 看是否 `Up`；`lsof -nP -iTCP:8001 -sTCP:LISTEN` 看端口占用 |
 | 想彻底重来 | `docker compose down -v`（数据卷 `chroma_chroma_data` 一并删除） |
 | 客户端建库后开始下模型 | 建库漏了 `embedding_function=None`（见 §6.1） |
-| 检索分数与 `local` 后端对不上 | 先核 collection 的 `space` 是否为 `cosine`（缺省是 `l2`！），再核换算 `cos = 1 − distance`（见 §6.2） |
+| 检索分数看起来不对 | 先核 collection 的 `space` 是否为 `cosine`（缺省是 `l2`！），再核换算 `cos = 1 − distance`（见 §6.2） |
 
 ## 9. 结论边界（如实标注，勿当能力承诺）
 
