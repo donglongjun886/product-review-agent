@@ -1,4 +1,4 @@
-"""共享测试构造件：领域对象工厂 + LLMBackend 测试替身 + 常用 state 骨架。
+"""共享测试构造件：领域对象工厂 + LLMBackend 测试替身 + 常用 state 骨架 + 真模型缓存探测。
 
 仅被 tests/* 引用；文件名不含 test_ 前缀，pytest 不收集。
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 from pra.agent.guardrails.llm_shell import LLMBackendError, LLMResponse
 from pra.domain.measurement import (
@@ -29,6 +30,31 @@ from pra.domain.models import (
     ScreeningSignal,
     SkuInfo,
 )
+from pra.rag.embedder import BGE_DEFAULT_MODEL
+
+# 真模型缓存探测（只读文件系统；生产路径本身**不做**磁盘预检，靠 fastembed 的
+# ``local_files_only=True`` —— 本探测只用于决定真模型用例是否 skip）
+_BGE_HF_SOURCE_REPO = "Qdrant"
+
+
+def bge_model_cached(cache_dir: Path, model_name: str = BGE_DEFAULT_MODEL) -> bool:
+    """``cache_dir`` 下是否已有该模型的可加载 onnx（只读，不 import fastembed、不联网）。
+
+    fastembed 两种落盘布局都探：HF snapshot（``models--<org>--<name>/``，blobs 为哈希名、不带
+    ``.onnx`` 后缀）与 GCS tar 解包（``fast-<name>/``，onnx 带扩展名）；漏探任一都会在布局不同的
+    机器上误 skip。BGE 模型的 HF 源仓库是 Qdrant 官方 ONNX 仓库（**只是模型来源，与向量库选型无关**）。
+    """
+    if not cache_dir.is_dir():
+        return False
+    layouts = [
+        cache_dir / f"models--{model_name.replace('/', '--')}",
+        cache_dir / f"fast-{model_name.rsplit('/', 1)[-1]}",
+    ]
+    if model_name == BGE_DEFAULT_MODEL:
+        name = model_name.rsplit("/", 1)[-1]
+        layouts.append(cache_dir / f"models--{_BGE_HF_SOURCE_REPO}--{name}")
+    return any(layout.is_dir() and any(layout.glob("**/*.onnx")) for layout in layouts)
+
 
 # domain 对象工厂
 

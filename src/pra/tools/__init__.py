@@ -7,6 +7,7 @@
 # ``build_production_tools()`` = 生产/HTTP 入口（商品与商家读 MySQL、案例与政策读真实 RAG）。
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, Literal
 
 from .base import Tool, ToolArgs, ToolContext, ToolRegistry, ToolResult
@@ -131,26 +132,29 @@ _PRODUCTION_RAG_MODE: RetrievalMode = "hybrid"
 def _production_embedding_model() -> Any:
     """生产检索用真语义编码器（LlamaIndex 官方 FastEmbed 集成）；**请求期绝不下载模型**。
 
-    先以 ``BgeEmbedder`` 的可用性/缓存探测做**只读预检**（同一 fastembed 模型、零联网）：
-    缺依赖或模型未缓存即快速报错 —— 服务器请求线程里下载 ~90MB 模型会把一次审核拖成分钟级并
-    可能被墙挂死。预检通过后再 ``build_embedding_model("fastembed")`` 构造 BaseEmbedding
-    （此时模型已缓存，构造不触发下载）。失败原样上抛 → 工具层记 warn failure，检索降级但不阻塞
-    审核，也**不静默回退 mock**。首次部署须预热一次（设 ``HF_ENDPOINT`` 下载到
-    ``PRA_EMBED_CACHE_DIR``）。
+    离线保证由库自身的 ``local_files_only=True`` 承担（不再由我们探测磁盘）：fastembed 只查
+    本地缓存，模型未缓存 / 缺 rag extra 就**立刻抛错** —— 服务器请求线程里下载 ~90MB 模型会把
+    一次审核拖成分钟级并可能被墙挂死。缓存目录取 ``PRA_EMBED_CACHE_DIR``（未设 → fastembed
+    默认目录）。失败转成带指引的 RuntimeError → 工具层记 warn failure，检索降级但不阻塞审核，
+    也**不静默回退 mock**。首次部署须预热一次（设 ``HF_ENDPOINT`` 下载到 ``PRA_EMBED_CACHE_DIR``）。
     """
-    from pra.rag.embedder import BgeEmbedder, build_embedding_model
+    from pra.rag.embedder import build_embedding_model
 
-    if not BgeEmbedder.available():
-        raise RuntimeError(
-            "生产 RAG 需要 rag extra：`uv sync --extra rag --extra observability`"
+    try:
+        return build_embedding_model(
+            "fastembed",
+            cache_dir=os.environ.get("PRA_EMBED_CACHE_DIR"),
+            local_files_only=True,
         )
-    if not BgeEmbedder().model_ready():
+    except Exception as exc:
         raise RuntimeError(
-            "生产 RAG 的 BGE 模型未缓存（生产路径不在请求期下载模型）。预热一次：设 "
-            "`HF_ENDPOINT=https://hf-mirror.com` 并让 `BgeEmbedder().embed('预热')` 跑通，"
-            "或用 `PRA_EMBED_CACHE_DIR` 指向已缓存的模型目录。"
-        )
-    return build_embedding_model("fastembed")
+            "生产 RAG 的真语义编码器不可用（缺 rag extra 或 BGE 模型未缓存；生产路径不在请求期"
+            "下载模型）。排查：1) `uv sync --extra rag --extra observability` 装上 fastembed；"
+            "2) 首次部署联网预热一次：设 `HF_ENDPOINT=https://hf-mirror.com` 后跑通一次真实"
+            "检索（或 `uv run python scripts/run_rag_demo.py`）把模型下到 "
+            "`PRA_EMBED_CACHE_DIR`；3) 已缓存时用 `PRA_EMBED_CACHE_DIR` 指向该目录。"
+            f"原始错误: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _build_production_case_index() -> CaseIndex:

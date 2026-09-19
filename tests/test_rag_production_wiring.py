@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import socket
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -143,19 +144,19 @@ async def test_lazy_build_failure_is_not_cached_and_is_retried():
     assert attempts == [1, 1] and lazy.is_built
 
 
-def test_production_embedder_fails_fast_instead_of_downloading(monkeypatch):
-    """**生产请求期绝不下载模型**：缺 rag extra / 模型未缓存都快速报错（否则请求线程会挂在
-    首次下载上——这正是「MySQL e2e 与演示脚本子进程挂死」的根因）。"""
-    from pra.rag.embedder import BgeEmbedder
+def test_production_embedder_fails_fast_instead_of_downloading(monkeypatch, tmp_path):
+    """**生产请求期绝不下载模型**：缓存目录里没有模型时，``local_files_only=True`` 让 fastembed
+    只读本地并**立刻**抛错（否则请求线程会挂在首次下载上——这正是 e2e / 演示脚本子进程挂死的根因）。
 
-    monkeypatch.setattr(BgeEmbedder, "available", classmethod(lambda cls: False))
-    with pytest.raises(RuntimeError, match="rag extra"):
+    非空转：不打桩任何被测函数，真实调用 ``_production_embedding_model()``，只把
+    ``PRA_EMBED_CACHE_DIR``（生产代码实际读取的缓存目录开关）指到一个空的临时目录。
+    """
+    monkeypatch.setenv("PRA_EMBED_CACHE_DIR", str(tmp_path))
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="不在请求期下载模型"):
         tools_pkg._production_embedding_model()
-
-    monkeypatch.setattr(BgeEmbedder, "available", classmethod(lambda cls: True))
-    monkeypatch.setattr(BgeEmbedder, "model_ready", lambda self: False)
-    with pytest.raises(RuntimeError, match="未缓存"):
-        tools_pkg._production_embedding_model()
+    assert time.monotonic() - started < 15, "必须是本地立即失败，而不是卡在下载/联网超时上"
+    assert not any(tmp_path.rglob("*.onnx")), "失败路径不得在缓存目录留下模型下载产物"
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +183,9 @@ def _e2e_skip_reason() -> str | None:
             f"Chroma 服务端不可达（{_CHROMA_HOST}:{_CHROMA_PORT}）→ 跳过；"
             "起服务：cd deploy/chroma && docker compose up -d"
         )
-    from pra.rag.embedder import BgeEmbedder
+    from helpers import bge_model_cached
 
-    if not BgeEmbedder(cache_dir=str(_BGE_CACHE)).model_ready():
+    if not bge_model_cached(_BGE_CACHE):
         return (
             f"BGE 模型未缓存（{_BGE_CACHE}）→ 跳过真模型 e2e；"
             "首次需联网下载（HF_ENDPOINT=https://hf-mirror.com）"
@@ -251,8 +252,9 @@ async def test_production_rag_reaches_real_knowledge_base(monkeypatch):
     corpus；同一案件换回 ``build_tools()`` 默认世界则得 InMemory 种子（``CASE_1832`` /
     ``POLICY_3.2_v2_c1``）—— 后半段是本用例的回退反证。
 
-    用 uuid 前缀隔离 collection（共享服务端上自建自删）；embedder 走生产默认 ``BgeEmbedder``
-    （缓存目录指到仓库内 ``.cache/model_cache``）。
+    用 uuid 前缀隔离 collection（共享服务端上自建自删）；embedder 走生产默认
+    ``build_embedding_model("fastembed", local_files_only=True)``（缓存目录经
+    ``PRA_EMBED_CACHE_DIR`` 指向仓库内 ``.cache/model_cache``，未缓存即本地报错、不下载）。
     """
     reason = _e2e_skip_reason()
     if reason:
