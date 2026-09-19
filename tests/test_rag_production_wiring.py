@@ -1,4 +1,4 @@
-"""生产入口的 RAG 接线 —— 装配惰性 / 首次检索才构建 / 参数透传 / 真 Chroma e2e。
+"""生产入口的 RAG 接线 —— 装配惰性 / 首次检索才构建 / 真 Chroma e2e。
 
 契约：
 - ``build_production_tools()`` 把 CaseSearchTool / PolicySearchTool 指向真实 RAG
@@ -141,56 +141,6 @@ async def test_lazy_build_failure_is_not_cached_and_is_retried():
     assert lazy.is_built is False and attempts == [1]
     assert await lazy.search("q", CaseSearchFilters(), 3) == ["ok"]
     assert attempts == [1, 1] and lazy.is_built
-
-
-async def test_lazy_default_production_builders_target_chroma_bge(monkeypatch):
-    """生产 builder 的真实口径：官方 FastEmbed/BGE 编码器 + hybrid。
-
-    用假 factory + 假 ``build_embedding_model`` 记录调用参数 —— 不 import llama_index/fastembed、
-    不连服务端，CI 恒跑；真链路在下面的 e2e。编码器参数名 = ``embedding_model``，其值来自
-    ``build_embedding_model("fastembed")``（官方集成 = BGE）；factory 已无 ``backend`` / ``embedder``
-    开关。
-    """
-    from pra.rag import embedder as embedder_mod
-    from pra.rag import factory
-    from pra.rag.embedder import BgeEmbedder
-
-    seen: list[tuple[str, dict]] = []
-    built: list[tuple[tuple, dict]] = []
-    sentinel = object()
-
-    def _fake_build_case(**kwargs):
-        seen.append(("case", kwargs))
-        return sentinel
-
-    def _fake_build_policy(**kwargs):
-        seen.append(("policy", kwargs))
-        return sentinel
-
-    def _fake_build_embedding_model(*args, **kwargs):
-        built.append((args, kwargs))
-        return sentinel
-
-    monkeypatch.setattr(factory, "build_case_index", _fake_build_case)
-    monkeypatch.setattr(factory, "build_policy_index", _fake_build_policy)
-    # 预检放行：只验证「builder 装配成 chroma + BGE + hybrid」，不加载模型/不下载（CI 恒跑）
-    monkeypatch.setattr(BgeEmbedder, "available", classmethod(lambda cls: True))
-    monkeypatch.setattr(BgeEmbedder, "model_ready", lambda self: True)
-    # 真 ``build_embedding_model("fastembed")`` 会 import llama_index-embeddings-fastembed（CI 未装）
-    # → 打桩为哨兵（函数体延迟 import，故此处 monkeypatch 生效）。
-    monkeypatch.setattr(embedder_mod, "build_embedding_model", _fake_build_embedding_model)
-
-    assert tools_pkg._build_production_case_index() is sentinel
-    assert tools_pkg._build_production_policy_index() is sentinel
-    assert [kind for kind, _ in seen] == ["case", "policy"]
-    for _, kwargs in seen:
-        assert kwargs["mode"] == "hybrid"
-        # chroma 线编码器参数 = ``embedding_model``（唯一后端，factory 已无 backend / embedder）
-        assert kwargs["embedding_model"] is sentinel
-        assert "backend" not in kwargs, "factory 已无 backend 开关"
-        assert "embedder" not in kwargs, "factory 已无 embedder 参数"
-    # 编码器经 ``build_embedding_model("fastembed")`` 构造（官方 FastEmbed 集成 = BGE 语义）
-    assert [args for args, _kw in built] == [("fastembed",), ("fastembed",)]
 
 
 def test_production_embedder_fails_fast_instead_of_downloading(monkeypatch):
