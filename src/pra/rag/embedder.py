@@ -1,63 +1,27 @@
-"""Embedding Provider —— ``Embedder`` 抽象 + 确定性 mock + chroma 编码器工厂。
+"""Embedding Provider —— 真语义 ``BgeEmbedder`` + chroma 链编码器工厂。
 
-``Embedder`` Protocol 只有 ``embed(text) -> list[float]``；生产装配用它做语义模型的可用性/缓存**只读预检**
-（``BgeEmbedder.available()`` / ``model_ready()``），请求期绝不下载模型。``MockHashEmbedder`` 是**确定性 mock
-（非语义检索）**：同输入同输出、离线、维度固定，向量刻画**词面特征**（CJK bigram / 拉丁词，与
-``bm25.tokenize`` 同口径）。特征哈希用 ``hashlib.sha256`` 而非内置 ``hash()``（后者受 PYTHONHASHSEED 影响跨
-进程漂移，破坏逐字节重放）。
+``BgeEmbedder``：真语义 provider（BAAI/bge-small-zh-v1.5 @ fastembed，dim 512）；真模型
+不可用时**显式抛带指引的 RuntimeError，绝不静默回退任何确定性编码器**；构造期不 import、
+不联网、不下载。它同时承载生产装配对语义模型的可用性 / 缓存**只读预检**（``available()`` /
+``model_ready()``），请求期绝不下载模型。
 
-``BgeEmbedder``：真语义 provider（BAAI/bge-small-zh-v1.5 @ fastembed，dim 512），与 mock **不可混算**；真模型
-不可用时**显式抛带指引的 RuntimeError，绝不静默回退 mock**；构造期不 import、不联网、不下载。
+``build_embedding_model``：chroma 链的 LlamaIndex 官方集成编码器工厂（``fastembed``）；函数体
+**延迟 import** ``llama_index``/``fastembed``，本模块被装配路径 import、顶层须零额外依赖。
 
-``build_embedding_model``：chroma 链的 LlamaIndex 官方集成编码器工厂（``fastembed`` / ``test``）；函数体**延迟
-import** ``llama_index``/``fastembed``，本模块被装配路径 import、顶层须零额外依赖。"""
+⚠️ 本模块**不再提供任何确定性 / mock 编码器**（既有此类实现及其 LlamaIndex 适配层已整体移除）：
+``src/`` 内唯一的编码来源是真实语义模型。
+"""
 
 from __future__ import annotations
 
-import hashlib
-from typing import Any, Protocol
-
-from pra.rag.bm25 import tokenize
+from typing import Any
 
 __all__ = [
-    "MOCK_DIM",
-    "Embedder",
-    "MockHashEmbedder",
     "BGE_DEFAULT_MODEL",
     "BGE_DIM",
     "BgeEmbedder",
     "build_embedding_model",
 ]
-
-MOCK_DIM = 256  # mock 特征维度（换真实模型后由其自身决定维度）
-
-
-class Embedder(Protocol):
-
-    def embed(self, text: str) -> list[float]:
-        ...
-
-
-class MockHashEmbedder:
-    """确定性 mock embedding：词特征哈希到固定维度。
-
-    :param dim: 特征维度（默认 256）；同输入同输出、跨进程稳定。
-    """
-
-    def __init__(self, dim: int = MOCK_DIM) -> None:
-        if dim < 1:
-            raise ValueError(f"embedding 维度须为正: {dim}")
-        self.dim = dim
-
-    def _feature_index(self, token: str) -> int:
-        digest = hashlib.sha256(token.encode("utf-8")).digest()[:8]
-        return int.from_bytes(digest, "big") % self.dim
-
-    def embed(self, text: str) -> list[float]:
-        vec = [0.0] * self.dim
-        for tok in tokenize(text):
-            vec[self._feature_index(tok)] += 1.0
-        return vec
 
 
 # --- 真语义 provider（懒加载：顶层不 import fastembed；构造不联网/不下载）---
@@ -71,7 +35,7 @@ BGE_DIM = 512
 class BgeEmbedder:
     """真语义 embedding provider —— BAAI/bge-small-zh-v1.5 @ fastembed/onnxruntime。
 
-    实现 ``Embedder`` Protocol（与 mock 不可混算、懒加载 + 离线守卫、确定性边界、无检索指令）。
+    提供 ``embed(text) -> list[float]``（懒加载 + 离线守卫、确定性边界、无检索指令）。
 
     :param model_name: fastembed 支持的模型名；默认 ``BGE_DEFAULT_MODEL``；空串抛 ValueError。
     :param cache_dir: 模型缓存目录；为空时回退 ``PRA_EMBED_CACHE_DIR`` → None（fastembed 默认）。
@@ -167,7 +131,7 @@ class BgeEmbedder:
         """懒加载：import fastembed 并实例化 ``TextEmbedding``（首次可能联网下载）。
 
         失败（fastembed 缺失 / 模型下载失败 / 加载失败）一律抛**带指引的 RuntimeError**
-        —— 提示 ``uv sync --extra rag`` 与 ``HF_ENDPOINT`` 镜像设置；**绝不静默回退 mock**。
+        —— 提示 ``uv sync --extra rag`` 与 ``HF_ENDPOINT`` 镜像设置；**绝不静默回退任何确定性编码器**。
         磁盘已缓存（``model_ready()`` 为真）时以 ``local_files_only=True`` 实例化：只读本地
         加载、离线可用。
         """
@@ -192,8 +156,8 @@ class BgeEmbedder:
                 "`export HF_ENDPOINT=https://hf-mirror.com` 后重试；"
                 "2) 模型已下载时可用 `BgeEmbedder(cache_dir=...).model_ready()` 预检缓存；"
                 "3) `uv sync --extra rag` 确认 fastembed 依赖完整。"
-                "注意: 本 provider 失败时显式报错（由调用方降级），绝不静默回退 "
-                "MockHashEmbedder（mock 与真模型维度/语义不可混算）。"
+                "注意: 本 provider 失败时显式报错（由调用方降级），绝不静默回退任何 "
+                "确定性 / mock 编码器（维度与语义均不可混算）。"
                 f"原始错误: {type(exc).__name__}: {exc}"
             ) from exc
 
@@ -201,7 +165,7 @@ class BgeEmbedder:
         """对一段文本编码为 512 维 float 列表（真语义）。
 
         首次调用才 import fastembed 并加载模型（懒加载），后续复用同一实例；编码走
-        fastembed 批量接口，numpy 数组转纯 Python ``float`` 列表（对齐 ``Embedder`` Protocol）。
+        fastembed 批量接口，numpy 数组转纯 Python ``float`` 列表（与检索链契约一致）。
         """
         if self._model is None:
             self._model = self._load_model()
@@ -219,7 +183,6 @@ def build_embedding_model(
     *,
     model_name: str = BGE_DEFAULT_MODEL,
     cache_dir: str | None = None,
-    embed_dim: int = MOCK_DIM,
 ) -> Any:
     """构造 chroma 链使用的 LlamaIndex ``BaseEmbedding``（官方集成，产出 numpy/Python float 向量）。
 
@@ -228,15 +191,14 @@ def build_embedding_model(
 
     - 函数体**延迟 import** ``llama_index`` / ``fastembed`` —— 本模块被装配路径 import，顶层
       须零额外依赖（``kind="fastembed"`` 仅在显式选用时才拉起这些包）。
-    - ``kind="fastembed"`` 真语义（BAAI/bge-small-zh-v1.5 → dim 512）；``kind="test"`` 确定性、
-      可离线、零模型下载、维度 = ``embed_dim``（默认 256，与 collection 名 ``*_256`` 一致）。
+    - ``kind="fastembed"`` 真语义（BAAI/bge-small-zh-v1.5 → dim 512）；**本工厂不提供任何确定性 /
+      mock 编码器**。
     - 非法 ``kind`` **显式抛 ValueError**，绝不静默回退到任一分支。
 
-    :param kind: ``"fastembed"`` 或 ``"test"``。
-    :param model_name: fastembed 模型名（仅 ``kind="fastembed"`` 生效），默认 ``BGE_DEFAULT_MODEL``。
-    :param cache_dir: fastembed 模型缓存目录（仅 ``kind="fastembed"`` 生效）；None → 用 fastembed 默认目录。
-    :param embed_dim: 仅 ``kind="test"`` 生效的维度，默认 ``MOCK_DIM``（256）。
-    :raises ValueError: ``kind`` 非法，或 ``kind="test"`` 的维度非正。
+    :param kind: 仅支持 ``"fastembed"``（真语义）。
+    :param model_name: fastembed 模型名，默认 ``BGE_DEFAULT_MODEL``。
+    :param cache_dir: fastembed 模型缓存目录；None → 用 fastembed 默认目录。
+    :raises ValueError: ``kind`` 非 ``"fastembed"``。
     """
     if kind == "fastembed":
         from llama_index.embeddings.fastembed import FastEmbedEmbedding
@@ -249,36 +211,6 @@ def build_embedding_model(
             kwargs["cache_dir"] = cache_dir
         return FastEmbedEmbedding(**kwargs)
 
-    if kind == "test":
-        from llama_index.core.embeddings import BaseEmbedding
-
-        # 复用 ``MockHashEmbedder`` 的词面 sha256 特征哈希：向量**可区分**且**跨进程逐位可重放**
-        # （官方 ``MockEmbedding`` 只返回常量 ``[0.5]*dim``，会让检索排序退化为全 ties）。
-        mock = MockHashEmbedder(dim=embed_dim)
-
-        class _DeterministicHashEmbedding(BaseEmbedding):
-            """确定性 mock 编码器（词面 sha256 特征哈希，非语义）；跨进程逐位可重放。"""
-
-            embed_dim: int
-
-            @classmethod
-            def class_name(cls) -> str:
-                return "DeterministicHashEmbedding"
-
-            def _get_query_embedding(self, query: str) -> list[float]:
-                return mock.embed(query)
-
-            def _get_text_embedding(self, text: str) -> list[float]:
-                return mock.embed(text)
-
-            async def _aget_query_embedding(self, query: str) -> list[float]:
-                return mock.embed(query)
-
-            async def _aget_text_embedding(self, text: str) -> list[float]:
-                return mock.embed(text)
-
-        return _DeterministicHashEmbedding(embed_dim=embed_dim)
-
     raise ValueError(
-        f"build_embedding_model: 未知 kind={kind!r}（仅支持 'fastembed' / 'test'），不静默回退。"
+        f"build_embedding_model: 未知 kind={kind!r}（仅支持 'fastembed'），不静默回退。"
     )

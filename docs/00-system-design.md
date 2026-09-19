@@ -462,7 +462,7 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 ### 6.4 向量库选型
 
 - 数据量小（实测：Policy 24 条 / Case 67 条），向量库现状为 **ChromaDB**（Docker 服务端 + HttpClient，LlamaIndex 装配）；**v1 明确不做 ES / Milvus / 知识图谱**，不引入重型向量库，降低工程复杂度。
-- 向量模型：文本用 **BGE**（`BAAI/bge-small-zh-v1.5`，dim 512）；测试与回归用 `MockHashEmbedder`（确定性）。**图片向量单独存**（ImageAnalysisTool 用于品牌款相似度检索的向量库，可与文本向量库分开）。
+- 向量模型：文本统一用 **BGE**（`BAAI/bge-small-zh-v1.5`，dim 512）—— 生产与测试/回归/评测同一真语义模型，`src/` 内**不存在确定性 mock 编码器**。**图片向量单独存**（ImageAnalysisTool 用于品牌款相似度检索的向量库，可与文本向量库分开）。
 
 ### 6.5 知识回流（闭环）
 
@@ -473,7 +473,7 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 **链路**：`Query → 双路召回（ChromaDB(cosine) + BGE 向量 / BM25(bm25s + jieba)）→ RRF 融合 → Top-K → CaseSearch / PolicySearch Tool → Evidence → Agent`。
 
 - **唯一检索后端是 chroma**：`factory.py` 的 `build_policy_index` / `build_case_index` 不再有 `backend` 开关，直接装配
-  ChromaDB(cosine) + LlamaIndex + FastEmbed 编码器；原先的 `local` 后端（纯 Python 余弦内存索引 + `MockHashEmbedder`）已整体移除。
+  ChromaDB(cosine) + LlamaIndex + FastEmbed 编码器；原先的 `local` 后端（纯 Python 余弦内存索引：`RagPolicyIndex` / `RagCaseIndex` / `rank_documents` / `BM25Index`）已整体移除。
   生产 / HTTP 入口（`build_production_tools()`）即用 **chroma + BGE + hybrid**，但经 `Lazy*Index` 惰性构建（首次检索才建库）。
   装 `--extra rag` 才可用；**默认 `build_tools()` 与评测世界仍是 InMemory 种子**（见 §6.4 工具装配），要跑真实检索须显式 `data_source="rag"`。
 - 🔴 **Chroma 建库必须显式 `space="cosine"`**：缺省是 `l2`，会让「相似度 = 1 − distance」**静默失效**；且对**已存在**的 l2 collection

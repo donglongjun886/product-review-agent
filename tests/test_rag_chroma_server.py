@@ -17,7 +17,8 @@ CI 上真正跑得动的守护是 ``tests/test_rag_default_path_no_extra.py``。
 
 起服务：``cd deploy/chroma && docker compose up -d``（仅绑 ``127.0.0.1:8001``，容器内 8000；
 ``/api/v1`` 已废弃返回 410，只用 ``/api/v2``）。URL 可用 ``PRA_CHROMA_URL`` 覆盖；
-chroma 侧编码器一律 ``build_embedding_model("test", embed_dim=256)``（确定性、零模型下载）。
+chroma 侧编码器一律用测试**自持**的确定性编码器（``tests/_deterministic_embedder.py``，256 维、
+零模型下载）。
 """
 
 from __future__ import annotations
@@ -44,19 +45,20 @@ from pra.rag.chroma_backend import (
     served_counters,
 )
 from pra.rag.corpus import load_cases, load_policies
-from pra.rag.embedder import build_embedding_model
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.tools.case_search.tool import CaseSearchFilters
 from pra.tools.policy_search.tool import PolicySearchFilters
+from _deterministic_embedder import DeterministicHashEmbedder
 
-#: chroma 线编码器 = LlamaIndex ``BaseEmbedding``（``build_embedding_model("test")``，确定性
-#: 256 维、零模型下载）。维度写死 256：断言依赖 collection 名 ``…_policy_256`` / ``…_case_256``。
+#: chroma 线编码器 = 测试**自持**的确定性编码器（同接口对象，经构造参数 ``embedding_model=``
+#: 注入，不依赖 ``pra.rag.embedder`` 已被移除的 mock）。维度写死 256：断言依赖 collection 名
+#: ``…_policy_256`` / ``…_case_256``。
 _TEST_EMBED_DIM = 256
 
 
 def _test_embedding_model():
-    """chroma 侧编码器（确定性 test 编码，256 维）。"""
-    return build_embedding_model("test", embed_dim=_TEST_EMBED_DIM)
+    """chroma 侧编码器（自持确定性编码器，256 维、零模型下载）。"""
+    return DeterministicHashEmbedder(dim=_TEST_EMBED_DIM)
 
 
 _CHROMA_URL = os.environ.get("PRA_CHROMA_URL", "http://127.0.0.1:8001")

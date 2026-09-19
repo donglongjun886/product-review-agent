@@ -5,7 +5,8 @@
 - **隔离红线**：Case KB 的 case_id 与 eval_data v1+v2 全部 case 标识（含 InMemory 种子先例）无交集，
   防评测作弊；
 - 共享检索公共件：``tokenize()`` 确定性切分、``normalize_minmax()`` 归一化口径、
-  ``MockHashEmbedder`` 确定性 + 固定维度；
+  **测试自持的确定性编码器**（``tests/_deterministic_embedder.py``，词面 sha256 特征）确定性 +
+  固定维度（替代已移除的 ``MockHashEmbedder``）；
 - ``build_tools()`` 默认（memory 世界）仍是 6 个 InMemory 工具（与 ``build_tools("memory")`` 一致）；
 - 默认评测路径（``tool_world="eval"``）全量 v1 agent 决策序列 == 入库基线（回归不破）。
 
@@ -29,10 +30,10 @@ from pra.evaluation.harness.base import EvalContext
 from pra.evaluation.regression import compute_current_snapshot
 from pra.rag.bm25 import tokenize
 from pra.rag.corpus import load_cases, load_policies
-from pra.rag.embedder import MOCK_DIM, MockHashEmbedder
 from pra.rag.retrieval import normalize_minmax
 from pra.tools import build_tools
 from pra.tools.policy_search.tool import InMemoryPolicyIndex
+from _deterministic_embedder import DETERMINISTIC_EMBED_DIM, DeterministicHashEmbedder
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_V1 = REPO_ROOT / "eval_data" / "v1" / "cases_v1.jsonl"
@@ -103,16 +104,26 @@ def test_normalize_minmax() -> None:
     assert normalize_minmax([1.0, 3.0]) == [0.0, 1.0]
 
 
-def test_mock_hash_embedder_deterministic_and_fixed_dim() -> None:
-    emb = MockHashEmbedder()
+def test_deterministic_embedder_is_deterministic_and_fixed_dim() -> None:
+    """测试自持编码器（``tests/_deterministic_embedder.py``）：确定性 + 固定维度 + 词面可区分。
+
+    它替代已移除的 ``MockHashEmbedder``：纯标准库实现（**不拉起** ``llama_index``），故本文件在
+    CI（``uv sync --frozen``，不装 rag extra）下仍能跑；chroma 测试把同一个对象经
+    ``embedding_model=`` **构造参数**注入后端（后端吃的是编码器对象，不是 ``kind`` 字符串）。
+    """
+    emb = DeterministicHashEmbedder()
     text = "外观高度模仿知名品牌，无品牌授权"
     v1 = emb.embed(text)
     v2 = emb.embed(text)
-    assert v1 == v2, "同输入同输出（确定性 mock）"
-    assert len(v1) == MOCK_DIM == 256
-    other = MockHashEmbedder(dim=128)
+    assert v1 == v2, "同输入同输出（确定性编码器）"
+    assert len(v1) == DETERMINISTIC_EMBED_DIM == 256
+    other = DeterministicHashEmbedder(dim=128)
     assert len(other.embed(text)) == 128
     assert emb.embed("外观高度模仿") != emb.embed("普通休闲鞋 无品牌 无模仿")
+    # chroma 链接口（后端注入后调用的公开方法）与维度声明
+    assert emb.get_text_embedding(text) == v1
+    assert emb.get_query_embedding(text) == v1
+    assert emb.dim == 256 and emb.embed_dim == 256
     # tokenize 确定性 + 无内置 hash() 依赖（跨进程可重放）
     assert tokenize("无品牌高相似 商家 image_similarity>=0.85") == tokenize(
         "无品牌高相似 商家 image_similarity>=0.85"

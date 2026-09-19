@@ -12,11 +12,11 @@
 weight=retrieval_score / ref_id=case_id —— 与 InMemory 世界同一引用格式。
 
 后端 = chroma（ChromaDB + LlamaIndex + BM25(jieba) + RRF；需 ``uv sync --extra rag``）。
-demo **显式注入离线确定性编码器** ``build_embedding_model("test")``（词面特征哈希，**非语义
-模型、零下载**）并配 ``chroma_ephemeral=True``（进程内内存库）—— 故无需起服务端、无需模型
-缓存即可跑；真语义模型（BGE）的路径由生产装配 / e2e 覆盖，不在本 demo。
+demo **显式注入真实语义编码器** ``build_embedding_model("fastembed")``（BAAI/bge-small-zh-v1.5，
+dim 512）并配 ``chroma_ephemeral=True``（进程内内存库）—— 故无需起服务端；但需 BGE 模型已缓存
+（首次运行会联网下载 onnx，~90MB，huggingface.co 被墙时可设 ``HF_ENDPOINT`` 镜像）。
 
-全链路确定性：无网络、无真 LLM、固定 corpus + 确定性编码器；同输入可重放。
+全链路确定性：无真 LLM、固定 corpus + 真语义编码器；同输入可重放（编码器确定性）。
 """
 
 from __future__ import annotations
@@ -44,15 +44,15 @@ MODES = ("bm25", "vector", "hybrid")
 
 
 def _build(mode: str, kind: str):
-    """离线装配一个 chroma 索引：确定性编码器 + 进程内 EphemeralClient（不连服务端）。
+    """装配一个 chroma 索引：真实语义编码器 + 进程内 EphemeralClient（不连服务端）。
 
-    ``embedding_model`` 必须显式传 ``build_embedding_model("test")`` —— 它是词面 sha256 特征的
-    **确定性、非语义、零下载**编码器（LlamaIndex ``BaseEmbedding``）；缺省 ``None`` 会让 chroma
-    类内自建 fastembed（真语义 BGE，需 rag extra + 已缓存模型），与 demo「离线可重放」相悖。
+    ``embedding_model`` 显式传 ``build_embedding_model("fastembed")`` —— LlamaIndex 官方集成的
+    真语义 BGE 编码器（``BaseEmbedding``）；缺省 ``None`` 时 chroma 类内也是同一 fastembed 集成，
+    这里显式传入只为让 demo 的编码来源一目了然。
     """
     build = build_policy_index if kind == "policy" else build_case_index
     return build(
-        mode=mode, embedding_model=build_embedding_model("test"), chroma_ephemeral=True
+        mode=mode, embedding_model=build_embedding_model("fastembed"), chroma_ephemeral=True
     )
 
 _POLICY_QUERIES = [
@@ -141,7 +141,7 @@ async def _main(argv: list[str] | None = None) -> int:
     for q in _CASE_QUERIES + args.query:
         await _case_table(q, args.top_k)
     await _evidence_demo()
-    print("\n[OK] RAG demo 完成（chroma 后端 · 确定性 test 编码器 + BM25 + RRF；非语义模型）")
+    print("\n[OK] RAG demo 完成（chroma 后端 · 真语义 BGE 编码器 + BM25 + RRF）")
     return 0
 
 

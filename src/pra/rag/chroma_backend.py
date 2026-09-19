@@ -181,25 +181,6 @@ def _node_id(collection: str, key: str) -> str:
     return f"pra-{digest}"
 
 
-def _resolve_dim(embedding_model: Any, doc_vectors: list[list[float]]) -> int:
-    """解析向量维度：优先模型声明的维度，否则回落到首条 doc 向量长度。
-
-    声明维度的属性名随集成而异 —— 官方集成（如 ``MockEmbedding``）用 ``embed_dim``，本仓自有
-    provider 用 ``dim``；两者都无（如 ``FastEmbedEmbedding``）时 doc 向量长度是唯一来源。
-    声明与实测不一致即抛，不静默取错维。
-    """
-    dim = getattr(embedding_model, "dim", None) or getattr(embedding_model, "embed_dim", None)
-    if isinstance(dim, int) and dim > 0:
-        if doc_vectors and len(doc_vectors[0]) != dim:
-            raise ValueError(
-                f"embedding 模型声明维度 {dim} 与 doc 向量长度 {len(doc_vectors[0])} 不一致"
-            )
-        return dim
-    if not doc_vectors:
-        raise ValueError("无法确定向量维度：corpus 为空且 embedding 模型未声明 dim/embed_dim")
-    return len(doc_vectors[0])
-
-
 #: collection 的期望向量空间（**必须显式 cosine**）：Chroma 默认是 ``l2``，
 #: 而本模块「相似度 = 1 − distance」的整套口径只在 cosine 空间成立。
 _REQUIRED_SPACE = "cosine"
@@ -805,9 +786,9 @@ def _fuse_rrf(
 class _ChromaIndexBase:
     """两个 Chroma 索引的装配 / 检索骨架；子类只需在类体里声明 ``_spec``。
 
-    构造顺序是「先 embed 全部文本、再建/校验 collection」：collection 名要带向量维度，而维度
-    通常只有拿到向量后才知道（embedding 模型自己声明了 ``dim`` 才能提前），故不为省一轮 embed 把构造
-    拆成两段 —— space 校验失败的代价就是白跑一轮 embed。
+    构造顺序是「先 embed 全部文本、再建/校验 collection」：collection 名要带向量维度，而维度由
+    **实际编码出的向量**决定（只有拿到向量后才知道），故不为省一轮 embed 把构造拆成两段 ——
+    space 校验失败的代价就是白跑一轮 embed。
     """
 
     _spec: _KindSpec
@@ -845,11 +826,12 @@ class _ChromaIndexBase:
         # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
         self._embed_model: Any = embedding_model or build_embedding_model("fastembed")
         if self._rows:
-            # 空 KB 走不到这里（不建库，故不 embed / 不解析维度 / 不留 collection_name）。
+            # 空 KB 走不到这里（不建库，故不 embed / 不留 collection_name）。
             self._doc_vectors = [
                 self._embed_model.get_text_embedding(self._spec.text_of(r)) for r in self._rows
             ]
-            self._dim = _resolve_dim(self._embed_model, self._doc_vectors)
+            # 维度唯一来源 = 实际编码出的向量长度（不再有可注入的 dim 参数，也不再探测模型声明）。
+            self._dim = len(self._doc_vectors[0])
             self.collection_name = _collection_name(
                 collection_prefix, self._spec.kind, self._dim
             )

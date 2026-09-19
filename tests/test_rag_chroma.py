@@ -60,25 +60,26 @@ from pra.rag.chroma_backend import (
     served_counters,
 )
 from pra.rag.corpus import load_cases, load_policies
-from pra.rag.embedder import build_embedding_model
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.rag.vectors import cosine_similarity
 from pra.tools import build_tools
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
 from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
+from _deterministic_embedder import DeterministicHashEmbedder
 
 POLICY_ROWS = load_policies()[0]
 CASE_ROWS = load_cases()[0]
 
-# 本文件统一编码器：chroma 线现在直接吃 LlamaIndex ``BaseEmbedding``（``build_embedding_model``
-# 的 ``kind="test"``：确定性、默认 256 维）。**256 维必须钉死** —— 多处断言写死 collection 名
+# 本文件统一编码器：测试**自持**的确定性编码器（同接口对象），经后端**构造参数**
+# ``embedding_model=`` 注入 —— 后端吃的是编码器对象，不是 ``kind`` 字符串；测试因此不依赖
+# ``pra.rag.embedder`` 里那个已被移除的 mock。**256 维必须钉死** —— 多处断言写死 collection 名
 # （``pra_policy_256`` / ``f"{prefix}_case_256"``）与 ``col.metadata["pra_dim"] == 256``。
 _TEST_EMBED_DIM = 256
 
 
 def _test_embedding_model() -> Any:
-    """chroma 索引构造用的确定性 ``BaseEmbedding``（256 维，零模型下载）。"""
-    return build_embedding_model("test", embed_dim=_TEST_EMBED_DIM)
+    """chroma 索引构造用的确定性编码器（256 维，零模型下载、跨进程可重放）。"""
+    return DeterministicHashEmbedder(dim=_TEST_EMBED_DIM)
 
 
 #: RRF 常数：本文件用**独立常量**做 oracle，改 k 就该让断言失败（不跟着实现漂移）。
@@ -432,7 +433,7 @@ def test_chroma_vector_bruteforce_fallback_scores_missing_candidates() -> None:
     missing = [idx.node_ids[0], idx.node_ids[7]]
     scored = idx._score_missing_by_stored_vectors(sub_ctx, query_bundle, missing)
     assert set(scored) == set(missing)
-    # oracle 必须与索引同一份编码（test 编码）：query 走 get_query_embedding（同
+    # oracle 必须与索引同一份编码（自持确定性编码器）：query 走 get_query_embedding（同
     # ``_score_missing_by_stored_vectors``），doc 走 get_text_embedding（同建库路径）。
     model = _test_embedding_model()
     query_vec = model.get_query_embedding("外观模仿")

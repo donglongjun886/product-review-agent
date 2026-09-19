@@ -7,9 +7,9 @@
 必须全部是 ``RAG_CASE_*``，不得引用 eval GT / InMemory 种子先例。
 
 检索后端**只有 chroma**（ChromaDB + LlamaIndex + BM25(jieba) + RRF；需 ``uv sync --extra rag``）
-—— 无 backend 维度、不比较后端。评测用显式注入的**离线确定性编码器**
-``build_embedding_model("test")``（词面 sha256 特征，**非语义模型、零下载**），故评测可重放、
-不需要 BGE 模型缓存；生产语义模型（BGE）路径不在评测内。
+—— 无 backend 维度、不比较后端。评测**显式注入真实语义编码器**
+``build_embedding_model("fastembed")``（BAAI/bge-small-zh-v1.5，dim 512）—— 与生产同一编码来源，
+故评测需 BGE 模型已缓存（首次运行会联网下载 onnx，~90MB；``src/`` 内已无确定性 / mock 编码器）。
 
 ``--probe`` 追加检索层报告（不跑 LLM/agent）：人工标注 probe 集在三模式下的 ``Recall@K``
 （默认 K=3，``--probe-top-k`` 可改），Policy KB 与 Case KB 并排；``--probe-only`` 只跑该报告。
@@ -146,7 +146,7 @@ def _score_of(hit) -> float | None:
 
 
 def _build_probe_index(kind: str, mode: str, options: dict):
-    """按 (kind, mode) 装配一个 chroma 索引（每 combo 独立实例；确定性 test 编码器）。"""
+    """按 (kind, mode) 装配一个 chroma 索引（每 combo 独立实例；真实语义 BGE 编码器）。"""
     from pra.rag.factory import build_case_index, build_policy_index
 
     build = build_policy_index if kind == "policy" else build_case_index
@@ -156,14 +156,14 @@ def _build_probe_index(kind: str, mode: str, options: dict):
 def _index_options(args: argparse.Namespace, prefix: str) -> dict:
     """RAG 索引装配参数（确定性编码器 + 客户端选择）。
 
-    - ``embedding_model`` = ``build_embedding_model("test")``：离线、确定性、**非语义**、零模型
-      下载（评测可重放，不需要 BGE 缓存）；
+    - ``embedding_model`` = ``build_embedding_model("fastembed")``：真实语义 BGE 编码器（需模型
+      已缓存；与生产同一来源，``src/`` 内已无确定性 / mock 编码器）；
     - ``collection_prefix`` 两种客户端都传：node id 由 ``hash(collection + row_key)`` 决定，
       固定前缀 → 两次运行 id 稳定（确定性契约）；
     - ``chroma_ephemeral``（缺省）→ 进程内内存库；缺省不传 → 连本机服务端（srv 模式）。
     """
     options: dict = {
-        "embedding_model": build_embedding_model("test"),
+        "embedding_model": build_embedding_model("fastembed"),
         "collection_prefix": prefix,
     }
     if args.chroma_client != "http":
@@ -197,7 +197,7 @@ async def _probe_report(
     print(f"人工标注 probe 集 · 三模式 Recall@{top_k} 并排（不预设任何模式最优）")
     print("=" * 100)
     print(f"probe 来源（**复用，未新造**）: {PROBE_SOURCE} —— Part C 的 _POLICY_PROBES / _CASE_PROBES")
-    print("embedder = build_embedding_model('test')（确定性、离线；**不是语义模型** —— 词面特征 hash）")
+    print("embedder = build_embedding_model('fastembed')（真实语义 BGE，dim 512；需模型已缓存）")
     print(f"chroma 客户端 = {client_label}；collection 前缀 = {options.get('collection_prefix')}")
 
     for kind, probes in probes_by_kind:
@@ -271,7 +271,7 @@ async def _probe_report(
 
 
 def _cleanup_chroma_collections(prefix: str, *, label: str) -> None:
-    """删除本脚本用 ``prefix`` 在**服务端**建的 collection（两个 KB × dim 256），并回读服务端列表。
+    """删除本脚本用 ``prefix`` 在**服务端**建的 collection（两个 KB × dim 512），并回读服务端列表。
 
     仅 ``--chroma-client http`` 需要：服务端是共享单实例，脚本只用独占前缀建库、用完即删，
     绝不触碰别人的 collection。``ephemeral`` 模式不调本函数 —— 内存库随进程消失，也不应为
@@ -279,7 +279,7 @@ def _cleanup_chroma_collections(prefix: str, *, label: str) -> None:
     """
     from pra.rag.chroma_backend import delete_collection, make_chroma_client
 
-    for name in (f"{prefix}_policy_256", f"{prefix}_case_256"):
+    for name in (f"{prefix}_policy_512", f"{prefix}_case_512"):
         deleted = delete_collection(name)
         print(f"  - [{label}] 清理 collection {name}: {'已删除' if deleted else '不存在'}")
     names = [c.name for c in make_chroma_client().list_collections()]

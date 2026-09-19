@@ -56,8 +56,8 @@ def build_policy_index(
     """构造 PolicyIndex（corpus_path 缺省 = rag/corpus/policies.json）。
 
     ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` 缺省 None → 类内自建
-    ``build_embedding_model("fastembed")``（真语义、需 rag extra 与已缓存模型）；传
-    ``build_embedding_model("test")`` 可得确定性离线编码器。
+    ``build_embedding_model("fastembed")``（真语义、需 rag extra 与已缓存模型）；显式传入时须为
+    真实语义 ``BaseEmbedding``（``src/`` 内已无任何确定性 / mock 编码器）。
     """
     record_rows, _meta = _resolve_rows(rows, corpus_path, load_policies)
     # 延迟 import：chroma / llama_index / bm25s / jieba 仅在真正装配索引时才拉起。
