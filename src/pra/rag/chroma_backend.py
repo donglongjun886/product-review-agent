@@ -6,10 +6,9 @@
 三种模式：``vector`` = ``1 − distance``；``bm25`` = 候选集内 min-max 归一化；``hybrid`` =
 RRF（``Σ 1/(60+rank)``）。写进 ``CaseHit.retrieval_score`` 的是检索分，不是语义相似度。
 建 collection 两条缺一即静默出错：``embedding_function=None``（否则启用默认 ONNX 嵌入函数并
-去下模型）、``space="cosine"``（Chroma 缺省 ``l2``，让「相似度 = 1 − distance」失效）；已存在的
-l2 collection 传配置**不会**被改建，故创建与复用两条路径都校验空间。过滤位置两路不统一：向量路
-把 ``category`` 下推到 store，BM25 路只喂候选 node，最终判定是同一份 Python 谓词；``risk_type``
-只能在 Python 侧判（Chroma ``$in`` 对列表字段恒不命中、LlamaIndex 的 ANY/CONTAINS 无翻译）。
+去下模型）、``space="cosine"``（Chroma 缺省 ``l2``，让「相似度 = 1 − distance」失效）。过滤位置
+两路不统一：向量路把 ``category`` 下推到 store，BM25 路只喂候选 node，最终判定是同一份 Python 谓词；
+``risk_type`` 只能在 Python 侧判（Chroma ``$in`` 对列表字段恒不命中、LlamaIndex 的 ANY/CONTAINS 无翻译）。
 ``bm25s.tokenize`` 无注入点，故构造与检索期间在锁内换成 jieba 实现；这**不是「天然线程安全」**，
 ``_TOKENIZER_LOCK`` 必须写在前面。链路零 LLM、零随机；tie-break 为「分降序、corpus 原序升序」。
 """
@@ -47,7 +46,6 @@ __all__ = [
     "ChromaCaseIndex",
     "ChromaPolicyIndex",
     "check_cosine_self_check",
-    "check_cosine_space",
     "delete_collection",
     "make_chroma_client",
     "served_counters",
@@ -170,52 +168,8 @@ def _node_id(collection: str, key: str) -> str:
     return f"pra-{digest}"
 
 
-#: collection 的期望向量空间（**必须显式 cosine**）：Chroma 默认是 ``l2``，
-#: 而本模块「相似度 = 1 − distance」的整套口径只在 cosine 空间成立。
-_REQUIRED_SPACE = "cosine"
-
 #: cosine 自检容差（实测 distance==0 时精确为 0；浮点尾差留 1e-6）。
 _SELF_CHECK_TOL = 1e-6
-
-
-def _collection_space(collection: Any) -> str | None:
-    """读 collection 的向量空间（优先新式 ``configuration["hnsw"]["space"]``，回落旧式 metadata）。
-
-    都读不到 → ``None``（调用方按「无法确认」处理，不假定 cosine）。
-    """
-    # 新式（chromadb ≥ 0.6/1.x）：实测 1.5.9 建库时传 configuration 或 metadata 都会在
-    # config 里体现为 "cosine"；旧式（老版本 API）只有 metadata["hnsw:space"]。
-    cfg = getattr(collection, "configuration", None) or {}
-    hnsw = cfg.get("hnsw") if isinstance(cfg, dict) else None
-    if isinstance(hnsw, dict) and hnsw.get("space"):
-        return str(hnsw["space"]).lower()
-    meta = getattr(collection, "metadata", None) or {}
-    for key in ("hnsw:space", "space"):
-        if meta.get(key):
-            return str(meta[key]).lower()
-    return None
-
-
-def _verify_collection_space(collection: Any, name: str, *, context: str) -> None:
-    """**断言 collection 真的是 cosine 空间**，不是 cosine 就报错（绝不静默降级）。
-
-    ``embedding_function=None`` **只管住默认 ONNX 嵌入函数，不管向量空间** —— Chroma 默认空间是
-    **l2**。实测单位向量 ``[1,0,0]`` vs ``[0.9,0.1,0]``：默认 l2 → distance ``0.020000005``
-    （``1 − distance`` = 0.979999995 而 numpy 余弦 0.993883735，**静默错**）；显式 cosine →
-    ``0.006116271`` → ``1 − distance`` = 0.993883729。**对已存在的 l2 collection**，再传 cosine
-    配置**不会**改建库空间 —— 故新建与复用**两条路径都校验**。读不到空间（``None``）时也报错：
-    宁可让调用方显式清理/换名前缀，也不在未知空间上检索。
-    """
-    space = _collection_space(collection)
-    if space != _REQUIRED_SPACE:
-        raise ValueError(
-            f"collection {name!r} 的向量空间是 {space!r}（{context}），"
-            f"必须是 {_REQUIRED_SPACE!r}：Chroma 默认空间是 l2，"
-            "而本索引的『相似度 = 1 − distance』只在 cosine 空间成立。"
-            "修法：显式建库 configuration={'hnsw': {'space': 'cosine'}}"
-            f"（已存在且空间不符的库不会被自动改建 —— 请删除后重建：delete_collection({name!r})，"
-            "或换 collection_prefix 用新库）"
-        )
 
 
 def check_cosine_self_check(
@@ -242,24 +196,14 @@ def check_cosine_self_check(
     return value
 
 
-def check_cosine_space(collection: Any, name: str) -> str:
-    """检索前复检空间（每次 ``search`` 都执行，返回空间名）。
-
-    成本可忽略（本地字段读取）；收益是空间错误永远在检索前暴露，而不是让错误的
-    ``1 − distance`` 静默流进 ``CaseHit.retrieval_score``。
-    """
-    _verify_collection_space(collection, name, context="检索前复检")
-    return _collection_space(collection) or _REQUIRED_SPACE
-
-
 def _open_collection(
     *, client: Any, name: str, dim: int, kind: str, prefix: str
 ) -> tuple[Any, bool]:
     """``get_or_create_collection``（**必须 ``embedding_function=None`` + 显式 cosine 空间**）。
 
     不关 ``embedding_function`` 会启用默认 ONNX 嵌入函数并去下模型；不显式 cosine 则空间是
-    Chroma 缺省的 l2。返回 ``(collection, reused)``：两条路径都校验空间（复用路径尤其重要 ——
-    对已存在的 l2 库再传 cosine 配置**不会**改建库空间）。
+    Chroma 缺省的 l2 —— 而「相似度 = 1 − distance」这套口径只在 cosine 空间成立。返回
+    ``(collection, reused)``。
     """
     _import_chroma()  # 缺包早失败（提示装 extra）；本函数只用注入进来的 client
     try:
@@ -268,7 +212,6 @@ def _open_collection(
         if "not found" not in str(exc).lower() and type(exc).__name__ != "NotFoundError":
             raise
     else:
-        _verify_collection_space(existing_collection, name, context="已存在，复用")
         return existing_collection, True
     collection = client.get_or_create_collection(
         name=name,
@@ -276,7 +219,6 @@ def _open_collection(
         configuration={"hnsw": {"space": "cosine"}},  # ★ 显式 cosine：默认是 l2
         metadata={_DIM_KEY: int(dim), "pra_kind": kind, "pra_prefix": prefix},
     )
-    _verify_collection_space(collection, name, context="本次新建")
     return collection, False
 
 
@@ -770,10 +712,8 @@ class _ChromaIndexBase:
         self._rows: list[Any] = _normalize_rows(rows, self._spec.record_type)
         self.mode: RetrievalMode = _validate_mode(mode)
         self.collection_prefix = collection_prefix
-        # 空语料不建库（collection_name 保持 ""）：这几个可见属性必须先有默认值，否则空 KB 上读
-        # ``index.space`` / ``collection_name`` 会抛 AttributeError，与「空 KB 未建库则为 None/""」
-        # 的口径不符。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算），见下方 if 分支。
-        self.collection_space: str | None = None
+        # 空语料不建库（``collection_name`` 保持 ""）：该可见属性必须先有默认值，否则空 KB 上
+        # 读它会抛 AttributeError。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算）。
         self._collection: Any | None = None
         self._nodes: list[Any] = []
         self._node_ids: list[str] = []
@@ -804,11 +744,8 @@ class _ChromaIndexBase:
         """建/复用 collection（``embedding_function=None`` **+ 显式 cosine 空间**）+ 幂等 upsert。
 
         node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按
-        「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。
-
-        空间闸：``_open_collection`` 对**新建与复用两条路径**都断言
-        collection 是 cosine（默认 l2 会让「相似度 = 1 − distance」静默失效）；upsert 后
-        再做一次 cosine 自检（自身距离须 ≈ 0），失败即抛 —— **绝不带着未知空间继续检索**。
+        「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。upsert 后做一次余弦自检
+        （已存向量与自身的距离须 ≈ 0），失败即抛 —— 绝不带着未真正写入的库继续检索。
         """
         collection, reused = _open_collection(
             client=self._client,
@@ -831,7 +768,6 @@ class _ChromaIndexBase:
             metadatas=[node.metadata for node in self._nodes],
             documents=[node.get_content() for node in self._nodes],
         )
-        self.collection_space = _collection_space(collection)
         check_cosine_self_check(
             collection, self._doc_vectors[0], name=self.collection_name
         )
@@ -842,14 +778,6 @@ class _ChromaIndexBase:
     @property
     def size(self) -> int:
         return len(self._rows)
-
-    @property
-    def space(self) -> str | None:
-        """collection 实际向量空间（构造后应为 ``"cosine"``；空 KB 未建库则为 ``None``）。
-
-        供测试/审计读取（对应 ``configuration["hnsw"]["space"]``）。
-        """
-        return self.collection_space
 
     @property
     def node_ids(self) -> list[str]:
@@ -1013,8 +941,6 @@ class _ChromaIndexBase:
         """
         if top_k < 1 or not candidates:
             return []
-        if self._collection is not None:
-            check_cosine_space(self._collection, self.collection_name)  # 检索前空间闸
         sub_ctx = self._sub_context(candidates)
         query_bundle = self._llama["QueryBundle"](query_str=query)
         # 三路都取「候选数」上限：先拿到**完整候选排名**，再复核过滤、最后截断 Top-K。
