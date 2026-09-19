@@ -195,9 +195,9 @@ def _e2e_skip_reason() -> str | None:
 
 def _delete_prefix(prefix: str) -> None:
     """只删本测试前缀的 collection（Chroma 是共享单实例，绝不动别人的库）。"""
-    from pra.rag.chroma_backend import make_chroma_client
+    from pra.rag.chroma_backend import ChromaConfig, make_chroma_client
 
-    client = make_chroma_client(host=_CHROMA_HOST, port=_CHROMA_PORT)
+    client = make_chroma_client(ChromaConfig(host=_CHROMA_HOST, port=_CHROMA_PORT))
     for coll in list(client.list_collections()):
         if coll.name.startswith(prefix):
             client.delete_collection(coll.name)
@@ -261,15 +261,17 @@ async def test_production_rag_reaches_real_knowledge_base(monkeypatch):
         pytest.skip(reason)
 
     from pra.rag import factory
+    from pra.rag.chroma_backend import ChromaConfig
 
     monkeypatch.setenv("PRA_EMBED_CACHE_DIR", str(_BGE_CACHE))
     prefix = f"pytest_prod_rag_{uuid4().hex[:8]}"
+    isolated = ChromaConfig(collection_prefix=prefix)
     real_case, real_policy = factory.build_case_index, factory.build_policy_index
     monkeypatch.setattr(
-        factory, "build_case_index", lambda **kw: real_case(collection_prefix=prefix, **kw)
+        factory, "build_case_index", lambda **kw: real_case(config=isolated, **kw)
     )
     monkeypatch.setattr(
-        factory, "build_policy_index", lambda **kw: real_policy(collection_prefix=prefix, **kw)
+        factory, "build_policy_index", lambda **kw: real_policy(config=isolated, **kw)
     )
 
     try:

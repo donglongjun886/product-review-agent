@@ -13,7 +13,7 @@ weight=retrieval_score / ref_id=case_id —— 与 InMemory 世界同一引用�
 
 后端 = chroma（ChromaDB + LlamaIndex + BM25(jieba) + RRF；需 ``uv sync --extra rag``）。
 demo **显式注入真实语义编码器** ``build_embedding_model("fastembed")``（BAAI/bge-small-zh-v1.5，
-dim 512）并配 ``chroma_ephemeral=True``（进程内内存库）—— 故无需起服务端；但需 BGE 模型已缓存
+dim 512）并配 ``ChromaConfig(ephemeral=True)``（进程内内存库）—— 故无需起服务端；但需 BGE 模型已缓存
 （首次运行会联网下载 onnx，~90MB，huggingface.co 被墙时可设 ``HF_ENDPOINT`` 镜像）。
 
 全链路确定性：无真 LLM、固定 corpus + 真语义编码器；同输入可重放（编码器确定性）。
@@ -26,6 +26,7 @@ import asyncio
 import sys
 
 from pra.domain.models import Budget
+from pra.rag.chroma_backend import ChromaConfig
 from pra.rag.embedder import build_embedding_model
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.tools.base import ToolContext
@@ -52,7 +53,9 @@ def _build(mode: str, kind: str):
     """
     build = build_policy_index if kind == "policy" else build_case_index
     return build(
-        mode=mode, embedding_model=build_embedding_model("fastembed"), chroma_ephemeral=True
+        mode=mode,
+        embedding_model=build_embedding_model("fastembed"),
+        config=ChromaConfig(ephemeral=True),
     )
 
 _POLICY_QUERIES = [

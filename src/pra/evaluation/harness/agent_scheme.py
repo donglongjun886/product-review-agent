@@ -498,9 +498,10 @@ def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
 
     :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid）。
     :param options: 索引装配参数透传（缺省 None = 不传 → 全走 factory 缺省）；键名与
-        ``pra.rag.factory`` 构造参数逐字对应（``embedding_model`` / ``collection_prefix`` /
-        ``chroma_client`` …）。``embedding_model`` 缺省 None → 类内自建 fastembed；显式传入时须为
-        真实语义 ``BaseEmbedding``（``src/`` 内已无确定性 / mock 编码器）。未知键由 factory 抛错（不吞键）。
+        ``pra.rag.factory`` 构造参数逐字对应（``embedding_model`` / ``config`` —— Chroma 连接与
+        collection 参数走 ``config=ChromaConfig(...)``）。``embedding_model`` 缺省 None → 类内自建
+        fastembed；显式传入时须为真实语义 ``BaseEmbedding``（``src/`` 内已无确定性 / mock
+        编码器）。未知键由 factory 抛错（不吞键）。
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index

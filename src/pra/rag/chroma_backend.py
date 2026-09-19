@@ -15,14 +15,16 @@ RRF（``Σ 1/(60+rank)``）。写进 ``CaseHit.retrieval_score`` 的是检索分
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import math
 import re
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 # 顶层只 import 仓库内模块 + 标准库；chroma / llama_index / jieba 一律延迟 import
@@ -44,6 +46,7 @@ __all__ = [
     "COLLECTION_NAME_TEMPLATE",
     "SERVED_COUNTERS",
     "ChromaCaseIndex",
+    "ChromaConfig",
     "ChromaPolicyIndex",
     "delete_collection",
     "make_chroma_client",
@@ -98,11 +101,13 @@ def _import_chroma() -> tuple[Any, Any]:
     return chromadb, ChromaNotFoundError
 
 
-def _import_llama() -> dict[str, Any]:
-    """延迟 import LlamaIndex 装配面（仅构造路径调用）。
+@functools.cache
+def _llama() -> SimpleNamespace:
+    """延迟 import 的 LlamaIndex 装配面（进程内首个构造/检索时拉起，之后缓存复用）。
 
     只 import core + retrievers-bm25 两个具体集成，不引伞包 ``llama-index``（伞包会拖进
-    llms-openai / embeddings-openai 等不用的集成）。
+    llms-openai / embeddings-openai 等不用的集成）。属性访问（``_llama().TextNode``）替代
+    原先的字符串键 dict：缓存对象是全局单例，故无需逐层穿透。
     """
     try:
         from llama_index.core.base.base_retriever import BaseRetriever
@@ -115,43 +120,54 @@ def _import_llama() -> dict[str, Any]:
             "RAG 检索需要 llama-index-core / llama-index-retrievers-bm25："
             "请运行 `uv sync --extra rag` 安装。"
         ) from exc
-    return {
-        "BaseRetriever": BaseRetriever,
-        "NodeWithScore": NodeWithScore,
-        "QueryBundle": QueryBundle,
-        "TextNode": TextNode,
-        "MetadataFilter": MetadataFilter,
-        "MetadataFilters": MetadataFilters,
-        "FilterOperator": FilterOperator,
-        "BM25Retriever": BM25Retriever,
-    }
+    return SimpleNamespace(
+        BaseRetriever=BaseRetriever,
+        NodeWithScore=NodeWithScore,
+        QueryBundle=QueryBundle,
+        TextNode=TextNode,
+        MetadataFilter=MetadataFilter,
+        MetadataFilters=MetadataFilters,
+        FilterOperator=FilterOperator,
+        BM25Retriever=BM25Retriever,
+    )
 
 
-def make_chroma_client(
-    chroma_client: Any | None = None,
-    *,
-    host: str = CHROMA_DEFAULT_HOST,
-    port: int = CHROMA_DEFAULT_PORT,
-    ephemeral: bool = False,
-) -> Any:
-    """取用/自建 Chroma 客户端（外部注入优先）。
+@dataclass(frozen=True)
+class ChromaConfig:
+    """Chroma 连接 + collection 装配参数（一处构造，逐层复用同一实例）。
+
+    ``client`` 非 None 即用注入的客户端；否则按 ``ephemeral`` 建进程内 ``EphemeralClient``
+    或按 ``host`` / ``port`` 建 ``HttpClient``。``collection_prefix`` 参与 collection 名
+    （``<prefix or 'pra'>_<policy|case>_<dim>``）与 collection metadata。
+    """
+
+    client: Any | None = None
+    host: str = CHROMA_DEFAULT_HOST
+    port: int = CHROMA_DEFAULT_PORT
+    ephemeral: bool = False
+    collection_prefix: str | None = None
+
+
+def make_chroma_client(config: ChromaConfig | None = None) -> Any:
+    """取用/自建 Chroma 客户端（``config.client`` 注入优先）。
 
     ``ephemeral=True`` → 进程内 ``EphemeralClient``；否则 ``HttpClient(host, port)``。
     **构造不联网**（``HttpClient`` 只做参数装配，首个请求才连接）；匿名遥测显式关闭。
     """
-    if chroma_client is not None:
-        return chroma_client
+    cfg = config or ChromaConfig()
+    if cfg.client is not None:
+        return cfg.client
     chromadb, _not_found = _import_chroma()
-    if ephemeral:
+    if cfg.ephemeral:
         return chromadb.EphemeralClient()
     try:
         from chromadb.config import Settings as ChromaSettings
 
         return chromadb.HttpClient(
-            host=host, port=port, settings=ChromaSettings(anonymized_telemetry=False)
+            host=cfg.host, port=cfg.port, settings=ChromaSettings(anonymized_telemetry=False)
         )
     except Exception:  # noqa: BLE001  # pragma: no cover —— 兼容无 Settings 参数的 chromadb 变体
-        return chromadb.HttpClient(host=host, port=port)
+        return chromadb.HttpClient(host=cfg.host, port=cfg.port)
 
 
 def _collection_name(prefix: str | None, kind: str, dim: int) -> str:
@@ -168,7 +184,7 @@ def _node_id(collection: str, key: str) -> str:
 
 
 def _open_collection(
-    *, client: Any, name: str, dim: int, kind: str, prefix: str
+    config: ChromaConfig, *, name: str, dim: int, kind: str
 ) -> tuple[Any, bool]:
     """``get_or_create_collection``（**必须 ``embedding_function=None`` + 显式 cosine 空间**）。
 
@@ -176,7 +192,8 @@ def _open_collection(
     Chroma 缺省的 l2 —— 而「相似度 = 1 − distance」这套口径只在 cosine 空间成立。返回
     ``(collection, reused)``。
     """
-    _import_chroma()  # 缺包早失败（提示装 extra）；本函数只用注入进来的 client
+    _import_chroma()  # 缺包早失败（提示装 extra）；客户端由 config 解析（注入优先）
+    client = make_chroma_client(config)
     try:
         existing_collection = client.get_collection(name=name)
     except Exception as exc:
@@ -188,7 +205,11 @@ def _open_collection(
         name=name,
         embedding_function=None,
         configuration={"hnsw": {"space": "cosine"}},  # ★ 显式 cosine：默认是 l2
-        metadata={_DIM_KEY: int(dim), "pra_kind": kind, "pra_prefix": prefix},
+        metadata={
+            _DIM_KEY: int(dim),
+            "pra_kind": kind,
+            "pra_prefix": config.collection_prefix or _DEFAULT_COLLECTION_PREFIX,
+        },
     )
     return collection, False
 
@@ -202,14 +223,8 @@ def _validate_collection_dim(collection: Any, name: str, dim: int) -> None:
         )
 
 
-def delete_collection(
-    name: str,
-    *,
-    chroma_client: Any | None = None,
-    host: str = CHROMA_DEFAULT_HOST,
-    port: int = CHROMA_DEFAULT_PORT,
-) -> bool:
-    client = make_chroma_client(chroma_client, host=host, port=port)
+def delete_collection(name: str, *, config: ChromaConfig | None = None) -> bool:
+    client = make_chroma_client(config)
     try:
         client.delete_collection(name)
         return True
@@ -333,53 +348,32 @@ def case_node_metadata(row: CasePrecedentRecord) -> dict[str, Any]:
     return meta
 
 
-def _policy_text(row: PolicyClauseRecord) -> str:
-    return f"{row.title}。{row.text}"
+def _kind_record_type(kind: str) -> type:
+    """一类 corpus 的行类型（policy / case 的全部逐类差异就在下面这四个分支里，各写一次）。"""
+    return PolicyClauseRecord if kind == "policy" else CasePrecedentRecord
 
 
-def _case_text(row: CasePrecedentRecord) -> str:
-    return row.summary
+def _kind_text(kind: str, row: Any) -> str:
+    """检索文本（= 入库 embed 的同一份文本）：policy = ``f"{title}。{text}"``；case = ``summary``。"""
+    return f"{row.title}。{row.text}" if kind == "policy" else row.summary
 
 
-@dataclass(frozen=True)
-class _KindSpec:
-    """一类 corpus（policy / case）的四个逐行取用钩子。
+def _kind_key(kind: str, row: Any) -> str:
+    """corpus 行键（node id 的哈希输入，逐行唯一）。"""
+    return row.clause_id if kind == "policy" else row.case_id
 
-    这四个取值此前靠 ``kind == "policy"`` 在装配与建 node 两处各分支一次（同一判断写两遍），
-    收敛到这里后只有一份定义：装配期取 ``record_type`` / ``text_of``，建 node 期取
-    ``key_of`` / ``text_of`` / ``meta_of``。
+
+def _kind_metadata(kind: str, row: Any) -> dict[str, Any]:
+    """node metadata：policy 6 字段 / case 4 字段，各加非空 ``risk_type``（空列表不写 ——
+    Chroma 1.5.9 拒绝空列表 metadata 值）。**metadata 不进检索文本**（见 :func:`_build_nodes`）。
     """
-
-    kind: str
-    record_type: type
-    text_of: Callable[[Any], str]
-    key_of: Callable[[Any], str]
-    meta_of: Callable[[Any], dict[str, Any]]
+    return policy_node_metadata(row) if kind == "policy" else case_node_metadata(row)
 
 
-_POLICY_SPEC = _KindSpec(
-    kind="policy",
-    record_type=PolicyClauseRecord,
-    text_of=_policy_text,
-    key_of=lambda r: r.clause_id,
-    meta_of=policy_node_metadata,
-)
-
-_CASE_SPEC = _KindSpec(
-    kind="case",
-    record_type=CasePrecedentRecord,
-    text_of=_case_text,
-    key_of=lambda r: r.case_id,
-    meta_of=case_node_metadata,
-)
-
-
-def _build_nodes(
-    rows: list[Any], *, spec: _KindSpec, collection: str, llama: dict[str, Any]
-) -> tuple[list[Any], list[str]]:
+def _build_nodes(rows: list[Any], *, kind: str, collection: str) -> tuple[list[Any], list[str]]:
     """corpus 行 → (TextNode 列表, node id 列表)。**1 行 = 1 Node，不切分**。
 
-    检索文本 = 正文（``spec.text_of``：policy 为 ``title。text``、case 为 ``summary``），
+    检索文本 = 正文（``_kind_text``：policy 为 ``title。text``、case 为 ``summary``），
     与向量路 embed 的文本同一份。
 
     **metadata 不进检索文本**：``excluded_embed_metadata_keys`` / ``excluded_llm_metadata_keys``
@@ -388,15 +382,16 @@ def _build_nodes(
     ``category`` / ``decision`` / ``risk_type`` 的字面值索引进去，出现「按 metadata 字面值就能
     命中」的伪检索。排除设置随 ``_node_content`` JSON 往返存活；metadata 本身仍完整保留。
     """
+    llama = _llama()
     nodes: list[Any] = []
     node_ids: list[str] = []
     for row in rows:
-        nid = _node_id(collection, spec.key_of(row))
+        nid = _node_id(collection, _kind_key(kind, row))
         node_ids.append(nid)
-        meta = spec.meta_of(row)
-        text = spec.text_of(row)
+        meta = _kind_metadata(kind, row)
+        text = _kind_text(kind, row)
         nodes.append(
-            llama["TextNode"](
+            llama.TextNode(
                 id_=nid,
                 text=text,
                 metadata=meta,
@@ -444,33 +439,35 @@ def _case_candidates(rows: list[CasePrecedentRecord], filters: CaseSearchFilters
     return candidates
 
 
-def _policy_store_filters(filters: PolicySearchFilters, llama: dict[str, Any]) -> Any | None:
+def _policy_store_filters(filters: PolicySearchFilters) -> Any | None:
     """Policy 下推过滤（向量路）：仅 ``category``（含「全类目」）可下推 —— Chroma 的
     ``$in``/``$eq`` 对列表字段恒不命中，LlamaIndex 的 ANY/CONTAINS 在 chroma 集成里无翻译。
     """
     if not filters.category:
         return None
-    return llama["MetadataFilters"](
+    llama = _llama()
+    return llama.MetadataFilters(
         filters=[
-            llama["MetadataFilter"](
+            llama.MetadataFilter(
                 key="category",
                 value=[filters.category, _FULL_CATEGORY],
-                operator=llama["FilterOperator"].IN,
+                operator=llama.FilterOperator.IN,
             )
         ]
     )
 
 
-def _case_store_filters(filters: CaseSearchFilters, llama: dict[str, Any]) -> Any | None:
+def _case_store_filters(filters: CaseSearchFilters) -> Any | None:
 
     if not filters.category:
         return None
-    return llama["MetadataFilters"](
+    llama = _llama()
+    return llama.MetadataFilters(
         filters=[
-            llama["MetadataFilter"](
+            llama.MetadataFilter(
                 key="category",
                 value=filters.category,
-                operator=llama["FilterOperator"].EQ,
+                operator=llama.FilterOperator.EQ,
             )
         ]
     )
@@ -489,7 +486,6 @@ class _RetrievalContext:
     nodes: list[Any]
     collection: Any | None
     embed_model: Any
-    llama: dict[str, Any]
     #: node_id → corpus 原序行索引（排序 tie-break 用原序，不依赖底层库返回顺序）。
     row_index_by_key: dict[str, int] = field(default_factory=dict)
 
@@ -543,7 +539,7 @@ def _make_vector_retriever(
     空。修法：把精确候选 id 交给 Chroma 的 ``ids=`` 参数，随后复核 + 截断照旧，并断言覆盖率。
     """
 
-    class _ChromaCosineRetriever(ctx.llama["BaseRetriever"]):
+    class _ChromaCosineRetriever(_llama().BaseRetriever):
 
         def __init__(self) -> None:
             super().__init__()
@@ -602,9 +598,7 @@ def _make_vector_retriever(
                 if node is None:  # 防御：候选集外的 node id（不应发生）
                     continue
                 out.append(
-                    ctx.llama["NodeWithScore"](
-                        node=node, score=_cosine_from_distance(distance)
-                    )
+                    _llama().NodeWithScore(node=node, score=_cosine_from_distance(distance))
                 )
             return out
 
@@ -619,7 +613,7 @@ def _make_bm25_retriever(ctx: _RetrievalContext, top_k: int) -> Any:
     """
     # ⚠️ 顺序不可颠倒：锁**在**补丁之前（见 :func:`_jieba_tokenizer` docstring，R6 实测）。
     with _TOKENIZER_LOCK, _jieba_tokenizer():
-        return ctx.llama["BM25Retriever"](
+        return _llama().BM25Retriever(
             nodes=list(ctx.nodes),
             similarity_top_k=min(top_k, len(ctx.nodes)),
             skip_stemming=True,
@@ -659,14 +653,14 @@ def _fuse_rrf(
 
 
 class _ChromaIndexBase:
-    """两个 Chroma 索引的装配 / 检索骨架；子类只需在类体里声明 ``_spec``。
+    """两个 Chroma 索引的装配 / 检索骨架；子类只需在类体里声明 ``_kind``。
 
     构造顺序是「先 embed 全部文本、再建/校验 collection」：collection 名要带向量维度，而维度由
     **实际编码出的向量**决定（只有拿到向量后才知道），故不为省一轮 embed 把构造拆成两段 ——
     space 校验失败的代价就是白跑一轮 embed。
     """
 
-    _spec: _KindSpec
+    _kind: str
 
     def __init__(
         self,
@@ -674,15 +668,12 @@ class _ChromaIndexBase:
         *,
         embedding_model: Any | None = None,
         mode: RetrievalMode = "hybrid",
-        chroma_client: Any | None = None,
-        host: str = CHROMA_DEFAULT_HOST,
-        port: int = CHROMA_DEFAULT_PORT,
-        ephemeral: bool = False,
-        collection_prefix: str | None = None,
+        config: ChromaConfig | None = None,
     ) -> None:
-        self._rows: list[Any] = _normalize_rows(rows, self._spec.record_type)
+        self._rows: list[Any] = _normalize_rows(rows, _kind_record_type(self._kind))
         self.mode: RetrievalMode = _validate_mode(mode)
-        self.collection_prefix = collection_prefix
+        cfg = config or ChromaConfig()
+        self.collection_prefix = cfg.collection_prefix
         # 空语料不建库（``collection_name`` 保持 ""）：该可见属性必须先有默认值，否则空 KB 上
         # 读它会抛 AttributeError。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算）。
         self._collection: Any | None = None
@@ -691,21 +682,22 @@ class _ChromaIndexBase:
         self._dim = 0
         self.collection_name = ""
         self._doc_vectors: list[list[float]] = []
-        self._llama = _import_llama()
-        self._client = make_chroma_client(
-            chroma_client, host=host, port=port, ephemeral=ephemeral
-        )
+        # 客户端在构造期解析一次（缺 rag extra / 客户端装配错误即刻暴露），回填进 config →
+        # 后续各层拿到的都是同一个实例，不再逐层重算 host/port/ephemeral。
+        self._config = replace(cfg, client=make_chroma_client(cfg))
+        # LlamaIndex 装配面同样在构造期解析（空 KB 也不例外 —— 缺 rag extra 不推迟到检索期）。
+        _llama()
         # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
         self._embed_model: Any = embedding_model or build_embedding_model("fastembed")
         if self._rows:
             # 空 KB 走不到这里（不建库，故不 embed / 不留 collection_name）。
             self._doc_vectors = [
-                self._embed_model.get_text_embedding(self._spec.text_of(r)) for r in self._rows
+                self._embed_model.get_text_embedding(_kind_text(self._kind, r)) for r in self._rows
             ]
             # 维度唯一来源 = 实际编码出的向量长度（不再有可注入的 dim 参数，也不再探测模型声明）。
             self._dim = len(self._doc_vectors[0])
             self.collection_name = _collection_name(
-                collection_prefix, self._spec.kind, self._dim
+                cfg.collection_prefix, self._kind, self._dim
             )
             self._seed()
 
@@ -718,19 +710,17 @@ class _ChromaIndexBase:
         「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。
         """
         collection, reused = _open_collection(
-            client=self._client,
+            self._config,
             name=self.collection_name,
             dim=self._dim,
-            kind=self._spec.kind,
-            prefix=self.collection_prefix or _DEFAULT_COLLECTION_PREFIX,
+            kind=self._kind,
         )
         if reused:
             _validate_collection_dim(collection, self.collection_name, self._dim)
         self._nodes, self._node_ids = _build_nodes(
             self._rows,
-            spec=self._spec,
+            kind=self._kind,
             collection=self.collection_name,
-            llama=self._llama,
         )
         collection.upsert(
             ids=list(self._node_ids),
@@ -764,7 +754,6 @@ class _ChromaIndexBase:
             nodes=[self._nodes[i] for i in candidates],
             collection=self._collection,
             embed_model=self._embed_model,
-            llama=self._llama,
             row_index_by_key={nid: candidates[offset] for offset, nid in enumerate(sub_ids)},
         )
 
@@ -909,7 +898,7 @@ class _ChromaIndexBase:
         if top_k < 1 or not candidates:
             return []
         sub_ctx = self._sub_context(candidates)
-        query_bundle = self._llama["QueryBundle"](query_str=query)
+        query_bundle = _llama().QueryBundle(query_str=query)
         # 三路都取「候选数」上限：先拿到**完整候选排名**，再复核过滤、最后截断 Top-K。
         # （若这里就按 top_k 预截断，store 返回的前 top_k 里一旦有被 recheck 剔除的行，
         #   结果会不足 top_k —— 实测 policy vector + effective_only 就是这样少一条。）
@@ -960,15 +949,15 @@ def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
 class ChromaPolicyIndex(_ChromaIndexBase):
     """``PolicyIndex`` Protocol 的 Chroma + LlamaIndex 实现。
 
-    构造参数为 Chroma 装配参数（``chroma_client`` 注入 /
-    ``host``+``port`` 自建 / ``ephemeral`` 离线内存库 / ``collection_prefix``）—— 签名见
-    :meth:`_ChromaIndexBase.__init__`。检索签名与工具契约逐字一致：
+    构造参数为 Chroma 装配参数（``config=ChromaConfig(...)``：client 注入 / host+port 自建 /
+    ephemeral 离线内存库 / collection_prefix）—— 签名见 :meth:`_ChromaIndexBase.__init__`。
+    检索签名与工具契约逐字一致：
     ``async def search(query, filters, top_k, effective_only) -> list[PolicyClauseHit]``。
     过滤语义（effective_only / category / risk_type）与既有实现逐条一致，差异只在
     「向量库 + 检索器 + 融合」。
     """
 
-    _spec = _POLICY_SPEC
+    _kind = "policy"
 
     async def search(
         self,
@@ -987,7 +976,7 @@ class ChromaPolicyIndex(_ChromaIndexBase):
             query,
             candidates,
             top_k=top_k,
-            store_filters=_policy_store_filters(filters, self._llama),
+            store_filters=_policy_store_filters(filters),
             recheck=lambda i: i in set(candidates),
         )
         return [
@@ -1005,7 +994,7 @@ class ChromaCaseIndex(_ChromaIndexBase):
     构造签名见 :meth:`_ChromaIndexBase.__init__`。
     """
 
-    _spec = _CASE_SPEC
+    _kind = "case"
 
     async def search(
         self, query: str, filters: CaseSearchFilters, top_k: int
@@ -1016,7 +1005,7 @@ class ChromaCaseIndex(_ChromaIndexBase):
             query,
             candidates,
             top_k=top_k,
-            store_filters=_case_store_filters(filters, self._llama),
+            store_filters=_case_store_filters(filters),
             recheck=lambda i: i in set(candidates),
         )
         hits: list[CaseHit] = []

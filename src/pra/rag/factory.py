@@ -2,7 +2,10 @@
 
 注入点：corpus 路径（缺省取 rag/corpus/ 内静态 JSON，失败即报错不静默）；``embedding_model``
 （LlamaIndex ``BaseEmbedding``，缺省 None → chroma 类内自建 fastembed 集成）；mode（三模式可切）；
-chroma 连接参数（client / host / port / ephemeral / collection 前缀）。
+``config``（``ChromaConfig``：client / host / port / ephemeral / collection 前缀，缺省全取默认值）。
+
+两个 builder 只在「行类型 + corpus 加载器 + 缺省语料文件」上有别，实现只有 ``_build_index`` 一份
+（corpus_path 缺省由加载器自己兜底）。
 
 检索后端只有 chroma（ChromaDB cosine + LlamaIndex 检索器 + RRF），``chroma_backend`` 在函数体内
 **延迟 import**，故本模块被 tools 层 import 时顶层零额外依赖；缺 ``--extra rag`` 时抛出带指引的
@@ -11,14 +14,15 @@ chroma 连接参数（client / host / port / ephemeral / collection 前缀）。
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pra.rag.corpus import CORPUS_DIR, load_cases, load_policies
 from pra.rag.retrieval import RetrievalMode
 
-if TYPE_CHECKING:  # 仅注解：本模块 import 期不拉起 tools 子包
+if TYPE_CHECKING:  # 仅注解：本模块 import 期不拉起 tools / chroma_backend
+    from pra.rag.chroma_backend import ChromaConfig
     from pra.tools.case_search.tool import CaseIndex
     from pra.tools.policy_search.tool import PolicyIndex
 
@@ -33,71 +37,77 @@ POLICIES_DEFAULT = CORPUS_DIR / "policies.json"
 CASES_DEFAULT = CORPUS_DIR / "cases.json"
 
 
-def _resolve_rows(
-    rows: Iterable[Any] | None, corpus_path: str | Path | None, loader
-) -> tuple[list[Any], dict]:
-    if rows is not None:
-        return list(rows), {}
-    return loader(corpus_path)
-
-
-def build_policy_index(
+def _build_index(
+    index_cls: type,
     *,
+    loader: Callable[[str | Path | None], tuple[list[Any], dict]],
     corpus_path: str | Path | None = None,
     rows: Iterable[Any] | None = None,
     embedding_model: Any | None = None,
     mode: RetrievalMode = "hybrid",
-    collection_prefix: str | None = None,
-    chroma_client: Any | None = None,
-    chroma_host: str = "127.0.0.1",
-    chroma_port: int = 8001,
-    chroma_ephemeral: bool = False,
+    config: ChromaConfig | None = None,
+) -> Any:
+    """两个公开 builder 的唯一实现；差异只在调用方传进来的 ``index_cls`` / ``loader``。
+
+    ``rows`` 显式注入时优先（跳过文件 IO，``corpus_path`` 随之失效）；否则 ``loader(corpus_path)``
+    （``corpus_path=None`` → 加载器自带的缺省语料文件）。
+    """
+    if rows is None:
+        record_rows, _meta = loader(corpus_path)
+    else:
+        record_rows = list(rows)
+    return index_cls(
+        record_rows, embedding_model=embedding_model, mode=mode, config=config
+    )
+
+
+def build_policy_index(
+    rows: Iterable[Any] | None = None,
+    *,
+    corpus_path: str | Path | None = None,
+    embedding_model: Any | None = None,
+    mode: RetrievalMode = "hybrid",
+    config: ChromaConfig | None = None,
 ) -> PolicyIndex:
     """构造 PolicyIndex（corpus_path 缺省 = rag/corpus/policies.json）。
 
     ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` 缺省 None → 类内自建
     ``build_embedding_model("fastembed")``（真语义、需 rag extra 与已缓存模型）；显式传入时须为
     真实语义 ``BaseEmbedding``（``src/`` 内已无任何确定性 / mock 编码器）。
+    ``config`` = Chroma 连接 / collection 参数（见 :class:`~pra.rag.chroma_backend.ChromaConfig`；
+    缺省 None → 全取默认值）。
     """
-    record_rows, _meta = _resolve_rows(rows, corpus_path, load_policies)
     # 延迟 import：chroma / llama_index / bm25s / jieba 仅在真正装配索引时才拉起。
     from pra.rag.chroma_backend import ChromaPolicyIndex
 
-    return ChromaPolicyIndex(
-        record_rows,
+    return _build_index(
+        ChromaPolicyIndex,
+        loader=load_policies,
+        corpus_path=corpus_path,
+        rows=rows,
         embedding_model=embedding_model,
         mode=mode,
-        chroma_client=chroma_client,
-        host=chroma_host,
-        port=chroma_port,
-        ephemeral=chroma_ephemeral,
-        collection_prefix=collection_prefix,
+        config=config,
     )
 
 
 def build_case_index(
+    rows: Iterable[Any] | None = None,
     *,
     corpus_path: str | Path | None = None,
-    rows: Iterable[Any] | None = None,
     embedding_model: Any | None = None,
     mode: RetrievalMode = "hybrid",
-    collection_prefix: str | None = None,
-    chroma_client: Any | None = None,
-    chroma_host: str = "127.0.0.1",
-    chroma_port: int = 8001,
-    chroma_ephemeral: bool = False,
+    config: ChromaConfig | None = None,
 ) -> CaseIndex:
     """构造 CaseIndex（corpus_path 缺省 = rag/corpus/cases.json）；参数语义同 ``build_policy_index``。"""
-    record_rows, _meta = _resolve_rows(rows, corpus_path, load_cases)
     from pra.rag.chroma_backend import ChromaCaseIndex
 
-    return ChromaCaseIndex(
-        record_rows,
+    return _build_index(
+        ChromaCaseIndex,
+        loader=load_cases,
+        corpus_path=corpus_path,
+        rows=rows,
         embedding_model=embedding_model,
         mode=mode,
-        chroma_client=chroma_client,
-        host=chroma_host,
-        port=chroma_port,
-        ephemeral=chroma_ephemeral,
-        collection_prefix=collection_prefix,
+        config=config,
     )

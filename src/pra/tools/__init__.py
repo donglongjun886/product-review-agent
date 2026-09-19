@@ -45,8 +45,9 @@ def build_tools(
         CaseSearchTool / PolicySearchTool 注入真实 RAG（chroma）索引，其余 4 工具仍为 InMemory
         事实世界。RAG 索引经 ``pra.rag.factory`` **延迟 import**（默认 memory 路径零额外 import）。
     :param rag_options: 仅 ``data_source="rag"`` 生效的索引装配参数透传字典；键名与
-        ``pra.rag.factory`` 参数**逐字对应**（``mode`` / ``embedding_model`` /
-        ``collection_prefix`` / ``chroma_client`` …），未给键走 factory 缺省（``embedding_model``
+        ``pra.rag.factory`` 参数**逐字对应**（``mode`` / ``embedding_model`` / ``config`` ——
+        Chroma 连接与 collection 参数走 ``config=ChromaConfig(...)``：client / host / port /
+        ephemeral / collection_prefix），未给键走 factory 缺省（``embedding_model``
         缺省 None → chroma 类内自建 fastembed 集成）。
     :param product_repo: ProductTool 的数据源；默认 **None → InMemory**（CI 不连库、评测可
         重放）。要读真库须**显式**传入 ``pra.tools.product.mysql_repo.MySQLProductRepository()``
