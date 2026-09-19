@@ -20,7 +20,7 @@ import hashlib
 import math
 import re
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
@@ -461,13 +461,46 @@ def _case_text(row: CasePrecedentRecord) -> str:
     return row.summary
 
 
+@dataclass(frozen=True)
+class _KindSpec:
+    """一类 corpus（policy / case）的四个逐行取用钩子。
+
+    这四个取值此前靠 ``kind == "policy"`` 在装配与建 node 两处各分支一次（同一判断写两遍），
+    收敛到这里后只有一份定义：装配期取 ``record_type`` / ``text_of``，建 node 期取
+    ``key_of`` / ``text_of`` / ``meta_of``。
+    """
+
+    kind: str
+    record_type: type
+    text_of: Callable[[Any], str]
+    key_of: Callable[[Any], str]
+    meta_of: Callable[[Any], dict[str, Any]]
+
+
+_POLICY_SPEC = _KindSpec(
+    kind="policy",
+    record_type=PolicyClauseRecord,
+    text_of=_policy_text,
+    key_of=lambda r: r.clause_id,
+    meta_of=policy_node_metadata,
+)
+
+_CASE_SPEC = _KindSpec(
+    kind="case",
+    record_type=CasePrecedentRecord,
+    text_of=_case_text,
+    key_of=lambda r: r.case_id,
+    meta_of=case_node_metadata,
+)
+
+
 def _build_nodes(
-    rows: list[Any], *, kind: str, collection: str, llama: dict[str, Any]
+    rows: list[Any], *, spec: _KindSpec, collection: str, llama: dict[str, Any]
 ) -> tuple[list[Any], list[str]]:
     """corpus 行 → (TextNode 列表, node id 列表)。**1 行 = 1 Node，不切分**。
 
-    检索文本 = 正文（policy：``title。text``；case：``summary``），与向量路 embed 的文本、
-    local 后端同一份。
+    检索文本 = 正文（``spec.text_of``：policy 为 ``title。text``、case 为 ``summary``），
+    与向量路 embed 的文本、local 后端同一份。
 
     **metadata 不进检索文本**：``excluded_embed_metadata_keys`` / ``excluded_llm_metadata_keys``
     设为全部 metadata 键，使 ``get_content(metadata_mode=EMBED)`` 只返回正文 —— 这对 BM25 路
@@ -478,11 +511,10 @@ def _build_nodes(
     nodes: list[Any] = []
     node_ids: list[str] = []
     for row in rows:
-        key = row.clause_id if kind == "policy" else row.case_id
-        nid = _node_id(collection, key)
+        nid = _node_id(collection, spec.key_of(row))
         node_ids.append(nid)
-        meta = policy_node_metadata(row) if kind == "policy" else case_node_metadata(row)
-        text = _policy_text(row) if kind == "policy" else _case_text(row)
+        meta = spec.meta_of(row)
+        text = spec.text_of(row)
         nodes.append(
             llama["TextNode"](
                 id_=nid,
@@ -571,10 +603,8 @@ def _case_store_filters(filters: CaseSearchFilters, llama: dict[str, Any]) -> An
 
 @dataclass
 class _RetrievalContext:
+    """一次检索的上下文：候选子集上的 node / node id / 行索引映射（只有检索链路会读的字段）。"""
 
-    kind: str
-    rows: list[Any]
-    row_keys: list[str]
     node_ids: list[str]
     nodes: list[Any]
     collection: Any | None
@@ -771,48 +801,51 @@ def _fuse_rrf(
 
 
 class _ChromaIndexBase:
+    """两个 Chroma 索引的装配 / 检索骨架；子类只需在类体里声明 ``_spec``。
 
-    _kind = ""
+    构造顺序是「先 embed 全部文本、再建/校验 collection」：collection 名要带向量维度，而维度
+    通常只有拿到向量后才知道（embedder 自己声明了 ``dim`` 才能提前），故不为省一轮 embed 把构造
+    拆成两段 —— space 校验失败的代价就是白跑一轮 embed。
+    """
 
-    def _setup(
+    _spec: _KindSpec
+
+    def __init__(
         self,
         rows: Iterable[dict | Any],
         *,
-        record_type: type,
-        text_of,
-        embedder: Embedder | None,
-        mode: str,
-        weights: tuple[float, float],
-        chroma_client: Any | None,
-        host: str,
-        port: int,
-        ephemeral: bool,
-        collection_prefix: str | None,
+        embedder: Embedder | None = None,
+        mode: RetrievalMode = "hybrid",
+        weights: tuple[float, float] = DEFAULT_WEIGHTS,  # 仅为与 local 后端同签名，本实现不消费
+        chroma_client: Any | None = None,
+        host: str = CHROMA_DEFAULT_HOST,
+        port: int = CHROMA_DEFAULT_PORT,
+        ephemeral: bool = False,
+        collection_prefix: str | None = None,
     ) -> None:
-        self._rows: list[Any] = _normalize_rows(rows, record_type)
+        self._rows: list[Any] = _normalize_rows(rows, self._spec.record_type)
         self.mode: RetrievalMode = _validate_mode(mode)
-        self.weights: tuple[float, float] = tuple(weights)  # 兼容既有构造签名（RRF 不用权重）
         self.embedder: Embedder = embedder or MockHashEmbedder()
-        self._texts: list[str] = [text_of(r) for r in self._rows]
-        self._row_keys: list[str] = [
-            (r.clause_id if self._kind == "policy" else r.case_id) for r in self._rows
-        ]
+        self.collection_prefix = collection_prefix
+        # 空语料不建库（collection_name = ""）：这两个可见属性必须先有默认值，否则空 KB 上读
+        # ``index.space`` 会抛 AttributeError，与「空 KB 未建库则为 None」的口径不符。
+        self.collection_space: str | None = None
+        self._self_check_distance: float | None = None
+        self._collection: Any | None = None
+        self._nodes: list[Any] = []
+        self._node_ids: list[str] = []
         self._llama = _import_llama()
         self._client = make_chroma_client(
             chroma_client, host=host, port=port, ephemeral=ephemeral
         )
         self._embed_model = LlamaIndexEmbeddingAdapter(self.embedder)
         self._doc_vectors: list[list[float]] = [
-            self._embed_model.get_text_embedding(t) for t in self._texts
+            self._embed_model.get_text_embedding(self._spec.text_of(r)) for r in self._rows
         ]
         self._dim = _resolve_dim(self.embedder, self._doc_vectors)
-        self.collection_prefix = collection_prefix
         self.collection_name = (
-            _collection_name(collection_prefix, self._kind, self._dim) if self._rows else ""
+            _collection_name(collection_prefix, self._spec.kind, self._dim) if self._rows else ""
         )
-        self._collection = None
-        self._nodes: list[Any] = []
-        self._node_ids: list[str] = []
         if self._rows:
             self._seed()
 
@@ -832,14 +865,14 @@ class _ChromaIndexBase:
             client=self._client,
             name=self.collection_name,
             dim=self._dim,
-            kind=self._kind,
+            kind=self._spec.kind,
             prefix=self.collection_prefix or _DEFAULT_COLLECTION_PREFIX,
         )
         if reused:
             _validate_collection_dim(collection, self.collection_name, self._dim)
         self._nodes, self._node_ids = _build_nodes(
             self._rows,
-            kind=self._kind,
+            spec=self._spec,
             collection=self.collection_name,
             llama=self._llama,
         )
@@ -888,17 +921,10 @@ class _ChromaIndexBase:
     # -- 装配子件 -----------------------------------------------------------
 
     def _sub_context(self, candidates: list[int]) -> _RetrievalContext:
-        """候选子集上的检索上下文（node / node id / 行索引映射都只含候选）。
-
-        ``row_index_by_key`` 把 node id 直接映射回 **corpus 原序行索引** —— 后续排序
-        tie-break 用原序，因此不依赖 Chroma / bm25s 的返回顺序。
-        """
+        """候选子集上的检索上下文（node / node id / 行索引映射都只含候选）。"""
         sub_ids = [self._node_ids[i] for i in candidates]
         return _RetrievalContext(
-            kind=self._kind,
-            rows=[self._rows[i] for i in candidates],
-            row_keys=[self._row_keys[i] for i in candidates],
-            node_ids=[self._node_ids[i] for i in candidates],
+            node_ids=sub_ids,
             nodes=[self._nodes[i] for i in candidates],
             collection=self._collection,
             embed_model=self._embed_model,
@@ -1109,40 +1135,14 @@ class ChromaPolicyIndex(_ChromaIndexBase):
     """``PolicyIndex`` Protocol 的 Chroma + LlamaIndex 实现。
 
     构造参数与 local 后端对齐，另加 Chroma 装配参数（``chroma_client`` 注入 /
-    ``host``+``port`` 自建 / ``ephemeral`` 离线内存库 / ``collection_prefix``）。检索签名与
-    工具契约逐字一致：``async def search(query, filters, top_k, effective_only) -> list[PolicyClauseHit]``。
+    ``host``+``port`` 自建 / ``ephemeral`` 离线内存库 / ``collection_prefix``）—— 签名见
+    :meth:`_ChromaIndexBase.__init__`。检索签名与工具契约逐字一致：
+    ``async def search(query, filters, top_k, effective_only) -> list[PolicyClauseHit]``。
     过滤语义（effective_only / category / risk_type）与既有实现逐条一致，差异只在
     「向量库 + 检索器 + 融合」。
     """
 
-    _kind = "policy"
-
-    def __init__(
-        self,
-        rows: Iterable[dict | PolicyClauseRecord],
-        *,
-        embedder: Embedder | None = None,
-        mode: RetrievalMode = "hybrid",
-        weights: tuple[float, float] = DEFAULT_WEIGHTS,
-        chroma_client: Any | None = None,
-        host: str = CHROMA_DEFAULT_HOST,
-        port: int = CHROMA_DEFAULT_PORT,
-        ephemeral: bool = False,
-        collection_prefix: str | None = None,
-    ) -> None:
-        self._setup(
-            rows,
-            record_type=PolicyClauseRecord,
-            text_of=_policy_text,
-            embedder=embedder,
-            mode=mode,
-            weights=weights,
-            chroma_client=chroma_client,
-            host=host,
-            port=port,
-            ephemeral=ephemeral,
-            collection_prefix=collection_prefix,
-        )
+    _spec = _POLICY_SPEC
 
     def effective_count(self) -> int:
         return sum(1 for r in self._rows if r.status == "EFFECTIVE")
@@ -1180,36 +1180,10 @@ class ChromaCaseIndex(_ChromaIndexBase):
     ``CaseHit.retrieval_score`` 是**检索分，不是语义相似度**：``bm25`` = 候选集内 min-max
     归一化 BM25 分；``vector`` = ``1 − distance``；``hybrid`` = RRF 融合分（``Σ 1/(k+rank)``，
     ``k=60``，落在 ~(0, ``2/60 = 1/30``]）。取值恒 ⊂ ``[0,1]``。
+    构造签名见 :meth:`_ChromaIndexBase.__init__`。
     """
 
-    _kind = "case"
-
-    def __init__(
-        self,
-        rows: Iterable[dict | CasePrecedentRecord],
-        *,
-        embedder: Embedder | None = None,
-        mode: RetrievalMode = "hybrid",
-        weights: tuple[float, float] = DEFAULT_WEIGHTS,
-        chroma_client: Any | None = None,
-        host: str = CHROMA_DEFAULT_HOST,
-        port: int = CHROMA_DEFAULT_PORT,
-        ephemeral: bool = False,
-        collection_prefix: str | None = None,
-    ) -> None:
-        self._setup(
-            rows,
-            record_type=CasePrecedentRecord,
-            text_of=_case_text,
-            embedder=embedder,
-            mode=mode,
-            weights=weights,
-            chroma_client=chroma_client,
-            host=host,
-            port=port,
-            ephemeral=ephemeral,
-            collection_prefix=collection_prefix,
-        )
+    _spec = _CASE_SPEC
 
     async def search(
         self, query: str, filters: CaseSearchFilters, top_k: int

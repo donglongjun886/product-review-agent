@@ -928,7 +928,12 @@ def test_chroma_build_nodes_embed_text_is_body_only() -> None:
         node_to_metadata_dict,
     )
 
-    from pra.rag.chroma_backend import _build_nodes, _import_llama
+    from pra.rag.chroma_backend import (
+        _CASE_SPEC,
+        _POLICY_SPEC,
+        _build_nodes,
+        _import_llama,
+    )
 
     llama = _import_llama()
 
@@ -942,12 +947,13 @@ def test_chroma_build_nodes_embed_text_is_body_only() -> None:
                 out.append(str(value))
         return [item for item in out if item]
 
-    for kind, rows, body_of in (
-        ("case", CASE_ROWS, lambda r: r.summary),
-        ("policy", POLICY_ROWS, lambda r: f"{r.title}。{r.text}"),
+    for spec, rows, body_of in (
+        (_CASE_SPEC, CASE_ROWS, lambda r: r.summary),
+        (_POLICY_SPEC, POLICY_ROWS, lambda r: f"{r.title}。{r.text}"),
     ):
+        kind = spec.kind
         nodes, node_ids = _build_nodes(
-            rows, kind=kind, collection=f"unit_{kind}_256", llama=llama
+            rows, spec=spec, collection=f"unit_{kind}_256", llama=llama
         )
         assert len(nodes) == len(node_ids) == len(rows), "1 行 = 1 Node（不切碎）"
         for node, row in zip(nodes, rows):
