@@ -36,7 +36,6 @@ from pra.rag.retrieval import (
     RetrievalMode,
     normalize_minmax,
 )
-from pra.rag.vectors import cosine_similarity
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
 from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
@@ -774,62 +773,19 @@ class _ChromaIndexBase:
     ) -> list[tuple[int, float]]:
         """向量路排名：``[(行索引, 1 − distance)]``（精确候选 id 集 + store 侧 category 下推）。
 
-        三件事保证结果完整：打分域 = 精确候选集（不让非候选行抢名额）；覆盖率
-        自检（返回 id 必须覆盖候选 id，否则重试/抛）；覆盖率失败时用 Chroma 已存的 doc 向量
-        兜底现算 cos。
+        打分域 = 精确候选集（不让非候选行抢名额）；覆盖率由检索器自检 —— 返回 id 不覆盖候选
+        即重试，重试仍不足则抛，**绝不静默返回子集**。
         """
         retriever = _make_vector_retriever(
             sub_ctx, top_k, store_filters, candidate_ids=list(sub_ctx.node_ids)
         )
-        try:
-            nodes = retriever.retrieve(query_bundle)
-        except RuntimeError:
-            # 覆盖率重试仍不足 → 已存向量兜底（结果仍完整）。
-            nodes = []
+        nodes = retriever.retrieve(query_bundle)
         scored: dict[str, float] = {
             n.node.node_id: n.score for n in nodes if n.node.node_id in sub_ctx.row_index_by_key
         }
-        missing = [nid for nid in sub_ctx.node_ids if nid not in scored]
-        if missing:
-            scored.update(self._score_missing_by_stored_vectors(sub_ctx, query_bundle, missing))
         ranked = [(sub_ctx.row_index_by_key[nid], score) for nid, score in scored.items()]
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
         return [(i, round(s, 6)) for i, s in ranked]
-
-    def _score_missing_by_stored_vectors(
-        self, sub_ctx: _RetrievalContext, query_bundle: Any, missing: list[str]
-    ) -> dict[str, float]:
-        """兜底：对未取回的候选，用 Chroma 里**已存 doc 向量**与 query 向量现算余弦。
-
-        - 向量来源 ``collection.get(ids=missing, include=["embeddings"])``（本地读取，无 ANN 近似）；
-        - 余弦用仓库既有 ``rag/vectors.cosine_similarity``（纯 Python，零第三方依赖），
-          再按 ``_cosine_from_distance`` 同口径 clamp 到 [0,1]；
-        - 任一步失败（缺向量/长度不符）即抛，**不静默少返** —— 少返正是本次要修的 bug。
-        """
-        raise_on_missing = (
-            f"向量路兜底失败：{len(missing)} 个候选取不到向量（如 {missing[:5]}）——"
-            "拒绝返回子集结果"
-        )
-        if self._collection is None:
-            raise RuntimeError(raise_on_missing)
-        got = self._collection.get(ids=list(missing), include=["embeddings"])
-        # 注意：embeddings 是 numpy 数组列表 —— 不能用 ``or []``（数组真值歧义，实测
-        # ``ValueError: The truth value of an array with more than one element is ambiguous``）。
-        got_ids = list(got.get("ids") if got.get("ids") is not None else [])
-        raw_emb = got.get("embeddings")
-        got_vecs = [list(v) for v in ([] if raw_emb is None else raw_emb)]
-        if len(got_ids) != len(missing) or len(got_vecs) != len(missing):
-            raise RuntimeError(
-                f"{raise_on_missing}（collection.get 只回 {len(got_ids)}/{len(missing)} 条）"
-            )
-        query_embedding = sub_ctx.embed_model.get_query_embedding(query_bundle.query_str)
-        out: dict[str, float] = {}
-        for nid, vec in zip(got_ids, got_vecs):
-            raw = float(cosine_similarity(list(query_embedding), vec))
-            if math.isnan(raw):  # 防御：退化输入（cosine_similarity 自身已 clamp 0~1）
-                raw = 0.0
-            out[nid] = max(0.0, min(1.0, raw))
-        return out
 
     def _rank_bm25(
         self, sub_ctx: _RetrievalContext, query_bundle: Any, top_k: int
