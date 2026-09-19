@@ -398,7 +398,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ### 7.2 Agent 工具数据源的结论边界（评测世界 InMemory vs 生产真链路）
 
-- **评测世界**：Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）；评测侧可经 `EvalContext.tool_world="rag"`（或显式装配 `data_source="rag"`）切到真实检索，向量库为 ChromaDB + LlamaIndex（见 [docs/00-system-design.md](00-system-design.md) 的 RAG 节与 `src/pra/rag/chroma_backend.py`）。
+- **评测世界**：Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）；评测侧可经 `EvalContext.tool_world="rag"`（或显式装配 `data_source="rag"`）切到真实检索，向量库为 ChromaDB + LlamaIndex（见 [docs/00-system-design.md](00-system-design.md) 的 RAG 节与 `src/pra/rag/`）。
 - **生产 / HTTP 入口已接真实链路**：`build_production_tools()` 注入商品/商家 MySQL 与案例/政策的真实 RAG（`Lazy*Index` 惰性构建：装配期零 import/零 IO，首次检索才建库连 Chroma）。故**本文所有数字仍是 InMemory 评测世界口径**，不得读成生产链路成绩。
 - **工具集口径**：本文所有 Agent 数字均出自**评测世界的 5 个工具**（`make_eval_world_tools()`：Product / ImageAnalysis / Merchant / CaseSearch / PolicySearch），比生产 `build_tools()` 的 6 个**少一个 `OCRTool`** —— 评测集 `expected_tools` 从不含它、机审 OCR 文本近乎全空，补进去只是多一个拿不到数据的工具。两者清单各自维护、**无"同构"约束**，Tool Selection Accuracy 真值按该 5 工具集合计。
 - **报告必带边界声明（P-2 口径）**："当前结果主要验证 **Agent Workflow、规则协同与 Evaluation Framework**，不代表真实 LLM 最终能力；InMemory 种子覆盖有限，**可能低估 Agent 上限**。"（与 §3.4 同文）
@@ -456,14 +456,14 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > 本节收集原先散落在设计文档里的**实测数字**，避免随文档收敛而丢失。数值口径与限制条件必须同框阅读；
 > 绝对值随语料 / 模型 / 服务状态变化，**勿照抄为结论**。
 
-### 10.3 可观测性实测（Langfuse）
+### 10.1 可观测性实测（Langfuse）
 
 - 本地 Docker 自托管 Langfuse **4.32.0**，**6 个常驻容器**（另加一次性 `minio-init`）；health 200；project `pra-local`。
 - 埋点覆盖 root / node / generation / tool / gate：单案真实路径 **≈26 observation**；评测侧 `--langfuse`
   实测 **3 case → 3 条 root trace / 69 条 observation**，全部 `sessionId=eval-demo-1`，每 case 带 `eval_case_id`。
 - **口径**：scripted 桩路径下 token=0 / cost 空 / latency≈0 是真实情况，不得伪造（详见 docs/00 可观测性节）。
 
-### 10.4 已移除后端的历史教训（Qdrant `url=` 远端 server，2026-09-10）
+### 10.2 已移除后端的历史教训（Qdrant `url=` 远端 server，2026-09-10）
 
 - 阻断缺陷：point id 取 sha256 前 16 字节 → **128 位整数**，而 Qdrant 服务端只接受 u64/UUID；
   其**进程内模式不校验上界**，**只在真 server 上以 400 暴露**。

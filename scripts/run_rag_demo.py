@@ -26,7 +26,7 @@ import asyncio
 import sys
 
 from pra.domain.models import Budget
-from pra.rag.chroma_backend import ChromaConfig
+from pra.rag.chroma_store import ChromaConfig
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.tools import production_embedder
 from pra.tools.base import ToolContext

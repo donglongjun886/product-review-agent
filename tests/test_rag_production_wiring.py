@@ -195,7 +195,7 @@ def _e2e_skip_reason() -> str | None:
 
 def _delete_prefix(prefix: str) -> None:
     """只删本测试前缀的 collection（Chroma 是共享单实例，绝不动别人的库）。"""
-    from pra.rag.chroma_backend import ChromaConfig, make_chroma_client
+    from pra.rag.chroma_store import ChromaConfig, make_chroma_client
 
     client = make_chroma_client(ChromaConfig(host=_CHROMA_HOST, port=_CHROMA_PORT))
     for coll in list(client.list_collections()):
@@ -261,7 +261,7 @@ async def test_production_rag_reaches_real_knowledge_base(monkeypatch):
         pytest.skip(reason)
 
     from pra.rag import factory
-    from pra.rag.chroma_backend import ChromaConfig
+    from pra.rag.chroma_store import ChromaConfig
 
     monkeypatch.setenv("PRA_EMBED_CACHE_DIR", str(_BGE_CACHE))
     prefix = f"pytest_prod_rag_{uuid4().hex[:8]}"

@@ -7,9 +7,9 @@
 两个 builder 只在「行类型 + corpus 加载器 + 缺省语料文件」上有别，实现只有 ``_build_index`` 一份
 （corpus_path 缺省由加载器自己兜底）。
 
-检索后端只有 chroma（ChromaDB cosine + LlamaIndex 检索器 + RRF），``chroma_backend`` 在函数体内
-**延迟 import**，故本模块被 tools 层 import 时顶层零额外依赖；缺 ``--extra rag`` 时抛出带指引的
-``RuntimeError``，不静默降级。
+检索后端只有 chroma（ChromaDB cosine + LlamaIndex 检索器 + RRF）；``pra.rag.index`` / ``chroma_store``
+在函数体内**延迟 import**，故本模块被 tools 层 import 时顶层零额外依赖；缺 ``--extra rag`` 时抛出
+带指引的 ``RuntimeError``，不静默降级。
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any
 from pra.rag.corpus import CORPUS_DIR, load_cases, load_policies
 from pra.rag.retrieval import RetrievalMode
 
-if TYPE_CHECKING:  # 仅注解：本模块 import 期不拉起 tools / chroma_backend
-    from pra.rag.chroma_backend import ChromaConfig
+if TYPE_CHECKING:  # 仅注解：本模块 import 期不拉起 tools / chroma_store
+    from pra.rag.chroma_store import ChromaConfig
     from pra.tools.case_search.tool import CaseIndex
     from pra.tools.policy_search.tool import PolicyIndex
 
@@ -76,11 +76,11 @@ def build_policy_index(
 
     ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` **必填**（``BaseEmbedding``；
     常用 ``pra.tools.production_embedder()``）—— 本函数不替你构造。
-    ``config`` = Chroma 连接 / collection 参数（见 :class:`~pra.rag.chroma_backend.ChromaConfig`；
+    ``config`` = Chroma 连接 / collection 参数（见 :class:`~pra.rag.chroma_store.ChromaConfig`；
     缺省 None → 全取默认值）。
     """
     # 延迟 import：chroma / llama_index / bm25s / jieba 仅在真正装配索引时才拉起。
-    from pra.rag.chroma_backend import ChromaPolicyIndex
+    from pra.rag.index import ChromaPolicyIndex
 
     return _build_index(
         ChromaPolicyIndex,
@@ -102,7 +102,7 @@ def build_case_index(
     config: ChromaConfig | None = None,
 ) -> CaseIndex:
     """构造 CaseIndex（corpus_path 缺省 = rag/corpus/cases.json）；参数语义同 ``build_policy_index``。"""
-    from pra.rag.chroma_backend import ChromaCaseIndex
+    from pra.rag.index import ChromaCaseIndex
 
     return _build_index(
         ChromaCaseIndex,

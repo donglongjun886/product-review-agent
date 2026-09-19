@@ -3,7 +3,7 @@
 > 本目录只做一件事：把 **ChromaDB 服务端**跑起来，让 `pra.rag` 的
 > **`HttpClient(host="127.0.0.1", port=8001)`** 装配路径可以被真实验证。
 > 选型与检索口径以 [docs/00-system-design.md](../../docs/00-system-design.md) 与
-> `src/pra/rag/chroma_backend.py` 的模块注释为准；
+> `src/pra/rag/` 的模块注释为准；
 > 本文件只记录**部署事实与实测结果**。
 
 ## 1. 定位（勿偏移）
@@ -11,11 +11,11 @@
 - **ChromaDB 是本仓库 RAG 的向量库后端**（选型与口径见 [docs/00-system-design.md](../../docs/00-system-design.md) 的 RAG 节）：`ChromaDB 1.5.9`，
   **Docker 服务端 + Python `HttpClient`**（不进程内起库，与「真服务端」叙事一致）。
 - Chroma 只承担「**存向量 + 算余弦**」；元数据过滤、BM25、融合、Top-K 排序仍在
-  **Python 侧**（同口径前提，见 `src/pra/rag/chroma_backend.py`）。
+  **Python 侧**（同口径前提，见 `src/pra/rag/`）。
 - **检索升级已实施**：本目录交付**部署**，检索升级（LlamaIndex + BGE 向量路 + BM25(jieba)
-  + RRF）与 `src/pra/rag/chroma_backend.py` **均已落地**；
+  + RRF）与 `src/pra/rag/` **均已落地**；
   检索口径以 [docs/00-system-design.md](../../docs/00-system-design.md) 的 RAG 节与
-  `src/pra/rag/chroma_backend.py` 的模块注释为准；
+  `src/pra/rag/` 的模块注释为准；
   `factory.py` 直接装配 chroma 索引（**已无 `backend` 开关** —— 原 `local` 后端已移除）。
 
 ## 2. 端口与数据
@@ -150,8 +150,8 @@ client = chromadb.HttpClient(host="127.0.0.1", port=8001)   # 服务端（本目
 # client = chromadb.PersistentClient(path="…")              # 进程内本地持久
 ```
 
-> ⚠️ **接线状态**：`src/pra/rag/chroma_backend.py`（LlamaIndex 装配）与
-> `src/pra/rag/factory.py` 的 chroma 装配路径**均已落地**（检索口径见 docs/00 与 `chroma_backend.py`）。
+> ⚠️ **接线状态**：`src/pra/rag/`（LlamaIndex 装配）与
+> `src/pra/rag/factory.py` 的 chroma 装配路径**均已落地**（检索口径见 docs/00 与 `pra/rag/` 各模块注释）。
 > 上面的片段既是**客户端契约**，也是仓库实现的接线方式（已用 `chromadb 1.5.9` 对本服务端实测通过）。
 > `pyproject.toml` 的 `rag` extra 已含 `chromadb` + 三个 LlamaIndex 具体集成包。
 
@@ -186,7 +186,7 @@ ONNX 模型，既慢又与「默认不联网」基调冲突。
 | `configuration={"hnsw": {"space": "cosine"}}` | `cosine` | 0.993883735 | 0.006116265 | **`0.006116271`** ✅ |
 | `metadata={"hnsw:space": "cosine"}`（旧写法） | `cosine` | 0.993883735 | 0.006116265 | **`0.006116271`** ✅ |
 
-→ **结论：只要 collection 是 `cosine`，Chroma 的 distance 就是 `1 − cos`**（与 `chroma_backend.py` 的空间自检一致，
+→ **结论：只要 collection 是 `cosine`，Chroma 的 distance 就是 `1 − cos`**（建库时 `chroma_store._open_collection` 已显式设 `space="cosine"`，无运行期自检，
 实测 `0.006116271` ↔ 计算值 `0.006116265`，差在浮点与向量归一化精度）。
 
 **但缺省 space 是 `l2`（不是 cosine）** —— 这是本次实测最容易踩的坑：用
@@ -241,7 +241,7 @@ Chroma 的连接参数目前**只能程序化传入**，尚无配置项或 CLI �
 - 语料仍是 **24 政策 / 67 案例**的小语料（沿用不变）→ **不构成能力声明**，
   更不代表 Chroma 在生产规模下的表现。
 - 本目录**只交付部署**；检索升级（LlamaIndex + BGE 向量路 + BM25 + RRF）**已实施**，
-  相关代码见 `src/pra/rag/`（`chroma_backend.py` 等；口径见 docs/00 与 §1、§6）。
+  相关代码见 `src/pra/rag/`（`vector.py` / `bm25.py` / `chroma_store.py` 等；口径见 docs/00 与 §1、§6）。
 - 以上均为 `chromadb/chroma:1.5.9` 镜像 + `chromadb 1.5.9` Python 包（本机 `uv` 环境）
   的实测结果；镜像内 `chroma --version` 自报 **`1.4.4`**（CLI 自报版本与镜像 tag / Python
   包版本不同源，**未深究二者差异**，如需精确对齐请以 tag 与 PyPI 包为准）。
