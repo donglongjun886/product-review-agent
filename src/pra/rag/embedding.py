@@ -17,14 +17,18 @@ def production_embedder(*, cache_dir: str | None = None) -> Any:
     缓存，**模型未缓存即抛、绝不联网下载** —— 请求线程里下 ~90MB 会把一次审核拖成分钟级，被墙
     还会挂死。失败转成带指引的 ``RuntimeError``，调用方记 warn failure，**不静默回退任何编码器**。
     预热（唯一需要联网的场合）直接用 ``fastembed.TextEmbedding`` 下到该目录。
+
+    不变量：``FastEmbedEmbedding`` 的 import **必须留在 ``try`` 块内** —— 「缺 rag extra」与
+    「模型未缓存」两种成因都要汇到同一条带指引的 ``RuntimeError``；import 一旦被挪到 ``try``
+    之外，「缺 extra」会裸抛 ``ModuleNotFoundError``、拿不到安装指引（本路径无请求期下载）。
     :param cache_dir: 模型缓存目录；None → 取 ``PRA_EMBED_CACHE_DIR``，未设则由 fastembed 定。
     """
     import os
 
-    from llama_index.embeddings.fastembed import FastEmbedEmbedding
-
     resolved = cache_dir if cache_dir is not None else os.environ.get("PRA_EMBED_CACHE_DIR")
     try:
+        from llama_index.embeddings.fastembed import FastEmbedEmbedding
+
         return FastEmbedEmbedding(
             model_name=BGE_MODEL,
             cache_dir=resolved,

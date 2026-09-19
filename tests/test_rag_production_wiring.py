@@ -15,7 +15,10 @@ import fastembed，避免污染其他用例的 ``sys.modules`` 断言）。CI �
 from __future__ import annotations
 
 import importlib.util
+import json
 import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -157,6 +160,55 @@ def test_production_embedder_fails_fast_instead_of_downloading(monkeypatch, tmp_
         tools_pkg.production_embedder()
     assert time.monotonic() - started < 15, "必须是本地立即失败，而不是卡在下载/联网超时上"
     assert not any(tmp_path.rglob("*.onnx")), "失败路径不得在缓存目录留下模型下载产物"
+
+
+#: 子进程脚本：屏蔽 ``llama_index``（模拟「缺 rag extra」）后调 ``production_embedder``。
+#: 「缺 extra」也必须汇到同一条带安装指引的 ``RuntimeError``（import 必须留在 ``try`` 内）。
+_NOEXTRA_CHILD_SCRIPT = """
+import importlib.abc, json, sys
+
+
+class _Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "llama_index" or name.startswith("llama_index."):
+            raise ModuleNotFoundError(f"No module named '{name}'")
+        return None
+
+
+sys.meta_path.insert(0, _Block())
+for _k in [k for k in sys.modules if k.split(".")[0] == "llama_index"]:
+    del sys.modules[_k]
+from pra.tools import production_embedder
+
+try:
+    production_embedder(cache_dir="/tmp/pra-noextra-guard")
+except BaseException as _e:
+    print("PRA_NOEXTRA:" + json.dumps({"type": type(_e).__name__, "msg": str(_e)}))
+else:
+    print("PRA_NOEXTRA:" + json.dumps({"type": "NONE", "msg": ""}))
+"""
+
+
+def test_missing_extra_embedder_raises_guided_runtime_error():
+    """缺 rag extra（``llama_index`` 不可导入）时 ``production_embedder`` 必须抛带安装指引的
+    ``RuntimeError``（含 ``uv sync --extra rag``），而非裸 ``ModuleNotFoundError``。
+
+    子进程模拟「缺 extra」：装了 extra 的开发 venv 里 ``llama_index`` 已在 ``sys.modules``，
+    进程内屏蔽不可靠（先例见 ``test_rag_default_path_no_extra`` 的 docstring）。本用例是这条路径
+    在装了 extra 的环境下唯一的守护 —— import 一旦被挪出 ``try`` 会再次静默复发。
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _NOEXTRA_CHILD_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert proc.returncode == 0, f"缺 extra 子进程失败：\n{proc.stdout}\n{proc.stderr}"
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("PRA_NOEXTRA:")]
+    payload = json.loads(lines[-1][len("PRA_NOEXTRA:") :])
+    assert payload["type"] == "RuntimeError", f"缺 extra 应抛 RuntimeError，实为 {payload['type']}"
+    assert "uv sync --extra rag" in payload["msg"], "缺 extra 的异常须带安装指引（承重）"
 
 
 # ---------------------------------------------------------------------------
