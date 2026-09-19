@@ -50,7 +50,6 @@ __all__ = [
     "check_cosine_space",
     "delete_collection",
     "make_chroma_client",
-    "reset_served_counters",
     "served_counters",
 ]
 
@@ -78,12 +77,6 @@ _RRF_K = 60.0
 #: 本进程内经本模块发出的计数（验收断言用）：llm 必须恒为 0（检索侧零 LLM）。
 SERVED_COUNTERS: dict[str, int] = {
     "llm_calls": 0,
-    "vector_searches": 0,
-    "bm25_searches": 0,
-    "hybrid_searches": 0,
-    "served_hits": 0,
-    #: 向量路在 Chroma 少返候选时，由本模块按已存向量补算 cos 的次数（正常应恒为 0）。
-    "vector_bruteforce_fallbacks": 0,
 }
 
 #: 向量路覆盖率自检的重试次数（第三方少返是已知风险；重试后仍不覆盖即抛）。
@@ -315,11 +308,6 @@ def delete_collection(
 
 def served_counters() -> dict[str, int]:
     return dict(SERVED_COUNTERS)
-
-
-def reset_served_counters() -> None:
-    for key in SERVED_COUNTERS:
-        SERVED_COUNTERS[key] = 0
 
 
 # ---------------------------------------------------------------------------
@@ -786,7 +774,6 @@ class _ChromaIndexBase:
         # ``index.space`` / ``collection_name`` 会抛 AttributeError，与「空 KB 未建库则为 None/""」
         # 的口径不符。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算），见下方 if 分支。
         self.collection_space: str | None = None
-        self._self_check_distance: float | None = None
         self._collection: Any | None = None
         self._nodes: list[Any] = []
         self._node_ids: list[str] = []
@@ -845,7 +832,7 @@ class _ChromaIndexBase:
             documents=[node.get_content() for node in self._nodes],
         )
         self.collection_space = _collection_space(collection)
-        self._self_check_distance = check_cosine_self_check(
+        check_cosine_self_check(
             collection, self._doc_vectors[0], name=self.collection_name
         )
         self._collection = collection
@@ -863,14 +850,6 @@ class _ChromaIndexBase:
         供测试/审计读取（对应 ``configuration["hnsw"]["space"]``）。
         """
         return self.collection_space
-
-    @property
-    def cosine_self_check_distance(self) -> float | None:
-        return self._self_check_distance
-
-    @property
-    def collection_count(self) -> int:
-        return int(self._collection.count()) if self._collection is not None else 0
 
     @property
     def node_ids(self) -> list[str]:
@@ -908,15 +887,12 @@ class _ChromaIndexBase:
         query_bundle: Any,
         top_k: int,
         store_filters: Any | None,
-        *,
-        count_search: bool = True,
     ) -> list[tuple[int, float]]:
         """向量路排名：``[(行索引, 1 − distance)]``（精确候选 id 集 + store 侧 category 下推）。
 
         三件事保证结果完整：打分域 = 精确候选集（不让非候选行抢名额）；覆盖率
         自检（返回 id 必须覆盖候选 id，否则重试/抛）；覆盖率失败时用 Chroma 已存的 doc 向量
-        兜底现算 cos，并累加 ``SERVED_COUNTERS["vector_bruteforce_fallbacks"]`` 使其可见。
-        ``count_search`` 控制本次是否记一次 ``vector_searches``（重试/兜底不重复计数）。
+        兜底现算 cos。
         """
         retriever = _make_vector_retriever(
             sub_ctx, top_k, store_filters, candidate_ids=list(sub_ctx.node_ids)
@@ -924,17 +900,14 @@ class _ChromaIndexBase:
         try:
             nodes = retriever.retrieve(query_bundle)
         except RuntimeError:
-            # 覆盖率重试仍不足 → 已存向量兜底（结果仍完整；计数可见）。
+            # 覆盖率重试仍不足 → 已存向量兜底（结果仍完整）。
             nodes = []
-        if count_search:
-            SERVED_COUNTERS["vector_searches"] += 1
         scored: dict[str, float] = {
             n.node.node_id: n.score for n in nodes if n.node.node_id in sub_ctx.row_index_by_key
         }
         missing = [nid for nid in sub_ctx.node_ids if nid not in scored]
         if missing:
             scored.update(self._score_missing_by_stored_vectors(sub_ctx, query_bundle, missing))
-            SERVED_COUNTERS["vector_bruteforce_fallbacks"] += 1
         ranked = [(sub_ctx.row_index_by_key[nid], score) for nid, score in scored.items()]
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
         return [(i, round(s, 6)) for i, s in ranked]
@@ -984,7 +957,6 @@ class _ChromaIndexBase:
         """
         retriever = _make_bm25_retriever(sub_ctx, top_k)
         nodes = self._bm25_retrieve(retriever, query_bundle)
-        SERVED_COUNTERS["bm25_searches"] += 1
         pairs = [
             (sub_ctx.row_index_by_key[n.node.node_id], float(n.score or 0.0))
             for n in nodes
@@ -1012,7 +984,6 @@ class _ChromaIndexBase:
         """
         vec_ranked = self._rank_vector(sub_ctx, query_bundle, top_k, store_filters)
         bm25_ranked = self._rank_bm25(sub_ctx, query_bundle, top_k)
-        SERVED_COUNTERS["hybrid_searches"] += 1
         # RRF 的输入是「两路各自的排名列表」：把 (行索引, 分) 排名还原为 node id 顺序。
         id_by_row = {row: nid for nid, row in sub_ctx.row_index_by_key.items()}
         ranked_lists = {
@@ -1106,9 +1077,6 @@ class ChromaPolicyIndex(_ChromaIndexBase):
 
     _spec = _POLICY_SPEC
 
-    def effective_count(self) -> int:
-        return sum(1 for r in self._rows if r.status == "EFFECTIVE")
-
     async def search(
         self,
         query: str,
@@ -1129,7 +1097,6 @@ class ChromaPolicyIndex(_ChromaIndexBase):
             store_filters=_policy_store_filters(filters, self._llama),
             recheck=lambda i: i in set(candidates),
         )
-        SERVED_COUNTERS["served_hits"] += len(ranked)
         return [
             PolicyClauseHit.model_validate(self._rows[i].model_dump(mode="json"))
             for i, _score in ranked
@@ -1159,7 +1126,6 @@ class ChromaCaseIndex(_ChromaIndexBase):
             store_filters=_case_store_filters(filters, self._llama),
             recheck=lambda i: i in set(candidates),
         )
-        SERVED_COUNTERS["served_hits"] += len(ranked)
         hits: list[CaseHit] = []
         for i, score in ranked:
             row = self._rows[i]

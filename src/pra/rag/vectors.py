@@ -1,7 +1,6 @@
 """向量余弦相似度 —— 纯 Python 实现，零第三方依赖。
 
-chroma 后端在**向量路覆盖率自检未通过**时用它补算候选与 query 的余弦（正常路径恒为 0 次，见
-``chroma_backend.SERVED_COUNTERS["vector_bruteforce_fallbacks"]``）。
+chroma 后端在**向量路覆盖率自检未通过**时用它补算候选与 query 的余弦（兜底路径，正常不触发）。
 
 确定性：浮点运算是 IEEE-754 可重复的（无随机、无并行归约），满足评测逐字节可重放的硬约束。
 """
