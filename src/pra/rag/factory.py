@@ -3,10 +3,10 @@
 注入点：corpus 路径（缺省取 rag/corpus/ 内静态 JSON，失败即报错不静默）、embedder（缺省
 ``MockHashEmbedder``）、mode / weights（三模式可切、权重可配）。
 
-``backend`` 开关：``"local"``（**默认**）= numpy 余弦内存检索；``"qdrant"`` = Qdrant 实现
-（向量存储 + 余弦打分，过滤/BM25/融合/Top-K 仍在 Python 侧同口径）；``"chroma"`` = Chroma
-实现（ChromaDB cosine + LlamaIndex 检索器 + RRF）。后两者都**分支内延迟 import**，默认 local
-路径不引入其中任何一个包。上层只依赖返回的索引（三者都实现 tools 层 Protocol）。
+``backend`` 开关：``"local"``（**默认**）= 纯 Python 余弦内存检索；``"chroma"`` = Chroma 实现
+（ChromaDB cosine + LlamaIndex 检索器 + RRF），**分支内延迟 import**，默认 local 路径不引入
+chromadb / llama_index / bm25s / jieba 中的任何一个包。上层只依赖返回的索引（两者都实现
+tools 层 Protocol）。
 """
 
 from __future__ import annotations
@@ -46,9 +46,7 @@ def build_policy_index(
     embedder: Embedder | None = None,
     mode: RetrievalMode = "hybrid",
     weights: tuple[float, float] = DEFAULT_WEIGHTS,
-    backend: Literal["local", "qdrant", "chroma"] = "local",
-    qdrant_client: Any | None = None,
-    location: str | Path = ":memory:",
+    backend: Literal["local", "chroma"] = "local",
     collection_prefix: str | None = None,
     chroma_client: Any | None = None,
     chroma_host: str = "127.0.0.1",
@@ -58,24 +56,11 @@ def build_policy_index(
     """构造 PolicyIndex（corpus_path 缺省 = rag/corpus/policies.json）。
 
     ``rows`` 显式注入时优先（跳过文件 IO）。``backend`` 缺省 ``"local"`` 走 ``RagPolicyIndex``；
-    ``"qdrant"`` / ``"chroma"`` 走对应实现（两者均**分支内延迟 import**），并透传专属装配参数。
-    返回类型标注为 ``RagPolicyIndex``，实际可能是三者之一 —— 均实现 tools 层 ``PolicyIndex``
+    ``"chroma"`` 走 ``ChromaPolicyIndex``（**分支内延迟 import**），并透传专属装配参数。
+    返回类型标注为 ``RagPolicyIndex``，实际可能是两者之一 —— 均实现 tools 层 ``PolicyIndex``
     Protocol。
     """
     record_rows, _meta = _resolve_rows(rows, corpus_path, load_policies)
-    if backend == "qdrant":
-        # 延迟 import：仅显式 qdrant 后端才拉起 qdrant_index。
-        from pra.rag.qdrant_index import QdrantPolicyIndex
-
-        return QdrantPolicyIndex(
-            record_rows,
-            embedder=embedder or MockHashEmbedder(),
-            mode=mode,
-            weights=weights,
-            qdrant_client=qdrant_client,
-            location=location,
-            collection_prefix=collection_prefix,
-        )
     if backend == "chroma":
         # 延迟 import：仅显式 chroma 后端才拉起 chroma_backend（+chromadb / llama-index /
         # bm25s / jieba）。
@@ -107,9 +92,7 @@ def build_case_index(
     embedder: Embedder | None = None,
     mode: RetrievalMode = "hybrid",
     weights: tuple[float, float] = DEFAULT_WEIGHTS,
-    backend: Literal["local", "qdrant", "chroma"] = "local",
-    qdrant_client: Any | None = None,
-    location: str | Path = ":memory:",
+    backend: Literal["local", "chroma"] = "local",
     collection_prefix: str | None = None,
     chroma_client: Any | None = None,
     chroma_host: str = "127.0.0.1",
@@ -121,18 +104,6 @@ def build_case_index(
     ``rows`` 显式注入时优先（跳过文件 IO）。``backend`` 语义与 ``build_policy_index`` 相同。
     """
     record_rows, _meta = _resolve_rows(rows, corpus_path, load_cases)
-    if backend == "qdrant":
-        from pra.rag.qdrant_index import QdrantCaseIndex
-
-        return QdrantCaseIndex(
-            record_rows,
-            embedder=embedder or MockHashEmbedder(),
-            mode=mode,
-            weights=weights,
-            qdrant_client=qdrant_client,
-            location=location,
-            collection_prefix=collection_prefix,
-        )
     if backend == "chroma":
         from pra.rag.chroma_backend import ChromaCaseIndex
 

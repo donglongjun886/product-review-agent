@@ -81,7 +81,7 @@ HUMAN_REVIEW → 人工裁决 → 回流案例库 + 策略库 + 评测集
 | 同步机审 | FastAPI 服务 + 规则引擎 | 高吞吐、低延迟、确定性 |
 | 分流 | 状态机 + 阈值规则 | 明确性决策，不滥用 LLM |
 | 复杂调查 | LangGraph StateGraph（asyncio + Worker） | 预算控制、可恢复状态机 |
-| 工具/RAG | 内部服务 + 向量检索（ChromaDB；Qdrant 暂留） | 多源数据访问 |
+| 工具/RAG | 内部服务 + 向量检索（ChromaDB） | 多源数据访问 |
 | 人工回流 | 审核工作台 + 反馈 Topic（**规划，未实现**） | 闭环、知识沉淀 |
 | 全链路 | MySQL 状态机（**已用**）+ Redis 幂等/限流、OTel（**规划，未实现**） | 可靠性、可观测性（现状：可观测性为 Langfuse，见 §10.4） |
 
@@ -472,8 +472,8 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 **链路**：`Query → 双路召回（ChromaDB(cosine) + BGE 向量 / BM25(bm25s + jieba)）→ RRF 融合 → Top-K → CaseSearch / PolicySearch Tool → Evidence → Agent`。
 
-- **默认后端仍是 `local`**（numpy 内存索引 + `MockHashEmbedder`，确定性、无外部依赖）；装 `--extra rag` 后可切 `rag_backend="chroma"`
-  （LlamaIndex 装配 + ChromaDB + BGE）；`factory.py` 的 `backend` 取值为 `local | qdrant | chroma`。
+- **默认后端仍是 `local`**（纯 Python 余弦内存索引 + `MockHashEmbedder`，确定性、无外部依赖）；装 `--extra rag` 后可切 `rag_backend="chroma"`
+  （LlamaIndex 装配 + ChromaDB + BGE）；`factory.py` 的 `backend` 取值为 `local | chroma`。
   生产 / HTTP 入口（`build_production_tools()`）即用 **chroma + BGE + hybrid**，但经 `Lazy*Index` 惰性构建（首次检索才建库）。
 - 🔴 **Chroma 建库必须显式 `space="cosine"`**：缺省是 `l2`，会让「相似度 = 1 − distance」**静默失效**；且对**已存在**的 l2 collection
   传 cosine 配置**不生效**——创建与复用两条路径都必须校验，不符即报错（不静默沿用）。
@@ -490,8 +490,8 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
   **口径红线：不得称该实现「天然线程安全」**——它仍是全局符号替换，已验证的只是「同进程内本模块两个调用点在并发下互不污染、不泄漏」。
 - **CI 只跑 `uv sync --frozen`（不装任何 extra）** → `chromadb` / LlamaIndex 都不在环境里，chroma 相关测试文件在 CI 上**整文件 skip**
   （**不得声称「CI 覆盖 chroma」**）；CI 上真正跑的检索侧守护是「默认路径不引入这 4 个 extra 模块」的契约测试。
-- **Qdrant 方案已被 ChromaDB 取代**（迁移期保留：代码与 `deploy/qdrant` 留在仓库、本机容器已卸）；其中一条教训仍成立：
-  point id 曾是 **128 位整数**，进程内模式不校验上界、**只在真 server 上以 400 暴露**，故已修为 u64 并补真服务端集成测试。
+- **历史教训（Qdrant 后端已移除，结论对 chroma 同样成立）**：进程内模式（`:memory:` / `EphemeralClient`）对 id / 维度等约束
+  **比真服务端宽松**，缺陷可能在单测全绿下潜伏、**只在真 server 上以 4xx 暴露** ⇒ 真服务端集成用例不可省（Qdrant point id 曾因此踩坑）。
 
 ---
 

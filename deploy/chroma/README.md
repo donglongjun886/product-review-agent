@@ -12,12 +12,6 @@
   **Docker 服务端 + Python `HttpClient`**（不进程内起库，与「真服务端」叙事一致）。
 - Chroma 只承担「**存向量 + 算余弦**」；元数据过滤、BM25、融合、Top-K 排序仍在
   **Python 侧**（同口径前提，见 `src/pra/rag/chroma_backend.py`）。
-- **`deploy/qdrant` 暂不删除**：Qdrant 是 RAG Phase 2（已被 ChromaDB 取代）的向量库，`rag_backend="qdrant"`
-  与 `scripts/run_rag_phase2_demo.py` 仍在（迁移期暂留不删）。但**本机容器已卸、
-  `qdrant_qdrant_storage` 卷亦已删除**（`docker ps -a` / `docker volume ls` 均无）——要复跑
-  那 3 个真服务端集成用例得先 `cd deploy/qdrant && docker compose up -d` 重来。
-  两套部署的端口**互不冲突**（Qdrant 6333/6334 vs Chroma 8001）；**Qdrant 去留另定**，
-  迁移期保留其代码与部署以便对照/复跑。
 - **检索升级已实施**：本目录交付**部署**，检索升级（LlamaIndex + BGE 向量路 + BM25(jieba)
   + RRF）与 `src/pra/rag/chroma_backend.py` **均已落地**；
   检索口径以 [docs/00-system-design.md](../../docs/00-system-design.md) 的 RAG 节与
@@ -37,12 +31,12 @@
 （README「API 演示」段），两者同时跑会**端口冲突**。故宿主机侧刻意错开为 `8001`，
 容器内仍保持镜像默认的 `8000`。
 
-- 两个端口都只绑 `127.0.0.1`（与 `deploy/langfuse` 内部服务、`deploy/qdrant` 同策略）。
+- 两个端口都只绑 `127.0.0.1`（与 `deploy/langfuse` 内部服务同策略）。
 
 ## 3. 镜像拉取（本机网络约束，实测）
 
 本机 **`registry-1.docker.io` 直连超时**，必须走国内镜像源，并在拉取后
-**retag 成规范名**（compose 里只写规范名，与 `deploy/langfuse` / `deploy/qdrant` 同一做法）：
+**retag 成规范名**（compose 里只写规范名，与 `deploy/langfuse` 同一做法）：
 
 ```bash
 docker pull docker.1panel.live/chromadb/chroma:1.5.9
@@ -78,10 +72,8 @@ docker compose down -v          # 停止并删除数据（彻底重置）
 | `docker compose down` → `up -d`（冷启动） | **5.5 秒**转 `healthy` |
 | `docker compose restart chroma`（复用容器） | **6.6 秒**转 `healthy` |
 
-> ⚠️ 时间数值的出处澄清（避免误引）：**本目录 compose 注释并没有写「约 9 秒」** ——
-> 「约 9 秒转 healthy」是 **`deploy/qdrant/README.md`** 里 **Qdrant** 的实测值；本目录文档未给 Chroma 的对照数值。
-> 本目录实测更快（冷启动 5.5s / restart 6.6s，本机 Docker Desktop），两者**未深究差异**
-> （可能是机器负载或首次拉层解压）。**以你机器上的 `docker compose ps` 为准。**
+> ⚠️ **以你机器上的 `docker compose ps` 为准**：上表为本机 Docker Desktop 实测，差异可能来自机器负载
+> 或首次拉层解压。
 
 > ⚠️ `docker compose down -v` 会**删掉整块向量库数据**（含集成测试建的 collection）——
 > 这是**单卷、无备份**的部署，删了只能重灌 corpus（见 §9）。
@@ -113,7 +105,7 @@ done
 > **踩坑提醒**：
 > 1. **`/api/v1/*` 在 Chroma 1.x 上整体不可用**（410 + `Please use /v2 apis`）。网上大量
 >    示例（含各家 healthcheck 片段）仍在打 `/api/v1/heartbeat` —— 照抄会**恒判失败**。
-> 2. **没有 `/health`**：这不是 Qdrant/langfuse 那种自带 `/readyz`、`/api/public/health`
+> 2. **没有 `/health`**：这不是 langfuse 那种自带 `/readyz`、`/api/public/health`
 >    的服务，探针必须打 `/api/v2/heartbeat`。
 > 3. `/api/v2/version` 返回的 `"1.0.0"` 是**API 版本**；镜像/包的版本是 **1.5.9**，别混用。
 
@@ -220,8 +212,8 @@ ONNX 模型，既慢又与「默认不联网」基调冲突。
 ### 6.3 配置红线：**别把连接串写进仓库根 `.env`**
 
 `Settings` 是 **`extra="forbid"`**：未声明的键会让配置校验**直接报错**、应用起不来
-（`6cf763e` 踩过「POST 恒 500」的同类事故；qdrant 的 `QDRANT_*` 已有同样提醒）。
-Chroma / Qdrant 的连接参数目前**只能程序化传入**，尚无配置项或 CLI 开关。
+（`6cf763e` 踩过「POST 恒 500」的同类事故）。
+Chroma 的连接参数目前**只能程序化传入**，尚无配置项或 CLI 开关。
 
 ## 7. 安全
 

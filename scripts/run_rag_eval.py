@@ -8,7 +8,7 @@
 
 ``--probe`` 追加检索层报告（不跑 LLM/agent）：人工标注 probe 集在三模式下的 ``Recall@K``
 （默认 K=3，``--probe-top-k`` 可改），Policy KB 与 Case KB 并排；``--probe-only`` 只跑该报告。
-``--backend {local,chroma,qdrant}``（缺省 local，缺省路径输出与改动前逐字节一致）同时作用于
+``--backend {local,chroma}``（缺省 local，缺省路径输出与改动前逐字节一致）同时作用于
 agent A/B 的 RAG 臂与 probe 报告；``--smoke`` / ``--smoke-limit`` 跑确定性子集。
 
 A/B 隔离（``--chroma-client``，默认 ``ephemeral``）：chroma 臂缺省用
@@ -41,7 +41,7 @@ from pra.evaluation.harness.base import EvalContext
 from pra.evaluation.runner import EvaluationRunner
 
 MODES = ("bm25", "vector", "hybrid")
-BACKENDS = ("local", "chroma", "qdrant")
+BACKENDS = ("local", "chroma")
 #: chroma 臂的客户端选择：ephemeral = 进程内内存库（默认），http = 本机服务端。
 #: 默认选 ephemeral 的理由 = A/B 隔离（见模块 docstring）。
 CHROMA_CLIENTS = ("ephemeral", "http")

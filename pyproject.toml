@@ -24,10 +24,8 @@ dependencies = [
 #     **不装 llama-index 伞包**，避免拖进本项目不用的 llms-openai / embeddings-openai）
 #   BM25 = 成熟引擎经 LlamaIndex BM25Retriever（引擎 = bm25s）+ jieba 中文分词
 #   embedding = BGE（fastembed/onnx）
-# 注：qdrant-client 迁移期暂留（非默认路径），去留另定。
 rag = [
     "chromadb",
-    "qdrant-client",
     "fastembed",
     "llama-index-core>=0.13,<0.15",
     "llama-index-vector-stores-chroma>=0.6,<0.7",

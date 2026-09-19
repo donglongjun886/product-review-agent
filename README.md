@@ -133,19 +133,18 @@ uv run python scripts/run_evaluation_real.py --limit 10   # 真实 LLM 对照（
 
 ## 检索（Policy KB / Case KB）
 
-默认后端为 `local`（numpy 内存索引 + `MockHashEmbedder`，确定性、无外部依赖）。安装 `--extra rag`
+默认后端为 `local`（纯 Python 余弦内存索引 + `MockHashEmbedder`，确定性、无外部依赖）。安装 `--extra rag`
 后可切换 `rag_backend="chroma"`：ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF，检索口径见
 [docs/00-system-design.md](docs/00-system-design.md) 与 `src/pra/rag/chroma_backend.py` 模块注释。
 
 ```bash
 uv run python scripts/run_rag_demo.py                            # 三模式（bm25/vector/hybrid）Top-K 检索演示
-uv run python scripts/run_rag_eval.py --backend chroma           # RAG 评测：local / chroma / qdrant
+uv run python scripts/run_rag_eval.py --backend chroma           # RAG 评测：local / chroma
 uv run python scripts/run_rag_eval.py --backend chroma --probe   # 人工标注 probe 的 Recall@K（缺省关）
 ```
 
 `--backend chroma` 默认使用进程内 `EphemeralClient`（每臂独立、无需本机服务端），连接服务端请加
-`--chroma-client http`，部署见 [deploy/chroma/README.md](deploy/chroma/README.md)。Qdrant 路径代码与
-`deploy/qdrant` 保留可用，但非默认。
+`--chroma-client http`，部署见 [deploy/chroma/README.md](deploy/chroma/README.md)。
 
 ## 可观测性（Langfuse，可选）
 
@@ -170,7 +169,7 @@ src/pra/
   domain/          Pydantic 契约（ProductReviewCase / ReviewDecision / Evidence …）
   tools/           6 个调查工具：product / merchant / image_analysis / ocr / case_search / policy_search
   screening/       机审引擎与三分流
-  rag/             知识库检索：local / chroma / qdrant、BM25、embedder、惰性索引
+  rag/             知识库检索：local / chroma、BM25、embedder、惰性索引
   evaluation/      评测 harness、数据集、指标、消融、扫描、回归
   infra/           MySQL 五表落库（SQLAlchemy 2.0 async）
   observability/   Tracer 适配层（Langfuse / Null）
@@ -198,7 +197,7 @@ docs/              系统设计与评测口径 · migrations/ DDL · scripts/ �
 | 接入层 | FastAPI + uvicorn |
 | 调查编排 | LangGraph StateGraph（5 节点 7 边单回环）+ InMemory Checkpointer |
 | LLM | `LLMBackend` 抽象：默认确定性 scripted 桩；`LiteLLMBackend` 经 `set_llm_backend` / `build_agent_graph(llm=)` 注入 |
-| 检索 | local（numpy + MockHash）/ chroma（ChromaDB + LlamaIndex + BGE + BM25 + RRF）/ qdrant |
+| 检索 | local（纯 Python 余弦 + MockHash）/ chroma（ChromaDB + LlamaIndex + BGE + BM25 + RRF） |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL |
 | 可观测性 | Langfuse v4（自托管）· Null Object 兜底 |
 | 质量 | pytest（含超时守护）· ruff · GitHub Actions |

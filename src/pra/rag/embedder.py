@@ -137,7 +137,7 @@ class BgeEmbedder:
 
         - ``<根>/models--<model_name 的 / 换成 -->/…``（fastembed/HF 快照布局）；
         - 默认模型另探测 ``models--Qdrant--bge-small-zh-v1.5``（fastembed 0.8 对该模型的
-          HF 源仓库为 Qdrant 官方 ONNX 仓库）；
+          HF 源仓库为 Qdrant 官方 ONNX 仓库 —— **这只是模型来源，与本仓库已移除的 Qdrant 向量库无关**）；
         - ``<根>/fast-<模型名最后一段>/``（fastembed GCS tar 落盘布局）。
         """
         from pathlib import Path

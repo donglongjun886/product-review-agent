@@ -33,7 +33,7 @@ __all__ = [
 
 def build_tools(
     data_source: Literal["memory", "rag"] = "memory",
-    rag_backend: Literal["local", "qdrant", "chroma"] = "local",
+    rag_backend: Literal["local", "chroma"] = "local",
     rag_embedder: Any | None = None,
     *,
     rag_backend_options: dict[str, Any] | None = None,
@@ -46,8 +46,8 @@ def build_tools(
     :param data_source: ``"memory"``（默认）= 6 工具 InMemory 种子世界；``"rag"`` =
         CaseSearchTool / PolicySearchTool 注入真实 RAG 索引，其余 4 工具仍为 InMemory 事实世界。
         RAG 索引经 ``pra.rag.factory`` **延迟 import**（默认 memory 路径零额外 import）。
-    :param rag_backend: 仅 ``data_source="rag"`` 生效 —— ``"local"``（默认）/ ``"qdrant"`` /
-        ``"chroma"``；后两者经 factory **延迟 import**，缺依赖时抛 ``RuntimeError``。
+    :param rag_backend: 仅 ``data_source="rag"`` 生效 —— ``"local"``（默认）/ ``"chroma"``；
+        后者经 factory **延迟 import**，缺依赖时抛 ``RuntimeError``。
     :param rag_embedder: RAG 检索 embedder（默认 None → factory 缺省 ``MockHashEmbedder``）。
     :param rag_backend_options: 后端专属装配参数透传字典；键名与 ``pra.rag.factory`` 参数
         **逐字对应**，未给键走 factory 缺省。

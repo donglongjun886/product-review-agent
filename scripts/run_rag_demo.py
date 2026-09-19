@@ -122,7 +122,7 @@ async def _main(argv: list[str] | None = None) -> int:
     for q in _CASE_QUERIES + args.query:
         await _case_table(q, args.top_k)
     await _evidence_demo()
-    print("\n[OK] RAG demo 完成（确定性 mock embedding + BM25 + 余弦；Phase 2 换本地模型 + Qdrant）")
+    print("\n[OK] RAG demo 完成（确定性 mock embedding + BM25 + 余弦；真语义模型见 chroma 后端）")
     return 0
 
 

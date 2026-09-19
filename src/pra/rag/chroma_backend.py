@@ -64,7 +64,7 @@ __all__ = [
 CHROMA_DEFAULT_HOST = "127.0.0.1"
 CHROMA_DEFAULT_PORT = 8001
 
-#: collection 名形状（与 qdrant 后端的 `_collection_name` 同形）。
+#: collection 名形状：`<prefix or 'pra'>_<policy|case>_<dim>`。
 COLLECTION_NAME_TEMPLATE = "<prefix or 'pra'>_<policy|case>_<dim>"
 
 _DEFAULT_COLLECTION_PREFIX = "pra"
@@ -114,8 +114,8 @@ def _import_chroma() -> tuple[Any, Any]:
 def _import_llama() -> dict[str, Any]:
     """延迟 import LlamaIndex 装配面（仅构造路径调用）。
 
-    只 import core + retrievers-bm25 + vector-stores-chroma 三个具体集成，不引伞包
-    ``llama-index``（伞包会拖进 llms-openai / embeddings-openai 等不用的集成）。
+    只 import core + retrievers-bm25 两个具体集成，不引伞包 ``llama-index``（伞包会拖进
+    llms-openai / embeddings-openai 等不用的集成）。
     """
     try:
         from llama_index.core.base.base_retriever import BaseRetriever
@@ -125,11 +125,10 @@ def _import_llama() -> dict[str, Any]:
         from llama_index.core.vector_stores import MetadataFilter, MetadataFilters
         from llama_index.core.vector_stores.types import FilterOperator
         from llama_index.retrievers.bm25 import BM25Retriever
-        from llama_index.vector_stores.chroma import ChromaVectorStore
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
         raise RuntimeError(
-            "chroma 后端需要 llama-index-core / llama-index-vector-stores-chroma / "
-            "llama-index-retrievers-bm25：请运行 `uv sync --extra rag` 安装；"
+            "chroma 后端需要 llama-index-core / llama-index-retrievers-bm25："
+            "请运行 `uv sync --extra rag` 安装；"
             '默认本地检索用 backend="local" 即可（无需该依赖）'
         ) from exc
     return {
@@ -143,7 +142,6 @@ def _import_llama() -> dict[str, Any]:
         "MetadataFilters": MetadataFilters,
         "FilterOperator": FilterOperator,
         "BM25Retriever": BM25Retriever,
-        "ChromaVectorStore": ChromaVectorStore,
     }
 
 
@@ -504,7 +502,7 @@ def _build_nodes(
 
 
 def _policy_candidates(rows: list[PolicyClauseRecord], filters: PolicySearchFilters, effective_only: bool) -> list[int]:
-    """候选行索引（语义与 local / qdrant 后端逐条一致）：``effective_only`` → ``status ==
+    """候选行索引（与 local 后端逐条一致）：``effective_only`` → ``status ==
     "EFFECTIVE"``；``category`` ∈ {None, 值, 全类目}；``risk_type`` 交叠非空。
     """
     candidates: list[int] = []
@@ -581,7 +579,6 @@ class _RetrievalContext:
     nodes: list[Any]
     collection: Any | None
     embed_model: Any
-    vector_store: Any
     llama: dict[str, Any]
     #: node_id → corpus 原序行索引（排序 tie-break 用原序，不依赖底层库返回顺序）。
     row_index_by_key: dict[str, int] = field(default_factory=dict)
@@ -814,11 +811,6 @@ class _ChromaIndexBase:
             _collection_name(collection_prefix, self._kind, self._dim) if self._rows else ""
         )
         self._collection = None
-        #: ``ChromaVectorStore``（LlamaIndex 官方 store 包装）——**装配面保留**：外部/测试可
-        #: 用它走标准 ``VectorStoreQuery`` 通路（vector-stores-chroma 集成确实被构造并被
-        #: 引用）；本模块自己的向量取数走原生 ``collection.query``（理由见模块
-        #: docstring 的 ``vector`` 段：该 store 的 ``exp(-distance)`` 不是余弦）。
-        self._vector_store = None
         self._nodes: list[Any] = []
         self._node_ids: list[str] = []
         if self._rows:
@@ -862,7 +854,6 @@ class _ChromaIndexBase:
             collection, self._doc_vectors[0], name=self.collection_name
         )
         self._collection = collection
-        self._vector_store = self._llama["ChromaVectorStore"](chroma_collection=collection)
 
     # -- size / 统计 ---------------------------------------------------------
 
@@ -911,7 +902,6 @@ class _ChromaIndexBase:
             nodes=[self._nodes[i] for i in candidates],
             collection=self._collection,
             embed_model=self._embed_model,
-            vector_store=self._vector_store,
             llama=self._llama,
             row_index_by_key={nid: candidates[offset] for offset, nid in enumerate(sub_ids)},
         )
@@ -1118,7 +1108,7 @@ def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
 class ChromaPolicyIndex(_ChromaIndexBase):
     """``PolicyIndex`` Protocol 的 Chroma + LlamaIndex 实现。
 
-    构造参数与 local / qdrant 后端对齐，另加 Chroma 装配参数（``chroma_client`` 注入 /
+    构造参数与 local 后端对齐，另加 Chroma 装配参数（``chroma_client`` 注入 /
     ``host``+``port`` 自建 / ``ephemeral`` 离线内存库 / ``collection_prefix``）。检索签名与
     工具契约逐字一致：``async def search(query, filters, top_k, effective_only) -> list[PolicyClauseHit]``。
     过滤语义（effective_only / category / risk_type）与既有实现逐条一致，差异只在

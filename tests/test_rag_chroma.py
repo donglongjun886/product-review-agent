@@ -246,7 +246,7 @@ async def test_chroma_case_protocol_shape_and_collection_facts() -> None:
 
 
 def test_chroma_collection_name_shape_and_metadata() -> None:
-    """collection 名形状 ``<prefix or "pra">_<policy|case>_<dim>``（与 qdrant 后端同形）。
+    """collection 名形状 ``<prefix or "pra">_<policy|case>_<dim>``。
 
     另钉住两条容易静默出错的建库约束：① ``embedding_function=None`` —— 配置里不得出现 Chroma
     默认 ONNX 嵌入函数（那会去下模型，而我们自带向量）；② 维度写进 collection metadata

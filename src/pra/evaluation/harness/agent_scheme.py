@@ -499,8 +499,8 @@ def make_rag_world_tools(
     差异只归因于检索数据源）。
 
     :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid 0.5/0.5）。
-    :param backend: 索引后端（缺省 "local" 行为不变）—— "local"（既有 numpy 实现）/
-        "qdrant" / "chroma"（ChromaDB + LlamaIndex；缺 ``rag`` extra 依赖时构造即抛，
+    :param backend: 索引后端（缺省 "local" 行为不变）—— "local"（纯 Python 余弦内存实现）/
+        "chroma"（ChromaDB + LlamaIndex；缺 ``rag`` extra 依赖时构造即抛，
         不静默降级）。只影响索引装配，零判定逻辑改动。
     :param backend_options: 后端装配参数透传（缺省 None = 不传 → 装配与改动前逐字节
         等价）；键名与 ``pra.rag.factory`` 构造参数逐字对应（如 chroma 的

@@ -458,7 +458,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ### 10.1 RAG 三路 Recall@3（小 probe；如实并排，不预设 hybrid 最优）
 
-**A. 真实 BGE + Qdrant 进程内（2026-09-09；`bge-small-zh-v1.5`，hybrid 权重 0.5/0.5，Policy/Case 各 8 条 probe = 5 keyword + 3 同义改写）**
+**A. 真实 BGE + 进程内向量库（2026-09-09；当时后端为 Qdrant 进程内，该后端已移除；`bge-small-zh-v1.5`，hybrid 权重 0.5/0.5，Policy/Case 各 8 条 probe = 5 keyword + 3 同义改写）**
 
 | KB | bm25 | vector | hybrid |
 |---|---|---|---|
@@ -497,12 +497,13 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
   实测 **3 case → 3 条 root trace / 69 条 observation**，全部 `sessionId=eval-demo-1`，每 case 带 `eval_case_id`。
 - **口径**：scripted 桩路径下 token=0 / cost 空 / latency≈0 是真实情况，不得伪造（详见 docs/00 可观测性节）。
 
-### 10.4 Qdrant 历史实测（`url=` 远端 server，2026-09-10）
+### 10.4 已移除后端的历史教训（Qdrant `url=` 远端 server，2026-09-10）
 
-- 阻断缺陷：`_point_id()` 取 sha256 前 16 字节 → **128 位整数**，而 Qdrant 服务端只接受 u64/UUID；
-  qdrant-client 进程内模式不校验上界，**只在真 server 上以 400 暴露**（复盘见 `src/pra/rag/qdrant_index.py`）。
+- 阻断缺陷：point id 取 sha256 前 16 字节 → **128 位整数**，而 Qdrant 服务端只接受 u64/UUID；
+  其**进程内模式不校验上界**，**只在真 server 上以 400 暴露**。
 - 修复（截为 u64）后：真 server 落库 **24 / 67 点**，与 `local` 后端 top3 逐条一致。
-- 该路线**已被 ChromaDB 取代**，此处数字仅作历史对照。
+- **该后端与 `deploy/qdrant` 已从仓库移除**，此条只保留教训：进程内模式的约束比真服务端宽松，
+  缺陷可潜伏于全绿单测 ⇒ 真服务端集成用例不可省（当前 chroma 后端同样适用）。
 
 ---
 

@@ -7,7 +7,7 @@
 - ``factory.py``：装配入口 ``build_policy_index`` / ``build_case_index``。
 
 默认 embedding 是**确定性 mock（hash）**：只验证链路与可重放、**不是语义检索**；真语义
-模型与向量库是可选后端（``backend="qdrant"`` / ``"chroma"``），默认路径不装任何向量库依赖。
+模型与向量库是可选后端（``backend="chroma"``），默认路径不装任何向量库依赖。
 """
 
 from __future__ import annotations

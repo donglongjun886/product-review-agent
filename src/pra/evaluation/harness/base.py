@@ -43,7 +43,7 @@ class EvalContext(BaseModel):
       评测侧相似度分档读取路径（agent_scheme 的确定性审查员模型）；真实图 tools_node 的
       quality_filter / gate overlay 常量属 pra.agent 业务层，不经本字段改动。
     - RAG 世界参数（仅 tool_world="rag" 生效）：``rag_mode`` = "bm25" / "vector" /
-      "hybrid"；``rag_backend`` = "local"（默认）/ "qdrant" / "chroma"，经
+      "hybrid"；``rag_backend`` = "local"（默认）/ "chroma"，经
       ``make_rag_world_tools`` 透传给 ``pra.rag.factory``；``rag_backend_options`` =
       后端装配参数透传（键名与 ``pra.rag.factory`` 构造参数逐字对应，None = 不传）。
       只影响索引装配，零判定逻辑改动。
@@ -62,7 +62,7 @@ class EvalContext(BaseModel):
         default=None,
         description="RAG 世界检索模式（tool_world='rag' 时生效；None → hybrid 0.5/0.5）",
     )
-    rag_backend: Literal["local", "qdrant", "chroma"] = Field(
+    rag_backend: Literal["local", "chroma"] = Field(
         default="local",
         description="RAG 世界索引后端（tool_world='rag' 时生效；默认 local = 既有实现）",
     )

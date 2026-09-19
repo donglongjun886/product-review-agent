@@ -1,7 +1,7 @@
 """真 Chroma 服务端集成测试 —— 服务端不可达时整文件 skip。
 
-内存库（``EphemeralClient``）与真服务端的差异不只是连接串：Qdrant ``point id`` 上界缺陷
-就曾在进程内模式全绿、只在真 server 炸。本文件钉住真服务端路径：建库 → 全量 upsert →
+内存库（``EphemeralClient``）与真服务端的差异不只是连接串：进程内模式对 id / 维度等约束更宽松，
+缺陷可能在全绿单测下潜伏、只在真 server 炸。本文件钉住真服务端路径：建库 → 全量 upsert →
 服务端点数校验 → 检索与 local 同口径。覆盖点：
 
 1. ``build_*_index(backend="chroma", chroma_host=…, chroma_port=…)`` 的 ``HttpClient`` 分支真连上；

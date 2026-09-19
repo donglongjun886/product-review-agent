@@ -18,7 +18,7 @@
 #   （Debian 13 + `chroma` CLI；entrypoint = `dumb-init -- chroma run /config.yaml`，
 #   持久路径取自镜像内 /config.yaml 的 `persist_path: "/data"`）→ healthcheck 只能用
 #   bash 的 /dev/tcp 发最小 HTTP 请求。启动实测：冷启动 **5.5s** / restart **6.6s**
-#   转 healthy（见 README §「起停验」；**不是** 9 秒 —— 那是 deploy/qdrant 的数值）。
+#   转 healthy（见 README §「起停验」）。
 # ============================================================================
 services:
   chroma:
