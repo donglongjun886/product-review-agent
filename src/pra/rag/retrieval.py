@@ -33,10 +33,11 @@ def fuse_rrf(ranked: dict[str, list[str]], row_index: dict[str, int]) -> list[tu
     """RRF（Reciprocal Rank Fusion）：``score(d) = Σ_r 1 / (k + rank_r(d))``，``k=60``。
 
     融合定义与 ``QueryFusionRetriever._reciprocal_rerank_fusion`` 逐条一致，但**由本模块自己
-    算**：该实现在融合时会**原地改写** ``NodeWithScore.node.score``，而 node 对象跨检索共享 →
-    融合分被写回共享对象，下一次检索的结果会随此前的调用序列漂移。另：该库用 ``node.hash``
-    去重，而本 corpus 存在内容相同的行 → 会把不同先例合并；本模块用 **node id**（逐行唯一）
-    作融合键。
+    算**：该实现在融合时会**原地改写** ``NodeWithScore.node.score``。另：该库默认
+    ``num_queries=4``，会调用 ``self._llm.complete`` 生成扩展查询 —— 与本仓「检索链路零 LLM」
+    的红线冲突。该库还按 ``node.hash`` 去重，而 Chroma 回读 metadata 的键序每次调用都不同
+    （1.5.9），同一行在两路上算出的 ``node.hash`` 不同 → 同一文档被拆成两个、融合退化成单路
+    并列。本模块用 **node id**（逐行唯一）作融合键。
 
     ⚠️ **上界是 ``2/60``（≈0.0333），不是 ``2/61``**：rank 从 **0** 起（``enumerate(ids)``），
     首位贡献 ``1/(60+0)``，两路都排首位即 ``2/60 = 1/30``。返回 ``[(行索引, 6 位 RRF 分)]``，

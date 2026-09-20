@@ -354,9 +354,9 @@ async def test_filter_plus_retrieval_no_silent_recall_loss(policy_bm25: Any) -> 
     """红线：**带过滤时**的检索不得静默漏召回（漏召回只在带过滤时暴露）。
 
     断言：``category="女鞋/运动鞋"`` + ``effective_only=True`` + 指向该条款的查询下，Top-K 仍含
-    ``POLICY_1.4_v1_c1``（女鞋/运动鞋且 EFFECTIVE）。意义：category 走的是 store 下推 + Python
-    二次复核的双重路径，若下推结果与候选集不一致且无补位，目标条款会被静默剔除；本用例专门覆盖
-    「过滤 + 检索」这一 red-line 组合（与无过滤的召回用例互为补充）。
+    ``POLICY_1.4_v1_c1``（女鞋/运动鞋且 EFFECTIVE）。意义：过滤走 Python 侧候选过滤 + ``ids=``
+    精确候选集，若候选集与判定不一致，目标条款会被静默剔除；本用例专门覆盖「过滤 + 检索」这一
+    red-line 组合（与无过滤的召回用例互为补充）。
     """
     hits = await policy_bm25.search(
         "鞋靴整体外观高度模仿知名品牌且无授权",

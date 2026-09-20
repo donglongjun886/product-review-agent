@@ -1,16 +1,16 @@
 """Chroma 检索索引 —— ``ChromaPolicyIndex`` / ``ChromaCaseIndex``（向量 + BM25 + RRF）。
 
-查询链路：Python 侧候选过滤 → 向量路（Chroma cosine，``1 − distance``）+ BM25 路（bm25s + jieba）
-→ RRF 融合 → Top-K。一类 corpus 的全部逐类差异 = 子类声明的类级钩子（``_record_type`` /
-``_text_of`` / ``_key_of`` / ``_meta_of``）+ ``_kind``，本模块不出现 ``if kind == ...`` 分派。
-向量路把 ``category`` 下推到 store（只是候选谓词的超集），最终判定与 BM25 路统一走同一份 Python
-谓词 ``recheck``。``effective_only`` / ``category``（含「全类目」）/ ``risk_type``（交叠非空）三个
-过滤语义与既有实现逐条一致。链路零 LLM、零随机；tie-break = (分降序, corpus 原序升序)。
+查询链路：Python 侧候选过滤 → 三模式检索（向量 / BM25 / hybrid）→ 排序截断。向量路（Chroma
+cosine，``1 − distance``）+ BM25 路（bm25s + jieba）→ RRF 融合 → Top-K。一类 corpus 的全部逐类
+差异 = 子类声明的类级钩子（``_record_type`` / ``_text_of`` / ``_key_of`` / ``_meta_of``）+
+``_kind``，本模块不出现 ``if kind == ...`` 分派。``effective_only`` / ``category``（含「全类目」）/
+``risk_type``（交叠非空）三个过滤语义与既有实现逐条一致。链路零 LLM、零随机；tie-break =
+(分降序, corpus 原序升序)。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
@@ -81,21 +81,6 @@ def _case_candidates(rows: list[CasePrecedentRecord], filters: CaseSearchFilters
     return candidates
 
 
-def _policy_store_filters(filters: PolicySearchFilters) -> dict[str, Any] | None:
-    """Policy 下推过滤（向量路，Chroma 原生 ``where``）：仅 ``category``（含「全类目」）可下推 ——
-    Chroma 的 ``$in``/``$eq`` 对列表字段恒不命中，故 ``risk_type`` 只能留在 Python 侧判。
-    """
-    if not filters.category:
-        return None
-    return {"category": {"$in": [filters.category, _FULL_CATEGORY]}}
-
-
-def _case_store_filters(filters: CaseSearchFilters) -> dict[str, Any] | None:
-    if not filters.category:
-        return None
-    return {"category": filters.category}
-
-
 def _validate_mode(mode: str) -> RetrievalMode:
     if mode not in MODES:
         raise ValueError(f"未知检索模式: {mode!r}（可选: {list(MODES)}）")
@@ -145,16 +130,15 @@ class _ChromaIndexBase:
         # LlamaIndex 装配面同样在构造期解析（空 KB 也不例外 —— 缺 rag extra 不推迟到检索期）。
         llama()
         # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
-        # **必填、无兜底** —— 这里曾有 `or build_embedding_model("fastembed")` 兜底，但它不传
-        # `cache_dir` / `local_files_only`，等于偷偷允许请求期联网下载模型。构造编码器的唯一
-        # 位置是 ``pra.tools.production_embedder``（或调用方自己注入）。
+        # **必填、无兜底** —— 构造编码器的唯一位置是 ``pra.tools.production_embedder``
+        # （或调用方自己注入），不许在请求期联网下载模型。
         self._embed_model: Any = embedding_model
         if self._rows:
             # 空 KB 走不到这里（不建库，故不 embed / 不留 collection_name）。
             self._doc_vectors = [
                 self._embed_model.get_text_embedding(self._text_of(r)) for r in self._rows
             ]
-            # 维度唯一来源 = 实际编码出的向量长度（不再有可注入的 dim 参数，也不再探测模型声明）。
+            # 维度唯一来源 = 实际编码出的向量长度。
             self._dim = len(self._doc_vectors[0])
             self.collection_name = _collection_name(cfg.collection_prefix, self._kind, self._dim)
             self._seed()
@@ -229,13 +213,13 @@ class _ChromaIndexBase:
         )
 
     def _rank_vector(
-        self, sub_ctx: _RetrievalContext, query_bundle: Any, store_filters: dict[str, Any] | None
+        self, sub_ctx: _RetrievalContext, query_bundle: Any
     ) -> list[tuple[int, float]]:
-        """向量路排名：``[(行索引, 1 − distance)]``（精确候选 id 集 + store 侧 category 下推）。
+        """向量路排名：``[(行索引, 1 − distance)]``（精确候选 id 集）。
 
         打分域 = 精确候选集（不让非候选行抢名额）：候选 id 交给 Chroma ``ids=`` 取回。
         """
-        retriever = make_vector_retriever(sub_ctx, self._collection, store_filters)
+        retriever = make_vector_retriever(sub_ctx, self._collection)
         nodes = retriever.retrieve(query_bundle)
         scored: dict[str, float] = {
             n.node.node_id: n.score for n in nodes if n.node.node_id in sub_ctx.row_index_by_key
@@ -259,7 +243,6 @@ class _ChromaIndexBase:
             for n in nodes
             if n.node.node_id in sub_ctx.row_index_by_key
         ]
-        pairs.sort(key=lambda t: (-t[1], t[0]))
         norm = normalize_minmax([s for _i, s in pairs])
         ranked = [(i, s) for (i, _raw), s in zip(pairs, norm)]
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
@@ -270,7 +253,6 @@ class _ChromaIndexBase:
         sub_ctx: _RetrievalContext,
         query_bundle: Any,
         top_k: int,
-        store_filters: dict[str, Any] | None,
     ) -> list[tuple[int, float]]:
         """Hybrid 路：两路排名 → **RRF 融合**（``Σ_r 1/(60 + rank_r)``，``k=60``）。
 
@@ -279,7 +261,7 @@ class _ChromaIndexBase:
         ⚠️ 该分是**融合排名分，不是相似度**（上界 **2/60 = 1/30 ≈ 0.0333**）；排序 key
         = ``(分降序, corpus 原序 idx 升序)``。
         """
-        vec_ranked = self._rank_vector(sub_ctx, query_bundle, store_filters)
+        vec_ranked = self._rank_vector(sub_ctx, query_bundle)
         bm25_ranked = self._rank_bm25(sub_ctx, query_bundle, top_k)
         # RRF 的输入是「两路各自的排名列表」：把 (行索引, 分) 排名还原为 node id 顺序。
         id_by_row = {row: nid for nid, row in sub_ctx.row_index_by_key.items()}
@@ -297,13 +279,8 @@ class _ChromaIndexBase:
         candidates: list[int],
         *,
         top_k: int,
-        store_filters: dict[str, Any] | None,
-        recheck: Callable[[int], bool],
     ) -> list[tuple[int, float]]:
         """三模式检索 → ``[(行索引, 6 位检索分)]``（已按 ``(分降序, 原序)`` 排序、已截断 Top-K）。
-
-        向量路在 store 下推之后用 ``recheck``（**与 BM25 路同一份** Python 谓词）复核一遍：
-        下推只用于收窄候选，判定只有一份实现，杜绝双实现语义漂移。
 
         ``top_k`` 截断在**排序之后**统一做；各路内部按需取「候选数」以保证 BM25 的
         min-max 与 RRF 的排名列表覆盖完整候选集。
@@ -312,17 +289,15 @@ class _ChromaIndexBase:
             return []
         sub_ctx = self._sub_context(candidates)
         query_bundle = llama().QueryBundle(query_str=query)
-        # 三路都取「候选数」上限：先拿到**完整候选排名**，再复核过滤、最后截断 Top-K。
-        # （若这里就按 top_k 预截断，store 返回的前 top_k 里一旦有被 recheck 剔除的行，
-        #   结果会不足 top_k —— 实测 policy vector + effective_only 就是这样少一条。）
+        # 三路都取「候选数」上限：先拿到**完整候选排名**，最后截断 Top-K。
+        # （BM25 的 min-max 归一化、RRF 的排名列表都要覆盖完整候选集，不能按 top_k 预截断。）
         full_k = len(candidates)
         if self.mode == "bm25":
             ranked = self._rank_bm25(sub_ctx, query_bundle, full_k)
         elif self.mode == "vector":
-            ranked = self._rank_vector(sub_ctx, query_bundle, store_filters)
+            ranked = self._rank_vector(sub_ctx, query_bundle)
         else:
-            ranked = self._rank_hybrid(sub_ctx, query_bundle, full_k, store_filters)
-        ranked = [item for item in ranked if recheck(item[0])]
+            ranked = self._rank_hybrid(sub_ctx, query_bundle, full_k)
         return ranked[:top_k]
 
 
@@ -357,16 +332,14 @@ class ChromaPolicyIndex(_ChromaIndexBase):
     ) -> list[PolicyClauseHit]:
         """检索政策条款（三模式；无命中 → ``[]``，工具 ok=True）。
 
-        流程：Python 侧候选过滤 → 按模式装配检索器（向量路 store 侧下推 category；BM25 路只喂
-        候选 node）→ 打分/融合 → ``(分降序, corpus 原序)`` 排序 + 6 位取整 → Top-K。
+        流程：Python 侧候选过滤 → 按模式装配检索器（两路都只喂候选 node）→ 打分/融合 →
+        ``(分降序, corpus 原序)`` 排序 + 6 位取整 → Top-K。
         """
         candidates = _policy_candidates(self._rows, filters, effective_only)
         ranked = self._retrieve_ranked(
             query,
             candidates,
             top_k=top_k,
-            store_filters=_policy_store_filters(filters),
-            recheck=lambda i: i in set(candidates),
         )
         return [
             PolicyClauseHit.model_validate(self._rows[i].model_dump(mode="json"))
@@ -401,8 +374,6 @@ class ChromaCaseIndex(_ChromaIndexBase):
             query,
             candidates,
             top_k=top_k,
-            store_filters=_case_store_filters(filters),
-            recheck=lambda i: i in set(candidates),
         )
         hits: list[CaseHit] = []
         for i, score in ranked:

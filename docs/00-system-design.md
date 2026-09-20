@@ -481,8 +481,9 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
   **运行期的空间自检已删** —— 本项目没有 l2 库来源，为假想的「库被人建错」维护一套检查属过度工程。
 - 🔴 **`ChromaVectorStore.query` 返回的分是 `exp(-distance)`，不是 `1 − distance`** → 向量取数走 Chroma 原生 `collection.query` 的 distance 自行换算。
 - 🔴 **向量取数必须传「精确候选 id 集合」(`ids=`)**，不能靠 `where` 近似 + `n_results=N`：否则非候选行会按距离抢占名额，
-  取回后被 Python 侧复检剔除且不补位 → 结果是精确候选集的**真子集**（最坏为空）。这就是曾经的漏召回缺陷；**契约类验收必须覆盖过滤器组合**，
+  结果变成精确候选集的**真子集**（最坏为空）。这就是曾经的漏召回缺陷；**契约类验收必须覆盖过滤器组合**，
   只测无过滤的干净 query 不会暴露它。
+  （**候选过滤只在 Python 侧做一次**：候选集由 `ids=` 精确锁定，故 store 侧 `where` 下推与随后的 Python 逐条复核均已删除。）
   **取回多少就是多少**：`top-k` 不保证返回数量等于 `top_k`，故不再有「候选集覆盖率自检 / 重试 / 从 stored vectors 补算」这套兜底 ——
   检索**真失败**（服务端不可达、collection 不存在、embedding 抛错）由 Chroma 直接上抛，不自己补一套检索系统。
 - **`retrieval_score` 是检索分**（hybrid 下即 RRF 分 `Σ1/(60+rank)`，rank 从 0 起 → 上界 `2/60 ≈ 0.0333`），**任何场合不得称为「语义相似度」**；

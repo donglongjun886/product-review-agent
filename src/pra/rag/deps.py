@@ -30,8 +30,8 @@ def llama() -> SimpleNamespace:
     """延迟 import 的 LlamaIndex 装配面（进程内首个构造/检索时拉起，之后缓存复用）。
 
     只 import core + retrievers-bm25 两个具体集成，不引伞包 ``llama-index``（伞包会拖进
-    llms-openai / embeddings-openai 等不用的集成）。属性访问（``llama().TextNode``）替代
-    原先的字符串键 dict：缓存对象是全局单例，故无需逐层穿透。
+    llms-openai / embeddings-openai 等不用的集成）。用属性访问（``llama().TextNode``）：缓存
+    对象是全局单例，故无需逐层穿透。
     """
     try:
         from llama_index.core.base.base_retriever import BaseRetriever
