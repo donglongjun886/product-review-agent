@@ -1,4 +1,4 @@
-"""向量检索器 —— 直接读 Chroma 原生 cosine ``distance`` 自算 ``1 − distance``（向量路唯一实现）。"""
+"""向量检索器 —— LlamaIndex ``ChromaVectorStore`` + ``VectorIndexRetriever`` 取数（向量路唯一实现）。"""
 
 from __future__ import annotations
 
@@ -6,78 +6,65 @@ import math
 from typing import Any
 
 from pra.rag.deps import llama
-from pra.rag.retrieval import _RetrievalContext
 
-__all__ = ["make_vector_retriever"]
+__all__ = ["vector_retrieve"]
 
 
-def make_vector_retriever(
-    ctx: _RetrievalContext,
-    collection: Any,
-) -> Any:
-    """向量检索器：Chroma cosine 距离，分数 = ``1 − distance``。
+def vector_retrieve(
+    index: Any,
+    query_bundle: Any,
+    *,
+    embed_model: Any,
+    node_ids: list[str],
+) -> list[tuple[str, float]]:
+    """向量路取数：``[(node id, 余弦相似度)]``（分数 = ``1 − distance``，见
+    :func:`_cosine_from_similarity`）。
 
-    ``ChromaVectorStore.query`` 的分是 ``exp(-distance)`` —— **另一套映射、不是余弦**，故取数走
-    **Chroma 原生 ``collection.query``** 自己算 ``1 − distance``；节点由 node id 直接映射，不经
-    ``_node_content`` JSON 反序列化 —— 保持节点为原始权威对象（Chroma 回读重建会让 node 身份
-    漂移，与按 ``node.hash`` 去重的融合冲突）。
+    ★ ``node_ids`` = 候选集的 **node id**（精确候选集），经 ``vector_store_kwargs={"ids": ...}``
+    透传到 Chroma 原生 ``collection.query``，让打分域恰好是候选集 —— 否则非候选行会按距离抢占
+    名额、把目标文档挤出 Top-N（漏召回，**只在带过滤时暴露**）。
+    ⚠️ ``VectorStoreQuery.node_ids`` 字段**不被** ``ChromaVectorStore`` 消费（`query()` 只读
+    ``query_embedding`` / ``similarity_top_k`` / ``filters`` / ``mode``），故候选只能走 kwargs 旁路。
 
-    ★ ``ctx.node_ids`` = 候选集的 **node id**（精确候选集）：候选 id 交给 Chroma 的 ``ids=`` 参数，
-    让打分域恰好是候选集 —— 否则非候选行会按距离抢占名额、把目标文档挤出 Top-N（漏召回）。
+    ★ 取「候选数」而非 ``top_k``：完整候选排名交给上层做 tie-break 与 RRF 融合，截断统一留在
+    ``index`` 层（``_retrieve_ranked``）。
+
+    ★ 查询向量**自算**后塞进 ``QueryBundle``：``VectorIndexRetriever`` 缺省走
+    ``embed_model.get_agg_embedding_from_queries``（内部再过一次 ``mean_agg`` 聚合），与向量路既有
+    口径不是同一条路径；自算可保证查询向量逐位一致（``_retrieve`` 见 ``query_bundle.embedding``
+    非空即跳过编码）。
     """
-
-    class _ChromaCosineRetriever(llama().BaseRetriever):
-
-        def __init__(self) -> None:
-            super().__init__()
-            self._collection = collection
-            self._emb = ctx.embed_model
-            # Chroma 返回的是 node id（`_node_id()` 派生），不是 corpus 行键 —— 映射键必须用 node id。
-            self._by_id = {nid: node for nid, node in zip(ctx.node_ids, ctx.nodes)}
-            #: 精确候选 id（NodeWithScore 只允许这些 id 出现）。
-            self._candidate_ids = list(ctx.node_ids)
-
-        def _query_once(self, query_embedding: list[float]) -> tuple[list[str], list[float]]:
-            """原生查询一次：只取候选 ``ids=``，不假定返回数量。"""
-            kwargs: dict[str, Any] = {
-                "query_embeddings": [list(query_embedding)],
-                "include": ["distances"],
-                "ids": list(self._candidate_ids),
-                "n_results": max(
-                    1, min(len(self._candidate_ids), int(self._collection.count()))
-                ),
-            }
-            result = self._collection.query(**kwargs)
-            return (
-                list((result.get("ids") or [[]])[0]),
-                list((result.get("distances") or [[]])[0]),
-            )
-
-        def _retrieve(self, query_bundle: Any) -> list[Any]:
-            if self._collection is None or not self._by_id:
-                return []
-            query_embedding = self._emb.get_query_embedding(query_bundle.query_str)
-            ids, distances = self._query_once(query_embedding)
-            return [
-                llama().NodeWithScore(node=self._by_id[nid], score=_cosine_from_distance(d))
-                for nid, d in zip(ids, distances)
-            ]
-
-    return _ChromaCosineRetriever()
+    llama_ = llama()
+    query = llama_.QueryBundle(
+        query_str=query_bundle.query_str,
+        embedding=embed_model.get_query_embedding(query_bundle.query_str),
+    )
+    retriever = llama_.VectorIndexRetriever(
+        index=index,
+        similarity_top_k=max(1, len(node_ids)),
+        vector_store_kwargs={"ids": list(node_ids)},
+    )
+    return [
+        (n.node.node_id, _cosine_from_similarity(n.score)) for n in retriever.retrieve(query)
+    ]
 
 
-def _cosine_from_distance(distance: float) -> float:
-    """Chroma cosine ``distance`` → 余弦相似度 ``1 − distance``。
+def _cosine_from_similarity(similarity: float) -> float:
+    """``ChromaVectorStore`` 的分 ``exp(-distance)`` → 余弦相似度 ``1 − distance``。
 
-    实测：``[1,0,0]`` vs ``[0.9,0.1,0]`` → ``distance = 0.006116271`` 而 ``1 − cos`` =
-    0.00611627；``[1,0,0]`` vs ``[1,1,0]`` → ``distance = 0.29289323`` ↔ ``1 − cos`` =
-    0.29289322。Chroma 对入库向量做过 L2 归一化、查询向量不做，其 cosine 距离即 ``1 − 余弦``。
+    包装层给的是 ``exp(-distance)``（``vector_stores/chroma/base.py`` 的 ``_query``），**另一套
+    映射**，故反解 ``distance = -ln(similarity)`` 后算 ``1 − distance``（= ``1 + ln(similarity)``）。
+
+    实测（cosine 空间，``[1,0,0]`` 对 ``[1,0,0]`` / ``[0.9,0.1,0]``）：包装层 score =
+    ``1.0`` / ``0.9939024``，反解得 ``1 + ln(score)`` = ``1.0`` / ``0.99388373``，与原生
+    ``1 − distance``（``0.0`` / ``0.006116271``）**逐位一致**（取 6 位后相同）。
 
     夹到 ``[0,1]`` 仅作防御：浮点尾差可能给出 ``-1e-9`` / ``1+1e-9``，而
     ``CaseHit.retrieval_score`` 约束 ``ge=0, le=1``（不夹会让整个检索抛 ValidationError）；
-    NaN（零向量等退化输入）按 0 计。⚠️ 这是**向量路的检索分**；hybrid 路是 RRF 融合分，不同量纲。
+    NaN / 非正值（``exp`` 下溢、零向量等退化输入）按 0 计。
+    ⚠️ 这是**向量路的检索分**；hybrid 路是 RRF 融合分，不同量纲。
     """
-    value = float(distance)
-    if math.isnan(value):
+    value = float(similarity)
+    if math.isnan(value) or value <= 0.0:
         return 0.0
-    return max(0.0, min(1.0, 1.0 - value))
+    return max(0.0, min(1.0, 1.0 + math.log(value)))

@@ -1,7 +1,8 @@
 """Chroma 检索索引 —— ``ChromaPolicyIndex`` / ``ChromaCaseIndex``（向量 + BM25 + RRF）。
 
-查询链路：Python 侧候选过滤 → 三模式检索（向量 / BM25 / hybrid）→ 排序截断。向量路（Chroma
-cosine，``1 − distance``）+ BM25 路（bm25s + jieba）→ RRF 融合 → Top-K。一类 corpus 的全部逐类
+查询链路：Python 侧候选过滤 → 三模式检索（向量 / BM25 / hybrid）→ 排序截断。向量路取数走
+LlamaIndex（``ChromaVectorStore`` + ``VectorIndexRetriever``，分数 ``1 − distance``，候选 id 经
+``vector_store_kwargs`` 锁定）+ BM25 路（bm25s + jieba）→ RRF 融合 → Top-K。一类 corpus 的全部逐类
 差异 = 子类声明的类级钩子（``_record_type`` / ``_text_of`` / ``_key_of`` / ``_meta_of``）+
 ``_kind``，本模块不出现 ``if kind == ...`` 分派。``effective_only`` / ``category``（含「全类目」）/
 ``risk_type``（交叠非空）三个过滤语义与既有实现逐条一致。链路零 LLM、零随机；tie-break =
@@ -34,7 +35,7 @@ from pra.rag.retrieval import (
     fuse_rrf,
     normalize_minmax,
 )
-from pra.rag.vector import make_vector_retriever
+from pra.rag.vector import vector_retrieve
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
 from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
@@ -118,7 +119,7 @@ class _ChromaIndexBase:
         self.collection_prefix = cfg.collection_prefix
         # 空语料不建库（``collection_name`` 保持 ""）：该可见属性必须先有默认值，否则空 KB 上
         # 读它会抛 AttributeError。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算）。
-        self._collection: Any | None = None
+        self._vec_index: Any | None = None
         self._nodes: list[Any] = []
         self._node_ids: list[str] = []
         self._dim = 0
@@ -164,6 +165,11 @@ class _ChromaIndexBase:
 
         node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按
         「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。
+
+        末尾顺带装配**向量路取数面**：同一个 collection 包进 ``ChromaVectorStore`` —— 建库参数
+        仍归我们（``_open_collection``），包装层只用于取数。**只 upsert 不写 ``_node_content``**：
+        取数时 ``metadata_dict_to_node`` 会因缺键抛错，被 ``_query`` 的 ``except`` 吸收后回落到
+        legacy 分支，重建出的 node 仍带稳定 ``id_``（= Chroma id）与 ``documents`` 正文，够用。
         """
         collection = _open_collection(
             self._config,
@@ -184,7 +190,12 @@ class _ChromaIndexBase:
             metadatas=[node.metadata for node in self._nodes],
             documents=[node.get_content() for node in self._nodes],
         )
-        self._collection = collection
+        # 向量路取数装配面。``embed_model`` **必须显式传** —— 不传会回落 ``Settings.embed_model`` →
+        # ``resolve_embed_model("default")`` → 拉 ``llama_index.embeddings.openai``（本仓不装）。
+        self._vec_index = llama().VectorStoreIndex.from_vector_store(
+            llama().ChromaVectorStore(chroma_collection=collection),
+            embed_model=self._embed_model,
+        )
 
     # -- size / 统计 ---------------------------------------------------------
 
@@ -217,12 +228,18 @@ class _ChromaIndexBase:
     ) -> list[tuple[int, float]]:
         """向量路排名：``[(行索引, 1 − distance)]``（精确候选 id 集）。
 
-        打分域 = 精确候选集（不让非候选行抢名额）：候选 id 交给 Chroma ``ids=`` 取回。
+        取数走 LlamaIndex（``ChromaVectorStore`` + ``VectorIndexRetriever``，见
+        :func:`~pra.rag.vector.vector_retrieve`）：候选 id 经 ``vector_store_kwargs`` 锁定，
+        打分域 = 精确候选集（不让非候选行抢名额）。
         """
-        retriever = make_vector_retriever(sub_ctx, self._collection)
-        nodes = retriever.retrieve(query_bundle)
+        pairs = vector_retrieve(
+            self._vec_index,
+            query_bundle,
+            embed_model=sub_ctx.embed_model,
+            node_ids=sub_ctx.node_ids,
+        )
         scored: dict[str, float] = {
-            n.node.node_id: n.score for n in nodes if n.node.node_id in sub_ctx.row_index_by_key
+            nid: score for nid, score in pairs if nid in sub_ctx.row_index_by_key
         }
         ranked = [(sub_ctx.row_index_by_key[nid], score) for nid, score in scored.items()]
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))

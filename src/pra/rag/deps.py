@@ -29,23 +29,28 @@ def chroma() -> Any:
 def llama() -> SimpleNamespace:
     """延迟 import 的 LlamaIndex 装配面（进程内首个构造/检索时拉起，之后缓存复用）。
 
-    只 import core + retrievers-bm25 两个具体集成，不引伞包 ``llama-index``（伞包会拖进
-    llms-openai / embeddings-openai 等不用的集成）。用属性访问（``llama().TextNode``）：缓存
-    对象是全局单例，故无需逐层穿透。
+    只 import 具体集成（core + vector-stores-chroma + retrievers-bm25），不引伞包 ``llama-index``
+    （伞包会拖进 llms-openai / embeddings-openai 等不用的集成）。用属性访问（``llama().TextNode``）：
+    缓存对象是全局单例，故无需逐层穿透。
     """
     try:
-        from llama_index.core.base.base_retriever import BaseRetriever
-        from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
+        from llama_index.core import VectorStoreIndex
+        from llama_index.core.indices.vector_store.retrievers import (
+            VectorIndexRetriever,
+        )
+        from llama_index.core.schema import QueryBundle, TextNode
         from llama_index.retrievers.bm25 import BM25Retriever
+        from llama_index.vector_stores.chroma import ChromaVectorStore
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
         raise RuntimeError(
-            "RAG 检索需要 llama-index-core / llama-index-retrievers-bm25："
-            "请运行 `uv sync --extra rag` 安装。"
+            "RAG 检索需要 llama-index-core / llama-index-vector-stores-chroma / "
+            "llama-index-retrievers-bm25：请运行 `uv sync --extra rag` 安装。"
         ) from exc
     return SimpleNamespace(
-        BaseRetriever=BaseRetriever,
-        NodeWithScore=NodeWithScore,
+        BM25Retriever=BM25Retriever,
+        ChromaVectorStore=ChromaVectorStore,
         QueryBundle=QueryBundle,
         TextNode=TextNode,
-        BM25Retriever=BM25Retriever,
+        VectorIndexRetriever=VectorIndexRetriever,
+        VectorStoreIndex=VectorStoreIndex,
     )
