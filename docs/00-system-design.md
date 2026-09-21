@@ -456,7 +456,7 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 - **混合检索**：BM25（关键词，如"无品牌""模仿""重上架"）+ 向量相似度（语义），融合后取 Top-K。
 - **元数据过滤**：先按 `类目`、`risk_type`、`政策有效性（当前生效版本）` 过滤，再检索——避免检索到过期政策或不相关类目案例。
-- **融合与截断**：向量 + BM25 混合召回经 **RRF（Reciprocal Rank Fusion）** 融合后取 Top-K，控制注入上下文的量；**当前没有模型 reranker**（明确不做），此前的"粗召回 Top-50 → 精排 Top-5（重排模型或 LLM 打分）"属**未做**的未来方向。
+- **融合与截断**：向量 + BM25 混合召回经 **RRF（Reciprocal Rank Fusion）** 融合后取 Top-K，控制注入上下文的量；当前实现**没有重排序（rerank）环节**，"粗召回 Top-50 → 精排 Top-5（重排模型或 LLM 打分）"尚未实现。
 - **引用格式**：检索结果必须带 `policy_id + 版本 + 条款原文` / `case_id + 决策`，进 `evidence[]` 时保留可追溯引用。
 
 ### 6.4 向量库选型
@@ -969,7 +969,7 @@ product-review-agent/
 │   │   ├── merchant/
 │   │   ├── case_search/
 │   │   └── policy_search/
-│   ├── rag/                         # 政策库 + 案例库检索：chroma（ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF）；不做 rerank
+│   ├── rag/                         # 政策库 + 案例库检索：chroma（ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF）
 │   │   ├── deps.py                  #   第三方重依赖的延迟 import 边界（唯一）
 │   │   ├── embedding.py             #   BGE 编码器构造点（production_embedder）
 │   │   ├── retrieval.py             #   模式枚举 / BM25 归一化 / RRF 融合 / 检索上下文
