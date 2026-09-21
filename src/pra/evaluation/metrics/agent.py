@@ -22,6 +22,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, Field
 
+from pra.domain.measurement import CITABLE_TYPES as _CITABLE_TYPES
 from pra.evaluation.harness.base import EvalRecord
 
 __all__ = [
@@ -35,10 +36,6 @@ __all__ = [
     "ToolSelectionEvaluator",
     "ToolSelectionMetrics",
 ]
-
-# Gate 的「可引用依据」类型（与 guardrails/gate.py 的 CITABLE_TYPES 同义，本地声明避免
-# 指标层反向依赖判定层；两处都只认「有 ref_id 的可引用证据」）。
-_CITABLE_TYPES = frozenset({"CASE_PRECEDENT", "POLICY_REF"})
 
 # expected.evidence 标签 → 实际证据类型。只映射**语义无歧义**的前缀；其余标签计入
 # unmapped（显式暴露缺口），不从"看起来能对上"硬猜 —— 猜出来的覆盖率不可解释。

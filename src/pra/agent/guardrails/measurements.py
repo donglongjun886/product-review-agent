@@ -32,7 +32,10 @@ from pra.domain.measurement import (
     DIM_MERCHANT_PROFILE,
     DIM_POLICY_CITATION,
     DIM_TEXT_COMPLIANCE,
+    EVIDENCE_MIN_SIM,
+    EVIDENCE_STRONG,
     MEASUREMENT_TYPE,
+    MERCHANT_DIRTY_MIN,
     VERDICT_NEGATIVE,
     VERDICT_POSITIVE,
     VERDICTS,
@@ -40,13 +43,8 @@ from pra.domain.measurement import (
     measurement_verdict,
 )
 from pra.domain.models import Evidence, ProductReviewCase
-from pra.tools.image_analysis.tool import (
-    EVIDENCE_MIN_SIM,
-    EVIDENCE_STRONG,
-    IMAGE_LOGO_TYPE,
-    IMAGE_SIMILARITY_TYPE,
-)
-from pra.tools.merchant.tool import MERCHANT_DIRTY_MIN, MERCHANT_HISTORY_TYPE
+from pra.tools.image_analysis.tool import IMAGE_LOGO_TYPE, IMAGE_SIMILARITY_TYPE
+from pra.tools.merchant.tool import MERCHANT_HISTORY_TYPE
 
 from .evidence import _parse_merchant_history
 

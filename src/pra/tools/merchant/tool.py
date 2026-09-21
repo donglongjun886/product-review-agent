@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ...domain.measurement import (
     DIM_MERCHANT_PROFILE,
+    MERCHANT_DIRTY_MIN,
     VERDICT_NEGATIVE,
     VERDICT_POSITIVE,
     make_measurement,
@@ -27,9 +28,7 @@ from ..base import ToolArgs, ToolContext, ToolResult
 # ---- 受控证据类型 & 默认证据强度 ----
 MERCHANT_HISTORY_TYPE = "MERCHANT_HISTORY"
 MERCHANT_HISTORY_WEIGHT = 0.85  # 多信号聚合型证据默认高权重（暂定默认，可调）
-# 「系统性规避行为」的确定性阈值：removals 或 title-relisting 达到该值即视为行为模式成立。
-# 单一来源：measurements 的阳性映射与 gate 的 risk_type 派生都引用本常量。
-MERCHANT_DIRTY_MIN = 3
+# 「系统性规避行为」阈值单一来源：pra.domain.measurement（上面按名引入，本工具用它做测量裁决）。
 
 
 # ---------------------------------------------------------------------------

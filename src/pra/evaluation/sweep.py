@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pra.domain.measurement import EVIDENCE_MIN_SIM, EVIDENCE_STRONG
 from pra.evaluation.dataset.loader import load_dataset
 from pra.evaluation.dataset.schema import EvalCase
 from pra.evaluation.harness.base import EvalContext
@@ -52,8 +53,8 @@ SWEEP_VARIABLES: dict[str, str] = {
     "EVIDENCE_STRONG": "strong",
 }
 
-# 当前默认（另一常量扫时固定取此值；与 tools/image_analysis 常量同值）
-DEFAULT_THRESHOLDS: dict[str, float] = {"min_sim": 0.70, "strong": 0.85}
+# 当前默认（另一常量扫时固定取此值；单一来源 pra.domain.measurement）
+DEFAULT_THRESHOLDS: dict[str, float] = {"min_sim": EVIDENCE_MIN_SIM, "strong": EVIDENCE_STRONG}
 
 # 观察指标（七项）—— 与 DecisionMetrics / 报告字段一一对应
 SEVEN_METRICS: tuple[str, ...] = (

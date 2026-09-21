@@ -20,13 +20,9 @@ from __future__ import annotations
 
 import re
 
+from pra.domain.measurement import EVIDENCE_MIN_SIM, EVIDENCE_STRONG
 from pra.domain.models import Evidence, ProductReviewCase
-from pra.tools.image_analysis.tool import (
-    EVIDENCE_MIN_SIM,
-    EVIDENCE_STRONG,
-    IMAGE_LOGO_TYPE,
-    IMAGE_SIMILARITY_TYPE,
-)
+from pra.tools.image_analysis.tool import IMAGE_LOGO_TYPE, IMAGE_SIMILARITY_TYPE
 from pra.tools.merchant.tool import MERCHANT_HISTORY_TYPE
 from pra.tools.policy_search.tool import POLICY_REF_TYPE
 from pra.tools.product.tool import PRODUCT_FACT_TYPE

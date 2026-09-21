@@ -27,12 +27,16 @@ from .models import Evidence
 
 __all__ = [
     "ALL_DIMENSIONS",
+    "CITABLE_TYPES",
     "DIM_IMAGE_APPEARANCE",
     "DIM_LISTING_REGISTRY",
     "DIM_MERCHANT_PROFILE",
     "DIM_POLICY_CITATION",
     "DIM_TEXT_COMPLIANCE",
+    "EVIDENCE_MIN_SIM",
+    "EVIDENCE_STRONG",
     "MEASUREMENT_TYPE",
+    "MERCHANT_DIRTY_MIN",
     "VERDICTS",
     "VERDICT_NEGATIVE",
     "VERDICT_POSITIVE",
@@ -68,6 +72,18 @@ VERDICTS: frozenset[str] = frozenset({VERDICT_POSITIVE, VERDICT_NEGATIVE})
 # ---- 测量证据类型 ----
 
 MEASUREMENT_TYPE = "MEASUREMENT"
+
+# ---- 证据确定性阈值（单一来源；tools / guardrails / evaluation 统一从此取值）----
+
+# 产 IMAGE_SIMILARITY 证据的相似度下限 / 「高相似」处置分界。
+EVIDENCE_MIN_SIM = 0.70
+EVIDENCE_STRONG = 0.85
+
+# 商家历史「系统性规避行为」阈值：removals 或 title-relisting 达到该值即成立。
+MERCHANT_DIRTY_MIN = 3
+
+# 可引用依据类型（Gate / 收敛判定 / 指标层共用；构成引用还须带 ref_id）。
+CITABLE_TYPES = frozenset({"CASE_PRECEDENT", "POLICY_REF"})
 
 
 def measurement_ref_id(dimension: str, source_ref: str) -> str:

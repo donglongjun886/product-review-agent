@@ -25,8 +25,8 @@
   可引用依据与 dc）；其余 → HUMAN。低先验 SUPPORTED 与 PASS 相容是刻意行为：交叉判据
   用"假设是否成立"而非"先验"。Gate / abstention overlay 仍做最终收口。
 
-确定性约束：纯函数 + 异步包装；不读 expected、不读外部配置；阈值常量本地声明并与
-gate / evidence / tools 同口径；同 (node, __STATE__) → 同 payload。
+确定性约束：纯函数 + 异步包装；不读 expected、不读外部配置；阈值常量取单一来源
+pra.domain.measurement；同 (node, __STATE__) → 同 payload。
 """
 
 from __future__ import annotations
@@ -52,6 +52,11 @@ from pra.agent.scripted_llm import (  # __STATE__ 解析/引用串格式
     _extract_state,
 )
 from pra.agent.state import build_initial_state
+
+# 相似度下限 / 强相似分界 / 商家系统性阈值：单一来源 pra.domain.measurement。
+from pra.domain.measurement import EVIDENCE_MIN_SIM as _SIM_MIN
+from pra.domain.measurement import EVIDENCE_STRONG as _SIM_STRONG
+from pra.domain.measurement import MERCHANT_DIRTY_MIN as _MERCHANT_DIRTY
 from pra.domain.models import ReviewDecision
 from pra.evaluation.dataset.schema import EvalCase
 from pra.evaluation.harness.base import EvalContext, EvalRecord, SchemeRunner
@@ -534,11 +539,8 @@ _T_MERCHANT = "MERCHANT_HISTORY"
 _T_CASE = "CASE_PRECEDENT"
 _T_POLICY = "POLICY_REF"
 
-_SIM_STRONG = 0.85  # 与 image_analysis.EVIDENCE_STRONG 同口径
-_SIM_MIN = 0.70  # 与 image_analysis.EVIDENCE_MIN_SIM 同口径（评测审查员读证据视图的下限）
 _LOGO_CONF = 0.70  # Logo 视为强视觉信号的置信下限
 _HIGH_PRIOR = 0.3  # 评测审查员桩的假设门槛（SUPPORTED/PENDING+UNRESOLVED 且 prior>=0.3 才算关注）
-_MERCHANT_DIRTY = 3  # removals/title >= 3 = 系统性（gate extra 口径一致）
 
 # 假设 statement 标记（hypothesize 写、reevaluate/decide 读 —— 表面事实经它跨节点传递）
 _MARK_VISUAL = "外观模仿风险"

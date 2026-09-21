@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field
 
 from ...domain.measurement import (
     DIM_IMAGE_APPEARANCE,
+    EVIDENCE_MIN_SIM,  # noqa: F401 —— 阈值单一来源，供下游按名再导入
+    EVIDENCE_STRONG,
     VERDICT_NEGATIVE,
     VERDICT_POSITIVE,
     make_measurement,
@@ -31,11 +33,8 @@ from ..base import ToolArgs, ToolContext, ToolResult
 IMAGE_SIMILARITY_TYPE = "IMAGE_SIMILARITY"
 IMAGE_LOGO_TYPE = "IMAGE_LOGO"
 
-# 产 IMAGE_SIMILARITY 证据的相似度下限 = 0.70；矛盾启发式「高相似」分界 = 0.85
-# （``SIM_HIGH_CONTRADICT`` 与 ``EVIDENCE_STRONG`` 同值同义，下游按各自命名引用）。
+# 相似度阈值单一来源：pra.domain.measurement（上面按名引入，EVIDENCE_MIN_SIM 供下游再导入）。
 # 本工具不据此过滤（只返回原始相似度，阈值裁决在确定性层）。
-EVIDENCE_MIN_SIM = 0.70
-EVIDENCE_STRONG = 0.85
 
 
 # ---------------------------------------------------------------------------

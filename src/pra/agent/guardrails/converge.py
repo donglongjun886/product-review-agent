@@ -20,10 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from pra.agent.guardrails.measurements import coverage_report
-from pra.domain.measurement import DIM_POLICY_CITATION
-
-# 可引用依据类型（与 gate.py 的 CITABLE_TYPES 同义，本地重声明）
-CITABLE_TYPES = {"CASE_PRECEDENT", "POLICY_REF"}
+from pra.domain.measurement import CITABLE_TYPES, DIM_POLICY_CITATION
 
 
 def is_converged(state: dict[str, Any]) -> bool:

@@ -35,9 +35,12 @@ from pra.agent.guardrails.measurements import (
     text_evasion_hit,
 )
 from pra.domain.measurement import (
+    CITABLE_TYPES,
     DIM_IMAGE_APPEARANCE,
     DIM_MERCHANT_PROFILE,
     DIM_TEXT_COMPLIANCE,
+    EVIDENCE_MIN_SIM,
+    EVIDENCE_STRONG,
 )
 from pra.domain.models import (
     Budget,
@@ -50,7 +53,6 @@ from pra.domain.models import (
 # 常量：本地声明，不与其它模块共享可变状态。
 
 CONFIDENCE_ABSTAIN_THRESHOLD = 0.7  # REJECT Gate 安全门槛（decision_confidence）
-CITABLE_TYPES = {"CASE_PRECEDENT", "POLICY_REF"}  # 可引用依据类型
 
 # dc 公式的结构系数（覆盖主项 / 证据强度次项 / 引用 / 基线 / 冲突惩罚）。
 # **结构性给定，不用任何数据集拟合**；阈值 CONFIDENCE_ABSTAIN_THRESHOLD 保持不变。
@@ -72,11 +74,6 @@ R3_POSITIVE_INSUFFICIENT = "R3_POSITIVE_INSUFFICIENT"
 R4_PASS_GATE_FAIL = "R4_PASS_GATE_FAIL"
 R5_DEGRADED_OR_FAILED_STEP = "R5_DEGRADED_OR_FAILED_STEP"
 
-# 强相似阈值：镜像 image_analysis.tool 的 0.85（本地声明，与证据层同源）
-_SIM_STRONG = 0.85
-_SIM_PRESENT = 0.70
-
-
 def _has_citable(evidence) -> bool:
     """是否存在带 ``ref_id`` 的可引用依据（POLICY_REF / CASE_PRECEDENT）。"""
     return any(e.type in CITABLE_TYPES and e.ref_id for e in evidence)
@@ -84,13 +81,13 @@ def _has_citable(evidence) -> bool:
 
 def _strong_similarity(evidence) -> bool:
     """是否存在强相似 IMAGE_SIMILARITY（``weight >= 0.85``）。"""
-    return any(e.type == "IMAGE_SIMILARITY" and (e.weight or 0.0) >= _SIM_STRONG for e in evidence)
+    return any(e.type == "IMAGE_SIMILARITY" and (e.weight or 0.0) >= EVIDENCE_STRONG for e in evidence)
 
 
 def weak_similarity(evidence) -> bool:
     """是否存在**弱相似**（0.70 <= weight < 0.85）—— 需与商品事实交叉，不能单独撑起 REJECT。"""
     return any(
-        e.type == "IMAGE_SIMILARITY" and _SIM_PRESENT <= (e.weight or 0.0) < _SIM_STRONG
+        e.type == "IMAGE_SIMILARITY" and EVIDENCE_MIN_SIM <= (e.weight or 0.0) < EVIDENCE_STRONG
         for e in evidence
     )
 
