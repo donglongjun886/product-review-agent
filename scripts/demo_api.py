@@ -1,8 +1,8 @@
 """直接调 ``run_review`` 验收执行器入口（不经 HTTP）。
 
 用例与 ``scripts/demo_walkthrough.py`` 的 ``build_demo_case`` 字段一致（复古运动鞋 P_88231 /
-商家 M_5512）：默认 6 个 InMemory Tool + scripted LLM 桩，无需 API key，打印 run_id + 裁决
-摘要，正常路径退出码 0。
+商家 M_5512）：``run_review`` 走生产图（商品/商家读 MySQL、案例/政策读真实 RAG 的 6 个 Tool）
++ scripted LLM 桩，无需 API key，打印 run_id + 裁决摘要，正常路径退出码 0。
 
 预期结局：decision=HUMAN_REVIEW、risk_level=HIGH、risk_type 覆盖 POTENTIAL_IP_RISK +
 EVASION_PATTERN、decision_confidence>=0.7、overrides=[]（scripted 桩确定性产出，可复现）。

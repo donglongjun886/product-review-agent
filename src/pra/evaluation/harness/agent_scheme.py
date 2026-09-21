@@ -491,10 +491,9 @@ def make_eval_world_tools():
 def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
     """构造 RAG 世界的 Agent 工具（评测 RAG 单独模式）。
 
-    与 ``make_eval_world_tools`` 只差两个"知识库检索"工具：CaseSearchTool /
-    PolicySearchTool 注入**真实 RAG 索引**（确定性 mock embedding + BM25 + 余弦，三模式
-    可切换）；Product / Image / Merchant 仍沿用 eval 世界种子（事实锚点，两世界共用 →
-    差异只归因于检索数据源）。
+    复用 ``make_eval_world_tools()`` 的 5 件工具（Product / Image / Merchant 沿用 eval 世界
+    种子，事实锚点两世界共用），再把 CaseSearchTool / PolicySearchTool 按名替换为**真实 RAG
+    索引**（确定性 mock embedding + BM25 + 余弦，三模式可切换）—— 输出仍恰好 5 件、无 OCR。
 
     :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid）。
     :param options: 索引装配参数透传（缺省 None = 不传 → 全走 factory 缺省）；键名与
@@ -505,15 +504,9 @@ def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index
-    from pra.tools.base import Tool
+    from pra.tools import replace_tool_by_name
     from pra.tools.case_search.tool import CaseSearchTool
-    from pra.tools.image_analysis.tool import (
-        ImageAnalysisTool,
-        MockImageAnalysisProvider,
-    )
-    from pra.tools.merchant.tool import InMemoryMerchantRepository, MerchantTool
     from pra.tools.policy_search.tool import PolicySearchTool
-    from pra.tools.product.tool import InMemoryProductRepository, ProductTool
 
     opts = dict(options or {})
     # RAG 世界的编码器必须显式给出（factory 不再代为构造）。调用方可在 options 里覆盖；
@@ -522,14 +515,11 @@ def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
         from pra.tools import production_embedder
 
         opts["embedding_model"] = production_embedder()
-    # 装配参数逐字透传给 factory（未知键由它抛错：不吞键、不静默忽略拼错字）。
-    tools: list[Tool] = [
-        ProductTool(repo=InMemoryProductRepository(EVAL_PRODUCTS)),
-        ImageAnalysisTool(provider=MockImageAnalysisProvider(EVAL_IMAGE_MATCHES)),
-        MerchantTool(repo=InMemoryMerchantRepository(EVAL_MERCHANTS)),
-        CaseSearchTool(index=build_case_index(mode=mode, **opts)),
-        PolicySearchTool(index=build_policy_index(mode=mode, **opts)),
-    ]
+    # 事实三件沿用 eval 世界种子；两个检索工具按名换上真实 RAG 索引。装配参数逐字透传给
+    # factory（未知键由它抛错：不吞键、不静默忽略拼错字）。
+    tools = make_eval_world_tools()
+    replace_tool_by_name(tools, CaseSearchTool(index=build_case_index(mode=mode, **opts)))
+    replace_tool_by_name(tools, PolicySearchTool(index=build_policy_index(mode=mode, **opts)))
     return tools
 
 

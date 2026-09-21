@@ -137,8 +137,9 @@ uv run python scripts/run_evaluation_real.py --limit 10   # 真实 LLM 对照（
 [docs/00-system-design.md](docs/00-system-design.md) §6；代码在 `src/pra/rag/`：
 `embedding.py`（BGE 编码器）/ `retrieval.py`（模式枚举 + 检索上下文）/ `bm25.py`（BM25 路 + jieba 分词 + bm25s 自建索引）/
 `chroma_store.py`（建库与 Node 装配）/ `index.py`（Policy / Case 索引）。
-**默认装配路径（`build_tools()` 与评测世界）仍是 InMemory 种子、不连向量库** —— 只有生产入口与显式
-`data_source="rag"` 才走真实检索。
+**默认装配路径（`build_tools()` 与评测世界）仍是 InMemory 种子、不连向量库** —— 只有生产入口
+（`build_production_tools()`）与评测侧显式切到 RAG 世界（`EvalContext.tool_world="rag"` /
+`make_rag_world_tools()`）才走真实检索。
 
 ```bash
 uv run python scripts/run_rag_demo.py                  # 三模式（bm25/vector/hybrid）Top-K 检索演示

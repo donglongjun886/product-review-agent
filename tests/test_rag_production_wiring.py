@@ -24,6 +24,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from helpers import tool_by_name
 
 import pra.tools as tools_pkg
 from pra.tools import build_tools
@@ -49,17 +50,27 @@ def test_production_assembly_injects_lazy_rag_indices():
 
     prod = _REAL_BUILD_PRODUCTION_TOOLS()
     default = build_tools()
+    prod_case = tool_by_name(prod, "CaseSearchTool")
+    prod_policy = tool_by_name(prod, "PolicySearchTool")
     assert [t.name for t in prod] == [t.name for t in default]
-    assert type(prod[0]._repo).__name__ == "MySQLProductRepository"
-    assert type(prod[3]._repo).__name__ == "MySQLMerchantRepository"
-    assert isinstance(prod[4]._index, LazyCaseIndex)
-    assert isinstance(prod[5]._index, LazyPolicyIndex)
+    assert type(tool_by_name(prod, "ProductTool")._repo).__name__ == "MySQLProductRepository"
+    assert type(tool_by_name(prod, "MerchantTool")._repo).__name__ == "MySQLMerchantRepository"
+    assert isinstance(prod_case._index, LazyCaseIndex)
+    assert isinstance(prod_policy._index, LazyPolicyIndex)
     # 惰性的全部意义：装配完还没建库（未 import 后端、未连服务端、未加载模型）
-    assert prod[4]._index.index is None and prod[4]._index.is_built is False
-    assert prod[5]._index.index is None and prod[5]._index.is_built is False
+    assert prod_case._index.index is None and prod_case._index.is_built is False
+    assert prod_policy._index.index is None and prod_policy._index.is_built is False
     # 其余两个仍走 Mock 桩（image/ocr 无真实数据源）
-    assert type(prod[1]).__name__ == type(default[1]).__name__ == "ImageAnalysisTool"
-    assert type(prod[2]).__name__ == type(default[2]).__name__ == "OCRTool"
+    assert (
+        type(tool_by_name(prod, "ImageAnalysisTool")).__name__
+        == type(tool_by_name(default, "ImageAnalysisTool")).__name__
+        == "ImageAnalysisTool"
+    )
+    assert (
+        type(tool_by_name(prod, "OCRTool")).__name__
+        == type(tool_by_name(default, "OCRTool")).__name__
+        == "OCRTool"
+    )
 
 
 def test_default_tools_keep_inmemory_knowledge_sources():
@@ -68,8 +79,8 @@ def test_default_tools_keep_inmemory_knowledge_sources():
     from pra.tools.policy_search.tool import InMemoryPolicyIndex
 
     default = build_tools()
-    assert isinstance(default[4]._index, InMemoryCaseIndex)
-    assert isinstance(default[5]._index, InMemoryPolicyIndex)
+    assert isinstance(tool_by_name(default, "CaseSearchTool")._index, InMemoryCaseIndex)
+    assert isinstance(tool_by_name(default, "PolicySearchTool")._index, InMemoryPolicyIndex)
 
 
 # ---------------------------------------------------------------------------
@@ -328,10 +339,11 @@ async def test_production_rag_reaches_real_knowledge_base(monkeypatch):
 
     try:
         prod_tools = _REAL_BUILD_PRODUCTION_TOOLS()
-        assert prod_tools[4]._index.is_built is False, "装配期不得构建"
+        case_tool = tool_by_name(prod_tools, "CaseSearchTool")
+        assert case_tool._index.is_built is False, "装配期不得构建"
         state = await _run_graph(prod_tools)
-        assert prod_tools[4]._index.is_built is True, "首次检索后应已构建"
-        assert type(prod_tools[4]._index.index).__name__ == "ChromaCaseIndex"
+        assert case_tool._index.is_built is True, "首次检索后应已构建"
+        assert type(case_tool._index.index).__name__ == "ChromaCaseIndex"
 
         case_hits = [e for e in state["evidence"] if e.type == "CASE_PRECEDENT"]
         policy_hits = [e for e in state["evidence"] if e.type == "POLICY_REF"]

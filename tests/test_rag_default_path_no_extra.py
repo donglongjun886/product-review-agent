@@ -57,8 +57,11 @@ def main() -> dict:
 
     policy_rows = load_policies()[0]
     case_rows = load_cases()[0]
-    tools_memory = build_tools()           # 默认 data_source="memory"
+    tools_memory = build_tools()           # 默认世界：InMemory 种子
     prod_tools = build_production_tools()  # 生产装配：惰性 RAG，装配期不得 import 后端
+    # 按名取工具（装配顺序对下游无语义：ToolRegistry / tools_node 全程按名调度）
+    memory_by_name = {t.name: t for t in tools_memory}
+    prod_by_name = {t.name: t for t in prod_tools}
 
     forbidden = {}
     for name in FORBIDDEN:
@@ -75,14 +78,17 @@ def main() -> dict:
         "tools_loaded": "pra.tools" in sys.modules,
         "tool_names": [t.name for t in tools_memory],
         "memory_index_types": [
-            type(tools_memory[4]._index).__name__,
-            type(tools_memory[5]._index).__name__,
+            type(memory_by_name["CaseSearchTool"]._index).__name__,
+            type(memory_by_name["PolicySearchTool"]._index).__name__,
         ],
         "prod_tool_index_types": [
-            type(prod_tools[4]._index).__name__,
-            type(prod_tools[5]._index).__name__,
+            type(prod_by_name["CaseSearchTool"]._index).__name__,
+            type(prod_by_name["PolicySearchTool"]._index).__name__,
         ],
-        "prod_tool_built": [prod_tools[4]._index.is_built, prod_tools[5]._index.is_built],
+        "prod_tool_built": [
+            prod_by_name["CaseSearchTool"]._index.is_built,
+            prod_by_name["PolicySearchTool"]._index.is_built,
+        ],
         "corpus_rows": [len(policy_rows), len(case_rows)],
     }
 

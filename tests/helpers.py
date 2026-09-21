@@ -31,6 +31,7 @@ from pra.domain.models import (
     SkuInfo,
 )
 from pra.tools import BGE_MODEL as BGE_DEFAULT_MODEL
+from pra.tools.base import Tool
 
 # 真模型缓存探测（只读文件系统；生产路径本身**不做**磁盘预检，靠 fastembed 的
 # ``local_files_only=True`` —— 本探测只用于决定真模型用例是否 skip）
@@ -54,6 +55,20 @@ def bge_model_cached(cache_dir: Path, model_name: str = BGE_DEFAULT_MODEL) -> bo
         name = model_name.rsplit("/", 1)[-1]
         layouts.append(cache_dir / f"models--{_BGE_HF_SOURCE_REPO}--{name}")
     return any(layout.is_dir() and any(layout.glob("**/*.onnx")) for layout in layouts)
+
+
+# 工具装配辅助：工具列表的**顺序对下游无语义**（``ToolRegistry`` / ``tools_node`` 全程按名调度），
+# 只被测试断言引用。故测试一律按名取工具，别再写 ``build_tools()[4]`` 这类位置下标 —— 那是脆弱
+# 耦合，装配顺序一变就误伤断言。
+
+
+def tool_by_name(tools: list[Tool], name: str) -> Tool:
+    """按 ``tool.name`` 从工具列表取工具；未命中抛 ``KeyError``（附现有工具名，便于定位）。"""
+    for tool in tools:
+        if getattr(tool, "name", None) == name:
+            return tool
+    available = [getattr(t, "name", repr(t)) for t in tools]
+    raise KeyError(f"工具列表无此 name：{name!r}；现有工具 = {available}")
 
 
 # domain 对象工厂
@@ -108,7 +123,7 @@ def make_case(
     merchant_id: str = "M_TEST",
     version: int = 3,
 ) -> ProductReviewCase:
-    # 默认 brand=None 不误触 R1 黑名单
+    # 默认 brand=None 不误触品牌黑名单
     product = ProductInfo(
         product_id=product_id,
         title="复古跑鞋",

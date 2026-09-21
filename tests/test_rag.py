@@ -4,7 +4,7 @@
 - corpus loader / schema 校验：Policy/Case KB 规模与唯一性、≥2 条 EXPIRED、meta 隔离声明；
 - **隔离红线**：Case KB 的 case_id 与 eval_data v1+v2 全部 case 标识（含 InMemory 种子先例）无交集，
   防评测作弊；
-- ``build_tools()`` 默认（memory 世界）仍是 6 个 InMemory 工具（与 ``build_tools("memory")`` 一致）；
+- ``build_tools()`` 默认世界仍是 6 个 InMemory 工具；
 - 默认评测路径（``tool_world="eval"``）全量 v1 agent 决策序列 == 入库基线（回归不破）。
 
 **chroma 真实检索的离线验收用例已整体移除**：它们靠一个测试自持的假编码器（词面 sha256 特征）
@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from helpers import tool_by_name
 
 from pra.evaluation.dataset.loader import load_dataset
 from pra.evaluation.harness.agent_scheme import EVAL_PRECEDENTS, AgentScheme
@@ -97,14 +99,12 @@ _EXPECTED_TOOLS = [
 ]
 
 
-def test_build_tools_memory_unchanged() -> None:
-    memory = build_tools("memory")
-    assert [t.name for t in memory] == _EXPECTED_TOOLS
-    # 默认参数即 memory：两个检索工具仍注入 InMemory 索引
-    default = build_tools()
-    assert [t.name for t in default] == _EXPECTED_TOOLS
-    assert type(memory[4]._index).__name__ == "InMemoryCaseIndex"
-    assert isinstance(memory[5]._index, InMemoryPolicyIndex)
+def test_build_tools_default_world_is_inmemory() -> None:
+    tools = build_tools()
+    assert [t.name for t in tools] == _EXPECTED_TOOLS
+    # 默认世界的两个检索工具注入 InMemory 索引（确定性可重放的种子）
+    assert type(tool_by_name(tools, "CaseSearchTool")._index).__name__ == "InMemoryCaseIndex"
+    assert isinstance(tool_by_name(tools, "PolicySearchTool")._index, InMemoryPolicyIndex)
 
 
 async def test_default_eval_path_regression_intact() -> None:

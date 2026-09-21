@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import make_case
+from helpers import make_case, tool_by_name
 from sqlalchemy import text
 
 from pra import wiring
@@ -243,13 +243,13 @@ async def test_missing_merchant_flows_to_ok_false_and_no_evidence():
 
 def test_default_merchant_tool_is_still_inmemory():
     """守护：默认装配路径不许连库（谁把默认改成真库，这里变红）。"""
-    assert isinstance(build_tools()[3]._repo, InMemoryMerchantRepository)
+    assert isinstance(tool_by_name(build_tools(), "MerchantTool")._repo, InMemoryMerchantRepository)
 
 
 def test_build_tools_uses_mysql_merchant_repo_only_when_explicitly_injected():
     repo, _ = _repo_with_fake_sessions([])
-    assert build_tools()[3]._repo is not repo
-    assert build_tools(merchant_repo=repo)[3]._repo is repo
+    assert tool_by_name(build_tools(), "MerchantTool")._repo is not repo
+    assert tool_by_name(build_tools(merchant_repo=repo), "MerchantTool")._repo is repo
 
 
 # ---------------------------------------------------------------------------

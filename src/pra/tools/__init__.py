@@ -7,8 +7,6 @@
 # ``build_production_tools()`` = 生产/HTTP 入口（商品与商家读 MySQL、案例与政策读真实 RAG）。
 from __future__ import annotations
 
-from typing import Any, Literal
-
 from pra.rag.embedding import BGE_MODEL, production_embedder
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.rag.lazy_index import LazyCaseIndex, LazyPolicyIndex
@@ -34,27 +32,35 @@ __all__ = [
     "build_production_tools",
     "build_tools",
     "production_embedder",
+    "replace_tool_by_name",
 ]
 
 
+def replace_tool_by_name(tools: list[Tool], tool: Tool) -> None:
+    """就地按 ``tool.name`` 替换列表中的同名工具（未命中抛 ``KeyError``）。
+
+    :param tools: 待修改的工具列表，命中项被就地覆盖。
+    :param tool: 新工具，按其 ``name`` 匹配列表中第一个同名项。
+    :return: None（就地修改 ``tools``）。
+    :raises KeyError: 列表中没有同名工具时抛出，消息含该 name 与现有名字排序列表。
+    """
+    for index, existing in enumerate(tools):
+        if existing.name == tool.name:
+            tools[index] = tool
+            return
+    raise KeyError(
+        f"未找到可替换的 tool: {tool.name!r}；现有: {sorted(t.name for t in tools)}"
+    )
+
+
 def build_tools(
-    data_source: Literal["memory", "rag"] = "memory",
     *,
-    rag_options: dict[str, Any] | None = None,
     product_repo: ProductRepository | None = None,
     merchant_repo: MerchantRepository | None = None,
     vision_measurement_available: bool = True,
 ) -> list[Tool]:
     """组装并返回 6 个调查工具（默认注入 InMemory/Mock 数据源）。
 
-    :param data_source: ``"memory"``（默认）= 6 工具 InMemory 种子世界；``"rag"`` =
-        CaseSearchTool / PolicySearchTool 注入真实 RAG（chroma）索引，其余 4 工具仍为 InMemory
-        事实世界。
-    :param rag_options: 仅 ``data_source="rag"`` 生效的索引装配参数透传字典；键名与
-        ``pra.rag.factory`` 参数**逐字对应**（``mode`` / ``embedding_model`` / ``config`` ——
-        Chroma 连接与 collection 参数走 ``config=ChromaConfig(...)``：client / host / port /
-        ephemeral / collection_prefix），未给键走 factory 缺省（``embedding_model``
-        缺省 None → chroma 类内自建 fastembed 集成）。
     :param product_repo: ProductTool 的数据源；默认 **None → InMemory**（CI 不连库、评测可
         重放）。要读真库须**显式**传入 ``pra.tools.product.mysql_repo.MySQLProductRepository()``
         —— 连库与否由此入参单点决定（repo 构造期不建 engine，首次查询才连库）。生产/HTTP 装配
@@ -75,11 +81,6 @@ def build_tools(
         CaseSearchTool(),
         PolicySearchTool(),
     ]
-    if data_source == "rag":
-        # 真实 RAG 索引替换两个"知识库检索"工具的数据源（其余 4 工具不受影响）。
-        options = dict(rag_options or {})
-        tools[4] = CaseSearchTool(index=build_case_index(**options))
-        tools[5] = PolicySearchTool(index=build_policy_index(**options))
     return tools
 
 
@@ -107,8 +108,8 @@ def build_production_tools() -> list[Tool]:
         # 若不声明，桩的"零命中"会被 gate 当成"测过且阴性"，把"测不出"误判成"证明无风险"。
         vision_measurement_available=False,
     )
-    tools[4] = CaseSearchTool(index=LazyCaseIndex(_build_production_case_index))
-    tools[5] = PolicySearchTool(index=LazyPolicyIndex(_build_production_policy_index))
+    replace_tool_by_name(tools, CaseSearchTool(index=LazyCaseIndex(_build_production_case_index)))
+    replace_tool_by_name(tools, PolicySearchTool(index=LazyPolicyIndex(_build_production_policy_index)))
     return tools
 
 

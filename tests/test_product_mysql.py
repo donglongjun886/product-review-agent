@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import make_case
+from helpers import make_case, tool_by_name
 from sqlalchemy import text
 
 from pra import wiring
@@ -332,13 +332,13 @@ async def test_missing_product_flows_to_ok_false_and_no_evidence():
 
 
 def test_default_product_tool_is_still_inmemory():
-    assert isinstance(build_tools()[0]._repo, InMemoryProductRepository)
+    assert isinstance(tool_by_name(build_tools(), "ProductTool")._repo, InMemoryProductRepository)
 
 
 def test_build_tools_uses_mysql_repo_only_when_explicitly_injected():
     repo, _ = _repo_with_fake_sessions([])
-    assert build_tools()[0]._repo is not repo
-    assert build_tools(product_repo=repo)[0]._repo is repo
+    assert tool_by_name(build_tools(), "ProductTool")._repo is not repo
+    assert tool_by_name(build_tools(product_repo=repo), "ProductTool")._repo is repo
 
 
 # ---------------------------------------------------------------------------
@@ -500,8 +500,8 @@ def test_build_production_tools_swaps_only_the_mysql_backed_sources():
     """生产装配 = 默认 6 工具，只把 ProductTool / MerchantTool 的数据源换成真库（装配期不连库）。"""
     prod = _REAL_BUILD_PRODUCTION_TOOLS()
     default = build_tools()
-    assert type(prod[0]._repo).__name__ == "MySQLProductRepository"
-    assert type(prod[3]._repo).__name__ == "MySQLMerchantRepository"
+    assert type(tool_by_name(prod, "ProductTool")._repo).__name__ == "MySQLProductRepository"
+    assert type(tool_by_name(prod, "MerchantTool")._repo).__name__ == "MySQLMerchantRepository"
     assert [t.name for t in prod] == [t.name for t in default]
     assert [type(t).__name__ for t in prod[1:]] == [type(t).__name__ for t in default[1:]]
 
@@ -515,10 +515,10 @@ def test_tests_are_pinned_to_the_inmemory_world():
     import pra.tools as tools_pkg
 
     tools = tools_pkg.build_production_tools()
-    assert isinstance(tools[0]._repo, InMemoryProductRepository), (
+    assert isinstance(tool_by_name(tools, "ProductTool")._repo, InMemoryProductRepository), (
         "conftest 的 InMemory 钉回 fixture 失效了 —— 测试会去连真库"
     )
-    assert isinstance(tools[3]._repo, InMemoryMerchantRepository), (
+    assert isinstance(tool_by_name(tools, "MerchantTool")._repo, InMemoryMerchantRepository), (
         "conftest 的 InMemory 钉回 fixture 失效了 —— 测试会去连真库"
     )
 

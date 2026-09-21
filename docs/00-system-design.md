@@ -478,7 +478,7 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 - **唯一检索后端是 chroma**：`factory.py` 的 `build_policy_index` / `build_case_index` 不再有 `backend` 开关，直接装配
   ChromaDB(cosine) + LlamaIndex + FastEmbed 编码器；原先的 `local` 后端（纯 Python 余弦内存索引：`RagPolicyIndex` / `RagCaseIndex` / `rank_documents` / `BM25Index`）已整体移除。
   生产 / HTTP 入口（`build_production_tools()`）即用 **chroma + BGE + hybrid**，但经 `Lazy*Index` 惰性构建（首次检索才建库）。
-  装 `--extra rag` 才可用；**默认 `build_tools()` 与评测世界仍是 InMemory 种子**（见 §6.4 工具装配），要跑真实检索须显式 `data_source="rag"`。
+  装 `--extra rag` 才可用；**默认 `build_tools()` 与评测世界仍是 InMemory 种子**（见 §6.4 工具装配），要跑真实检索须走生产/HTTP 入口 `build_production_tools()`，或评测侧切到 RAG 世界（`EvalContext.tool_world="rag"` / `make_rag_world_tools()`）。
 - 🔴 **Chroma 建库必须显式 `space="cosine"`**：缺省是 `l2`，会让**间距语义整体偏离** —— BGE 向量的"像不像"是**方向**，
   `l2` 下距离受模长干扰，排名与分数一起失真，**且不报错**。唯一保证就是建库那一句
   （`chroma_store._open_collection` 的 `embedding_function=None` + `configuration={"hnsw": {"space": "cosine"}}`）。

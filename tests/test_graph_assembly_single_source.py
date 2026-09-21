@@ -1,8 +1,8 @@
 """装配唯一处契约：生产图只在组合根 ``pra.wiring`` 组装一次。
 
-架构评审 🔴 R1「双图单例」的防回退守护 —— 曾出现 ``pra.api.service.get_graph`` 与
-``pra.infra.persist_service._get_graph`` 各写一份装配 + 各一个模块级单例。现已收敛到
-``pra.wiring.get_production_graph``；本模块把「装配只有一处」变成**可执行契约**：
+生产图必须只在组合根 ``pra.wiring.get_production_graph`` 组装一次：入口模块
+（``pra.api.service`` / ``pra.infra.persist_service``）不得各写一份装配、各持一个模块级单例。
+本模块把「装配只有一处」变成**可执行契约**：
 
 - (a) 单例同一性：进程内 ``get_production_graph()`` 恒返回同一实例。
 - (b) 命名空间：两个入口模块不再自带 ``get_graph`` / ``_get_graph`` / ``_graph`` /

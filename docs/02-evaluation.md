@@ -398,7 +398,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ### 7.2 Agent 工具数据源的结论边界（评测世界 InMemory vs 生产真链路）
 
-- **评测世界**：Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）；评测侧可经 `EvalContext.tool_world="rag"`（或显式装配 `data_source="rag"`）切到真实检索，向量库为 ChromaDB + LlamaIndex（见 [docs/00-system-design.md](00-system-design.md) 的 RAG 节与 `src/pra/rag/`）。
+- **评测世界**：Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）；评测侧可经 `EvalContext.tool_world="rag"`（`make_rag_world_tools()`）切到真实检索，向量库为 ChromaDB + LlamaIndex（见 [docs/00-system-design.md](00-system-design.md) 的 RAG 节与 `src/pra/rag/`）。
 - **生产 / HTTP 入口已接真实链路**：`build_production_tools()` 注入商品/商家 MySQL 与案例/政策的真实 RAG（`Lazy*Index` 惰性构建：装配期零 IO、不 import 检索后端，首次检索才建库连 Chroma）。故**本文所有数字仍是 InMemory 评测世界口径**，不得读成生产链路成绩。
 - **工具集口径**：本文所有 Agent 数字均出自**评测世界的 5 个工具**（`make_eval_world_tools()`：Product / ImageAnalysis / Merchant / CaseSearch / PolicySearch），比生产 `build_tools()` 的 6 个**少一个 `OCRTool`** —— 评测集 `expected_tools` 从不含它、机审 OCR 文本近乎全空，补进去只是多一个拿不到数据的工具。两者清单各自维护、**无"同构"约束**，Tool Selection Accuracy 真值按该 5 工具集合计。
 - **报告必带边界声明（P-2 口径）**："当前结果主要验证 **Agent Workflow、规则协同与 Evaluation Framework**，不代表真实 LLM 最终能力；InMemory 种子覆盖有限，**可能低估 Agent 上限**。"（与 §3.4 同文）
