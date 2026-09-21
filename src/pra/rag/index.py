@@ -5,7 +5,7 @@
 **两路的过滤机制不同，且必须逐条等价**：
 - **向量路**：过滤**下推给 Chroma**（``_filters_of`` 把业务过滤编译成 ``MetadataFilters`` →
   ``where``），打分域在库侧收窄 = 库内全集 ∩ ``where``；取数走 LlamaIndex（``ChromaVectorStore``
-  + ``VectorIndexRetriever``，分数 ``1 − distance``）。
+  + ``VectorIndexRetriever``，分数直接采库口径 ``exp(-distance)``）。
 - **BM25 路**：``bm25s`` 是内存索引、**没有 ``where``**，只能在 Python 候选集（``_*_candidates``）
   上建索引打分。
 
@@ -281,11 +281,13 @@ class _ChromaIndexBase:
     def _rank_vector(
         self, ctx: _RetrievalContext, query_bundle: Any, filters: Any | None
     ) -> list[tuple[int, float]]:
-        """向量路排名：``[(行索引, 1 − distance)]``（打分域 = 库内全集 ∩ ``where``）。
+        """向量路排名：``[(行索引, exp(-distance))]``（打分域 = 库内全集 ∩ ``where``）。
 
-        取数走 LlamaIndex（``ChromaVectorStore`` + ``VectorIndexRetriever``，见
-        :func:`~pra.rag.vector.vector_retrieve`）：过滤由 ``filters``（``where``）在库侧收窄，
-        故这里传**全量** ctx（``_full_context``）而不是候选子集。
+        分数**原样透传**库口径（见 :func:`~pra.rag.vector.vector_retrieve` 的三条换算否决理由）
+        —— 排名只需单调性，该值往下仅作证据展示权重，不参与 Gate 判定。
+
+        过滤由 ``filters``（``where``）在库侧收窄，故这里传**全量** ctx（``_full_context``）
+        而不是候选子集。
         """
         pairs = vector_retrieve(
             self._vec_index,
@@ -455,8 +457,10 @@ class ChromaCaseIndex(_ChromaIndexBase):
     """``CaseIndex`` Protocol 的 Chroma + LlamaIndex 实现（``search`` 签名与工具契约一致）。
 
     ``CaseHit.retrieval_score`` 是**检索分，不是语义相似度**：``bm25`` = 候选集内 min-max
-    归一化 BM25 分；``vector`` = ``1 − distance``；``hybrid`` = RRF 融合分（``Σ 1/(k+rank)``，
+    归一化 BM25 分；``vector`` = 库口径 ``exp(-distance)``；``hybrid`` = RRF 融合分（``Σ 1/(k+rank)``，
     ``k=60``，落在 ~(0, ``2/60 = 1/30``]）。取值恒 ⊂ ``[0,1]``。
+    **三种分数量纲互不可比，且都不参与 Gate 判定**（Gate 对 ``CASE_PRECEDENT`` / ``POLICY_REF``
+    只判存在性；见 :func:`pra.agent.guardrails.measurements.positive_dimensions` 的类型白名单）。
     构造签名见 :meth:`_ChromaIndexBase.__init__`。
     """
 

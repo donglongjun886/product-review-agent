@@ -5,7 +5,7 @@
 - ``embedding.py``：BGE 编码器构造点（``production_embedder``）；
 - ``retrieval.py``：检索公共件（模式枚举 / BM25 归一化 / RRF 融合 / 检索上下文）；
 - ``chroma_store.py``：Chroma 连接、collection 与 corpus 行 → Node 的装配；
-- ``vector.py``：向量检索器（Chroma cosine 距离 → ``1 − distance``）；
+- ``vector.py``：向量路取数（LlamaIndex ``ChromaVectorStore`` + ``VectorIndexRetriever``；分数直接采库口径 ``exp(-distance)``）；
 - ``bm25.py``：BM25 检索桥（jieba 分词接入 bm25s）；
 - ``index.py``：``ChromaPolicyIndex`` / ``ChromaCaseIndex``（候选过滤 + 三模式检索）；
 - ``lazy_index.py``：把索引构建推迟到首次检索的代理；

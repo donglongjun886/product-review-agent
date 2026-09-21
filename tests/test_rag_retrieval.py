@@ -12,7 +12,7 @@ PolicyHit·CaseHit → Evidence 两层契约 / 真基础设施异常上抛 / RAG
 bm25s**（否则会污染 ``tests/test_rag_default_path_no_extra.py`` 的子进程 ``sys.modules`` 断言）。
 
 术语红线：hybrid 的 ``retrieval_score`` 是 **RRF 融合分**（``Σ 1/(60+rank)``，上界
-``2/60 ≈ 0.0333``），**不是语义相似度**；vector 才是 ``1 − cosine distance``，两者量纲不同。
+``2/60 ≈ 0.0333``），**不是语义相似度**；vector 是库口径 ``exp(-distance)``（⊂ ``(0, 1]``），两者量纲不同。
 """
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ async def test_hybrid_scores_are_rrf_fusion_not_similarity(case_hybrid: Any) -> 
 
 
 async def test_vector_scores_are_similarity_scale_unlike_rrf(case_vector: Any) -> None:
-    """对照反证：vector 模式的分是 ``1 − cosine distance``，量纲与 hybrid 的 RRF 分完全不同。
+    """对照反证：vector 模式的分是库口径 ``exp(-distance)``（⊂ ``(0, 1]``），量纲与 hybrid 的 RRF 分完全不同。
 
     断言：同一查询在 vector 模式的 Top 分 **大于** RRF 上界 ``2/60``。意义：与上一条互为反证
     —— 若 hybrid 误用了 vector 的相似度分（或反之），两条用例必有一条失败；同时钉住「不得把
@@ -224,7 +224,7 @@ async def test_vector_scores_are_similarity_scale_unlike_rrf(case_vector: Any) -
     scores = [h.retrieval_score for h in hits]
     assert scores, "vector 检索必须返回命中"
     assert max(scores) > _RRF_UPPER_BOUND, (
-        f"vector 相似度分应远大于 RRF 上界 {_RRF_UPPER_BOUND:.4f}，实际={scores}"
+        f"vector 的库口径分应远大于 RRF 上界 {_RRF_UPPER_BOUND:.4f}，实际={scores}"
     )
 
 
@@ -354,8 +354,8 @@ async def test_filter_plus_retrieval_no_silent_recall_loss(policy_bm25: Any) -> 
     """红线：**带过滤时**的检索不得静默漏召回（漏召回只在带过滤时暴露）。
 
     断言：``category="女鞋/运动鞋"`` + ``effective_only=True`` + 指向该条款的查询下，Top-K 仍含
-    ``POLICY_1.4_v1_c1``（女鞋/运动鞋且 EFFECTIVE）。意义：过滤走 Python 侧候选过滤 + ``ids=``
-    精确候选集，若候选集与判定不一致，目标条款会被静默剔除；本用例专门覆盖「过滤 + 检索」这一
+    ``POLICY_1.4_v1_c1``（女鞋/运动鞋且 EFFECTIVE）。意义：过滤走**库侧 ``where`` 下推 + 同一套语义的
+    Python 谓词**（BM25 路），若两处语义错位，目标条款会被静默剔除；本用例专门覆盖「过滤 + 检索」这一
     red-line 组合（与无过滤的召回用例互为补充）。
     """
     hits = await policy_bm25.search(

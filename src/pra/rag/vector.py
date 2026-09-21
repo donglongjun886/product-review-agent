@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 from pra.rag.deps import llama
@@ -23,8 +22,15 @@ def vector_retrieve(
     top_k: int,
     filters: Any | None = None,
 ) -> list[tuple[str, float]]:
-    """向量路取数：``[(node id, 余弦相似度)]``（分数 = ``1 − distance``，见
-    :func:`_cosine_from_similarity`）。
+    """向量路取数：``[(node id, 相似度分)]`` —— 分数**直接采库口径**，不换算。
+
+    ★ ``ChromaVectorStore`` 给的分是 ``exp(-distance)``（cosine 空间即 ``exp(-(1 − cos))``，
+    ⊂ ``(0, 1]``、越大越近）。这里**原样透传**，不做 ``1 − distance`` 换算：
+
+    ① **排名不需要**——任何 distance 的单调降函数都给出同一顺序，换算是纯冗余；
+    ② **决策不读**——该分往下只变成 ``CaseHit.retrieval_score``（渲染给 LLM 的证据行 + 落库
+       审计），``gate`` 对 ``CASE_PRECEDENT`` / ``POLICY_REF`` 只判**是否存在**、不读 value；
+    ③ 换算反而有损——``1 − distance`` 在 ``d > 1`` 时被 clamp 塌成 0，低分区区分度全丢。
 
     ★ ``filters``（``MetadataFilters``；``None`` = 无过滤）由 ``VectorIndexRetriever`` 透传到
     ``ChromaVectorStore.query`` 的 ``where`` —— 打分域在**库侧**收窄。
@@ -51,27 +57,8 @@ def vector_retrieve(
     if filters is not None:
         kwargs["filters"] = filters
     retriever = llama_.VectorIndexRetriever(**kwargs)
+    # ``min(1.0, ...)`` 不是换算，只是防越界：cosine 距离在浮点下可能微负，``exp(-d)`` 随之
+    # 微超 1，而 ``CaseHit.retrieval_score`` 带 ``le=1`` 约束（越界直接 ValidationError）。
     return [
-        (n.node.node_id, _cosine_from_similarity(n.score)) for n in retriever.retrieve(query)
+        (n.node.node_id, min(1.0, float(n.score or 0.0))) for n in retriever.retrieve(query)
     ]
-
-
-def _cosine_from_similarity(similarity: float) -> float:
-    """``ChromaVectorStore`` 的分 ``exp(-distance)`` → 余弦相似度 ``1 − distance``。
-
-    包装层给的是 ``exp(-distance)``（``vector_stores/chroma/base.py`` 的 ``_query``），**另一套
-    映射**，故反解 ``distance = -ln(similarity)`` 后算 ``1 − distance``（= ``1 + ln(similarity)``）。
-
-    实测（cosine 空间，``[1,0,0]`` 对 ``[1,0,0]`` / ``[0.9,0.1,0]``）：包装层 score =
-    ``1.0`` / ``0.9939024``，反解得 ``1 + ln(score)`` = ``1.0`` / ``0.99388373``，与原生
-    ``1 − distance``（``0.0`` / ``0.006116271``）**逐位一致**（取 6 位后相同）。
-
-    夹到 ``[0,1]`` 仅作防御：浮点尾差可能给出 ``-1e-9`` / ``1+1e-9``，而
-    ``CaseHit.retrieval_score`` 约束 ``ge=0, le=1``（不夹会让整个检索抛 ValidationError）；
-    NaN / 非正值（``exp`` 下溢、零向量等退化输入）按 0 计。
-    ⚠️ 这是**向量路的检索分**；hybrid 路是 RRF 融合分，不同量纲。
-    """
-    value = float(similarity)
-    if math.isnan(value) or value <= 0.0:
-        return 0.0
-    return max(0.0, min(1.0, 1.0 + math.log(value)))

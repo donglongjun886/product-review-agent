@@ -4,7 +4,8 @@ collection 名形状 ``<prefix or 'pra'>_<policy|case>_<dim>_v<schema>``（维�
 末段是 metadata 形状版本 —— 形状一改必须换名字，``_open_collection`` 是「先 get 后 create」，
 同名旧库会被原样复用，新过滤表达式将对旧 metadata 静默零命中）。
 建库两条缺一即静默出错：``embedding_function=None``（否则启用默认 ONNX 嵌入函数并去下模型）、
-``space="cosine"``（Chroma 缺省 ``l2``，让「相似度 = 1 − distance」失效）。
+``space="cosine"``（Chroma 缺省 ``l2``，让间距语义整体偏离 —— BGE 向量的"像不像"是**方向**，
+l2 下距离受模长干扰，排名与分数一起失真且不报错）。
 1 行 = 1 Node 不切分；node id = ``sha256(collection + 行键)`` → 重建幂等覆盖。
 """
 
@@ -107,7 +108,9 @@ def _open_collection(config: ChromaConfig, *, name: str, dim: int, kind: str) ->
     """``get_or_create_collection``（**必须 ``embedding_function=None`` + 显式 cosine 空间**）。
 
     不关 ``embedding_function`` 会启用默认 ONNX 嵌入函数并去下模型；不显式 cosine 则空间是
-    Chroma 缺省的 l2 —— 而「相似度 = 1 − distance」这套口径只在 cosine 空间成立。
+    Chroma 缺省的 l2 —— 而本仓的间距语义（BGE 向量的方向相似度）只在 cosine 空间成立。
+    ⚠️ 空间是 collection 级属性、**创建时定死**，且 ``get_collection`` 命中同名旧库会原样复用
+    —— 换空间只能换 collection 名。
     """
     chroma()  # 缺包早失败（提示装 extra）；客户端由 config 解析（注入优先）
     client = make_chroma_client(config)
