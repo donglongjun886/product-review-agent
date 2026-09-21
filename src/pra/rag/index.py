@@ -1,12 +1,19 @@
 """Chroma 检索索引 —— ``ChromaPolicyIndex`` / ``ChromaCaseIndex``（向量 + BM25 + RRF）。
 
-查询链路：Python 侧候选过滤 → 三模式检索（向量 / BM25 / hybrid）→ 排序截断。向量路取数走
-LlamaIndex（``ChromaVectorStore`` + ``VectorIndexRetriever``，分数 ``1 − distance``，候选 id 经
-``vector_store_kwargs`` 锁定）+ BM25 路（bm25s + jieba）→ RRF 融合 → Top-K。一类 corpus 的全部逐类
-差异 = 子类声明的类级钩子（``_record_type`` / ``_text_of`` / ``_key_of`` / ``_meta_of``）+
-``_kind``，本模块不出现 ``if kind == ...`` 分派。``effective_only`` / ``category``（含「全类目」）/
-``risk_type``（交叠非空）三个过滤语义与既有实现逐条一致。链路零 LLM、零随机；tie-break =
-(分降序, corpus 原序升序)。
+查询链路：业务过滤 → 三模式检索（向量 / BM25 / hybrid）→ 排序截断。
+
+**两路的过滤机制不同，且必须逐条等价**：
+- **向量路**：过滤**下推给 Chroma**（``_filters_of`` 把业务过滤编译成 ``MetadataFilters`` →
+  ``where``），打分域在库侧收窄 = 库内全集 ∩ ``where``；取数走 LlamaIndex（``ChromaVectorStore``
+  + ``VectorIndexRetriever``，分数 ``1 − distance``）。
+- **BM25 路**：``bm25s`` 是内存索引、**没有 ``where``**，只能在 Python 候选集（``_*_candidates``）
+  上建索引打分。
+
+两条路径的等价性由 ``tests/test_rag_retrieval.py`` 的全组合用例锁住 —— 改任一侧都要同步另一侧。
+一类 corpus 的全部逐类差异 = 子类声明的类级钩子（``_record_type`` / ``_text_of`` / ``_key_of`` /
+``_meta_of`` / ``_filters_of``）+ ``_kind``，本模块不出现 ``if kind == ...`` 分派。
+``effective_only`` / ``category``（含「全类目」）/ ``risk_type``（交叠非空）三个过滤语义与既有实现
+逐条一致。链路零 LLM、零随机；tie-break = (分降序, corpus 原序升序)。
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from pra.rag.chroma_store import (
     case_node_metadata,
     make_chroma_client,
     policy_node_metadata,
+    risk_type_key,
 )
 from pra.rag.corpus.schema import CasePrecedentRecord, PolicyClauseRecord
 from pra.rag.deps import llama
@@ -45,7 +53,8 @@ _FULL_CATEGORY = "全类目"
 
 
 # ---------------------------------------------------------------------------
-# 候选过滤（policy / case 各一份谓词；向量路与 BM25 路共用，绝无双实现）
+# 候选过滤（policy / case 各一份谓词；**只服务 BM25 路** —— 向量路的过滤已下推给 Chroma，
+# 见 ``_filters_of``。两侧语义必须等价，由 tests/test_rag_retrieval.py 的组合用例锁住）
 # ---------------------------------------------------------------------------
 
 
@@ -80,6 +89,29 @@ def _case_candidates(rows: list[CasePrecedentRecord], filters: CaseSearchFilters
                 continue
         candidates.append(i)
     return candidates
+
+
+def _risk_type_clause(risk_types: list[Any]) -> Any:
+    """``risk_type`` 「交叠非空」→ ``$or`` of ``rt_<值>: 1``。
+
+    值取整数 ``1``（不是 ``True``）：``MetadataFilter.value`` 的 pydantic 联合类型不收 ``bool``。
+    键名必须与写入侧（``chroma_store.risk_type_key``）同源，否则**静默零命中**。
+    """
+    llama_ = llama()
+    return llama_.MetadataFilters(
+        condition=llama_.FilterCondition.OR,
+        filters=[llama_.MetadataFilter(key=risk_type_key(t), value=1) for t in risk_types],
+    )
+
+
+def _where_from(clauses: list[Any]) -> Any | None:
+    """过滤子句列表 → ``MetadataFilters``（空 → ``None``；单条不套 ``$and``）。"""
+    if not clauses:
+        return None
+    llama_ = llama()
+    if len(clauses) == 1:
+        return llama_.MetadataFilters(filters=clauses)
+    return llama_.MetadataFilters(condition=llama_.FilterCondition.AND, filters=clauses)
 
 
 def _validate_mode(mode: str) -> RetrievalMode:
@@ -158,6 +190,17 @@ class _ChromaIndexBase:
         """node metadata（不进检索文本，见 ``chroma_store._build_nodes``）。"""
         raise NotImplementedError
 
+    def _filters_of(self, filters: Any, effective_only: bool = False) -> Any | None:
+        """业务过滤 → Chroma ``where`` 表达式（``MetadataFilters``；``None`` = 无过滤）。
+
+        **必须与 ``_*_candidates`` 的 Python 谓词逐条等价** —— 前者是向量路的打分域，后者是
+        BM25 路的打分域，两处不一致时「带过滤就会静默漏召回」（漏召回只在带过滤时暴露）。
+
+        返回 ``None`` 而非空 ``MetadataFilters``：空表达式翻译出的 ``{}`` 语义上等于全量，
+        但显式 ``None`` 让「无过滤」这条路径根本不经过 ``where``。
+        """
+        raise NotImplementedError
+
     # -- 装配 ---------------------------------------------------------------
 
     def _seed(self) -> None:
@@ -223,25 +266,38 @@ class _ChromaIndexBase:
             row_index_by_key={nid: candidates[offset] for offset, nid in enumerate(sub_ids)},
         )
 
+    def _full_context(self) -> _RetrievalContext:
+        """全量语料上的检索上下文（**向量路**用：过滤已在库侧下推，打分域 = 库内全集 ∩ ``where``）。
+
+        ``_node_ids[i] ↔ self._rows[i]`` 是构造期既有约定，故行索引映射就是下标枚举。
+        """
+        return _RetrievalContext(
+            node_ids=list(self._node_ids),
+            nodes=list(self._nodes),
+            embed_model=self._embed_model,
+            row_index_by_key={nid: i for i, nid in enumerate(self._node_ids)},
+        )
+
     def _rank_vector(
-        self, sub_ctx: _RetrievalContext, query_bundle: Any
+        self, ctx: _RetrievalContext, query_bundle: Any, filters: Any | None
     ) -> list[tuple[int, float]]:
-        """向量路排名：``[(行索引, 1 − distance)]``（精确候选 id 集）。
+        """向量路排名：``[(行索引, 1 − distance)]``（打分域 = 库内全集 ∩ ``where``）。
 
         取数走 LlamaIndex（``ChromaVectorStore`` + ``VectorIndexRetriever``，见
-        :func:`~pra.rag.vector.vector_retrieve`）：候选 id 经 ``vector_store_kwargs`` 锁定，
-        打分域 = 精确候选集（不让非候选行抢名额）。
+        :func:`~pra.rag.vector.vector_retrieve`）：过滤由 ``filters``（``where``）在库侧收窄，
+        故这里传**全量** ctx（``_full_context``）而不是候选子集。
         """
         pairs = vector_retrieve(
             self._vec_index,
             query_bundle,
-            embed_model=sub_ctx.embed_model,
-            node_ids=sub_ctx.node_ids,
+            embed_model=ctx.embed_model,
+            top_k=len(ctx.node_ids),
+            filters=filters,
         )
         scored: dict[str, float] = {
-            nid: score for nid, score in pairs if nid in sub_ctx.row_index_by_key
+            nid: score for nid, score in pairs if nid in ctx.row_index_by_key
         }
-        ranked = [(sub_ctx.row_index_by_key[nid], score) for nid, score in scored.items()]
+        ranked = [(ctx.row_index_by_key[nid], score) for nid, score in scored.items()]
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
         return [(i, round(s, 6)) for i, s in ranked]
 
@@ -265,28 +321,23 @@ class _ChromaIndexBase:
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
         return [(i, round(s, 6)) for i, s in ranked]
 
-    def _rank_hybrid(
-        self,
-        sub_ctx: _RetrievalContext,
-        query_bundle: Any,
-        top_k: int,
+    def _rank_fused(
+        self, routed: dict[str, list[tuple[int, float]]], row_index: dict[str, int]
     ) -> list[tuple[int, float]]:
-        """Hybrid 路：两路排名 → **RRF 融合**（``Σ_r 1/(60 + rank_r)``，``k=60``）。
+        """多路排名 → **RRF 融合**（``Σ_r 1/(60 + rank_r)``，``k=60``）。
 
-        两路各自返回**全部候选**（``top_k`` = 候选数）→ 在完整排名列表上融合
+        各路返回**各自打分域内的完整排名**（不按 ``top_k`` 预截断）→ 在完整排名列表上融合
         （:func:`~pra.rag.retrieval.fuse_rrf`，含「为什么不用 ``QueryFusionRetriever`` 现成融合」的实测理由）。
         ⚠️ 该分是**融合排名分，不是相似度**（上界 **2/60 = 1/30 ≈ 0.0333**）；排序 key
         = ``(分降序, corpus 原序 idx 升序)``。
         """
-        vec_ranked = self._rank_vector(sub_ctx, query_bundle)
-        bm25_ranked = self._rank_bm25(sub_ctx, query_bundle, top_k)
-        # RRF 的输入是「两路各自的排名列表」：把 (行索引, 分) 排名还原为 node id 顺序。
-        id_by_row = {row: nid for nid, row in sub_ctx.row_index_by_key.items()}
-        ranked_lists = {
-            "vector": [id_by_row[row] for row, _score in vec_ranked],
-            "bm25": [id_by_row[row] for row, _score in bm25_ranked],
-        }
-        return fuse_rrf(ranked_lists, sub_ctx.row_index_by_key)
+        # RRF 的输入是「各路排名 id 列表 + node_id → 行索引映射」。两路打分域不同
+        # （向量 = 库内全集 ∩ where，BM25 = Python 候选集），故映射必须用**全量**行索引。
+        id_by_row = {row: nid for nid, row in row_index.items()}
+        return fuse_rrf(
+            {name: [id_by_row[row] for row, _score in ranked] for name, ranked in routed.items()},
+            row_index,
+        )
 
     # -- 检索核心 -----------------------------------------------------------
 
@@ -294,27 +345,36 @@ class _ChromaIndexBase:
         self,
         query: str,
         candidates: list[int],
+        filters: Any | None,
         *,
         top_k: int,
     ) -> list[tuple[int, float]]:
         """三模式检索 → ``[(行索引, 6 位检索分)]``（已按 ``(分降序, 原序)`` 排序、已截断 Top-K）。
 
-        ``top_k`` 截断在**排序之后**统一做；各路内部按需取「候选数」以保证 BM25 的
-        min-max 与 RRF 的排名列表覆盖完整候选集。
+        两路的**打分域不同**：向量路用全量 ctx + ``where``（过滤已下推给 Chroma），BM25 路用
+        Python 候选子集（``candidates``）—— ``bm25s`` 内存索引没有 ``where``。
+
+        ``top_k`` 截断在**排序之后**统一做；各路内部取「所在打分域的全长」，先拿到完整排名
+        （BM25 的 min-max 归一化、RRF 的排名列表都必须覆盖完整域，不能按 ``top_k`` 预截断）。
         """
         if top_k < 1 or not candidates:
             return []
-        sub_ctx = self._sub_context(candidates)
         query_bundle = llama().QueryBundle(query_str=query)
-        # 三路都取「候选数」上限：先拿到**完整候选排名**，最后截断 Top-K。
-        # （BM25 的 min-max 归一化、RRF 的排名列表都要覆盖完整候选集，不能按 top_k 预截断。）
-        full_k = len(candidates)
         if self.mode == "bm25":
-            ranked = self._rank_bm25(sub_ctx, query_bundle, full_k)
+            ranked = self._rank_bm25(self._sub_context(candidates), query_bundle, len(candidates))
         elif self.mode == "vector":
-            ranked = self._rank_vector(sub_ctx, query_bundle)
+            ranked = self._rank_vector(self._full_context(), query_bundle, filters)
         else:
-            ranked = self._rank_hybrid(sub_ctx, query_bundle, full_k)
+            full_ctx = self._full_context()
+            ranked = self._rank_fused(
+                {
+                    "vector": self._rank_vector(full_ctx, query_bundle, filters),
+                    "bm25": self._rank_bm25(
+                        self._sub_context(candidates), query_bundle, len(candidates)
+                    ),
+                },
+                full_ctx.row_index_by_key,
+            )
         return ranked[:top_k]
 
 
@@ -340,6 +400,32 @@ class ChromaPolicyIndex(_ChromaIndexBase):
     def _meta_of(self, row: PolicyClauseRecord) -> dict[str, Any]:
         return policy_node_metadata(row)
 
+    def _filters_of(
+        self, filters: PolicySearchFilters, effective_only: bool = False
+    ) -> Any | None:
+        """业务过滤 → Chroma ``where``（**与 :func:`_policy_candidates` 逐条等价**）。
+
+        - ``effective_only`` → ``status == "EFFECTIVE"``；
+        - ``category`` 的三态 ``{None, 值, 全类目}``：``category`` 是 schema **必填非空 str**，
+          故 ``None`` 分支不可达，表达式只需 ``$in [值, 全类目]``；
+        - ``risk_type`` 交叠非空 → ``$or`` of ``rt_*`` 键。
+        """
+        llama_ = llama()
+        clauses: list[Any] = []
+        if effective_only:
+            clauses.append(llama_.MetadataFilter(key="status", value="EFFECTIVE"))
+        if filters.category:
+            clauses.append(
+                llama_.MetadataFilter(
+                    key="category",
+                    operator=llama_.FilterOperator.IN,
+                    value=[filters.category, _FULL_CATEGORY],
+                )
+            )
+        if filters.risk_type:
+            clauses.append(_risk_type_clause(filters.risk_type))
+        return _where_from(clauses)
+
     async def search(
         self,
         query: str,
@@ -349,13 +435,14 @@ class ChromaPolicyIndex(_ChromaIndexBase):
     ) -> list[PolicyClauseHit]:
         """检索政策条款（三模式；无命中 → ``[]``，工具 ok=True）。
 
-        流程：Python 侧候选过滤 → 按模式装配检索器（两路都只喂候选 node）→ 打分/融合 →
+        流程：业务过滤（向量路下推 Chroma ``where``；BM25 路走 Python 候选集）→ 打分/融合 →
         ``(分降序, corpus 原序)`` 排序 + 6 位取整 → Top-K。
         """
         candidates = _policy_candidates(self._rows, filters, effective_only)
         ranked = self._retrieve_ranked(
             query,
             candidates,
+            self._filters_of(filters, effective_only),
             top_k=top_k,
         )
         return [
@@ -385,11 +472,29 @@ class ChromaCaseIndex(_ChromaIndexBase):
     def _meta_of(self, row: CasePrecedentRecord) -> dict[str, Any]:
         return case_node_metadata(row)
 
+    def _filters_of(
+        self, filters: CaseSearchFilters, effective_only: bool = False
+    ) -> Any | None:
+        """业务过滤 → Chroma ``where``（**与 :func:`_case_candidates` 逐条等价**）。
+
+        case **没有** ``effective_only`` 语义（``effective_only`` 形参只为与基类钩子同签名，
+        恒被忽略）；``category`` 是**精确相等**（不是 policy 的「占位 / 值 / 全类目」三态）。
+        """
+        del effective_only
+        llama_ = llama()
+        clauses: list[Any] = []
+        if filters.category:
+            clauses.append(llama_.MetadataFilter(key="category", value=filters.category))
+        if filters.risk_type:
+            clauses.append(_risk_type_clause(filters.risk_type))
+        return _where_from(clauses)
+
     async def search(self, query: str, filters: CaseSearchFilters, top_k: int) -> list[CaseHit]:
         candidates = _case_candidates(self._rows, filters)
         ranked = self._retrieve_ranked(
             query,
             candidates,
+            self._filters_of(filters),
             top_k=top_k,
         )
         hits: list[CaseHit] = []

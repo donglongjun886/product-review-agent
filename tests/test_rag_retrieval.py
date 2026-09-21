@@ -370,6 +370,80 @@ async def test_filter_plus_retrieval_no_silent_recall_loss(policy_bm25: Any) -> 
 
 
 # ---------------------------------------------------------------------------
+# 4b. 过滤下推的等价性守护（向量路 ``where`` ⟷ BM25 路 Python 谓词）
+# ---------------------------------------------------------------------------
+
+
+async def test_policy_where_pushdown_equals_python_candidates(
+    policy_vector: Any, policy_rows: Any
+) -> None:
+    """向量路下推的 ``where`` 与 BM25 路的 Python 谓词**必须给出同一打分域**。
+
+    断言：遍历 ``category``（无 / 真实类目 / 全类目 / 不存在）× ``effective_only`` × ``risk_type``
+    （无 / 单值 / 双值）的全组合，``policy_vector.search(..., top_k=len(rows))`` 的命中集合
+    **逐组等于** ``_policy_candidates`` 算出的候选集合。
+
+    意义：向量路把过滤**下推给 Chroma**（``where``），BM25 路只能在 Python 候选集上打分
+    （``bm25s`` 内存索引没有 ``where``）—— 两处语义一旦不一致就会「带过滤时静默漏召回」，
+    而漏召回**只在带过滤时暴露**（无过滤时全绿）。这是这条下推唯一的守护：
+    ``risk_type`` 的「交叠非空」靠 ``rt_*`` 整数键 + ``$or`` 表达（Chroma 无数组交叠操作符），
+    ``category`` 的三态靠 ``$in [值, 全类目]``；键名与写入侧不同源、或语义错一处，都会有某组集合不等。
+
+    ``top_k`` 取语料行数 ⇒ 命中全部返回、不被截断，集合比较才有意义。
+    （``category="不存在的类目"`` 一组候选为空，覆盖的是「空候选短路」，属弱校验，留作边界。）
+    """
+    from pra.rag.index import _policy_candidates
+
+    for category in (None, "女鞋/运动鞋", "箱包/女包", "全类目", "不存在的类目"):
+        for effective_only in (False, True):
+            for risks in (None, ["FALSE_CLAIM"], ["EVASION_PATTERN", "FALSE_CLAIM"]):
+                filters = PolicySearchFilters(category=category, risk_type=risks)
+                expected = {
+                    policy_rows[i].clause_id
+                    for i in _policy_candidates(policy_rows, filters, effective_only)
+                }
+                hits = await policy_vector.search(
+                    "外观高度模仿知名品牌 / 材质虚假宣传 / 改标题重上架",
+                    filters,
+                    len(policy_rows),
+                    effective_only,
+                )
+                assert {h.clause_id for h in hits} == expected, (
+                    "where 下推与 Python 谓词不一致（带过滤的静默漏召回）："
+                    f"category={category!r} effective_only={effective_only} risk_type={risks}"
+                )
+
+
+async def test_case_where_pushdown_equals_python_candidates(
+    case_vector: Any, case_rows: Any
+) -> None:
+    """case 侧同理；差异点：case **没有** ``effective_only``，``category`` 是**精确相等**。
+
+    断言：``category``（无 / 真实类目 / 不存在）× ``risk_type``（无 / 单值 / 双值）全组合下，
+    ``case_vector.search(..., top_k=len(rows))`` 的命中集合逐组等于 ``_case_candidates`` 的候选集合。
+    意义：case 的 ``category`` 若被误写成 policy 的三态（``$in [值, 全类目]``），带过滤时会**多召回**
+    全类目先例 —— 本用例把它钉死（预期集合按 case 自己的精确相等语义现算）。
+    """
+    from pra.rag.index import _case_candidates
+
+    for category in (None, "女鞋/运动鞋", "箱包/女包", "不存在的类目"):
+        for risks in (None, ["EVASION_PATTERN"], ["FALSE_CLAIM", "EVASION_PATTERN"]):
+            filters = CaseSearchFilters(category=category, risk_type=risks)
+            expected = {
+                case_rows[i].case_id for i in _case_candidates(case_rows, filters)
+            }
+            hits = await case_vector.search(
+                "无品牌外观高度模仿，商家多次改标题重上架",
+                filters,
+                len(case_rows),
+            )
+            assert {h.case_id for h in hits} == expected, (
+                "case 侧 where 下推与 Python 谓词不一致："
+                f"category={category!r} risk_type={risks}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # 5. 两层契约：索引 → Hit；工具 → Evidence
 # ---------------------------------------------------------------------------
 

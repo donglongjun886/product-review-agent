@@ -39,6 +39,12 @@ def llama() -> SimpleNamespace:
             VectorIndexRetriever,
         )
         from llama_index.core.schema import QueryBundle, TextNode
+        from llama_index.core.vector_stores import (
+            FilterCondition,
+            FilterOperator,
+            MetadataFilter,
+            MetadataFilters,
+        )
         from llama_index.retrievers.bm25 import BM25Retriever
         from llama_index.vector_stores.chroma import ChromaVectorStore
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
@@ -49,6 +55,10 @@ def llama() -> SimpleNamespace:
     return SimpleNamespace(
         BM25Retriever=BM25Retriever,
         ChromaVectorStore=ChromaVectorStore,
+        FilterCondition=FilterCondition,
+        FilterOperator=FilterOperator,
+        MetadataFilter=MetadataFilter,
+        MetadataFilters=MetadataFilters,
         QueryBundle=QueryBundle,
         TextNode=TextNode,
         VectorIndexRetriever=VectorIndexRetriever,

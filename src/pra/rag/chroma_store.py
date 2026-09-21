@@ -1,6 +1,8 @@
 """Chroma 连接与 collection / node 装配 —— ``ChromaConfig``、客户端、建库、corpus 行 → Node。
 
-collection 名形状 ``<prefix or 'pra'>_<policy|case>_<dim>``（维度由实际编码出的向量决定）。
+collection 名形状 ``<prefix or 'pra'>_<policy|case>_<dim>_v<schema>``（维度由实际编码出的向量决定；
+末段是 metadata 形状版本 —— 形状一改必须换名字，``_open_collection`` 是「先 get 后 create」，
+同名旧库会被原样复用，新过滤表达式将对旧 metadata 静默零命中）。
 建库两条缺一即静默出错：``embedding_function=None``（否则启用默认 ONNX 嵌入函数并去下模型）、
 ``space="cosine"``（Chroma 缺省 ``l2``，让「相似度 = 1 − distance」失效）。
 1 行 = 1 Node 不切分；node id = ``sha256(collection + 行键)`` → 重建幂等覆盖。
@@ -24,6 +26,7 @@ __all__ = [
     "case_node_metadata",
     "make_chroma_client",
     "policy_node_metadata",
+    "risk_type_key",
 ]
 
 #: 默认 Chroma 服务端地址（deploy/chroma：宿主 8001 → 容器 8000；只用 `/api/v2`）。
@@ -31,10 +34,25 @@ CHROMA_DEFAULT_HOST = "127.0.0.1"
 CHROMA_DEFAULT_PORT = 8001
 
 _DEFAULT_COLLECTION_PREFIX = "pra"
+#: metadata 形状版本（collection 名末段）。**metadata 键形状变更时必须递增** —— 否则服务端上
+#: 已存在的同名 collection 会被 ``_open_collection`` 的 get 原样复用（新 ``where`` 一条都查不到、
+#: 静默全空）。
+_SCHEMA_VERSION = 2
 #: metadata 维度键（Chroma 不声明向量维度，故把本索引声明的 dim 存进 collection metadata）。
 _DIM_KEY = "pra_dim"
-#: 风险类型列表键（空列表不写 —— Chroma 1.5.9 拒绝空列表 metadata 值）。
-_RISK_TYPE_KEY = "risk_type"
+#: ``risk_type`` 过滤键前缀：**每个枚举值一个整数键**（``rt_FALSE_CLAIM: 1``），不用数组。
+#: Chroma ``where`` 只支持标量比较、没有「数组交叠」操作符，而过滤语义恰恰是**交叠非空**。
+#: 值取 ``1`` 而非 ``True``：``MetadataFilter.value`` 的 pydantic 联合类型不收 ``bool``。
+_RISK_TYPE_PREFIX = "rt_"
+
+
+def risk_type_key(value: Any) -> str:
+    """``risk_type`` 枚举（或字符串）→ metadata 过滤键 ``rt_<value>``。
+
+    写入（:func:`policy_node_metadata` / :func:`case_node_metadata`）与查询（``where`` 构造）
+    必须同源，否则键名不一致会**静默零命中**（Chroma 对不存在的键不报错）。
+    """
+    return f"{_RISK_TYPE_PREFIX}{getattr(value, 'value', value)}"
 
 
 @dataclass(frozen=True)
@@ -73,7 +91,7 @@ def make_chroma_client(config: ChromaConfig | None = None) -> Any:
 
 
 def _collection_name(prefix: str | None, kind: str, dim: int) -> str:
-    return f"{prefix or _DEFAULT_COLLECTION_PREFIX}_{kind}_{dim}"
+    return f"{prefix or _DEFAULT_COLLECTION_PREFIX}_{kind}_{dim}_v{_SCHEMA_VERSION}"
 
 
 def _node_id(collection: str, key: str) -> str:
@@ -115,6 +133,11 @@ def _iso_or_empty(value: date | None) -> str:
 
 
 def policy_node_metadata(row: PolicyClauseRecord) -> dict[str, Any]:
+    """policy node metadata（**不进检索文本**，见 :func:`_build_nodes`）。
+
+    ``risk_type`` 写成 ``rt_<值>: 1`` 整数键（供 Chroma ``where`` 表达「交叠非空」），
+    见 :func:`risk_type_key`。
+    """
     meta: dict[str, Any] = {
         "clause_id": row.clause_id,
         "policy_id": row.policy_id,
@@ -123,20 +146,21 @@ def policy_node_metadata(row: PolicyClauseRecord) -> dict[str, Any]:
         "status": row.status,
         "effective_date": _iso_or_empty(row.effective_date),
     }
-    if row.risk_type:
-        meta[_RISK_TYPE_KEY] = [t.value for t in row.risk_type]
+    for risk_type in row.risk_type:
+        meta[risk_type_key(risk_type)] = 1
     return meta
 
 
 def case_node_metadata(row: CasePrecedentRecord) -> dict[str, Any]:
+    """case node metadata（``risk_type`` 同 :func:`policy_node_metadata`）。"""
     meta: dict[str, Any] = {
         "case_id": row.case_id,
         "category": row.category,
         "decision": row.decision.value,
         "risk_level": row.risk_level.value,
     }
-    if row.risk_type:
-        meta[_RISK_TYPE_KEY] = [t.value for t in row.risk_type]
+    for risk_type in row.risk_type:
+        meta[risk_type_key(risk_type)] = 1
     return meta
 
 
@@ -156,7 +180,7 @@ def _build_nodes(
     **metadata 不进检索文本**：``excluded_embed_metadata_keys`` / ``excluded_llm_metadata_keys``
     设为全部 metadata 键，使 ``get_content(metadata_mode=EMBED)`` 只返回正文 —— 这对 BM25 路
     **必需**（``BM25Retriever`` 用 ``MetadataMode.EMBED``），不排除就会把 ``case_id`` /
-    ``category`` / ``decision`` / ``risk_type`` 的字面值索引进去，出现「按 metadata 字面值就能
+    ``category`` / ``decision`` / ``rt_*`` 的字面值索引进去，出现「按 metadata 字面值就能
     命中」的伪检索。排除设置随 ``_node_content`` JSON 往返存活；metadata 本身仍完整保留。
     """
     llama_ = llama()

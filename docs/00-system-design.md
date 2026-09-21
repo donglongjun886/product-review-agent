@@ -455,7 +455,10 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 ### 6.3 检索策略
 
 - **混合检索**：BM25（关键词，如"无品牌""模仿""重上架"）+ 向量相似度（语义），融合后取 Top-K。
-- **元数据过滤**：先按 `类目`、`risk_type`、`政策有效性（当前生效版本）` 过滤，再检索——避免检索到过期政策或不相关类目案例。
+- **元数据过滤**：按 `类目`、`risk_type`、`政策有效性（当前生效版本）` 过滤，避免检索到过期政策或不相关类目案例。
+  **两路的过滤机制不同、语义必须等价**：向量路把过滤**下推给 Chroma `where`**（在库侧收窄打分域）；
+  BM25 路是 `bm25s` 内存索引、**没有 `where`**，只能在 Python 候选集上建索引打分。两侧等价性由
+  `tests/test_rag_retrieval.py` 的过滤器全组合用例锁住（漏召回只在带过滤时暴露）。
 - **融合与截断**：向量 + BM25 混合召回经 **RRF（Reciprocal Rank Fusion）** 融合后取 Top-K，控制注入上下文的量；当前实现**没有重排序（rerank）环节**，"粗召回 Top-50 → 精排 Top-5（重排模型或 LLM 打分）"尚未实现。
 - **引用格式**：检索结果必须带 `policy_id + 版本 + 条款原文` / `case_id + 决策`，进 `evidence[]` 时保留可追溯引用。
 
@@ -479,12 +482,21 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 - 🔴 **Chroma 建库必须显式 `space="cosine"`**：缺省是 `l2`，会让「相似度 = 1 − distance」**静默失效**。唯一保证就是建库那一句
   （`chroma_store._open_collection` 的 `embedding_function=None` + `configuration={"hnsw": {"space": "cosine"}}`）。
   **运行期的空间自检已删** —— 本项目没有 l2 库来源，为假想的「库被人建错」维护一套检查属过度工程。
-- 🔴 **`ChromaVectorStore.query` 返回的分是 `exp(-distance)`，不是 `1 − distance`** → 向量取数走 Chroma 原生 `collection.query` 的 distance 自行换算。
-- 🔴 **向量取数必须传「精确候选 id 集合」(`ids=`)**，不能靠 `where` 近似 + `n_results=N`：否则非候选行会按距离抢占名额，
-  结果变成精确候选集的**真子集**（最坏为空）。这就是曾经的漏召回缺陷；**契约类验收必须覆盖过滤器组合**，
-  只测无过滤的干净 query 不会暴露它。
-  （**候选过滤只在 Python 侧做一次**：候选集由 `ids=` 精确锁定，故 store 侧 `where` 下推与随后的 Python 逐条复核均已删除。）
-  **取回多少就是多少**：`top-k` 不保证返回数量等于 `top_k`，故不再有「候选集覆盖率自检 / 重试 / 从 stored vectors 补算」这套兜底 ——
+  collection 名形如 `pra_<policy|case>_<dim>_v<schema>`：末段是 **metadata 形状版本**，形状一改必须换名字 ——
+  `_open_collection` 是「先 get 后 create」，同名旧库会被原样复用，新 `where` 对旧 metadata 会**静默零命中**。
+- 🔴 **向量取数的分是 `exp(-distance)`，不是 `1 − distance`**：`ChromaVectorStore.query` 给的是 `exp(-distance)`，
+  由 `rag/vector.py::_cosine_from_similarity` 反解 `1 + ln(score)` 换算成余弦相似度（取 6 位后与原生 `1 − distance` 一致）。
+- 🔴 **向量路的过滤下推给 Chroma `where`**（`rag/index.py::_filters_of` 把业务过滤编译成 `MetadataFilters`，
+  经 `VectorIndexRetriever` 透传到 `collection.query(where=...)`）：打分域 = **库内全集 ∩ `where`**。
+  - `risk_type` 的「交叠非空」由**每个枚举值一个 `rt_<值>: 1` 整数键 + `$or`** 表达（Chroma `where` 只支持标量比较、
+    没有数组交叠操作符）；值取整数 `1` 而非 `True`，因为 `MetadataFilter.value` 的 pydantic 联合类型**不收 `bool`**。
+  - `category`：policy 是三态 `{占位, 值, 全类目}` → `$in [值, 全类目]`；case 是**精确相等** → `$eq`。
+  - ⚠️ 过滤语义因此有**两处定义**（向量路 `where` + BM25 路的 Python 谓词 `_policy_candidates` / `_case_candidates`），
+    两者必须**逐条等价** —— 由 `tests/test_rag_retrieval.py::test_policy_where_pushdown_equals_python_candidates`
+    与 `::test_case_where_pushdown_equals_python_candidates` 的过滤器全组合用例锁住。**改任一侧都要同步另一侧与该用例。**
+  - **候选 id 预览式锁定（`vector_store_kwargs={"ids": ...}`）已删除**：它要求先算出 Python 候选集，
+    与「下推」重复；实测两者在 114 组过滤器组合上打分域、排名、分数、hybrid 融合**逐位一致**。
+- **取回多少就是多少**：`top-k` 不保证返回数量等于 `top_k`（带过滤的 HNSW 检索尤其如此），故不再有「候选集覆盖率自检 / 重试 / 从 stored vectors 补算」这套兜底 ——
   检索**真失败**（服务端不可达、collection 不存在、embedding 抛错）由 Chroma 直接上抛，不自己补一套检索系统。
 - **`retrieval_score` 是检索分**（hybrid 下即 RRF 分 `Σ1/(60+rank)`，rank 从 0 起 → 上界 `2/60 ≈ 0.0333`），**任何场合不得称为「语义相似度」**；
   `image_analysis` 的外观相似度是另一回事：它在 evidence 里叫 `IMAGE_SIMILARITY`。
@@ -973,10 +985,10 @@ product-review-agent/
 │   │   ├── deps.py                  #   第三方重依赖的延迟 import 边界（唯一）
 │   │   ├── embedding.py             #   BGE 编码器构造点（production_embedder）
 │   │   ├── retrieval.py             #   模式枚举 / BM25 归一化 / RRF 融合 / 检索上下文
-│   │   ├── chroma_store.py          #   Chroma 连接、collection 与 Node 装配
-│   │   ├── vector.py                #   向量路检索器（distance → 1 − distance）
+│   │   ├── chroma_store.py          #   Chroma 连接、collection（含 metadata 形状版本）与 Node 装配
+│   │   ├── vector.py                #   向量路取数（LlamaIndex + 过滤下推 where）
 │   │   ├── bm25.py                  #   BM25 路（jieba 分词桥）
-│   │   ├── index.py                 #   ChromaPolicyIndex / ChromaCaseIndex（候选过滤 + 三模式）
+│   │   ├── index.py                 #   ChromaPolicyIndex / ChromaCaseIndex（两路过滤 + 三模式 + RRF）
 │   │   ├── lazy_index.py            #   索引构建推迟到首次检索的代理
 │   │   ├── factory.py               #   装配入口 build_policy_index / build_case_index
 │   │   └── corpus/                  #   静态 corpus（policies.json / cases.json）+ schema

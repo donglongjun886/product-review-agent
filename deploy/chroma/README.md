@@ -193,12 +193,14 @@ ONNX 模型，既慢又与「默认不联网」基调冲突。
 `embedding_function=None` 建库、**不改 space**，拿到的就是 L2 距离（实测 `0.020000005`，
 在归一化向量上 = `2(1−cos)`），任何「相似度 = 1 − distance」的换算都会**静默错**。
 
-- 建库两种等价写法（**都实测过，落库 `space` 均为 `cosine`**）：
+- 建库两种等价写法（**都实测过，落库 `space` 均为 `cosine`**）。collection 名形如
+  `pra_<policy|case>_<dim>_v<schema>`，**末段是 metadata 形状版本**（`chroma_store._SCHEMA_VERSION`）——
+  形状一改就得换名字，否则同名旧库会被 `_open_collection` 的 get 原样复用：
 
   ```python
-  client.create_collection("pra_policy_512", embedding_function=None,
+  client.create_collection("pra_policy_512_v2", embedding_function=None,
                            configuration={"hnsw": {"space": "cosine"}})   # 新写法（推荐）
-  client.create_collection("pra_policy_512", embedding_function=None,
+  client.create_collection("pra_policy_512_v2", embedding_function=None,
                            metadata={"hnsw:space": "cosine"})             # 旧写法（兼容）
   ```
 
