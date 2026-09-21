@@ -3,7 +3,7 @@
 - ``corpus/``：静态 corpus 数据 + 校验 schema；
 - ``deps.py``：第三方重依赖（chromadb / llama_index）的延迟 import 边界；
 - ``embedding.py``：BGE 编码器构造点（``production_embedder``）；
-- ``retrieval.py``：检索公共件（模式枚举 / BM25 归一化 / RRF 融合 / 检索上下文）；
+- ``retrieval.py``：检索公共件（模式枚举 / 检索上下文）；
 - ``chroma_store.py``：Chroma 连接、collection 与 corpus 行 → Node 的装配；
 - ``vector.py``：向量路取数（LlamaIndex ``ChromaVectorStore`` + ``VectorIndexRetriever``；分数直接采库口径 ``exp(-distance)``）；
 - ``bm25.py``：BM25 检索桥（jieba 分词接入 bm25s）；

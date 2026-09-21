@@ -13,7 +13,8 @@
 一类 corpus 的全部逐类差异 = 子类声明的类级钩子（``_record_type`` / ``_text_of`` / ``_key_of`` /
 ``_meta_of`` / ``_filters_of``）+ ``_kind``，本模块不出现 ``if kind == ...`` 分派。
 ``effective_only`` / ``category``（含「全类目」）/ ``risk_type``（交叠非空）三个过滤语义与既有实现
-逐条一致。链路零 LLM、零随机；tie-break = (分降序, corpus 原序升序)。
+逐条一致。链路零 LLM 调用、零随机；tie-break = (分降序, corpus 原序升序)。
+hybrid 的融合在 :meth:`_ChromaIndexBase._rank_hybrid`（``QueryFusionRetriever`` + RRF）。
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from pra.rag.bm25 import bm25_retrieve, make_bm25_retriever
+from pra.rag.bm25 import bm25_retrieve, bm25_tokenizer_context, make_bm25_retriever
 from pra.rag.chroma_store import (
     ChromaConfig,
     _build_nodes,
@@ -31,6 +32,7 @@ from pra.rag.chroma_store import (
     _open_collection,
     case_node_metadata,
     make_chroma_client,
+    node_metadatas,
     policy_node_metadata,
     risk_type_key,
 )
@@ -40,10 +42,8 @@ from pra.rag.retrieval import (
     MODES,
     RetrievalMode,
     _RetrievalContext,
-    fuse_rrf,
-    normalize_minmax,
 )
-from pra.rag.vector import vector_retrieve
+from pra.rag.vector import make_vector_retriever
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
 from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
@@ -206,13 +206,11 @@ class _ChromaIndexBase:
     def _seed(self) -> None:
         """建/复用 collection（``embedding_function=None`` **+ 显式 cosine 空间**）+ 幂等 upsert。
 
-        node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按
-        「1 行 = 1 node」写入，metadata 见 ``*_node_metadata``。
+        node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按「1 行 = 1 node」写入，
+        metadata 见 :func:`~pra.rag.chroma_store.node_metadatas`（扁平键 + ``_node_content``）。
 
         末尾顺带装配**向量路取数面**：同一个 collection 包进 ``ChromaVectorStore`` —— 建库参数
-        仍归我们（``_open_collection``），包装层只用于取数。**只 upsert 不写 ``_node_content``**：
-        取数时 ``metadata_dict_to_node`` 会因缺键抛错，被 ``_query`` 的 ``except`` 吸收后回落到
-        legacy 分支，重建出的 node 仍带稳定 ``id_``（= Chroma id）与 ``documents`` 正文，够用。
+        仍归我们（``_open_collection``），包装层只用于取数。
         """
         collection = _open_collection(
             self._config,
@@ -230,7 +228,7 @@ class _ChromaIndexBase:
         collection.upsert(
             ids=list(self._node_ids),
             embeddings=[list(v) for v in self._doc_vectors],
-            metadatas=[node.metadata for node in self._nodes],
+            metadatas=node_metadatas(self._nodes),
             documents=[node.get_content() for node in self._nodes],
         )
         # 向量路取数装配面。``embed_model`` **必须显式传** —— 不传会回落 ``Settings.embed_model`` →
@@ -280,14 +278,13 @@ class _ChromaIndexBase:
 
         过滤在库侧按 ``filters`` 收窄，故传**全量** ctx（``_full_context``）而非候选子集。
         """
-        pairs = vector_retrieve(
-            self._vec_index,
-            query_bundle,
-            top_k=len(ctx.node_ids),
-            filters=filters,
+        retriever = make_vector_retriever(
+            self._vec_index, top_k=len(ctx.node_ids), filters=filters
         )
-        scored: dict[str, float] = {
-            nid: score for nid, score in pairs if nid in ctx.row_index_by_key
+        scored = {
+            n.node.node_id: float(n.score or 0.0)
+            for n in retriever.retrieve(query_bundle)
+            if n.node.node_id in ctx.row_index_by_key
         }
         ranked = [(ctx.row_index_by_key[nid], score) for nid, score in scored.items()]
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
@@ -296,41 +293,62 @@ class _ChromaIndexBase:
     def _rank_bm25(
         self, sub_ctx: _RetrievalContext, query_bundle: Any, top_k: int
     ) -> list[tuple[int, float]]:
-        """BM25 路排名：候选集内 min-max 归一化 BM25 分（Python 侧过滤 = 只喂候选 node）。
+        """BM25 路排名：候选集内的 BM25 原始分（Python 侧过滤 = 只喂候选 node）。
 
-        归一化用 ``retrieval.normalize_minmax``：候选集内最高分 = 1.0、最低 = 0.0（等值集全 1.0）。
-        归一化的目的是让 BM25 的**无界**原始分落到与前两路同量级、可比较 —— **不是**为了满足
-        ``CaseHit.retrieval_score`` 的约束（该字段已不设取值域，见 :class:`ChromaCaseIndex`）。
+        分数原样透传 ``bm25s``（**无界、不做量纲适配**），只做 6 位取整与
+        ``(分降序, corpus 原序)`` 排序 —— RRF 只看名次，融合与截断都不依赖该分的大小。
         """
         retriever = make_bm25_retriever(sub_ctx, top_k)
         nodes = bm25_retrieve(retriever, query_bundle)
-        pairs = [
+        ranked = [
             (sub_ctx.row_index_by_key[n.node.node_id], float(n.score or 0.0))
             for n in nodes
             if n.node.node_id in sub_ctx.row_index_by_key
         ]
-        norm = normalize_minmax([s for _i, s in pairs])
-        ranked = [(i, s) for (i, _raw), s in zip(pairs, norm)]
         ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
         return [(i, round(s, 6)) for i, s in ranked]
 
-    def _rank_fused(
-        self, routed: dict[str, list[tuple[int, float]]], row_index: dict[str, int]
+    def _rank_hybrid(
+        self, query: str, candidates: list[int], filters: Any | None
     ) -> list[tuple[int, float]]:
-        """多路排名 → **RRF 融合**（``Σ_r 1/(60 + rank_r)``，``k=60``）。
+        """hybrid 排名：两路检索器交给 ``QueryFusionRetriever`` 做 RRF 融合。
 
-        各路返回**各自打分域内的完整排名**（不按 ``top_k`` 预截断）→ 在完整排名列表上融合
-        （:func:`~pra.rag.retrieval.fuse_rrf`，含「为什么不用 ``QueryFusionRetriever`` 现成融合」的实测理由）。
-        ⚠️ 该分是**融合排名分，不是相似度**（上界 **2/60 = 1/30 ≈ 0.0333**）；排序 key
-        = ``(分降序, corpus 原序 idx 升序)``。
+        两路**打分域不同**：向量路用全量 ctx + ``where``（过滤已下推给 Chroma），BM25 路用
+        Python 候选子集（``bm25s`` 内存索引没有 ``where``）。
+
+        ⚠️ 两处偏离 ``QueryFusionRetriever`` 缺省行为：``num_queries=1`` + ``MockLLM``
+        （缺省 4 会让它调 LLM 生成扩展查询，本仓不做多查询扩展）；``use_async=False``
+        （缺省 True 会在调用方已有事件循环时另起线程跑检索）。``similarity_top_k`` 传库内全集
+        行数 —— 截断由调用方在融合之后统一做。
         """
-        # RRF 的输入是「各路排名 id 列表 + node_id → 行索引映射」。两路打分域不同
-        # （向量 = 库内全集 ∩ where，BM25 = Python 候选集），故映射必须用**全量**行索引。
-        id_by_row = {row: nid for nid, row in row_index.items()}
-        return fuse_rrf(
-            {name: [id_by_row[row] for row, _score in ranked] for name, ranked in routed.items()},
-            row_index,
+        full_ctx = self._full_context()
+        sub_ctx = self._sub_context(candidates)
+        fusion = llama().QueryFusionRetriever(
+            retrievers=[
+                make_vector_retriever(
+                    self._vec_index, top_k=len(full_ctx.node_ids), filters=filters
+                ),
+                make_bm25_retriever(sub_ctx, len(candidates)),
+            ],
+            # ⚠️ 构造期只校验它是 LLM 实例；``num_queries=1`` 时一次都不会被调用。
+            llm=llama().MockLLM(),
+            mode=llama().FUSION_MODES.RECIPROCAL_RANK,
+            num_queries=1,
+            use_async=False,
+            similarity_top_k=max(1, len(full_ctx.node_ids)),
         )
+        # ⚠️ BM25 的 ``_retrieve`` 也要调 ``bm25s.tokenize``（查询侧分词），故**整个融合过程**
+        # 必须在 jieba 上下文内 —— 代价是向量检索期间一并持锁（``bm25s.tokenize`` 是模块级符号，
+        # 只有全局替换这一个注入口）。
+        with bm25_tokenizer_context():
+            nodes = fusion.retrieve(llama().QueryBundle(query_str=query))
+        ranked = [
+            (full_ctx.row_index_by_key[n.node.node_id], float(n.score or 0.0))
+            for n in nodes
+            if n.node.node_id in full_ctx.row_index_by_key
+        ]
+        ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
+        return [(i, round(s, 6)) for i, s in ranked]
 
     # -- 检索核心 -----------------------------------------------------------
 
@@ -348,7 +366,7 @@ class _ChromaIndexBase:
         Python 候选子集（``candidates``）—— ``bm25s`` 内存索引没有 ``where``。
 
         ``top_k`` 截断在**排序之后**统一做；各路内部取「所在打分域的全长」，先拿到完整排名
-        （BM25 的 min-max 归一化、RRF 的排名列表都必须覆盖完整域，不能按 ``top_k`` 预截断）。
+        （RRF 的排名列表必须覆盖完整域，不能按 ``top_k`` 预截断）。
         """
         if top_k < 1 or not candidates:
             return []
@@ -358,16 +376,7 @@ class _ChromaIndexBase:
         elif self.mode == "vector":
             ranked = self._rank_vector(self._full_context(), query_bundle, filters)
         else:
-            full_ctx = self._full_context()
-            ranked = self._rank_fused(
-                {
-                    "vector": self._rank_vector(full_ctx, query_bundle, filters),
-                    "bm25": self._rank_bm25(
-                        self._sub_context(candidates), query_bundle, len(candidates)
-                    ),
-                },
-                full_ctx.row_index_by_key,
-            )
+            ranked = self._rank_hybrid(query, candidates, filters)
         return ranked[:top_k]
 
 
@@ -447,9 +456,9 @@ class ChromaPolicyIndex(_ChromaIndexBase):
 class ChromaCaseIndex(_ChromaIndexBase):
     """``CaseIndex`` Protocol 的 Chroma + LlamaIndex 实现（``search`` 签名与工具契约一致）。
 
-    ``CaseHit.retrieval_score`` 是**检索分，不是语义相似度**：``bm25`` = 候选集内 min-max
-    归一化 BM25 分；``vector`` = 库口径 ``exp(-distance)``；``hybrid`` = RRF 融合分（``Σ 1/(k+rank)``，
-    ``k=60``，落在 ~(0, ``2/60 = 1/30``]）。**取值域由后端定义，字段不设上下界约束**。
+    ``CaseHit.retrieval_score`` 是**检索分，不是语义相似度**，且**不做量纲适配**：``bm25`` =
+    ``bm25s`` 原始分（无界）；``vector`` = 库口径 ``exp(-distance)``；``hybrid`` = RRF 融合分
+    （``Σ 1/(k+rank)``，``k=60``，落在 ~(0, ``2/60 = 1/30``]）。**取值域由后端定义，字段不设上下界约束**。
     **三种分数量纲互不可比，且都不参与 Gate 判定**（Gate 对 ``CASE_PRECEDENT`` / ``POLICY_REF``
     只判存在性；见 :func:`pra.agent.guardrails.measurements.positive_dimensions` 的类型白名单）。
     构造签名见 :meth:`_ChromaIndexBase.__init__`。

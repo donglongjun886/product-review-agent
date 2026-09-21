@@ -20,8 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 # RAG 基建：
 #   向量库 = ChromaDB（1.x，Docker 服务端 + HttpClient）
-#   RAG 框架 = LlamaIndex（C2 拍板「全量 LlamaIndex」——只装具体集成包，
-#     **不装 llama-index 伞包**，避免拖进本项目不用的 llms-openai / embeddings-openai）
+#   RAG 框架 = LlamaIndex（C2 拍板「全量 LlamaIndex」）
 #   BM25 = 成熟引擎经 LlamaIndex BM25Retriever（引擎 = bm25s）+ jieba 中文分词
 #   embedding = BGE（fastembed/onnx）
 rag = [

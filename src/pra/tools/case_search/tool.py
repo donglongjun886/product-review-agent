@@ -9,10 +9,10 @@
 惰性、首次检索才建库）；默认与评测世界仍是 ``InMemoryCaseIndex``。本工具不含业务判定：
 每个 hit → 1 条 CASE_PRECEDENT 证据（``weight=retrieval_score``、``ref_id=case_id`` 必填）。
 
-``retrieval_score`` 是**检索分，不是语义相似度**：``bm25``/``vector`` 模式下 = 该模式的
-归一化分（0~1）；``hybrid`` 模式下 = RRF 融合分（``Σ 1/(k+rank)``）。**取值域由检索后端定义，
-schema 不设约束** —— 三模式下分别是 [0,1]、(0,1]、(0, 2/60]，为它们设一个共同上下界只会
-逼出「钳位」这类假防御（详见 ``docs/00-system-design.md`` 的 RAG 分数口径）。
+``retrieval_score`` 是**检索分，不是语义相似度**，且**不做量纲适配**：``bm25`` = ``bm25s``
+原始分（无界）、``vector`` = 库口径 ``exp(-distance)``、``hybrid`` = RRF 融合分
+（``Σ 1/(k+rank)``）。**取值域由检索后端定义，schema 不设约束**（详见
+``docs/00-system-design.md`` 的 RAG 分数口径）。
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ class CaseHit(BaseModel):
     case_id: str = Field(description="回案库引用主键（脱敏文本只含摘要）")
     retrieval_score: float = Field(
         description=(
-            "检索分（**不是语义相似度**）：bm25/vector 模式 = 该模式归一化分；"
-            "hybrid 模式 = RRF 融合分 Σ1/(k+rank)。取值域由检索后端定义，不设上下界约束"
+            "检索分（**不是语义相似度**，不做量纲适配）：bm25 = bm25s 原始分（无界）；"
+            "vector = exp(-distance)；hybrid = RRF 融合分 Σ1/(k+rank)。取值域由检索后端定义"
         ),
     )
     decision: Decision = Field(description="人工裁决：PASS / REJECT / HUMAN_REVIEW")

@@ -135,7 +135,7 @@ uv run python scripts/run_evaluation_real.py --limit 10   # 真实 LLM 对照（
 
 检索后端为 ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF（需 `--extra rag`），检索口径见
 [docs/00-system-design.md](docs/00-system-design.md) §6；代码在 `src/pra/rag/`：
-`embedding.py`（BGE 编码器）/ `retrieval.py`（模式枚举 + BM25 归一化 + RRF 融合）/ `vector.py`（向量路）/
+`embedding.py`（BGE 编码器）/ `retrieval.py`（模式枚举 + 检索上下文）/ `vector.py`（向量路）/
 `bm25.py`（BM25 路 + jieba 分词桥）/ `chroma_store.py`（建库与 Node 装配）/ `index.py`（Policy / Case 索引）。
 **默认装配路径（`build_tools()` 与评测世界）仍是 InMemory 种子、不连向量库** —— 只有生产入口与显式
 `data_source="rag"` 才走真实检索。

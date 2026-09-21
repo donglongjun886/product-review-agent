@@ -4,7 +4,6 @@
 - corpus loader / schema 校验：Policy/Case KB 规模与唯一性、≥2 条 EXPIRED、meta 隔离声明；
 - **隔离红线**：Case KB 的 case_id 与 eval_data v1+v2 全部 case 标识（含 InMemory 种子先例）无交集，
   防评测作弊；
-- 共享检索公共件：``normalize_minmax()`` 归一化口径；
 - ``build_tools()`` 默认（memory 世界）仍是 6 个 InMemory 工具（与 ``build_tools("memory")`` 一致）；
 - 默认评测路径（``tool_world="eval"``）全量 v1 agent 决策序列 == 入库基线（回归不破）。
 
@@ -26,7 +25,6 @@ from pra.evaluation.harness.agent_scheme import EVAL_PRECEDENTS, AgentScheme
 from pra.evaluation.harness.base import EvalContext
 from pra.evaluation.regression import compute_current_snapshot
 from pra.rag.corpus import load_cases, load_policies
-from pra.rag.retrieval import normalize_minmax
 from pra.tools import build_tools
 from pra.tools.policy_search.tool import InMemoryPolicyIndex
 
@@ -87,16 +85,6 @@ def test_case_kb_isolated_from_eval_gt() -> None:
     assert not overlap, f"Case KB 与 eval GT case_id 有交集（红线违反）: {sorted(overlap)[:10]}"
     # InMemory 种子先例 id 亦不得混入（CASE_1832/0911/2033/2120 等）
     assert kb_ids.isdisjoint({r["case_id"] for r in EVAL_PRECEDENTS})
-
-
-def test_normalize_minmax() -> None:
-    """``normalize_minmax`` 归一口径：空集 → []；等值集 → 全 1.0（防除零）；极差集 → [0, 1]。"""
-    assert normalize_minmax([]) == []
-    assert normalize_minmax([5.0]) == [1.0]
-    # 等值集 → 全 1（确定性约定）
-    assert normalize_minmax([2.0, 2.0]) == [1.0, 1.0]
-    # 极差集 → 归一到 [0, 1]
-    assert normalize_minmax([1.0, 3.0]) == [0.0, 1.0]
 
 
 _EXPECTED_TOOLS = [

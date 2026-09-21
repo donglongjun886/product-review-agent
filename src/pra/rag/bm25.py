@@ -15,7 +15,7 @@ from typing import Any
 from pra.rag.deps import llama
 from pra.rag.retrieval import _RetrievalContext
 
-__all__ = ["bm25_retrieve", "make_bm25_retriever"]
+__all__ = ["bm25_retrieve", "bm25_tokenizer_context", "make_bm25_retriever"]
 
 _LATIN_RUN = re.compile(r"[0-9A-Za-z_]+")
 
@@ -90,12 +90,19 @@ def _jieba_tokenizer() -> Iterator[None]:
         bm25s.tokenize = original
 
 
-def bm25_retrieve(retriever: Any, query_bundle: Any) -> list[Any]:
-    """BM25 检索（**在 jieba 上下文内** —— 查询与索引必须同一分词器）。
+@contextmanager
+def bm25_tokenizer_context() -> Iterator[None]:
+    """在 jieba 分词器内执行 —— **构造与检索都必须覆盖**（两者都调 ``bm25s.tokenize``）。
 
     ⚠️ 顺序不可颠倒：锁**在**补丁之前（见 :func:`_jieba_tokenizer`）。
     """
     with _TOKENIZER_LOCK, _jieba_tokenizer():
+        yield
+
+
+def bm25_retrieve(retriever: Any, query_bundle: Any) -> list[Any]:
+    """BM25 检索（**在 jieba 上下文内** —— 查询与索引必须同一分词器）。"""
+    with bm25_tokenizer_context():
         return retriever.retrieve(query_bundle)
 
 
@@ -105,8 +112,7 @@ def make_bm25_retriever(ctx: _RetrievalContext, top_k: int) -> Any:
     ``similarity_top_k=top_k`` 取候选集内 Top-K；``skip_stemming=True`` / ``language=""`` 关掉
     英文词干器与停用词（中文语料无意义）；``token_pattern=""`` 只作显式标注（jieba 替身忽略它）。
     """
-    # ⚠️ 顺序不可颠倒：锁**在**补丁之前（见 :func:`_jieba_tokenizer` docstring，R6 实测）。
-    with _TOKENIZER_LOCK, _jieba_tokenizer():
+    with bm25_tokenizer_context():
         return llama().BM25Retriever(
             nodes=list(ctx.nodes),
             similarity_top_k=min(top_k, len(ctx.nodes)),

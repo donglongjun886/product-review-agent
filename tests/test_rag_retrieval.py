@@ -228,28 +228,6 @@ async def test_vector_scores_are_similarity_scale_unlike_rrf(case_vector: Any) -
     )
 
 
-def test_fuse_rrf_ranks_double_route_doc_above_single_route_doc() -> None:
-    """``fuse_rrf`` 的核心性质：两路都排靠前的文档，名次优于只被一路命中的文档。
-
-    断言：``both`` 同时位于 vector / bm25 首位 → 分 = ``2/60``；``v_only`` / ``b_only`` 各只被
-    一路排到次位 → 分 = ``1/61``，故 ``score(both) > score(v_only) == score(b_only)``。意义：
-    这是「RRF 真的在融合，而非取两路并集」的最小可判据。索引侧两路排名都覆盖全部候选，
-    端到端观察不到「单路命中」的差异，故必须在 ``fuse_rrf`` 这一层用合成输入验证 ——
-    ``fuse_rrf(ranked, row_index)`` 入参是「各路排名 id 列表 + node_id→行索引映射」，
-    返回 ``[(行索引, RRF 分)]``。
-    """
-    from pra.rag.retrieval import fuse_rrf
-
-    ranked = {"vector": ["id_both", "id_v"], "bm25": ["id_both", "id_b"]}
-    row_index = {"id_both": 0, "id_v": 1, "id_b": 2}
-    scores = dict(fuse_rrf(ranked, row_index))
-    assert scores[0] > scores[1], f"双路命中应优于单路命中：{scores}"
-    assert scores[0] > scores[2], f"双路命中应优于单路命中：{scores}"
-    assert scores[0] == pytest.approx(2.0 / _RRF_K, abs=1e-6)
-    assert scores[1] == pytest.approx(1.0 / (_RRF_K + 1.0), abs=1e-6)
-    assert scores[2] == pytest.approx(1.0 / (_RRF_K + 1.0), abs=1e-6)
-
-
 # ---------------------------------------------------------------------------
 # 4. metadata filter 正确性
 # ---------------------------------------------------------------------------

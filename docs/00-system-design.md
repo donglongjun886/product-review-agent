@@ -490,15 +490,24 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
   任何 distance 的单调降函数都给出同一顺序；② 该分往下只变成 `CaseHit.retrieval_score`（渲染给 LLM 的证据行
   + 落库审计），**不参与任何 Gate 判定**（Gate 对 `CASE_PRECEDENT` / `POLICY_REF` 只判存在性、不读 value）；
   ③ `1 − distance` 在 `d > 1` 时被 clamp 塌成 0，低分区区分度反而更差。
-- 🔴 **`retrieval_score` 不设取值域约束**：它是**后端口径的检索分**，取值域由检索后端定义
-  （`bm25` = 候选集内 min-max ⊂ [0,1]；`vector` = `exp(-distance)` ⊂ (0,1]；`hybrid` = RRF ⊂ (0, `2/60`]），
-  **schema 不替后端 policing 一个既不归它管、也不参与决策的量**。
+- 🔴 **`retrieval_score` 不设取值域约束，也不做量纲适配**：它是**后端口径的检索分**，取值域由检索后端定义
+  （`bm25` = `bm25s` 原始分、**无界**；`vector` = `exp(-distance)` ⊂ (0,1]；`hybrid` = RRF ⊂ (0, `2/60`]），
+  **schema 不替后端 policing 一个既不归它管、也不参与决策的量**，代码也不把三种量纲「拉平」。
   - 曾有的 `ge=0, le=1` 只产生两处代价：向量路为不触发 `le=1` 而在 cosine 距离浮点微负时给 `exp(-d)` 钳位，
     以及三份 docstring 为这条约束写的辩护。约束去掉后**两处一并删除**。
+  - 曾有 `normalize_minmax` 把 BM25 原始分在**候选集内** min-max 到 [0,1]（等值集 → 全 `1.0` 防除零）——
+    它只为「让三路同量级」这个伪目标存在：RRF 只读**名次**，min-max 是单调变换，对融合与截断**零影响**；
+    而等值集给满分是**伪造**（最差的匹配也会显示 `weight=1.0`）。已整体删除，BM25 分改为原样透传后端。
   - 下游 `Evidence.weight` 同步**只保留 `ge=0`、去掉 `le=1`**：`weight` 的上界从来不是为检索分设的 ——
     它源自 `IMAGE_SIMILARITY` 的三档阈值语义（`0.70 / 0.85`），而 `weight` 的**全部读点**都是
     `>= 常量` 比较与 `max()`（`measurements.positive_dimensions` / `dimension_strength` /
     `listing_signal_present` / `gate`），**上界从未被读**，去掉 `le=1` 不改变任何判定结果、不改任何渲染文本。
+- 🔴 **写入 Chroma 的 metadata 必须带 `_node_content`**（`rag/chroma_store.py::node_metadatas`）：扁平键供
+  `where` 过滤，`_node_content`（整份 node JSON）供取数时**无损还原** `node_id` 与 `hash`。缺它时
+  `metadata_dict_to_node` 回落 legacy 分支、按回读的 metadata 重算 `hash` —— 而 Chroma 回读的键序不固定
+  （1.5.9），同一行的 `hash` 会漂移 ⇒ 与另一条路（BM25 侧存了 `_node_content`）**不同源**。
+  ⚠️ `_node_content` 必须取 `node_to_metadata_dict` 的产物，手写 `json.dumps(node.dict())` 与它**不相等**。
+  ⚠️ metadata 形状变更 ⇒ collection 名末段 `_SCHEMA_VERSION` 必须递增（v2 = `rt_<值>` 整数键；v3 = 带 `_node_content`）。
 - 🔴 **向量路的过滤下推给 Chroma `where`**（`rag/index.py::_filters_of` 把业务过滤编译成 `MetadataFilters`，
   经 `VectorIndexRetriever` 透传到 `collection.query(where=...)`）：打分域 = **库内全集 ∩ `where`**。
   - `risk_type` 的「交叠非空」由**每个枚举值一个 `rt_<值>: 1` 整数键 + `$or`** 表达（Chroma `where` 只支持标量比较、
@@ -517,7 +526,7 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
   ⚠️ `CaseSearchTool` 把它原样塞进 `Evidence.weight`（见上一节的 `ge=0` 无上界口径）——
   这是**沿用**而非耦合：`weight` 对该类型证据从不被读，两者量纲不同也无副作用。
   `image_analysis` 的外观相似度是另一回事：它在 evidence 里叫 `IMAGE_SIMILARITY`。
-- **三模式分数量纲互不可比**（`vector` = 库口径 `exp(-distance)`、`bm25` = 候选集内 min-max、`hybrid` = RRF 分），
+- **三模式分数量纲互不可比**（`vector` = 库口径 `exp(-distance)`、`bm25` = `bm25s` 原始分、`hybrid` = RRF 分），
   只断言「候选完整 + 可复现 + 案例库与评测真值零交集」。
 - 🔴 **BM25 分词是受控替换**（`llama-index-retrievers-bm25` 无 tokenizer 注入点，桥接实现在 `rag/bm25.py`）：调用点必须写成 `with _TOKENIZER_LOCK, _jieba_tokenizer():`
   （**锁在前**），否则补丁落在临界区外 → 并发下在飞线程会用错分词器检索 jieba 索引并抛错，且符号会**进程级永久泄漏**。
@@ -1001,7 +1010,7 @@ product-review-agent/
 │   ├── rag/                         # 政策库 + 案例库检索：chroma（ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF）
 │   │   ├── deps.py                  #   第三方重依赖的延迟 import 边界（唯一）
 │   │   ├── embedding.py             #   BGE 编码器构造点（production_embedder）
-│   │   ├── retrieval.py             #   模式枚举 / BM25 归一化 / RRF 融合 / 检索上下文
+│   │   ├── retrieval.py             #   模式枚举 / 检索上下文
 │   │   ├── chroma_store.py          #   Chroma 连接、collection（含 metadata 形状版本）与 Node 装配
 │   │   ├── vector.py                #   向量路取数（LlamaIndex + 过滤下推 where）
 │   │   ├── bm25.py                  #   BM25 路（jieba 分词桥）

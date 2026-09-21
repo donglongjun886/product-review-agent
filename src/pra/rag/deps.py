@@ -29,15 +29,17 @@ def chroma() -> Any:
 def llama() -> SimpleNamespace:
     """延迟 import 的 LlamaIndex 装配面（进程内首个构造/检索时拉起，之后缓存复用）。
 
-    只 import 具体集成（core + vector-stores-chroma + retrievers-bm25），不引伞包 ``llama-index``
-    （伞包会拖进 llms-openai / embeddings-openai 等不用的集成）。用属性访问（``llama().TextNode``）：
-    缓存对象是全局单例，故无需逐层穿透。
+    按需 import 具体集成（core + vector-stores-chroma + retrievers-bm25）。用属性访问
+    （``llama().TextNode``）：缓存对象是全局单例，故无需逐层穿透。
     """
     try:
         from llama_index.core import VectorStoreIndex
         from llama_index.core.indices.vector_store.retrievers import (
             VectorIndexRetriever,
         )
+        from llama_index.core.llms import MockLLM
+        from llama_index.core.retrievers import QueryFusionRetriever
+        from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
         from llama_index.core.schema import QueryBundle, TextNode
         from llama_index.core.vector_stores import (
             FilterCondition,
@@ -45,6 +47,7 @@ def llama() -> SimpleNamespace:
             MetadataFilter,
             MetadataFilters,
         )
+        from llama_index.core.vector_stores.utils import node_to_metadata_dict
         from llama_index.retrievers.bm25 import BM25Retriever
         from llama_index.vector_stores.chroma import ChromaVectorStore
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
@@ -55,12 +58,16 @@ def llama() -> SimpleNamespace:
     return SimpleNamespace(
         BM25Retriever=BM25Retriever,
         ChromaVectorStore=ChromaVectorStore,
+        FUSION_MODES=FUSION_MODES,
         FilterCondition=FilterCondition,
         FilterOperator=FilterOperator,
         MetadataFilter=MetadataFilter,
         MetadataFilters=MetadataFilters,
+        MockLLM=MockLLM,
         QueryBundle=QueryBundle,
+        QueryFusionRetriever=QueryFusionRetriever,
         TextNode=TextNode,
         VectorIndexRetriever=VectorIndexRetriever,
         VectorStoreIndex=VectorStoreIndex,
+        node_to_metadata_dict=node_to_metadata_dict,
     )
