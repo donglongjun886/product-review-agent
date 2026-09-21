@@ -37,7 +37,8 @@ htmlcov/
 # OS
 .DS_Store
 
-# 本地记忆（不进公开仓库；DSH 直接从磁盘加载 AGENTS.md，无需入库）
-AGENTS.md
+# 本地记忆（不进公开仓库）。AGENTS.md 是公开契约、随代码入库；
+# AGENTS.local.md 是本机/harness 叠加层，DSH 会自动注入，不入库。
+AGENTS.local.md
 .memory/
 .workbuddy/
