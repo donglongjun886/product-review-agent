@@ -32,7 +32,6 @@ from pra.rag.chroma_store import (
     _open_collection,
     case_node_metadata,
     make_chroma_client,
-    node_metadatas,
     policy_node_metadata,
     risk_type_key,
 )
@@ -204,13 +203,13 @@ class _ChromaIndexBase:
     # -- 装配 ---------------------------------------------------------------
 
     def _seed(self) -> None:
-        """建/复用 collection（``embedding_function=None`` **+ 显式 cosine 空间**）+ 幂等 upsert。
+        """建/复用 collection（``embedding_function=None`` **+ 显式 cosine 空间**）+ 先删后加重建。
 
         node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按「1 行 = 1 node」写入，
-        metadata 见 :func:`~pra.rag.chroma_store.node_metadatas`（扁平键 + ``_node_content``）。
+        metadata 由 ``ChromaVectorStore.add`` 生成（扁平业务键 + ``_node_content``）。
 
-        末尾顺带装配**向量路取数面**：同一个 collection 包进 ``ChromaVectorStore`` —— 建库参数
-        仍归我们（``_open_collection``），包装层只用于取数。
+        写入分两步：先按 node id 删除、再 ``add`` —— ``add`` 对**已存在的 id 静默跳过**
+        （既不覆盖也不抛错，chromadb 1.5.9 实测），不先删则同 id 的旧记录留在库里、新内容写不进去。
         """
         collection = _open_collection(
             self._config,
@@ -225,17 +224,16 @@ class _ChromaIndexBase:
             text_of=self._text_of,
             meta_of=self._meta_of,
         )
-        collection.upsert(
-            ids=list(self._node_ids),
-            embeddings=[list(v) for v in self._doc_vectors],
-            metadatas=node_metadatas(self._nodes),
-            documents=[node.get_content() for node in self._nodes],
-        )
-        # 向量路取数装配面。``embed_model`` **必须显式传** —— 不传会回落 ``Settings.embed_model`` →
+        # ``add`` 取 ``node.get_embedding()``，故把文本向量回填到 node（与 ``_doc_vectors`` 同源）。
+        for node, vec in zip(self._nodes, self._doc_vectors):
+            node.embedding = list(vec)
+        # 读写共用同一个 store 实例。``embed_model`` **必须显式传** —— 不传会回落 ``Settings.embed_model`` →
         # ``resolve_embed_model("default")`` → 拉 ``llama_index.embeddings.openai``（本仓不装）。
+        store = llama().ChromaVectorStore(chroma_collection=collection)
+        store.delete_nodes(node_ids=list(self._node_ids))
+        store.add(self._nodes)
         self._vec_index = llama().VectorStoreIndex.from_vector_store(
-            llama().ChromaVectorStore(chroma_collection=collection),
-            embed_model=self._embed_model,
+            store, embed_model=self._embed_model
         )
 
     # -- size / 统计 ---------------------------------------------------------

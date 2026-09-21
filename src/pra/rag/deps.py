@@ -47,7 +47,6 @@ def llama() -> SimpleNamespace:
             MetadataFilter,
             MetadataFilters,
         )
-        from llama_index.core.vector_stores.utils import node_to_metadata_dict
         from llama_index.retrievers.bm25 import BM25Retriever
         from llama_index.vector_stores.chroma import ChromaVectorStore
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
@@ -69,5 +68,4 @@ def llama() -> SimpleNamespace:
         TextNode=TextNode,
         VectorIndexRetriever=VectorIndexRetriever,
         VectorStoreIndex=VectorStoreIndex,
-        node_to_metadata_dict=node_to_metadata_dict,
     )

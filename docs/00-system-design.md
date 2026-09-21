@@ -502,12 +502,18 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
     它源自 `IMAGE_SIMILARITY` 的三档阈值语义（`0.70 / 0.85`），而 `weight` 的**全部读点**都是
     `>= 常量` 比较与 `max()`（`measurements.positive_dimensions` / `dimension_strength` /
     `listing_signal_present` / `gate`），**上界从未被读**，去掉 `le=1` 不改变任何判定结果、不改任何渲染文本。
-- 🔴 **写入 Chroma 的 metadata 必须带 `_node_content`**（`rag/chroma_store.py::node_metadatas`）：扁平键供
-  `where` 过滤，`_node_content`（整份 node JSON）供取数时**无损还原** `node_id` 与 `hash`。缺它时
-  `metadata_dict_to_node` 回落 legacy 分支、按回读的 metadata 重算 `hash` —— 而 Chroma 回读的键序不固定
-  （1.5.9），同一行的 `hash` 会漂移 ⇒ 与另一条路（BM25 侧存了 `_node_content`）**不同源**。
-  ⚠️ `_node_content` 必须取 `node_to_metadata_dict` 的产物，手写 `json.dumps(node.dict())` 与它**不相等**。
-  ⚠️ metadata 形状变更 ⇒ collection 名末段 `_SCHEMA_VERSION` 必须递增（v2 = `rt_<值>` 整数键；v3 = 带 `_node_content`）。
+- 🔴 **写入 Chroma 走 `ChromaVectorStore` 的 delete-then-add**（`rag/index.py::_seed`）：先按 node id
+  `delete_nodes`、再 `add`。⚠️ 理由**不是**「重复 id 会报错」—— chromadb 1.5.9 的 `collection.add` 对
+  已存在的 id **静默跳过**（既不覆盖也不抛错，重复 `add` 后 `count` 不变）⇒ 不先删，同 id 的旧记录会留在
+  库里、新内容写不进去。写入的 metadata 由库的 `node_to_metadata_dict(node, remove_text=True,
+  flat_metadata=True)` 生成：扁平业务键供 `where` 过滤，`_node_content`（整份 node JSON）供取数时
+  **无损还原** `node_id` 与 `hash`。缺它时 `metadata_dict_to_node` 直接抛 `ValueError`、被 `except` 兜到
+  legacy 分支按回读的 metadata 重算 `hash` —— 而 Chroma 回读的键序不固定（1.5.9），同一行的 `hash` 会漂移
+  ⇒ 与另一条路（BM25 侧存了 `_node_content`）**不同源**。
+  ⚠️ `add` 逐节点取 `node.get_embedding()` ⇒ `_seed` 须把文本向量回填到 node（`TextNode.hash` 只吃
+  `text` + `metadata`，回填 embedding 不改变融合去重键）。
+  ⚠️ metadata 形状变更 ⇒ collection 名末段 `_SCHEMA_VERSION` 必须递增（v2 = `rt_<值>` 整数键；
+  v3 = 带 `_node_content`；v4 = metadata 改由库 `add` 生成、`_node_content` 内的 text 被清空）。
 - 🔴 **向量路的过滤下推给 Chroma `where`**（`rag/index.py::_filters_of` 把业务过滤编译成 `MetadataFilters`，
   经 `VectorIndexRetriever` 透传到 `collection.query(where=...)`）：打分域 = **库内全集 ∩ `where`**。
   - `risk_type` 的「交叠非空」由**每个枚举值一个 `rt_<值>: 1` 整数键 + `$or`** 表达（Chroma `where` 只支持标量比较、

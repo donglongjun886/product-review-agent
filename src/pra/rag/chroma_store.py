@@ -6,9 +6,9 @@ collection 名形状 ``<prefix or 'pra'>_<policy|case>_<dim>_v<schema>``（维�
 建库两条缺一即静默出错：``embedding_function=None``（否则启用默认 ONNX 嵌入函数并去下模型）、
 ``space="cosine"``（Chroma 缺省 ``l2``，让间距语义整体偏离 —— BGE 向量的"像不像"是**方向**，
 l2 下距离受模长干扰，排名与分数一起失真且不报错）。
-1 行 = 1 Node 不切分；node id = ``sha256(collection + 行键)`` → 重建幂等覆盖。
-写入的 metadata = 扁平键（供 ``where`` 过滤）+ ``_node_content``（整份 node JSON，供取数时
-无损还原，见 :func:`node_metadatas`）。
+1 行 = 1 Node 不切分；node id = ``sha256(collection + 行键)`` → 写入按该 id 先删后加、重建覆盖。
+写入的 metadata 由 ``ChromaVectorStore.add`` 生成 = 扁平业务键（供 ``where`` 过滤）
++ ``_node_content``（整份 node JSON，供取数时无损还原）。
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ __all__ = [
     "ChromaConfig",
     "case_node_metadata",
     "make_chroma_client",
-    "node_metadatas",
     "policy_node_metadata",
     "risk_type_key",
 ]
@@ -40,8 +39,9 @@ CHROMA_DEFAULT_PORT = 8001
 _DEFAULT_COLLECTION_PREFIX = "pra"
 #: metadata 形状版本（collection 名末段）。**metadata 键形状变更时必须递增** —— 否则服务端上
 #: 已存在的同名 collection 会被 ``_open_collection`` 的 get 原样复用（新 ``where`` 一条都查不到、
-#: 静默全空）。v2 = ``risk_type`` 数组键改为 ``rt_<值>`` 整数键；v3 = 写入 ``_node_content``。
-_SCHEMA_VERSION = 3
+#: 静默全空）。v2 = ``risk_type`` 数组键改为 ``rt_<值>`` 整数键；v3 = 写入 ``_node_content``；
+#: v4 = metadata 改由 ``ChromaVectorStore.add`` 生成（``_node_content`` 内的 text 被清空）。
+_SCHEMA_VERSION = 4
 #: metadata 维度键（Chroma 不声明向量维度，故把本索引声明的 dim 存进 collection metadata）。
 _DIM_KEY = "pra_dim"
 #: ``risk_type`` 过滤键前缀：**每个枚举值一个整数键**（``rt_FALSE_CLAIM: 1``），不用数组。
@@ -208,25 +208,6 @@ def _build_nodes(
             )
         )
     return nodes, node_ids
-
-
-def node_metadatas(nodes: list[Any]) -> list[dict[str, Any]]:
-    """写入 Chroma 的 metadata：扁平键（供 ``where`` 过滤）+ ``_node_content``（整份 node JSON）。
-
-    有 ``_node_content`` 时 ``metadata_dict_to_node`` 走现代分支、**无损还原** ``node_id`` 与
-    ``hash``；缺它则回落 legacy 分支、按 Chroma 回读的 metadata 重算 —— 而回读键序不固定
-    （1.5.9），``hash`` 会漂移。
-
-    ⚠️ ``_node_content`` 必须取 :func:`~pra.rag.deps.llama` 的 ``node_to_metadata_dict`` 产物，
-    手写 ``json.dumps(node.dict())`` 与它**不相等**。
-    ``doc_id`` / ``ref_doc_id`` / ``document_id`` 为 ``None`` 时 Chroma 不接受，故剔除。
-    """
-    llama_ = llama()
-    out: list[dict[str, Any]] = []
-    for node in nodes:
-        md = llama_.node_to_metadata_dict(node)
-        out.append({k: v for k, v in md.items() if v is not None})
-    return out
 
 
 def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:

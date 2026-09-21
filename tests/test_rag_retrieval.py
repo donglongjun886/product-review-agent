@@ -1,7 +1,7 @@
 """RAG 检索行为验收测试 —— 真 Chroma（进程内库）+ 真 BGE（生产同款编码器）。
 
-覆盖「检索行为」这一层（此前被整体删除、只剩 corpus 完整性与装配契约的部分）：BM25 召回 /
-Vector 召回 / Hybrid 的 RRF 融合正确性 / metadata filter（含「过滤器 + 检索」组合的红线场景）/
+覆盖「检索行为」这一层（此前被整体删除、只剩 corpus 完整性与装配契约的部分）：建库重建幂等 /
+BM25 召回 / Vector 召回 / Hybrid 的 RRF 融合正确性 / metadata filter（含「过滤器 + 检索」组合的红线场景）/
 PolicyHit·CaseHit → Evidence 两层契约 / 真基础设施异常上抛 / RAG 工具可被正常调用。
 
 运行面（用户拍板）：真 Chroma **进程内库**（``ChromaConfig(ephemeral=True)`` →
@@ -141,6 +141,43 @@ def _tool_ctx() -> ToolContext:
     from pra.domain.models import Budget
 
     return ToolContext(run_id="rag-retrieval-test", case_id="CASE_TEST_RAG", budget=Budget())
+
+
+# ---------------------------------------------------------------------------
+# 0. 建库写入（delete-then-add）
+# ---------------------------------------------------------------------------
+
+
+def test_reseed_on_existing_collection_overwrites_same_id(
+    policy_rows: Any, embedder: Any
+) -> None:
+    """同一 collection 上重建必须覆盖同 id 的旧记录（写前先删）。
+
+    断言：改写首条 policy 的正文后重建，库里该 node id 的 document 变成新正文，且 ``node_ids``
+    与首次逐位相同。意义：库的 ``add`` 对**已存在的 id 静默跳过**（既不覆盖也不抛错，chromadb
+    1.5.9 实测：重复 ``add`` 后 ``count`` 仍为 1）⇒ 删掉写前的 ``delete_nodes`` 这条断言必失败，
+    库里留下的是改写前的旧正文。断言必须直接读库：BM25 路读内存 node、不经库，用检索观察不到。
+    """
+    from pra.rag.chroma_store import ChromaConfig, make_chroma_client
+    from pra.rag.factory import build_policy_index
+
+    prefix = "pytest_rag_ret_idem"
+    base = ChromaConfig(ephemeral=True, collection_prefix=prefix)
+    shared = ChromaConfig(
+        ephemeral=True, collection_prefix=prefix, client=make_chroma_client(base)
+    )
+    first = build_policy_index(
+        rows=policy_rows, embedding_model=embedder, mode="bm25", config=shared
+    )
+    marker = "重建改写标记字"
+    patched = [policy_rows[0].model_copy(update={"text": marker}), *policy_rows[1:]]
+    second = build_policy_index(
+        rows=patched, embedding_model=embedder, mode="bm25", config=shared
+    )
+    assert second.node_ids == first.node_ids
+    collection = shared.client.get_collection(second.collection_name)
+    stored = collection.get(ids=[second.node_ids[0]])["documents"]
+    assert stored and marker in stored[0], f"同 id 未被覆盖：{stored}"
 
 
 # ---------------------------------------------------------------------------
