@@ -534,9 +534,9 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
   `image_analysis` 的外观相似度是另一回事：它在 evidence 里叫 `IMAGE_SIMILARITY`。
 - **三模式分数量纲互不可比**（`vector` = 库口径 `exp(-distance)`、`bm25` = `bm25s` 原始分、`hybrid` = RRF 分），
   只断言「候选完整 + 可复现 + 案例库与评测真值零交集」。
-- 🔴 **BM25 分词是受控替换**（`llama-index-retrievers-bm25` 无 tokenizer 注入点，桥接实现在 `rag/bm25.py`）：调用点必须写成 `with _TOKENIZER_LOCK, _jieba_tokenizer():`
-  （**锁在前**），否则补丁落在临界区外 → 并发下在飞线程会用错分词器检索 jieba 索引并抛错，且符号会**进程级永久泄漏**。
-  **口径红线：不得称该实现「天然线程安全」**——它仍是全局符号替换，已验证的只是「同进程内本模块两个调用点在并发下互不污染、不泄漏」。
+- 🔴 **BM25 分词自持**（`rag/bm25.py` 自建检索器：jieba 切词 + `bm25s.BM25` 自建索引，`_tokenize` 语料/查询共用；
+  不继承库 `BM25Retriever`、**不替换 `bm25s.tokenize` 全局符号**）。故无锁、无上下文管理器、无调用顺序约束 ——
+  并发下各检索器实例各持分词器与索引，互不干扰。
 - **CI 只跑 `uv sync --frozen`（不装任何 extra）** → `chromadb` / LlamaIndex 都不在环境里，chroma 相关测试文件在 CI 上**整文件 skip**
   （**不得声称「CI 覆盖 chroma」**）；CI 上真正跑的检索侧守护是「默认路径不引入这 4 个 extra 模块」的契约测试。
 - **历史教训（Qdrant 后端已移除，结论对 chroma 同样成立）**：进程内模式（`:memory:` / `EphemeralClient`）对 id / 维度等约束
@@ -1018,8 +1018,7 @@ product-review-agent/
 │   │   ├── embedding.py             #   BGE 编码器构造点（production_embedder）
 │   │   ├── retrieval.py             #   模式枚举 / 检索上下文
 │   │   ├── chroma_store.py          #   Chroma 连接、collection（含 metadata 形状版本）与 Node 装配
-│   │   ├── vector.py                #   向量路取数（LlamaIndex + 过滤下推 where）
-│   │   ├── bm25.py                  #   BM25 路（jieba 分词桥）
+│   │   ├── bm25.py                  #   BM25 路（jieba 分词 + bm25s 自建索引）
 │   │   ├── index.py                 #   ChromaPolicyIndex / ChromaCaseIndex（两路过滤 + 三模式 + RRF）
 │   │   ├── lazy_index.py            #   索引构建推迟到首次检索的代理
 │   │   ├── factory.py               #   装配入口 build_policy_index / build_case_index

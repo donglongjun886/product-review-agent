@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from pra.rag.bm25 import bm25_retrieve, bm25_tokenizer_context, make_bm25_retriever
+from pra.rag.bm25 import make_bm25_retriever
 from pra.rag.chroma_store import (
     ChromaConfig,
     _build_nodes,
@@ -42,7 +42,6 @@ from pra.rag.retrieval import (
     RetrievalMode,
     _RetrievalContext,
 )
-from pra.rag.vector import make_vector_retriever
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
 from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
@@ -208,15 +207,11 @@ class _ChromaIndexBase:
         node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按「1 行 = 1 node」写入，
         metadata 由 ``ChromaVectorStore.add`` 生成（扁平业务键 + ``_node_content``）。
 
-        写入分两步：先按 node id 删除、再 ``add`` —— ``add`` 对**已存在的 id 静默跳过**
+        写入分两步：先按 node id 删除、再 ``add``。删除的 id = 残留 id（库内全量 id 与
+        ``_node_ids`` 的差集）∪ ``_node_ids``；``add`` 对**已存在的 id 静默跳过**
         （既不覆盖也不抛错，chromadb 1.5.9 实测），不先删则同 id 的旧记录留在库里、新内容写不进去。
         """
-        collection = _open_collection(
-            self._config,
-            name=self.collection_name,
-            dim=self._dim,
-            kind=self._kind,
-        )
+        collection = _open_collection(self._config, name=self.collection_name)
         self._nodes, self._node_ids = _build_nodes(
             self._rows,
             collection=self.collection_name,
@@ -230,6 +225,11 @@ class _ChromaIndexBase:
         # 读写共用同一个 store 实例。``embed_model`` **必须显式传** —— 不传会回落 ``Settings.embed_model`` →
         # ``resolve_embed_model("default")`` → 拉 ``llama_index.embeddings.openai``（本仓不装）。
         store = llama().ChromaVectorStore(chroma_collection=collection)
+        # 残留 id = 库内全量 id（``get(include=[])["ids"]``）− 当前语料 id；为空时不删
+        # （``delete(ids=[])`` 被 chromadb 拒绝）。集合一致时差集为空，不产生写操作。
+        stale_ids = sorted(set(collection.get(include=[])["ids"]) - set(self._node_ids))
+        if stale_ids:
+            store.delete_nodes(node_ids=stale_ids)
         store.delete_nodes(node_ids=list(self._node_ids))
         store.add(self._nodes)
         self._vec_index = llama().VectorStoreIndex.from_vector_store(
@@ -269,42 +269,40 @@ class _ChromaIndexBase:
             row_index_by_key={nid: i for i, nid in enumerate(self._node_ids)},
         )
 
+    def _to_ranked(self, nodes: list[Any], ctx: _RetrievalContext) -> list[tuple[int, float]]:
+        """检索结果 → ``[(行索引, 6 位检索分)]``（按 ``(分降序, corpus 原序)`` 排序）。
+
+        ``ctx`` 之外的 node 直接丢弃 —— collection 里可能残留已不在语料中的旧 node id。
+        """
+        ranked = [
+            (ctx.row_index_by_key[n.node.node_id], round(float(n.score or 0.0), 6))
+            for n in nodes
+            if n.node.node_id in ctx.row_index_by_key
+        ]
+        ranked.sort(key=lambda t: (-t[1], t[0]))
+        return ranked
+
     def _rank_vector(
         self, ctx: _RetrievalContext, query_bundle: Any, filters: Any | None
     ) -> list[tuple[int, float]]:
-        """向量路排名：``[(行索引, 分数)]``，按分数降序、corpus 原序 tie-break。
+        """向量路排名（分数 = 库口径 ``exp(-distance)``）；过滤在库侧按 ``filters`` 收窄。
 
-        过滤在库侧按 ``filters`` 收窄，故传**全量** ctx（``_full_context``）而非候选子集。
+        故传**全量** ctx（``_full_context``）而非候选子集。
         """
-        retriever = make_vector_retriever(
-            self._vec_index, top_k=len(ctx.node_ids), filters=filters
+        retriever = self._vec_index.as_retriever(
+            similarity_top_k=max(1, len(ctx.node_ids)), filters=filters
         )
-        scored = {
-            n.node.node_id: float(n.score or 0.0)
-            for n in retriever.retrieve(query_bundle)
-            if n.node.node_id in ctx.row_index_by_key
-        }
-        ranked = [(ctx.row_index_by_key[nid], score) for nid, score in scored.items()]
-        ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
-        return [(i, round(s, 6)) for i, s in ranked]
+        return self._to_ranked(retriever.retrieve(query_bundle), ctx)
 
     def _rank_bm25(
         self, sub_ctx: _RetrievalContext, query_bundle: Any, top_k: int
     ) -> list[tuple[int, float]]:
-        """BM25 路排名：候选集内的 BM25 原始分（Python 侧过滤 = 只喂候选 node）。
+        """BM25 路排名（Python 侧过滤 = 只喂候选 node）。
 
-        分数原样透传 ``bm25s``（**无界、不做量纲适配**），只做 6 位取整与
-        ``(分降序, corpus 原序)`` 排序 —— RRF 只看名次，融合与截断都不依赖该分的大小。
+        分数原样透传 ``bm25s``（**无界、不做量纲适配**）—— RRF 只看名次，融合与截断都不依赖该分。
         """
         retriever = make_bm25_retriever(sub_ctx, top_k)
-        nodes = bm25_retrieve(retriever, query_bundle)
-        ranked = [
-            (sub_ctx.row_index_by_key[n.node.node_id], float(n.score or 0.0))
-            for n in nodes
-            if n.node.node_id in sub_ctx.row_index_by_key
-        ]
-        ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
-        return [(i, round(s, 6)) for i, s in ranked]
+        return self._to_ranked(retriever.retrieve(query_bundle), sub_ctx)
 
     def _rank_hybrid(
         self, query: str, candidates: list[int], filters: Any | None
@@ -323,8 +321,8 @@ class _ChromaIndexBase:
         sub_ctx = self._sub_context(candidates)
         fusion = llama().QueryFusionRetriever(
             retrievers=[
-                make_vector_retriever(
-                    self._vec_index, top_k=len(full_ctx.node_ids), filters=filters
+                self._vec_index.as_retriever(
+                    similarity_top_k=max(1, len(full_ctx.node_ids)), filters=filters
                 ),
                 make_bm25_retriever(sub_ctx, len(candidates)),
             ],
@@ -335,18 +333,8 @@ class _ChromaIndexBase:
             use_async=False,
             similarity_top_k=max(1, len(full_ctx.node_ids)),
         )
-        # ⚠️ BM25 的 ``_retrieve`` 也要调 ``bm25s.tokenize``（查询侧分词），故**整个融合过程**
-        # 必须在 jieba 上下文内 —— 代价是向量检索期间一并持锁（``bm25s.tokenize`` 是模块级符号，
-        # 只有全局替换这一个注入口）。
-        with bm25_tokenizer_context():
-            nodes = fusion.retrieve(llama().QueryBundle(query_str=query))
-        ranked = [
-            (full_ctx.row_index_by_key[n.node.node_id], float(n.score or 0.0))
-            for n in nodes
-            if n.node.node_id in full_ctx.row_index_by_key
-        ]
-        ranked.sort(key=lambda t: (-round(t[1], 6), t[0]))
-        return [(i, round(s, 6)) for i, s in ranked]
+        nodes = fusion.retrieve(llama().QueryBundle(query_str=query))
+        return self._to_ranked(nodes, full_ctx)
 
     # -- 检索核心 -----------------------------------------------------------
 

@@ -42,8 +42,6 @@ _DEFAULT_COLLECTION_PREFIX = "pra"
 #: 静默全空）。v2 = ``risk_type`` 数组键改为 ``rt_<值>`` 整数键；v3 = 写入 ``_node_content``；
 #: v4 = metadata 改由 ``ChromaVectorStore.add`` 生成（``_node_content`` 内的 text 被清空）。
 _SCHEMA_VERSION = 4
-#: metadata 维度键（Chroma 不声明向量维度，故把本索引声明的 dim 存进 collection metadata）。
-_DIM_KEY = "pra_dim"
 #: ``risk_type`` 过滤键前缀：**每个枚举值一个整数键**（``rt_FALSE_CLAIM: 1``），不用数组。
 #: Chroma ``where`` 只支持标量比较、没有「数组交叠」操作符，而过滤语义恰恰是**交叠非空**。
 #: 值取 ``1`` 而非 ``True``：``MetadataFilter.value`` 的 pydantic 联合类型不收 ``bool``。
@@ -107,7 +105,7 @@ def _node_id(collection: str, key: str) -> str:
     return f"pra-{digest}"
 
 
-def _open_collection(config: ChromaConfig, *, name: str, dim: int, kind: str) -> Any:
+def _open_collection(config: ChromaConfig, *, name: str) -> Any:
     """``get_or_create_collection``（**必须 ``embedding_function=None`` + 显式 cosine 空间**）。
 
     不关 ``embedding_function`` 会启用默认 ONNX 嵌入函数并去下模型；不显式 cosine 则空间是
@@ -126,11 +124,6 @@ def _open_collection(config: ChromaConfig, *, name: str, dim: int, kind: str) ->
         name=name,
         embedding_function=None,
         configuration={"hnsw": {"space": "cosine"}},  # ★ 显式 cosine：默认是 l2
-        metadata={
-            _DIM_KEY: int(dim),
-            "pra_kind": kind,
-            "pra_prefix": config.collection_prefix or _DEFAULT_COLLECTION_PREFIX,
-        },
     )
 
 
@@ -185,7 +178,7 @@ def _build_nodes(
 
     **metadata 不进检索文本**：``excluded_embed_metadata_keys`` / ``excluded_llm_metadata_keys``
     设为全部 metadata 键，使 ``get_content(metadata_mode=EMBED)`` 只返回正文 —— 这对 BM25 路
-    **必需**（``BM25Retriever`` 用 ``MetadataMode.EMBED``），不排除就会把 ``case_id`` /
+    **必需**（`bm25.py` 的检索器用 ``MetadataMode.EMBED`` 取索引文本），不排除就会把 ``case_id`` /
     ``category`` / ``decision`` / ``rt_*`` 的字面值索引进去，出现「按 metadata 字面值就能
     命中」的伪检索。排除设置随 ``_node_content`` JSON 往返存活；metadata 本身仍完整保留。
     """
@@ -213,8 +206,9 @@ def _build_nodes(
 def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
     out: list[Any] = []
     for row in rows:
-        out.append(record_type.model_validate(row) if isinstance(row, dict) else row)
-    for row in out:
+        if isinstance(row, dict):
+            row = record_type.model_validate(row)
         if not isinstance(row, record_type):
             raise TypeError(f"corpus 行须为 {record_type.__name__} 或 dict: got {type(row)!r}")
+        out.append(row)
     return out

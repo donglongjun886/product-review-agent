@@ -180,6 +180,39 @@ def test_reseed_on_existing_collection_overwrites_same_id(
     assert stored and marker in stored[0], f"同 id 未被覆盖：{stored}"
 
 
+def test_reseed_on_shrunk_corpus_purges_stale_node_ids(
+    policy_rows: Any, embedder: Any
+) -> None:
+    """语料缩减后重建：collection 内 id 集合与当前语料严格一致，残留旧 id 被清除。
+
+    断言：先按全量 policy 建库、再用去掉末行的语料重建，collection 的 id 集合 == 当前 corpus 的
+    ``node_ids`` 集合，且 ``count`` == 当前行数。意义：不清理差集时被删行的 node 会永久残留，
+    占掉向量路 ``similarity_top_k`` 的名额（``_to_ranked`` 会把它丢弃）。
+    """
+    from pra.rag.chroma_store import ChromaConfig, make_chroma_client
+    from pra.rag.factory import build_policy_index
+
+    prefix = "pytest_rag_ret_stale"
+    base = ChromaConfig(ephemeral=True, collection_prefix=prefix)
+    shared = ChromaConfig(
+        ephemeral=True, collection_prefix=prefix, client=make_chroma_client(base)
+    )
+    full = build_policy_index(
+        rows=policy_rows, embedding_model=embedder, mode="bm25", config=shared
+    )
+    shrunk_rows = policy_rows[:-1]
+    shrunk = build_policy_index(
+        rows=shrunk_rows, embedding_model=embedder, mode="bm25", config=shared
+    )
+    assert len(full.node_ids) == len(shrunk.node_ids) + 1, "前置：全量应比缩减多一 node"
+    collection = shared.client.get_collection(shrunk.collection_name)
+    stored_ids = set(collection.get(include=[])["ids"])
+    assert stored_ids == set(shrunk.node_ids), (
+        f"残留旧 node id：{sorted(stored_ids - set(shrunk.node_ids))}"
+    )
+    assert collection.count() == len(shrunk_rows)
+
+
 # ---------------------------------------------------------------------------
 # 1 / 2. BM25 与 Vector 的召回
 # ---------------------------------------------------------------------------
@@ -200,6 +233,26 @@ async def test_bm25_recalls_expected_policy_clause(policy_bm25: Any) -> None:
     )
     ids = [h.clause_id for h in hits]
     assert "POLICY_1.4_v1_c1" in ids, f"BM25 未召回预期条款；实际 Top-5={ids}"
+
+
+async def test_bm25_no_global_tokenizer_patch(policy_bm25: Any) -> None:
+    """BM25 分词是检索器自持的（``bm25s.tokenize`` 归库所有，不得再被全局替换）。
+
+    断言：跑一次真实检索后，``rag/bm25.py`` 不再暴露全局替换件（``_TOKENIZER_LOCK`` /
+    ``bm25_tokenizer_context``），且 ``bm25s.tokenize`` 仍指向库自身实现。意义：把「删掉猴补丁
+    这条决定」钉死 —— 重新引入全局替换会让本用例立刻变红。
+    """
+    import bm25s
+
+    from pra.rag import bm25 as bm25_mod
+
+    hits = await policy_bm25.search("外观高度模仿知名品牌", PolicySearchFilters(), 3, True)
+    assert hits, "BM25 检索应有命中（空结果会让本用例失去意义）"
+    assert not hasattr(bm25_mod, "_TOKENIZER_LOCK")
+    assert not hasattr(bm25_mod, "bm25_tokenizer_context")
+    assert bm25s.tokenize.__module__ == "bm25s.tokenization", (
+        f"bm25s.tokenize 被替换：{bm25s.tokenize!r}"
+    )
 
 
 async def test_vector_recalls_semantically_matching_clause(policy_vector: Any) -> None:

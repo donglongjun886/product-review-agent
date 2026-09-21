@@ -29,43 +29,46 @@ def chroma() -> Any:
 def llama() -> SimpleNamespace:
     """延迟 import 的 LlamaIndex 装配面（进程内首个构造/检索时拉起，之后缓存复用）。
 
-    按需 import 具体集成（core + vector-stores-chroma + retrievers-bm25）。用属性访问
+    按需 import 具体集成（core + vector-stores-chroma）。用属性访问
     （``llama().TextNode``）：缓存对象是全局单例，故无需逐层穿透。
     """
     try:
         from llama_index.core import VectorStoreIndex
-        from llama_index.core.indices.vector_store.retrievers import (
-            VectorIndexRetriever,
-        )
         from llama_index.core.llms import MockLLM
-        from llama_index.core.retrievers import QueryFusionRetriever
+        from llama_index.core.retrievers import BaseRetriever, QueryFusionRetriever
         from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
-        from llama_index.core.schema import QueryBundle, TextNode
+        from llama_index.core.schema import MetadataMode, NodeWithScore, QueryBundle, TextNode
         from llama_index.core.vector_stores import (
             FilterCondition,
             FilterOperator,
             MetadataFilter,
             MetadataFilters,
         )
-        from llama_index.retrievers.bm25 import BM25Retriever
+        from llama_index.core.vector_stores.utils import (
+            metadata_dict_to_node,
+            node_to_metadata_dict,
+        )
         from llama_index.vector_stores.chroma import ChromaVectorStore
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
         raise RuntimeError(
-            "RAG 检索需要 llama-index-core / llama-index-vector-stores-chroma / "
-            "llama-index-retrievers-bm25：请运行 `uv sync --extra rag` 安装。"
+            "RAG 检索需要 llama-index-core / llama-index-vector-stores-chroma："
+            "请运行 `uv sync --extra rag` 安装。"
         ) from exc
     return SimpleNamespace(
-        BM25Retriever=BM25Retriever,
+        BaseRetriever=BaseRetriever,
         ChromaVectorStore=ChromaVectorStore,
         FUSION_MODES=FUSION_MODES,
         FilterCondition=FilterCondition,
         FilterOperator=FilterOperator,
         MetadataFilter=MetadataFilter,
         MetadataFilters=MetadataFilters,
+        MetadataMode=MetadataMode,
         MockLLM=MockLLM,
+        NodeWithScore=NodeWithScore,
         QueryBundle=QueryBundle,
         QueryFusionRetriever=QueryFusionRetriever,
         TextNode=TextNode,
-        VectorIndexRetriever=VectorIndexRetriever,
         VectorStoreIndex=VectorStoreIndex,
+        metadata_dict_to_node=metadata_dict_to_node,
+        node_to_metadata_dict=node_to_metadata_dict,
     )

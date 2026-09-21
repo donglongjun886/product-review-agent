@@ -243,7 +243,7 @@ Chroma 的连接参数目前**只能程序化传入**，尚无配置项或 CLI �
 - 语料仍是 **24 政策 / 67 案例**的小语料（沿用不变）→ **不构成能力声明**，
   更不代表 Chroma 在生产规模下的表现。
 - 本目录**只交付部署**；检索升级（LlamaIndex + BGE 向量路 + BM25 + RRF）**已实施**，
-  相关代码见 `src/pra/rag/`（`vector.py` / `bm25.py` / `chroma_store.py` 等；口径见 docs/00 与 §1、§6）。
+  相关代码见 `src/pra/rag/`（`index.py` / `bm25.py` / `chroma_store.py` 等；口径见 docs/00 与 §1、§6）。
 - 以上均为 `chromadb/chroma:1.5.9` 镜像 + `chromadb 1.5.9` Python 包（本机 `uv` 环境）
   的实测结果；镜像内 `chroma --version` 自报 **`1.4.4`**（CLI 自报版本与镜像 tag / Python
   包版本不同源，**未深究二者差异**，如需精确对齐请以 tag 与 PyPI 包为准）。
