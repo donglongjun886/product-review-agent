@@ -262,37 +262,27 @@ class _ChromaIndexBase:
         return _RetrievalContext(
             node_ids=sub_ids,
             nodes=[self._nodes[i] for i in candidates],
-            embed_model=self._embed_model,
             row_index_by_key={nid: candidates[offset] for offset, nid in enumerate(sub_ids)},
         )
 
     def _full_context(self) -> _RetrievalContext:
-        """全量语料上的检索上下文（**向量路**用：过滤已在库侧下推，打分域 = 库内全集 ∩ ``where``）。
-
-        ``_node_ids[i] ↔ self._rows[i]`` 是构造期既有约定，故行索引映射就是下标枚举。
-        """
+        """全量语料上的检索上下文（向量路用；``_node_ids[i]`` 对应 ``self._rows[i]``）。"""
         return _RetrievalContext(
             node_ids=list(self._node_ids),
             nodes=list(self._nodes),
-            embed_model=self._embed_model,
             row_index_by_key={nid: i for i, nid in enumerate(self._node_ids)},
         )
 
     def _rank_vector(
         self, ctx: _RetrievalContext, query_bundle: Any, filters: Any | None
     ) -> list[tuple[int, float]]:
-        """向量路排名：``[(行索引, exp(-distance))]``（打分域 = 库内全集 ∩ ``where``）。
+        """向量路排名：``[(行索引, 分数)]``，按分数降序、corpus 原序 tie-break。
 
-        分数**原样透传**库口径（见 :func:`~pra.rag.vector.vector_retrieve` 的三条换算否决理由）
-        —— 排名只需单调性，该值往下仅作证据展示权重，不参与 Gate 判定。
-
-        过滤由 ``filters``（``where``）在库侧收窄，故这里传**全量** ctx（``_full_context``）
-        而不是候选子集。
+        过滤在库侧按 ``filters`` 收窄，故传**全量** ctx（``_full_context``）而非候选子集。
         """
         pairs = vector_retrieve(
             self._vec_index,
             query_bundle,
-            embed_model=ctx.embed_model,
             top_k=len(ctx.node_ids),
             filters=filters,
         )

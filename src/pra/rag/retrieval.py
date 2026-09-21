@@ -58,6 +58,5 @@ class _RetrievalContext:
 
     node_ids: list[str]
     nodes: list[Any]
-    embed_model: Any
     #: node_id → corpus 原序行索引（排序 tie-break 用原序，不依赖底层库返回顺序）。
     row_index_by_key: dict[str, int] = field(default_factory=dict)
