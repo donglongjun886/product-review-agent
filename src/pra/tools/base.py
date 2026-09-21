@@ -103,9 +103,6 @@ class ToolRegistry:
         except KeyError:
             raise KeyError(f"未注册的 tool: {name!r}；已注册: {sorted(self._tools)}") from None
 
-    def names(self) -> list[str]:
-        return sorted(self._tools)
-
     def parse_args(self, tool_name: str, raw: dict) -> ToolArgs:
         """按名取工具并用其 ``args_model`` 校验/解析 plan 给的原始 dict。
 

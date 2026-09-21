@@ -105,9 +105,6 @@ class SweepResult:
     def points_of(self, variable: str) -> list[SweepPoint]:
         return [p for p in self.points if p.variable == variable]
 
-    def grid_of(self, variable: str) -> list[float]:
-        return [p.value for p in self.points_of(variable)]
-
 
 def _ctx_with_thresholds(base: EvalContext, variable: str, value: float) -> EvalContext:
     """在 ``base`` 上覆盖单变量档值，另一常量取默认 —— sweep 只动 EvalContext。"""

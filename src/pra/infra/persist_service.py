@@ -37,7 +37,9 @@ from uuid import uuid4
 
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
+from pra import tools as tools_pkg
 from pra.agent.checkpointer import make_memory_checkpointer
+from pra.agent.graph import build_agent_graph
 from pra.agent.state import build_initial_state
 from pra.domain.models import (
     Budget,
@@ -83,27 +85,22 @@ _NODE_STEP_TYPE = {
     "tools": "TOOL_CALL",  # 仅供识别；实际每行取 TOOL_CALL（见 run_and_persist tools 特判）
 }
 
-# 模块级懒加载缓存（与 pra.api.service.get_graph 同款原子性论证：无 await 切换点）。
-_compiled_graph: Any = None  # CompiledStateGraph（延迟 import 防 pra.infra 依赖链循环）
+# 模块级单例缓存（与 pra.api.service.get_graph 同款原子性论证：无 await 切换点）。
+_compiled_graph: Any = None
 
 
 def _get_graph() -> Any:
-    """懒加载返回编译图单例（scripted LLM 桩 + 生产工具世界，无 API key）。
+    """返回编译图单例（scripted LLM 桩 + 生产工具世界），首次调用时装配。
 
-    工具世界 = ``build_production_tools()``（商品/商家读 MySQL，案例/政策读真实 RAG）——
-    HTTP/生产入口读真库是刻意的；单测由 ``tests/conftest.py`` 的 autouse
-    fixture 把生产装配钉回 InMemory，故测试/CI 不连库。
-
-    每次执行经唯一 ``thread_id=run_id`` 隔离线程状态（InMemorySaver）；真实 LLM / MySQL
-    Checkpointer 接入时改这里即可。
+    工具世界取 ``pra.tools.build_production_tools()``（商品/商家读 MySQL，案例/政策读真实
+    RAG）—— 单测由 ``tests/conftest.py`` 的 autouse fixture 把生产装配钉回 InMemory，故不连库。
+    每次执行经唯一 ``thread_id=run_id`` 隔离线程状态（InMemorySaver）。
     """
     global _compiled_graph
     if _compiled_graph is None:
-        from pra.agent.graph import build_agent_graph  # 延迟 import：编译代价大、仅首次
-        from pra.tools import build_production_tools  # 函数内 import：便于测试替换装配
-
         _compiled_graph = build_agent_graph(
-            tools=build_production_tools(), checkpointer=make_memory_checkpointer()
+            tools=tools_pkg.build_production_tools(),
+            checkpointer=make_memory_checkpointer(),
         )
     return _compiled_graph
 

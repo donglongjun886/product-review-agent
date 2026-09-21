@@ -531,11 +531,14 @@ def test_http_graph_entries_pass_the_production_world(monkeypatch):
         return object()
 
     sentinel = object()
-    monkeypatch.setattr("pra.agent.graph.build_agent_graph", fake_build_agent_graph)
     monkeypatch.setattr("pra.tools.build_production_tools", lambda: sentinel)
 
     from pra.api import service as api_service
 
+    # 两个入口各自顶层 import 了 ``build_agent_graph``，故 patch 须落在「使用处」（各模块内的名字）
+    # 而非定义处 ``pra.agent.graph`` —— 后者的替换不会被已绑定的名字看到。
+    monkeypatch.setattr(api_service, "build_agent_graph", fake_build_agent_graph)
+    monkeypatch.setattr(ps, "build_agent_graph", fake_build_agent_graph)
     monkeypatch.setattr(api_service, "_graph", None)
     monkeypatch.setattr(ps, "_compiled_graph", None)
     api_service.get_graph()

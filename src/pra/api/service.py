@@ -6,7 +6,7 @@
 
 run_id 语义：案件身份不进 AgentState，接入层映射为 LangGraph 线程维度 ``thread_id = run_id``；
 缺省自动生成 ``uuid4().hex`` —— 每请求独立线程，InMemorySaver 线程状态互不串扰（也可传可读
-形式如 ``RUN_{case_id}``）。图装配为懒加载 + 模块级缓存（``get_graph``），首次调用才
+形式如 ``RUN_{case_id}``）。图装配为模块级单例（``get_graph``），首次调用才
 ``build_agent_graph(tools=build_production_tools(), checkpointer=make_memory_checkpointer())``
 （生产工具世界：商品与商家读 MySQL、案例与政策读真实 RAG；scripted LLM 桩，无需 API key），
 图不挂在 FastAPI app 上。单测不连库/不连 Chroma —— ``tests/conftest.py`` 把生产装配钉回
@@ -23,7 +23,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from pra import tools as tools_pkg
 from pra.agent.checkpointer import make_memory_checkpointer
+from pra.agent.graph import build_agent_graph
 from pra.agent.state import build_initial_state
 from pra.api.schemas import ReviewRunResult
 from pra.domain.models import ProductReviewCase, ReviewDecision
@@ -40,31 +42,21 @@ if TYPE_CHECKING:  # 仅类型：运行时不需要 CompiledStateGraph（future 
 __all__ = ["run_review", "get_graph"]
 
 
-# 模块级懒加载缓存：首次调用 get_graph 时装配编译，之后复用（见模块 docstring 并发说明）。
+# 模块级单例缓存：首次调用 get_graph 时装配编译，之后复用（见模块 docstring 并发说明）。
 _graph: CompiledStateGraph | None = None
 
 
 def get_graph() -> CompiledStateGraph:
-    """懒加载返回编译图单例（scripted LLM 桩 + 生产工具世界，无 API key）。
+    """返回编译图单例（scripted LLM 桩 + 生产工具世界），首次调用时装配。
 
-    工具世界 = ``build_production_tools()``（商品/商家读 MySQL，案例/政策读真实 RAG）——
-    HTTP/生产入口读真库是刻意的：单测走 ``build_tools()`` 的 InMemory 世界，
-    ``tests/conftest.py`` 的 autouse fixture 把生产装配钉回 InMemory，故测试/CI 不连库。
-
-    图实例与 FastAPI app 生命周期解耦 —— app 重建/热重载不影响已编译图；接真实 LLM / 外部
-    Checkpointer（MySQL saver）时改这里即可，调用方零改动。
+    工具世界取 ``pra.tools.build_production_tools()``（商品/商家读 MySQL，案例/政策读真实
+    RAG）—— 测试/CI 由 ``tests/conftest.py`` 的 autouse fixture 把该装配钉回 InMemory。
     """
     global _graph
     if _graph is None:
-        from pra.agent.graph import (
-            build_agent_graph,  # 延迟 import：pra.api 不被 agent 反向依赖
-        )
-        from pra.tools import build_production_tools  # 函数内 import：便于测试替换装配
-
-        # checkpointer 默认 None = 不持久化仅调试；接入层一律注入 InMemorySaver，
-        # 使 thread_id=run_id 的线程状态可查询/可断点续跑。
         _graph = build_agent_graph(
-            tools=build_production_tools(), checkpointer=make_memory_checkpointer()
+            tools=tools_pkg.build_production_tools(),
+            checkpointer=make_memory_checkpointer(),
         )
     return _graph
 

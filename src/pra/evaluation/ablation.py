@@ -57,7 +57,6 @@ __all__ = [
     "AblationResult",
     "AblationRunner",
     "build_rag_context",
-    "decision_sequence",
     "expected_tool_coverage",
     "render_ablation_report",
 ]
@@ -136,11 +135,6 @@ def build_rag_context(case: EvalCase) -> list[str]:
 # 小工具（确定性）
 
 
-def decision_sequence(records: list[EvalRecord]) -> list[str]:
-    """records（已按 case 行序）的 decision 序列（regression/消融差异对比用）。"""
-    return [r.decision for r in records]
-
-
 def expected_tool_coverage(cases: list[EvalCase]) -> dict[str, list[str]]:
     """每个工具的**评测世界证据覆盖**：expected.expected_tools 含该工具的 case id 列表。
 
@@ -188,10 +182,6 @@ class VariantOutcome:
     overall: DecisionMetrics
     abstention: AbstentionMetrics
 
-    @property
-    def decisions(self) -> list[str]:
-        return decision_sequence(self.records)
-
 
 @dataclass
 class AblationResult:
@@ -203,12 +193,6 @@ class AblationResult:
     component_outcomes: dict[str, VariantOutcome] = field(default_factory=dict)  # full/-rag/…
     tool_coverage: dict[str, list[str]] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
-
-    @property
-    def all_outcomes(self) -> dict[str, VariantOutcome]:
-        out = dict(self.scheme_outcomes)
-        out.update(self.component_outcomes)
-        return out
 
 
 async def _run_records(

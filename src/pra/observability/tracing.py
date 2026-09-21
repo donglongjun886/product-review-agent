@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Protocol, runtime_checkable
 from uuid import NAMESPACE_URL, uuid5
@@ -311,8 +311,3 @@ def make_tracer(
     return build_langfuse_tracer(
         public_key=public_key, secret_key=secret_key, host=host, sample=sample
     )
-
-
-def null_observation() -> AbstractContextManager[Observation]:
-    """空观测上下文（供不想分支调用的场景）。"""
-    return nullcontext(_NullObservation())

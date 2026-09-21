@@ -414,7 +414,7 @@ class Tool(Protocol):
 | Tool | 默认实现（`build_tools()` / 评测世界） | 生产 / HTTP 入口（`build_production_tools()`） |
 |---|---|---|
 | ProductTool / MerchantTool | InMemory 种子（`InMemoryProductRepository` / `InMemoryMerchantRepository`） | 真库：`MySQLProductRepository`（`product/product_sku/product_image`）/ `MySQLMerchantRepository`（`merchant/merchant_event`） |
-| CaseSearchTool / PolicySearchTool | InMemory 种子（`InMemoryCaseIndex` / `InMemoryPolicyIndex`） | 真实 RAG（chroma 后端 + FastEmbed 编码器 + hybrid）；经 `Lazy*Index` **惰性构建**——装配期零 import/零 IO，首次检索才建库连 Chroma |
+| CaseSearchTool / PolicySearchTool | InMemory 种子（`InMemoryCaseIndex` / `InMemoryPolicyIndex`） | 真实 RAG（chroma 后端 + FastEmbed 编码器 + hybrid）；经 `Lazy*Index` **惰性构建**——装配期零 IO（不建库 / 不连 Chroma / 不加载模型），首次检索才建库连 Chroma |
 | ImageAnalysisTool / OCRTool | Mock 桩（`MockImageAnalysisProvider` / `MockOcrProvider`） | 同左（未接真实视觉模型 / OCR 服务） |
 
 > 边界：**默认装配路径（`build_tools()` 与 `build_agent_graph()` 缺省）与两个评测世界仍是 InMemory**（评测确定性红线，CI 不连 MySQL / Chroma）；
