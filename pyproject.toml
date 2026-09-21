@@ -21,14 +21,14 @@ dependencies = [
 # RAG 基建：
 #   向量库 = ChromaDB（1.x，Docker 服务端 + HttpClient）
 #   RAG 框架 = LlamaIndex（C2 拍板「全量 LlamaIndex」）
-#   BM25 = 成熟引擎经 LlamaIndex BM25Retriever（引擎 = bm25s）+ jieba 中文分词
+#   BM25 = bm25s 自建索引 + jieba 中文分词（自持 BaseRetriever）
 #   embedding = BGE（fastembed/onnx）
 rag = [
     "chromadb",
     "fastembed",
     "llama-index-core>=0.13,<0.15",
     "llama-index-vector-stores-chroma>=0.6,<0.7",
-    "llama-index-retrievers-bm25>=0.8,<0.9",
+    "bm25s>=0.3.11,<0.4",
     "llama-index-embeddings-fastembed>=0.7,<0.8",
     "jieba>=0.42,<0.43",
 ]
