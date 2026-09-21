@@ -49,8 +49,8 @@ def _disable_langfuse_tracing():
 def _production_tools_use_inmemory_world(monkeypatch):
     """单测/CI 不连库：把生产入口的工具装配钉回 InMemory 世界。
 
-    生产/HTTP 入口（``pra.api.service.get_graph`` / ``pra.infra.persist_service._get_graph``）
-    按设计调 ``pra.tools.build_production_tools()`` 读真库商品表；而测试必须无库可跑（CI 上没有
+    生产入口唯一装配处 ``pra.wiring.get_production_graph`` 按设计调
+    ``pra.tools.build_production_tools()`` 读真库商品表；而测试必须无库可跑（CI 上没有
     MySQL），故把该装配函数替换为 ``build_tools()``。真库集成测试不依赖本 fixture —— 它们自行
     把真实装配函数换回去并显式连库。
     """

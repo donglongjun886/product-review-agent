@@ -23,6 +23,7 @@ import pytest
 from helpers import make_case
 from sqlalchemy import text
 
+from pra import wiring
 from pra.domain.models import Budget, ProductImage, ProductReviewCase
 from pra.infra import persist_service as ps
 from pra.infra.db import Settings, get_sessionmaker
@@ -522,8 +523,12 @@ def test_tests_are_pinned_to_the_inmemory_world():
     )
 
 
-def test_http_graph_entries_pass_the_production_world(monkeypatch):
-    """两个生产入口（HTTP 执行器 / 落库编排）都必须把生产工具世界显式注入图装配。"""
+def test_single_source_assembly_feeds_the_production_world(monkeypatch):
+    """装配唯一处守护：生产图只在组合根 ``pra.wiring.get_production_graph`` 组装一次。
+
+    单点 patch 接缝（``pra.wiring.build_agent_graph``）+ 单份单例重置（``pra.wiring._graph``）即可
+    覆盖全部生产入口；两个入口模块**不得**再自带装配/单例 —— 重复装配一旦复现，这里立刻变红。
+    """
     captured: dict = {}
 
     def fake_build_agent_graph(*, tools=None, checkpointer=None, llm=None):
@@ -532,19 +537,18 @@ def test_http_graph_entries_pass_the_production_world(monkeypatch):
 
     sentinel = object()
     monkeypatch.setattr("pra.tools.build_production_tools", lambda: sentinel)
+    monkeypatch.setattr(wiring, "build_agent_graph", fake_build_agent_graph)
+    monkeypatch.setattr(wiring, "_graph", None)
 
     from pra.api import service as api_service
 
-    # 两个入口各自顶层 import 了 ``build_agent_graph``，故 patch 须落在「使用处」（各模块内的名字）
-    # 而非定义处 ``pra.agent.graph`` —— 后者的替换不会被已绑定的名字看到。
-    monkeypatch.setattr(api_service, "build_agent_graph", fake_build_agent_graph)
-    monkeypatch.setattr(ps, "build_agent_graph", fake_build_agent_graph)
-    monkeypatch.setattr(api_service, "_graph", None)
-    monkeypatch.setattr(ps, "_compiled_graph", None)
-    api_service.get_graph()
-    assert captured.pop("tools") is sentinel, "HTTP 执行器未注入生产工具世界"
-    ps._get_graph()
-    assert captured.pop("tools") is sentinel, "落库编排未注入生产工具世界"
+    wiring.get_production_graph()
+    assert captured.pop("tools") is sentinel, "组合根未把生产工具世界注入图装配"
+
+    # 回退反证：任一入口重新自建装配/单例，以下断言即变红。
+    assert not hasattr(api_service, "get_graph"), "HTTP 执行器又自建了装配入口"
+    assert not hasattr(ps, "_get_graph"), "落库编排又自建了装配入口"
+    assert not hasattr(ps, "_compiled_graph"), "落库编排又自带了图单例"
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +634,7 @@ async def test_production_path_reads_product_fact_from_mysql(monkeypatch):
     tag = uuid4().hex[:8]
     mysql_case_id, memory_case_id = f"PYTEST_HTTP_MYSQL_{tag}", f"PYTEST_HTTP_MEM_{tag}"
     try:
-        monkeypatch.setattr(ps, "_compiled_graph", None)
+        monkeypatch.setattr(wiring, "_graph", None)
         out_mysql = await ps.process_review(_case_for_product(mysql_case_id))
         facts = await _product_fact_rows(out_mysql["run_id"])
         assert len(facts) == 1, "生产路径应恰好落 1 条 PRODUCT_FACT"
@@ -639,7 +643,7 @@ async def test_production_path_reads_product_fact_from_mysql(monkeypatch):
         assert "version=1" in facts[0][3], "版本必须来自真库行（P_77310 的 version=1）"
 
         monkeypatch.setattr("pra.tools.build_production_tools", build_tools)
-        monkeypatch.setattr(ps, "_compiled_graph", None)
+        monkeypatch.setattr(wiring, "_graph", None)
         out_mem = await ps.process_review(_case_for_product(memory_case_id))
         assert await _product_fact_rows(out_mem["run_id"]) == [], (
             "InMemory 默认世界没有该商品 → 不应有 PRODUCT_FACT（本断言是上面那条的回退反证）"

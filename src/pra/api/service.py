@@ -6,26 +6,19 @@
 
 run_id 语义：案件身份不进 AgentState，接入层映射为 LangGraph 线程维度 ``thread_id = run_id``；
 缺省自动生成 ``uuid4().hex`` —— 每请求独立线程，InMemorySaver 线程状态互不串扰（也可传可读
-形式如 ``RUN_{case_id}``）。图装配为模块级单例（``get_graph``），首次调用才
-``build_agent_graph(tools=build_production_tools(), checkpointer=make_memory_checkpointer())``
-（生产工具世界：商品与商家读 MySQL、案例与政策读真实 RAG；scripted LLM 桩，无需 API key），
-图不挂在 FastAPI app 上。单测不连库/不连 Chroma —— ``tests/conftest.py`` 把生产装配钉回
-InMemory 世界。
+形式如 ``RUN_{case_id}``）。图装配由组合根 ``pra.wiring.get_production_graph`` 提供（模块级单例，
+首次调用才装配生产工具世界：商品与商家读 MySQL、案例与政策读真实 RAG；scripted LLM 桩，无需
+API key），图不挂在 FastAPI app 上。单测不连库/不连 Chroma —— ``tests/conftest.py`` 把生产装配
+钉回 InMemory 世界。
 
-并发：build_agent_graph / InMemorySaver 均为同步、无 I/O（不 await），同一事件循环内检查与赋值
-之间无协程切换点，故「先查缓存再构建」天然原子，无需加锁；未来换异步 Checkpointer
-（AsyncSqlite/自研 MySQL saver）需在此加锁或改 asyncio 单飞模式。约束：不注入 llm → 保持
-scripted 桩；注入真实 LLM 属未来配置化（调用方先 ``set_llm_backend`` 或传 ``llm=`` 并重建缓存）。
+约束：不注入 llm → 保持 scripted 桩；注入真实 LLM 属未来配置化（调用方先 ``set_llm_backend``
+或传 ``llm=`` 并重建图缓存）。
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from pra import tools as tools_pkg
-from pra.agent.checkpointer import make_memory_checkpointer
-from pra.agent.graph import build_agent_graph
 from pra.agent.state import build_initial_state
 from pra.api.schemas import ReviewRunResult
 from pra.domain.models import ProductReviewCase, ReviewDecision
@@ -35,30 +28,9 @@ from pra.observability.tracing import (
     get_tracer,
     trace_id_from_run_id,
 )
+from pra.wiring import get_production_graph
 
-if TYPE_CHECKING:  # 仅类型：运行时不需要 CompiledStateGraph（future annotations 惰性求值）
-    from langgraph.graph.state import CompiledStateGraph
-
-__all__ = ["run_review", "get_graph"]
-
-
-# 模块级单例缓存：首次调用 get_graph 时装配编译，之后复用（见模块 docstring 并发说明）。
-_graph: CompiledStateGraph | None = None
-
-
-def get_graph() -> CompiledStateGraph:
-    """返回编译图单例（scripted LLM 桩 + 生产工具世界），首次调用时装配。
-
-    工具世界取 ``pra.tools.build_production_tools()``（商品/商家读 MySQL，案例/政策读真实
-    RAG）—— 测试/CI 由 ``tests/conftest.py`` 的 autouse fixture 把该装配钉回 InMemory。
-    """
-    global _graph
-    if _graph is None:
-        _graph = build_agent_graph(
-            tools=tools_pkg.build_production_tools(),
-            checkpointer=make_memory_checkpointer(),
-        )
-    return _graph
+__all__ = ["run_review"]
 
 
 async def run_review(
@@ -78,7 +50,7 @@ async def run_review(
     """
     resolved_run_id = run_id or uuid4().hex
     config = {"configurable": {"thread_id": resolved_run_id}}
-    app = get_graph()
+    app = get_production_graph()
 
     # Root trace：trace_id = run_id 映射（32-hex 原样，否则确定性 uuid5）→ Langfuse trace
     # 可与 MySQL review_run.run_id 硬对齐。常驻服务不 per-request flush（SDK 后台批量上报）。

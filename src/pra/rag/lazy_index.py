@@ -10,7 +10,7 @@ BGE）的索引构造是重活 —— import chromadb / llama_index、加载语�
 - 构建失败**不缓存** —— 下一次 ``search`` 重试（服务端短暂不可达可自愈）；异常原样上抛，
   由 ``tools_node`` 记 warn failure，**绝不静默回退 InMemory 种子**；
 - 构建是同步的、到 builder 返回前没有 ``await``，故同一事件循环内的并发 ``search`` 不会交错
-  构建（与 ``pra.api.service.get_graph`` 的懒加载同一论证）。跨线程 / 跨事件循环并发不在本
+  构建（与 ``pra.wiring.get_production_graph`` 的懒加载同一论证）。跨线程 / 跨事件循环并发不在本
   代理的保证范围内。
 """
 

@@ -22,6 +22,7 @@ import pytest
 from helpers import make_case
 from sqlalchemy import text
 
+from pra import wiring
 from pra.domain.models import Budget, ProductImage, ProductReviewCase
 from pra.infra import persist_service as ps
 from pra.infra.db import Settings, get_sessionmaker
@@ -455,7 +456,7 @@ async def test_production_path_reads_merchant_history_from_mysql(monkeypatch):
     tag = uuid4().hex[:8]
     mysql_case_id, memory_case_id = f"PYTEST_MH_MYSQL_{tag}", f"PYTEST_MH_MEM_{tag}"
     try:
-        monkeypatch.setattr(ps, "_compiled_graph", None)
+        monkeypatch.setattr(wiring, "_graph", None)
         out_mysql = await ps.process_review(_case_for_merchant(mysql_case_id))
         rows = await _merchant_history_rows(out_mysql["run_id"])
         assert len(rows) == 1, "生产路径应恰好落 1 条 MERCHANT_HISTORY"
@@ -464,7 +465,7 @@ async def test_production_path_reads_merchant_history_from_mysql(monkeypatch):
         assert "credit=38" in rows[0][2], "画像必须来自真库行（M_8801 的 credit=38）"
 
         monkeypatch.setattr("pra.tools.build_production_tools", build_tools)
-        monkeypatch.setattr(ps, "_compiled_graph", None)
+        monkeypatch.setattr(wiring, "_graph", None)
         out_mem = await ps.process_review(_case_for_merchant(memory_case_id))
         assert await _merchant_history_rows(out_mem["run_id"]) == [], (
             "InMemory 默认世界没有该商家 → 不应有 MERCHANT_HISTORY（本断言是上面那条的回退反证）"

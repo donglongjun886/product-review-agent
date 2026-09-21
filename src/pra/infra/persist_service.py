@@ -37,9 +37,6 @@ from uuid import uuid4
 
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
-from pra import tools as tools_pkg
-from pra.agent.checkpointer import make_memory_checkpointer
-from pra.agent.graph import build_agent_graph
 from pra.agent.state import build_initial_state
 from pra.domain.models import (
     Budget,
@@ -64,6 +61,7 @@ from pra.observability.tracing import (
     trace_id_from_run_id,
 )
 from pra.screening.engine import TriageResult, rule_evidence, triage
+from pra.wiring import get_production_graph
 
 logger = logging.getLogger(__name__)
 
@@ -84,25 +82,6 @@ _NODE_STEP_TYPE = {
     "decide": "DECIDE",
     "tools": "TOOL_CALL",  # 仅供识别；实际每行取 TOOL_CALL（见 run_and_persist tools 特判）
 }
-
-# 模块级单例缓存（与 pra.api.service.get_graph 同款原子性论证：无 await 切换点）。
-_compiled_graph: Any = None
-
-
-def _get_graph() -> Any:
-    """返回编译图单例（scripted LLM 桩 + 生产工具世界），首次调用时装配。
-
-    工具世界取 ``pra.tools.build_production_tools()``（商品/商家读 MySQL，案例/政策读真实
-    RAG）—— 单测由 ``tests/conftest.py`` 的 autouse fixture 把生产装配钉回 InMemory，故不连库。
-    每次执行经唯一 ``thread_id=run_id`` 隔离线程状态（InMemorySaver）。
-    """
-    global _compiled_graph
-    if _compiled_graph is None:
-        _compiled_graph = build_agent_graph(
-            tools=tools_pkg.build_production_tools(),
-            checkpointer=make_memory_checkpointer(),
-        )
-    return _compiled_graph
 
 
 def _utcnow() -> datetime:
@@ -388,7 +367,7 @@ async def run_and_persist(
         if extra_rows:
             await session.commit()
 
-        app = _get_graph()
+        app = get_production_graph()
         config = {"configurable": {"thread_id": resolved_run_id}}
         seq = 0
         trace_rows = 0
