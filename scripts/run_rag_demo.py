@@ -99,7 +99,7 @@ async def _case_table(query: str, top_k: int) -> None:
         for h in hits:
             tags = "/".join(t.value for t in h.risk_type) or "-"
             cells.append(
-                f"{h.case_id} sim={h.retrieval_score:.3f} {h.decision.value}/{h.risk_level.value}[{tags}] {_clip(h.summary, 40)}"
+                f"{h.case_id} score={h.retrieval_score:.3f} {h.decision.value}/{h.risk_level.value}[{tags}] {_clip(h.summary, 40)}"
             )
         print(f"  [{mode:<7}] " + (" | ".join(cells) if cells else "(无命中)"))
 

@@ -139,7 +139,7 @@ class Evidence(_StrictModel):
     type: str = Field(description="证据类型（开放性文本），如 IMAGE_SIMILARITY / MERCHANT_HISTORY / CASE_PRECEDENT")
     source: str = Field(description="证据来源工具，如 ImageAnalysisTool / MerchantTool")
     value: str = Field(description="证据内容（人读摘要），如 similarity=0.91, match=某品牌经典鞋款")
-    weight: float = Field(ge=0.0, le=1.0, description="证据强度（0~1，供证据综合加权）")
+    weight: float = Field(ge=0.0, description="证据强度（非负）。量纲由来源工具定义：图像/OCR 相似度类为 0~1，先例检索分为后端口径 —— 所有读点都是「≥ 常量」比较，故不设上界")
     ref_id: str | None = Field(default=None, description="引用的源对象 ID（用于去重/回溯，可空）")
     extra: dict = Field(default_factory=dict, description="结构化附加数值（similarity/removals 等），供确定性函数读取，不进人读 value")
 

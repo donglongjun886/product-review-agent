@@ -25,7 +25,8 @@ def vector_retrieve(
     """向量路取数：``[(node id, 相似度分)]`` —— 分数**直接采库口径**，不换算。
 
     ★ ``ChromaVectorStore`` 给的分是 ``exp(-distance)``（cosine 空间即 ``exp(-(1 − cos))``，
-    ⊂ ``(0, 1]``、越大越近）。这里**原样透传**，不做 ``1 − distance`` 换算：
+    ⊂ ``(0, 1]``、越大越近；浮点下可能微超 1 —— 下游不设域约束，原样容忍）。这里**原样透传**，
+    不做 ``1 − distance`` 换算：
 
     ① **排名不需要**——任何 distance 的单调降函数都给出同一顺序，换算是纯冗余；
     ② **决策不读**——该分往下只变成 ``CaseHit.retrieval_score``（渲染给 LLM 的证据行 + 落库
@@ -57,8 +58,6 @@ def vector_retrieve(
     if filters is not None:
         kwargs["filters"] = filters
     retriever = llama_.VectorIndexRetriever(**kwargs)
-    # ``min(1.0, ...)`` 不是换算，只是防越界：cosine 距离在浮点下可能微负，``exp(-d)`` 随之
-    # 微超 1，而 ``CaseHit.retrieval_score`` 带 ``le=1`` 约束（越界直接 ValidationError）。
-    return [
-        (n.node.node_id, min(1.0, float(n.score or 0.0))) for n in retriever.retrieve(query)
-    ]
+    # 原样透传，不钳位：``CaseHit.retrieval_score`` 不设取值域约束（见上方 ★），
+    # cosine 距离在浮点下微负导致 ``exp(-d)`` 微超 1 属后端口径本身，不是需要修的越界。
+    return [(n.node.node_id, float(n.score or 0.0)) for n in retriever.retrieve(query)]

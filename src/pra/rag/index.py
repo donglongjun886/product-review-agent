@@ -308,8 +308,9 @@ class _ChromaIndexBase:
     ) -> list[tuple[int, float]]:
         """BM25 路排名：候选集内 min-max 归一化 BM25 分（Python 侧过滤 = 只喂候选 node）。
 
-        归一化用 ``retrieval.normalize_minmax``：
-        候选集内最高分 = 1.0，分数恒 ⊂ [0,1]（``CaseHit.retrieval_score`` 的 ``le=1`` 约束成立）。
+        归一化用 ``retrieval.normalize_minmax``：候选集内最高分 = 1.0、最低 = 0.0（等值集全 1.0）。
+        归一化的目的是让 BM25 的**无界**原始分落到与前两路同量级、可比较 —— **不是**为了满足
+        ``CaseHit.retrieval_score`` 的约束（该字段已不设取值域，见 :class:`ChromaCaseIndex`）。
         """
         retriever = make_bm25_retriever(sub_ctx, top_k)
         nodes = bm25_retrieve(retriever, query_bundle)
@@ -458,7 +459,7 @@ class ChromaCaseIndex(_ChromaIndexBase):
 
     ``CaseHit.retrieval_score`` 是**检索分，不是语义相似度**：``bm25`` = 候选集内 min-max
     归一化 BM25 分；``vector`` = 库口径 ``exp(-distance)``；``hybrid`` = RRF 融合分（``Σ 1/(k+rank)``，
-    ``k=60``，落在 ~(0, ``2/60 = 1/30``]）。取值恒 ⊂ ``[0,1]``。
+    ``k=60``，落在 ~(0, ``2/60 = 1/30``]）。**取值域由后端定义，字段不设上下界约束**。
     **三种分数量纲互不可比，且都不参与 Gate 判定**（Gate 对 ``CASE_PRECEDENT`` / ``POLICY_REF``
     只判存在性；见 :func:`pra.agent.guardrails.measurements.positive_dimensions` 的类型白名单）。
     构造签名见 :meth:`_ChromaIndexBase.__init__`。

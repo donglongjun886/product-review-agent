@@ -452,16 +452,16 @@ async def test_index_search_returns_hit_models(policy_bm25: Any, case_hybrid: An
     """索引检索返回的是工具契约的 Hit 模型（而非内部 node / dict）。
 
     断言：``ChromaPolicyIndex.search`` 返回 ``PolicyClauseHit``；``ChromaCaseIndex.search`` 返回
-    ``CaseHit``，且 ``retrieval_score ∈ [0, 1]``（该约束带 ``le=1``，越界会直接 ValidationError）。
+    ``CaseHit``，且检索分为非零正数（hybrid/RRF 后端自身口径）。
+    ⚠️ **不再断言取值域 ⊂ [0,1]** —— ``retrieval_score`` 已不设上下界约束（三模式量纲互不可比，
+    量纲归后端定义，详见 ``docs/00-system-design.md`` 的 RAG 分数口径）。
     意义：工具层只认 Hit 契约，索引若透出内部结构会让上层协议形同虚设。
     """
     p_hits = await policy_bm25.search("外观模仿", PolicySearchFilters(), 3, True)
     c_hits = await case_hybrid.search("外观模仿", CaseSearchFilters(), 3)
     assert p_hits and all(type(h).__name__ == "PolicyClauseHit" for h in p_hits)
     assert c_hits and all(type(h).__name__ == "CaseHit" for h in c_hits)
-    assert all(0.0 <= h.retrieval_score <= 1.0 for h in c_hits), (
-        "CaseHit.retrieval_score 必须落在 [0, 1]"
-    )
+    assert all(h.retrieval_score > 0.0 for h in c_hits), "hybrid（RRF）检索分恒 > 0"
 
 
 async def test_policy_search_tool_produces_policy_ref_evidence(policy_bm25: Any) -> None:
@@ -491,10 +491,10 @@ async def test_policy_search_tool_produces_policy_ref_evidence(policy_bm25: Any)
 async def test_case_search_tool_produces_case_precedent_evidence(case_hybrid: Any) -> None:
     """Case 两层：``ChromaCaseIndex.search`` → ``CaseHit``；工具 → ``CASE_PRECEDENT``。
 
-    断言：命中均为 ``CaseHit`` 且 ``retrieval_score ⊂ [0,1]``；证据 type=``CASE_PRECEDENT``、
+    断言：命中均为 ``CaseHit``（检索分为 hybrid/RRF 的非零正数）；证据 type=``CASE_PRECEDENT``、
     source=``CaseSearchTool``、weight==该 hit 的 ``retrieval_score``、ref_id==case_id。意义：证据
     侧 weight 直接复用检索分（术语：这是检索分，不是语义相似度），两条断言一起把「检索」与
-    「证据产生」两层焊住。
+    「证据产生」两层焊住。⚠️ 此处 weight 能原样透传，前提是 ``Evidence.weight`` 已去掉 ``le=1``。
     """
     tool = CaseSearchTool(index=case_hybrid)
     result = await tool.call(
@@ -503,7 +503,7 @@ async def test_case_search_tool_produces_case_precedent_evidence(case_hybrid: An
     )
     assert result.ok and result.hits, "注入真索引后工具应拿到命中"
     assert all(type(h).__name__ == "CaseHit" for h in result.hits)
-    assert all(0.0 <= h.retrieval_score <= 1.0 for h in result.hits)
+    assert all(h.retrieval_score > 0.0 for h in result.hits)
     evidences = tool.to_evidence(result)
     assert evidences, "命中应转为证据"
     for ev, hit in zip(evidences, result.hits):

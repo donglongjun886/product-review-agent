@@ -486,11 +486,19 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
   collection 名形如 `pra_<policy|case>_<dim>_v<schema>`：末段是 **metadata 形状版本**，形状一改必须换名字 ——
   `_open_collection` 是「先 get 后 create」，同名旧库会被原样复用，新 `where` 对旧 metadata 会**静默零命中**。
 - 🔴 **向量取数的分直接采库口径 `exp(-distance)`，不做量纲换算**：`ChromaVectorStore.query` 给的就是它
-  （cosine 空间下 ⊂ `(0, 1]`、越大越近）；代码里只留一个 `min(1.0, …)` 防越界（cosine 距离浮点微负时 `exp(-d)`
-  会微超 1，而 `retrieval_score` 带 `le=1`）。**为什么不必换算成 `1 − distance`**：① 排名只依赖单调性，
+  （cosine 空间下 ⊂ `(0, 1]`、越大越近）。**为什么不必换算成 `1 − distance`**：① 排名只依赖单调性，
   任何 distance 的单调降函数都给出同一顺序；② 该分往下只变成 `CaseHit.retrieval_score`（渲染给 LLM 的证据行
   + 落库审计），**不参与任何 Gate 判定**（Gate 对 `CASE_PRECEDENT` / `POLICY_REF` 只判存在性、不读 value）；
   ③ `1 − distance` 在 `d > 1` 时被 clamp 塌成 0，低分区区分度反而更差。
+- 🔴 **`retrieval_score` 不设取值域约束**：它是**后端口径的检索分**，取值域由检索后端定义
+  （`bm25` = 候选集内 min-max ⊂ [0,1]；`vector` = `exp(-distance)` ⊂ (0,1]；`hybrid` = RRF ⊂ (0, `2/60`]），
+  **schema 不替后端 policing 一个既不归它管、也不参与决策的量**。
+  - 曾有的 `ge=0, le=1` 只产生两处代价：向量路为不触发 `le=1` 而在 cosine 距离浮点微负时给 `exp(-d)` 钳位，
+    以及三份 docstring 为这条约束写的辩护。约束去掉后**两处一并删除**。
+  - 下游 `Evidence.weight` 同步**只保留 `ge=0`、去掉 `le=1`**：`weight` 的上界从来不是为检索分设的 ——
+    它源自 `IMAGE_SIMILARITY` 的三档阈值语义（`0.70 / 0.85`），而 `weight` 的**全部读点**都是
+    `>= 常量` 比较与 `max()`（`measurements.positive_dimensions` / `dimension_strength` /
+    `listing_signal_present` / `gate`），**上界从未被读**，去掉 `le=1` 不改变任何判定结果、不改任何渲染文本。
 - 🔴 **向量路的过滤下推给 Chroma `where`**（`rag/index.py::_filters_of` 把业务过滤编译成 `MetadataFilters`，
   经 `VectorIndexRetriever` 透传到 `collection.query(where=...)`）：打分域 = **库内全集 ∩ `where`**。
   - `risk_type` 的「交叠非空」由**每个枚举值一个 `rt_<值>: 1` 整数键 + `$or`** 表达（Chroma `where` 只支持标量比较、
@@ -506,6 +514,8 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 - **`retrieval_score` 是检索分**（hybrid 下即 RRF 分 `Σ1/(60+rank)`，rank 从 0 起 → 上界 `2/60 ≈ 0.0333`），**任何场合不得称为「语义相似度」**；
   **它也不参与任何 Gate 判定**：`gate` 对 `CASE_PRECEDENT` / `POLICY_REF` 只要求**存在**（可引用依据），
   不读 `weight`；`measurements.positive_dimensions` 的阳性类型白名单里根本没有这两类。
+  ⚠️ `CaseSearchTool` 把它原样塞进 `Evidence.weight`（见上一节的 `ge=0` 无上界口径）——
+  这是**沿用**而非耦合：`weight` 对该类型证据从不被读，两者量纲不同也无副作用。
   `image_analysis` 的外观相似度是另一回事：它在 evidence 里叫 `IMAGE_SIMILARITY`。
 - **三模式分数量纲互不可比**（`vector` = 库口径 `exp(-distance)`、`bm25` = 候选集内 min-max、`hybrid` = RRF 分），
   只断言「候选完整 + 可复现 + 案例库与评测真值零交集」。
