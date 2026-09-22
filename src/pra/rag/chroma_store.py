@@ -3,9 +3,9 @@
 collection 名形状 ``<prefix or 'pra'>_<policy|case>_<dim>_v<schema>``（维度由实际编码出的向量决定；
 末段是 metadata 形状版本 —— 形状一改必须换名字，``_open_collection`` 是「先 get 后 create」，
 同名旧库会被原样复用，新过滤表达式将对旧 metadata 静默零命中）。
-建库两条缺一即静默出错：``embedding_function=None``（否则启用默认 ONNX 嵌入函数并去下模型）、
-``space="cosine"``（Chroma 缺省 ``l2``，让间距语义整体偏离 —— BGE 向量的"像不像"是**方向**，
-l2 下距离受模长干扰，排名与分数一起失真且不报错）。
+建库两条必须显式声明：``embedding_function=None``（否则启用默认 ONNX 嵌入函数并去下模型）、
+``space="cosine"``（Chroma 缺省是 ``l2``；本仓按 cosine 声明 —— 当前 BGE 向量已归一化，
+两空间对排名与分数的影响**未经实测对比**，此处不预设谁对）。
 1 行 = 1 Node 不切分；node id = ``sha256(collection + 行键)`` → 写入按该 id 先删后加、重建覆盖。
 写入的 metadata 由 ``ChromaVectorStore.add`` 生成 = 扁平业务键（供 ``where`` 过滤）
 + ``_node_content``（整份 node JSON，供取数时无损还原）。
@@ -107,10 +107,10 @@ def _node_id(collection: str, key: str) -> str:
 
 
 def _open_collection(config: ChromaConfig, *, name: str) -> Any:
-    """``get_or_create_collection``（**必须 ``embedding_function=None`` + 显式 cosine 空间**）。
+    """``get_or_create_collection``（``embedding_function=None`` + 显式 cosine 空间）。
 
-    不关 ``embedding_function`` 会启用默认 ONNX 嵌入函数并去下模型；不显式 cosine 则空间是
-    Chroma 缺省的 l2 —— 而本仓的间距语义（BGE 向量的方向相似度）只在 cosine 空间成立。
+    不关 ``embedding_function`` 会启用默认 ONNX 嵌入函数并去下模型；空间取 cosine（Chroma 缺省是 l2），
+    两者对排名 / 分数的影响**未经实测对比**，此处只是显式声明本仓口径。
     ⚠️ 空间是 collection 级属性、**创建时定死**，且 ``get_collection`` 命中同名旧库会原样复用
     —— 换空间只能换 collection 名。
     """
@@ -118,7 +118,7 @@ def _open_collection(config: ChromaConfig, *, name: str) -> Any:
     try:
         return client.get_collection(name=name)
     except Exception as exc:
-        if "not found" not in str(exc).lower() and type(exc).__name__ != "NotFoundError":
+        if type(exc).__name__ != "NotFoundError":
             raise
     return client.get_or_create_collection(
         name=name,

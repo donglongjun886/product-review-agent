@@ -93,14 +93,15 @@ def _case_cell(row: Any, score: float) -> str:
 async def _policy_table(index: Any, query: str, top_k: int) -> None:
     print(f"\n▶ 政策检索   query = {query}")
     hits = await index.search(query, PolicySearchFilters(), top_k, True)
-    print("  [hybrid ] " + (" | ".join(_policy_cell(h) for h in hits) if hits else "(无命中)"))
+    cells = [_policy_cell(h) for h in hits]
+    print("  " + (" | ".join(cells) if cells else "(无命中)"))
 
 
 async def _case_table(index: Any, query: str, top_k: int) -> None:
     print(f"\n▶ 先例检索   query = {query}")
     hits = await index.search(query, CaseSearchFilters(), top_k)
-    print("  [hybrid ] " + (" | ".join(_case_cell(h, h.retrieval_score) for h in hits)
-                            if hits else "(无命中)"))
+    cells = [_case_cell(h, h.retrieval_score) for h in hits]
+    print("  " + (" | ".join(cells) if cells else "(无命中)"))
 
 
 def _tool_ctx() -> ToolContext:
