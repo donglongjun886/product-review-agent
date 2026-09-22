@@ -27,23 +27,15 @@ from pra.agent.guardrails.dedup import dedup_pending
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_PLAN, make_failure
 from pra.agent.guardrails.llm_shell import call_structured_llm
 from pra.agent.guardrails.schemas import PlanOutput
+from pra.agent.llm_prompts import SYSTEM_PROMPTS
 
 __all__ = ["plan_node"]
 
 # LLM 步降级 failure 文案：与 hypothesize 一致，取固定字面值、不拼 outcome.error。
 _DEGRADE_REASON = "schema 校验重试仍失败"
 
-_SYSTEM_PROMPT = (
-    "你是调查取证的计划器。根据当前已收集证据与仍存疑（PENDING/UNRESOLVED）的假设，"
-    "决定本轮是否调用取证工具：\n"
-    "1. 只计划能带来「新证据」的工具调用（对照证据缺口：如 IMAGE_SIMILARITY / "
-    "PRODUCT_FACT / MERCHANT_HISTORY / CASE_PRECEDENT / POLICY_REF 尚未收集时安排"
-    "对应工具取证）；\n"
-    "2. 不重复已成功执行过的调用（同 tool + 同 args；确定性 dedup 会兜底过滤）；\n"
-    "3. 若已无能带来新证据的工具 → next_action=conclude（tools 必须为空）；\n"
-    "4. tools 每轮 ≤3 条、priority 1 最优先，reason 说明验证哪条假设 / 要哪条证据。\n"
-    "只输出符合 PlanOutput JSON Schema 的 JSON。"
-)
+# system 指令单一来源：``pra.agent.llm_prompts.SYSTEM_PROMPTS``（真实后端与节点共用同一份）。
+_SYSTEM_PROMPT = SYSTEM_PROMPTS["plan"]
 
 
 def _case_subset(case) -> dict:

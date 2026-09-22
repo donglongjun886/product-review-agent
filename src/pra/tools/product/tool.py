@@ -6,9 +6,7 @@
 ``ProductRepository`` 是窄接口（按 product_id 取在库事实快照）；``InMemoryProductRepository``
 是 **Mock 默认实现**（默认装配路径恒用它，CI 不连库、评测可重放），真实实现是
 ``pra.tools.product.mysql_repo.MySQLProductRepository``（显式 opt-in：``build_tools(product_repo=…)``）。
-本模块**不含业务判定**：只取事实并结构化为 Evidence 原料。``version_drift``（库中 version vs
-``case.product.version``）需比对案件快照，而 ``ToolContext`` 只带 ``case_id`` —— 该比对放
-tools_node 的 evidence processing 层（其持有 case 快照）；``ref_id`` 填 ``product_id``。
+本模块**不含业务判定**：只取事实并结构化为 Evidence 原料。``ref_id`` 填 ``product_id``。
 """
 
 from __future__ import annotations
@@ -167,7 +165,7 @@ class ProductTool:
 
         ``source`` = 工具名；``ref_id=product_id``（稳定业务标识，供去重/回溯）。value 只陈述
         库中事实（brand/version/status）；「标题/描述是否含品牌词」的措辞需规则引擎词表支撑，
-        本工具不臆断。``version_drift`` 判定归 tools_node（需 case 快照比对），本工具不产。
+        本工具不臆断。
 
         **查无商品（``ok=False``）刻意不产任何证据** —— 包括不产 ``MEASUREMENT``：
         "没测到"不是"测过且阴性"，gate 侧按 ``NOT_MEASURED`` 处理（`domain/measurement.py`）。

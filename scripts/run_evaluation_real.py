@@ -317,7 +317,8 @@ async def run_comparison(
     model_label: str,
     world: str = "eval",
     data_path: str = "",
-    budget_limits: dict | None = None,
+    max_latency_ms: int | None = None,
+    max_llm_calls: int | None = None,
     real_concurrency: int = 1,
 ) -> tuple[dict, dict]:
     """核心对比：scripted（确定性桩，先行、可复现）→ real（注入后端，逐案串行）。
@@ -329,12 +330,14 @@ async def run_comparison(
     ``extra`` 是报告渲染用中间物（rows / by_scene / 两臂 DecisionMetrics /
     scripted_records / truth_human 计数等，不进 JSON）。
 
-    ``budget_limits`` 只作用于 real 臂的评测侧预算覆盖；scripted 臂恒为默认预算
-    （毫秒级跑完，不触发墙钟护栏）。
+    ``max_latency_ms`` / ``max_llm_calls`` 只作用于 real 臂的评测侧预算覆盖；scripted 臂
+    恒为生产默认预算（毫秒级跑完，不触发墙钟护栏）。
     """
     exp = expected_index(cases)
     scripted = AgentScheme()
-    real = AgentScheme(llm=real_backend, budget_limits=budget_limits)
+    real = AgentScheme(
+        llm=real_backend, max_latency_ms=max_latency_ms, max_llm_calls=max_llm_calls
+    )
 
     print("-" * 100)
     print("① scripted（确定性审查员桩 EvalScriptedLLMBackend · 可复现基线）")
@@ -888,10 +891,13 @@ def _build_budget_limits(*, max_latency_ms: int, llm_budget: int | None) -> dict
 
     ``llm_budget=None`` → 只放宽 ``max_latency_ms``（与改动前逐字节一致）；
     ``--llm-budget N`` → 追加 ``max_llm_calls=N``（本覆盖只作用于 real 臂，生产护栏
-    仍固定 10）。
+    仍固定 10）。``llm_budget`` 须为正整数（``BudgetLimits.max_llm_calls`` 约束 gt=0），
+    非法值在此显式报错，不静默带进预算对象。
     """
     limits = {"max_latency_ms": max_latency_ms}
     if llm_budget is not None:
+        if llm_budget <= 0:
+            raise ValueError(f"--llm-budget 须为正整数（got {llm_budget}）")
         limits["max_llm_calls"] = llm_budget
     return limits
 
@@ -969,7 +975,8 @@ async def _main(argv: list[str] | None = None) -> int:
         model_label=args.model,
         world=args.world,
         data_path=str(data_path),
-        budget_limits=budget_limits,
+        max_latency_ms=budget_limits.get("max_latency_ms"),
+        max_llm_calls=budget_limits.get("max_llm_calls"),
         real_concurrency=args.concurrency,
     )
 

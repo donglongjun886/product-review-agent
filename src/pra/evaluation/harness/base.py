@@ -1,6 +1,6 @@
 """评测 Harness 基座：EvalContext / SchemeRunner / EvalRecord。
 
-- ``EvalContext``：一次评测运行的配置注入点（sweep 只改这里的常量）；
+- ``EvalContext``：一次评测运行的配置注入点；
 - ``SchemeRunner``（ABC）：统一接口 ``run(case, ctx) -> EvalRecord``；指标层只吃
   EvalRecord，不直接吃 DB / AgentState —— 这是三方案可比的前提；
 - ``EvalRecord``：三方案归一化后的**统一输出**。``decision`` ∈
@@ -21,7 +21,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pra.domain.measurement import EVIDENCE_MIN_SIM, EVIDENCE_STRONG
 from pra.evaluation.dataset.schema import EvalCase
 
 # 三分类输出空间（Rule 的 COMPLEX 与 Single-call 的置信不足后处理都映射 HUMAN_REVIEW）
@@ -30,7 +29,7 @@ DecisionLabel = Literal["PASS", "REJECT", "HUMAN_REVIEW"]
 
 
 class EvalContext(BaseModel):
-    """一次评测运行的配置注入（sweep 只改这里，不动判定逻辑）。
+    """一次评测运行的配置注入（不动判定逻辑）。
 
     - ``abstain_confidence_threshold``：Single-call 的 REJECT 候选置信门槛 ——
       confidence < 门槛的 REJECT 候选确定性改记 HUMAN_REVIEW（与
@@ -39,10 +38,6 @@ class EvalContext(BaseModel):
       （公平性：Rule/Single-call 只用基础输入，Agent 经工具取"基础输入之外"的证据）；
       "default" = 仓库默认演示种子；"rag" = RAG 世界（CaseSearch / PolicySearch 注入
       真实 RAG 索引，事实工具沿用 eval 世界）。评测默认 "eval"。
-    - ``evidence_thresholds``：Evidence 阈值覆盖 ``{"min_sim", "strong"}``，None = 默认
-      （0.70 / 0.85，单一来源 ``pra.domain.measurement``）。生效范围 =
-      评测侧相似度分档读取路径（agent_scheme 的确定性审查员模型）；真实图 tools_node 的
-      quality_filter / gate overlay 常量属 pra.agent 业务层，不经本字段改动。
     - RAG 世界参数（仅 tool_world="rag" 生效）：``rag_mode`` = "bm25" / "vector" /
       "hybrid"；``rag_options`` = 索引装配参数透传（键名与 ``pra.rag.factory`` 构造参数
       逐字对应，None = 不传），经 ``make_rag_world_tools`` 透传。
@@ -66,21 +61,6 @@ class EvalContext(BaseModel):
         default=None,
         description="RAG 索引装配参数透传（None = 不传；键名同 pra.rag.factory 参数）",
     )
-    evidence_thresholds: dict | None = Field(
-        default=None,
-        description="Evidence 阈值覆盖 {\"min_sim\": float, \"strong\": float}；None = 默认 0.70/0.85",
-    )
-
-    def resolve_evidence_thresholds(self) -> dict:
-        """把 ``evidence_thresholds`` 解析为确定性 (min_sim, strong) dict。
-
-        None（或只给一档）→ 另一档取单一来源默认 ``EVIDENCE_MIN_SIM`` / ``EVIDENCE_STRONG``。
-        """
-        overrides = dict(self.evidence_thresholds or {})
-        return {
-            "min_sim": float(overrides.get("min_sim", EVIDENCE_MIN_SIM)),
-            "strong": float(overrides.get("strong", EVIDENCE_STRONG)),
-        }
 
 
 class SchemeRunner(ABC):

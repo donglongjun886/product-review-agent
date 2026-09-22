@@ -1,7 +1,7 @@
 """tools_node —— 图内"调查工具执行"节点：执行本轮待办的 pending_tool_calls。
 
 逐条走：预算截断 → ``parse_args`` 校验 → before 边际探针 → 工具执行（infra 失败重试
-1 次）→ 记账 → ``to_evidence`` → 质量过滤 → extra 回填 → 去重合并（只写回本 visit 新增）
+1 次）→ 记账 → ``to_evidence`` → 质量过滤 → 去重合并（只写回本 visit 新增）
 → after 边际探针 → 审计 record（ok 含边际增益 4 字段：before_confidence /
 after_confidence / evidence_added / decision_changed，JSON 承载、不进 DB 列）。
 
@@ -86,7 +86,7 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
 
     # 延迟 import：evidence/metrics 到"图构建"这一刻才真正需要，
     # 且避免模块导入期就拉起这两处依赖。
-    from pra.agent.guardrails.evidence import backfill_extra, quality_filter
+    from pra.agent.guardrails.evidence import quality_filter
     from pra.agent.guardrails.metrics import decision_conf_probe, gate_probe
 
     async def tools_node(state: dict, config) -> dict:
@@ -197,11 +197,10 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
                     seq += 1
                     continue
 
-                # ⑤ 成功：记账 → to_evidence → 质量过滤 → extra 回填 → 去重合并
+                # ⑤ 成功：记账 → to_evidence → 质量过滤 → 去重合并
                 budget_w = bump_tool_usage(budget_w)
                 raw = tool.to_evidence(result)
                 evs = quality_filter(raw)
-                evs = backfill_extra(evs, case=case)  # case=None 时跳过 version_drift 回填
                 existing = {_evidence_key(x) for x in working_evidence}
                 added = [e for e in evs if _evidence_key(e) not in existing]
                 working_evidence = merge_evidence(working_evidence, added)

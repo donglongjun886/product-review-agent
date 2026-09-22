@@ -1,10 +1,8 @@
-"""Evaluation Phase 2 测试：Abstention / Ablation / Sweep / Regression 四组。
+"""Evaluation Phase 2 测试：Abstention / Ablation / Regression 三组。
 
 - ``test_abstention_*``：五指标在手工可算小样本上数值正确（SHOULD_ABSTAIN 被自动
   只表现为 recall 缺口、不进 wrong_auto；分母 0 → None；老数据无 abstain_label 兼容）；
-- ``test_ablation_*``：方案级 2b vs 2a 在"预塞政策文本能命中"的案上决策不同；组件级
-  裁剪 allowed_tools 后 tool_calls_actual 不含被裁工具且强视觉案决策改变；
-- ``test_sweep_*``：阈值参数确实穿透评估路径（min_sim 0.70 vs 0.85 改变 EC_0303 决策）；
+- ``test_ablation_*``：方案级 2b vs 2a 在"预塞政策文本能命中"的案上决策不同；
 - ``test_regression_*``：篡改记录后比对失败，真实跑 v1 集两次 digest 一致。
 
 全程离线确定性；测试数据来自 eval_data/v1（只读），基线快照一律写 tmp_path。
@@ -19,7 +17,6 @@ import pytest
 from pra.evaluation.ablation import build_rag_context
 from pra.evaluation.dataset.loader import load_dataset
 from pra.evaluation.dataset.schema import EvalCase
-from pra.evaluation.harness.agent_scheme import AgentScheme
 from pra.evaluation.harness.base import EvalContext, EvalRecord
 from pra.evaluation.harness.single_call_scheme import SingleCallScheme
 from pra.evaluation.metrics.abstention import AbstentionEvaluator
@@ -29,12 +26,8 @@ from pra.evaluation.regression import (
     snapshot_from_records,
     write_baseline,
 )
-from pra.evaluation.runner import EvaluationRunner
-from pra.evaluation.sweep import EVIDENCE_GRID, ThresholdSweepRunner
 
 DATA_PATH = Path(__file__).resolve().parents[1] / "eval_data" / "v1" / "cases_v1.jsonl"
-
-_DECISION_SET = {"PASS", "REJECT", "HUMAN_REVIEW"}
 
 
 def _make_record(case_id: str, decision: str, scheme: str = "rule") -> EvalRecord:
@@ -181,87 +174,6 @@ def test_rag_context_from_eval_world_has_no_expected_answer() -> None:
                 marker in line
                 for marker in ("expected", "abstain_label", "SHOULD_ABSTAIN", "AUTO_DECIDABLE")
             )
-
-
-async def test_component_ablation_cuts_tool_registration_and_calls() -> None:
-    """组件级：allowed_tools 装配裁剪 → 图工具注册与 plan 都不含被裁工具，tool_calls_actual 不含被裁工具；强视觉案去掉 ImageTool 后决策改变（差异归因）。"""
-    cases = _cases_by_id()
-    ctx = EvalContext()
-    ec0401 = cases["EC_0401"]
-
-    full = await _run_scheme(AgentScheme(), ec0401, ctx)
-    assert full.decision == "REJECT"
-    assert "ImageAnalysisTool" in full.tool_calls_actual
-
-    # 正式裁剪路径：allowed_tools = 全工具 − 被裁（工具注册 + plan schema 都只给该子集）
-    all_tools = {"ProductTool", "ImageAnalysisTool", "MerchantTool",
-                 "CaseSearchTool", "PolicySearchTool"}
-    no_image = AgentScheme(allowed_tools=all_tools - {"ImageAnalysisTool"})
-    rec_no_image = await _run_scheme(no_image, ec0401, ctx)
-    assert "ImageAnalysisTool" not in rec_no_image.tool_calls_actual
-    assert rec_no_image.decision == "HUMAN_REVIEW", "强视觉案无 ImageTool → 视觉未决 → 转人工"
-
-    # −CaseTool：注册层去掉 CaseSearchTool → tool_calls_actual 不含它（PolicySearch 仍在）
-    no_case = AgentScheme(allowed_tools=all_tools - {"CaseSearchTool"})
-    rec_no_case = await _run_scheme(no_case, ec0401, ctx)
-    assert "CaseSearchTool" not in rec_no_case.tool_calls_actual
-    assert "PolicySearchTool" in rec_no_case.tool_calls_actual
-    assert rec_no_case.decision in _DECISION_SET
-
-
-def test_sweep_threshold_penetrates_sim_stats() -> None:
-    """白盒：相似度 0.72 在 min_sim=0.70 时可见、0.75 时不可见；strong=0.70 时算强相似、0.85 时不算 —— sweep 档位直达相似度分档读取路径。"""
-    evs = [{"type": "IMAGE_SIMILARITY", "weight": 0.72}]
-    from pra.evaluation.harness import agent_scheme as A
-
-    sim_max, strong70, any70 = A._sim_stats(evs, strong=0.70, min_sim=0.70)
-    assert sim_max == pytest.approx(0.72) and strong70 is True and any70 is True
-    sim_max, strong85, any85 = A._sim_stats(evs, strong=0.85, min_sim=0.70)
-    assert strong85 is False and any85 is True  # 弱相似（0.70~0.85）
-    sim_max, _s, any75 = A._sim_stats(evs, strong=0.85, min_sim=0.75)
-    assert sim_max == pytest.approx(0.0) and any75 is False  # 低于证据下限 → 不可见
-
-
-async def test_sweep_min_sim_changes_agent_decision_and_metrics() -> None:
-    """同一（真实）数据两档阈值跑出不同 agent metrics：min_sim 0.85 抬证据下限 → EC_0303（弱相似 0.73 + 脏商家）由 REJECT 转 HUMAN（弱视觉证据被挡）—— 阈值穿透到决策。"""
-    cases = _cases_by_id()
-    weak_case = cases["EC_0303"]
-    ctx_lo = EvalContext(evidence_thresholds={"min_sim": 0.70, "strong": 0.85})
-    ctx_hi = EvalContext(evidence_thresholds={"min_sim": 0.85, "strong": 0.85})
-    r_lo = await _run_scheme(AgentScheme(), weak_case, ctx_lo)
-    r_hi = await _run_scheme(AgentScheme(), weak_case, ctx_hi)
-    assert r_lo.decision == "REJECT"
-    assert r_hi.decision == "HUMAN_REVIEW"
-
-    trio = [cases["EC_0303"], cases["EC_0202"], cases["EC_0001"]]
-    res_lo = await EvaluationRunner(ctx=ctx_lo).run(cases=trio, include=("agent",))
-    res_hi = await EvaluationRunner(ctx=ctx_hi).run(cases=trio, include=("agent",))
-    m_lo, m_hi = res_lo.overall["agent"], res_hi.overall["agent"]
-    assert m_lo.human_pred == 0 and m_hi.human_pred == 1
-    assert m_lo.human_rate == pytest.approx(0.0)
-    assert m_hi.human_rate == pytest.approx(1 / 3)
-
-
-async def test_sweep_runner_grid_rows_rule_single_flat_agent_moves() -> None:
-    """ThresholdSweepRunner：min_sim 全网格跑同一个小数据集 —— rule / single_call_llm 对阈值不敏感（行恒定）；agent 在 min_sim≥0.75 后变。"""
-    cases = [c for c in load_dataset(DATA_PATH) if c.eval_case_id in ("EC_0303", "EC_0202", "EC_0001")]
-    runner = ThresholdSweepRunner(data_path=str(DATA_PATH))
-    result = await runner.run(
-        cases=cases,
-        variables=("EVIDENCE_MIN_SIM",),
-        schemes=("rule", "single_call_llm", "agent"),
-    )
-    assert [p.value for p in result.points] == list(EVIDENCE_GRID)
-    # rule / single_call 行恒定（metrics dict 的 metric_row 序列跨档全等）
-    rule_rows = {p.value: p.metrics_by_scheme["rule"].metric_row() for p in result.points}
-    single_rows = {p.value: p.metrics_by_scheme["single_call_llm"].metric_row() for p in result.points}
-    assert len({tuple(sorted(r.items())) for r in rule_rows.values()}) == 1
-    assert len({tuple(sorted(r.items())) for r in single_rows.values()}) == 1
-    agent_humans = [p.metrics_by_scheme["agent"].human_pred for p in result.points]
-    # 0.60~0.70 弱相似可见（EC_0303 REJECT）；≥0.75 被挡（EC_0303 HUMAN）
-    assert agent_humans[:3] == [0, 0, 0]
-    assert agent_humans[3:] == [1, 1, 1, 1]
-    assert any(p.thresholds["min_sim"] == pytest.approx(0.75) for p in result.points)
 
 
 def test_regression_tampered_record_fails() -> None:

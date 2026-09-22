@@ -169,7 +169,8 @@ class ImageAnalysisTool:
         weight 分别取 ``similarity`` / ``confidence``。**不套 EVIDENCE_MIN_SIM 下限**，下游按
         上述常量做证据质量过滤。``ref_id=item.image_url``（源图片为稳定业务
         标识，去重 key 以它为准 —— 同一品牌多图命中不会因 ref=None 互相吞并）；
-        ``extra.similarity`` 等派生数值由 tools_node 的 backfill_extra 回填，本工具不写。
+        ``extra`` 从结构化命中直接写入（``similarity`` / ``strong`` / ``logo_brand`` /
+        ``confidence``），不反向解析 value。
 
         ``MEASUREMENT`` 的 verdict 相对 ``EVIDENCE_STRONG`` **硬阈值**判定：
         有 ``similarity >= EVIDENCE_STRONG`` 或任一 Logo → ``POSITIVE``；否则 ``NEGATIVE``。
@@ -190,6 +191,10 @@ class ImageAnalysisTool:
                         value=f"similarity={m.similarity:.2f}, match={m.brand_ref}",
                         weight=m.similarity,
                         ref_id=item.image_url,
+                        extra={
+                            "similarity": round(m.similarity, 3),
+                            "strong": bool(m.similarity >= EVIDENCE_STRONG),
+                        },
                     )
                 )
             for logo in item.logos:
@@ -201,6 +206,10 @@ class ImageAnalysisTool:
                         value=f"logo={logo.brand}, conf={logo.confidence:.2f}",
                         weight=logo.confidence,
                         ref_id=item.image_url,
+                        extra={
+                            "logo_brand": logo.brand,
+                            "confidence": logo.confidence,
+                        },
                     )
                 )
             top = max((m.similarity for m in item.top_similar), default=0.0)

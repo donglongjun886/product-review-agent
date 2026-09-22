@@ -28,6 +28,7 @@ from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_REEVALUATE, make_failure
 from pra.agent.guardrails.llm_shell import call_structured_llm
 from pra.agent.guardrails.schemas import QueueUpdate, ReevaluateOutput
+from pra.agent.llm_prompts import SYSTEM_PROMPTS
 from pra.domain.models import Hypothesis, HypothesisStatus
 
 __all__ = ["reevaluate_node"]
@@ -35,23 +36,8 @@ __all__ = ["reevaluate_node"]
 # 假设 id 序号匹配：H1..Hn（hypothesize 生成 / reevaluate.new_hypotheses 续号共用）。
 _H_ID_RE = re.compile(r"^H(\d+)$")
 
-# 系统指令 —— 证据综合（MVP 注入版；真实 litellm 的完整 prompt 见 llm_prompts.py）。
-_SYSTEM_PROMPT = (
-    "你是商品审核 Agent 的证据综合步骤（reevaluate）：把 __STATE__ 中本轮已收集的 "
-    "evidence 综合进各条 hypothesis，并关闭已解答的队列问题。\n"
-    "硬性约束：\n"
-    "1. 只依据 __STATE__ 已给的 evidence 判断，禁止臆造任何未出现的事实/数值/来源；\n"
-    "2. 证据不足、既无法证实也无法证伪的假设 → status=UNRESOLVED（不要把'没查到'当"
-    "'证伪'）；\n"
-    "3. hypothesis_updates 的 id 必须命中现有假设 id，status 只能取 SUPPORTED / "
-    "REFUTED / UNRESOLVED（PENDING 只留给新增假设）；\n"
-    "4. evidence_for / evidence_against 只填证据引用串：type + 空格 + value"
-    "（value 为 ≤200 字符的人读摘要）；\n"
-    "5. 运行中新发现的风险维度放 new_hypotheses（后续由 plan 决定取证），不要塞进 "
-    "hypothesis_updates；\n"
-    "6. 已解答的队列问题经 queue_updates 置 DONE。\n"
-    "输出 JSON 必须严格符合给定 Schema。"
-)
+# 系统指令单一来源：``pra.agent.llm_prompts.SYSTEM_PROMPTS``（真实后端与节点共用同一份）。
+_SYSTEM_PROMPT = SYSTEM_PROMPTS["reevaluate"]
 
 # LLM 步降级 failure 文案：与 hypothesize/plan 对齐（固定字面值、不拼 outcome.error）。
 _DEGRADE_REASON = "schema 校验重试仍失败"

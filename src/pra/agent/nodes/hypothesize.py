@@ -23,6 +23,7 @@ from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_HYPOTHESIZE, make_failure
 from pra.agent.guardrails.llm_shell import call_structured_llm
 from pra.agent.guardrails.schemas import HypothesizeOutput
+from pra.agent.llm_prompts import SYSTEM_PROMPTS
 from pra.domain.models import Hypothesis, HypothesisStatus
 
 __all__ = ["hypothesize_node"]
@@ -30,16 +31,8 @@ __all__ = ["hypothesize_node"]
 # LLM 步降级 failure 文案：取固定字面值、不拼 outcome.error（reason 稳定、可断言）。
 _DEGRADE_REASON = "schema 校验重试仍失败"
 
-_SYSTEM_PROMPT = (
-    "你是电商上架审核的「初始风险假设生成器」。你只负责根据案件事实生成待验证的"
-    "风险假设与调查问题队列，绝不据此下最终结论（终判由收敛后的 decide 完成）。\n"
-    "要求：\n"
-    "1. 每条假设一句话可验证，聚焦可取证的风险维度（外观/品牌/商家行为/字段冲突等）；\n"
-    "2. 必须包含至少 1 条低风险/正常假设（避免只报风险、预设违规）；\n"
-    "3. prior = 未经调查的先验怀疑度（0..1），不要求归一化、不要求总和为 1；\n"
-    "4. 调查问题 1~8 条，priority 1 最优先。\n"
-    "只输出符合 HypothesizeOutput JSON Schema 的 JSON。"
-)
+# system 指令单一来源：``pra.agent.llm_prompts.SYSTEM_PROMPTS``（真实后端与节点共用同一份）。
+_SYSTEM_PROMPT = SYSTEM_PROMPTS["hypothesize"]
 
 
 def _build_messages(state: dict) -> list[dict]:

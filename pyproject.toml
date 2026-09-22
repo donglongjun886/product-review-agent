@@ -13,8 +13,6 @@ dependencies = [
     "litellm",
     "sqlalchemy[asyncio]",
     "aiomysql",
-    "alembic",
-    "redis",
 ]
 
 [project.optional-dependencies]

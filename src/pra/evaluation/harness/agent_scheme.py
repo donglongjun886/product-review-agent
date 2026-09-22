@@ -616,11 +616,8 @@ def _ev_types(evs: list[dict]) -> set:
 def _visible_sim_evidence(evs: list[dict], *, min_sim: float = _SIM_MIN) -> list[dict]:
     """审查员"看得见"的 IMAGE_SIMILARITY 证据（仅相似度证据，weight >= min_sim）。
 
-    sweep 的最小侵入注入点：真实图 tools_node 的 quality_filter 常量（pra.agent，
-    业务层不动）先以 0.70 兜底，评测审查员模型读证据视图时再按
-    ``EvalContext.evidence_thresholds.min_sim`` 过滤 —— 只在评测侧模拟"更低/更高
-    证据下限"的校准视图，原始 state 证据不动（审计可溯）。
-    只返回 IMAGE_SIMILARITY 类型条目（相似度分档/证据引用只针对相似度证据）。
+    只返回 IMAGE_SIMILARITY 类型条目（相似度分档/证据引用只针对相似度证据）；下限取
+    ``pra.domain.measurement.EVIDENCE_MIN_SIM``（与真实图 tools_node 的 quality_filter 同源）。
     """
     return [
         e for e in evs
@@ -628,17 +625,14 @@ def _visible_sim_evidence(evs: list[dict], *, min_sim: float = _SIM_MIN) -> list
     ]
 
 
-def _sim_stats(
-    evs: list[dict], *, strong: float = _SIM_STRONG, min_sim: float = _SIM_MIN
-) -> tuple[float, bool, bool]:
+def _sim_stats(evs: list[dict]) -> tuple[float, bool, bool]:
     """(sim_max, sim_strong, any_sim)；similarity 即 IMAGE_SIMILARITY.weight。
 
-    ``strong``/``min_sim`` 为 sweep 注入的相似度分档阈值（默认 0.85/0.70 保持现行为）：
-    sim_strong = 可见强相似中 sim_max >= strong；any_sim = 可见证据里存在相似命中。
+    sim_strong = 可见强相似中 sim_max >= ``EVIDENCE_STRONG``；any_sim = 可见证据里存在相似命中。
     """
-    sims = [float(e.get("weight") or 0.0) for e in _visible_sim_evidence(evs, min_sim=min_sim)]
+    sims = [float(e.get("weight") or 0.0) for e in _visible_sim_evidence(evs)]
     sim_max = max(sims) if sims else 0.0
-    return sim_max, sim_max >= strong, bool(sims)
+    return sim_max, sim_max >= _SIM_STRONG, bool(sims)
 
 
 def _logo_conf(evs: list[dict]) -> float:
@@ -715,27 +709,17 @@ class EvalScriptedLLMBackend:
     case）→ 本层不自造事实，只消费假设标记与证据；hypothesize 阶段已把表面信号固化
     进假设 prior/statement。
 
-    可注入参数（均默认 None/默认值 → 行为逐字节不变）：
+    可注入参数（默认 None → 行为逐字节不变）：
     - ``allowed_tools``：装配层裁剪（组件级 Ablation）—— plan 只排程该子集内的工具，
       图工具注册由 AgentScheme 另行过滤；None = 全工具。
-    - ``evidence_thresholds``：证据阈值覆盖（sweep）—— min_sim 过滤审查员读到的
-      相似度证据视图，strong 决定强相似分档；None = 0.70/0.85。
     """
 
     name = "eval-scripted-reviewer"
 
-    def __init__(
-        self,
-        *,
-        allowed_tools: set[str] | None = None,
-        evidence_thresholds: dict | None = None,
-    ) -> None:
+    def __init__(self, *, allowed_tools: set[str] | None = None) -> None:
         self._allowed_tools: frozenset[str] | None = (
             None if allowed_tools is None else frozenset(allowed_tools)
         )
-        overrides = dict(evidence_thresholds or {})
-        self._min_sim: float = float(overrides.get("min_sim", _SIM_MIN))
-        self._strong: float = float(overrides.get("strong", _SIM_STRONG))
 
     async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
         from pra.agent.guardrails.llm_shell import LLMBackendError
@@ -894,9 +878,7 @@ class EvalScriptedLLMBackend:
     def _reevaluate(self, state: dict) -> dict:
         evs = _evidence_list(state)
         hyps = _hypothesis_list(state)
-        sim_max, sim_strong, any_sim = _sim_stats(
-            evs, strong=self._strong, min_sim=self._min_sim
-        )
+        sim_max, sim_strong, any_sim = _sim_stats(evs)
         logo = _logo_conf(evs)
         merch_dirty, merch_clean, merch_known = _merchant_flags(evs)
         prod_found = _product_found(evs)
@@ -914,14 +896,14 @@ class EvalScriptedLLMBackend:
                 if sim_strong or logo >= _LOGO_CONF:
                     posterior = max(sim_max, logo)
                     refs = [
-                        self._citation(e) for e in _visible_sim_evidence(evs, min_sim=self._min_sim)
+                        self._citation(e) for e in _visible_sim_evidence(evs)
                     ] + [
                         self._citation(e) for e in evs if e["type"] == _T_IMAGE_LOGO
                     ]
                     target = ("SUPPORTED", round(posterior, 2), refs, [])
                 elif any_sim:  # 弱相似(0.70~0.85)：弱支持（不构成"高度模仿"确证）
                     refs = [
-                        self._citation(e) for e in _visible_sim_evidence(evs, min_sim=self._min_sim)
+                        self._citation(e) for e in _visible_sim_evidence(evs)
                     ]
                     target = ("SUPPORTED", round(sim_max, 2), refs, [])
                 else:
@@ -1003,13 +985,11 @@ class EvalScriptedLLMBackend:
     def _decide(self, state: dict) -> dict:
         evs = _evidence_list(state)
         hyps = _hypothesis_list(state)
-        _sim_max, sim_strong, _ = _sim_stats(
-            evs, strong=self._strong, min_sim=self._min_sim
-        )
+        _sim_max, sim_strong, _ = _sim_stats(evs)
         logo = _logo_conf(evs)
         merch_dirty, _, _ = _merchant_flags(evs)
         has_citable = _has_citable(evs)
-        visible_sim = _visible_sim_evidence(evs, min_sim=self._min_sim)
+        visible_sim = _visible_sim_evidence(evs)
 
         def _pri(h: dict) -> float:
             try:
@@ -1032,7 +1012,7 @@ class EvalScriptedLLMBackend:
         visual_strong = sim_strong or logo >= _LOGO_CONF
 
         risk_types: list[str] = []
-        # 视觉风险类型按"审查员可见证据视图"派生（sweep 抬 min_sim → 弱相似不再记 IP 风险）
+        # 视觉风险类型按"审查员可见证据视图"派生
         if visible_sim or any(e.get("type") == _T_IMAGE_LOGO for e in evs):
             risk_types.append("POTENTIAL_IP_RISK")
         if merch_dirty:
@@ -1110,24 +1090,6 @@ class EvalScriptedLLMBackend:
 
 
 # SchemeRunner：走真实图（build_agent_graph + eval 世界 + eval 审查员后端）
-
-
-def _validate_budget_limit_keys(overrides: dict, model_cls: type) -> None:
-    """按 pydantic 模型字段白名单校验预算覆盖键；未知键抛 ValueError。
-
-    pydantic v2 的 ``model_copy(update=…)`` **不校验键**：未知键会静默挂成实例多余
-    属性而覆盖不生效 —— 拼错字（如 ``max_llm_call`` 少个 s）会让档位实验静默以生产
-    默认 10 跑。装配层失败要响亮：非空 overrides 的每个键都必须命中
-    ``model_cls.model_fields``。
-    """
-    allowed = set(model_cls.model_fields)
-    unknown = sorted(set(overrides) - allowed)
-    if unknown:
-        raise ValueError(
-            "AgentScheme budget_limits 含未知键（拼错字会被 model_copy 静默挂成多余"
-            f"属性而不生效，已拒绝）：{unknown}；合法键 = BudgetLimits 字段"
-            f"（无别名映射）：{sorted(allowed)}"
-        )
 
 
 def _budget_hit_dim_from_snapshot(budget) -> str | None:
@@ -1217,20 +1179,16 @@ class AgentScheme(SchemeRunner):
       证据链自然缺该类证据 → 决策差异即"该组件必要性"的归因。
     - ``ctx.tool_world`` == "rag"：CaseSearch/PolicySearch 注入真实 RAG 索引，其余事实
       工具沿用 eval 世界；检索模式随 ``ctx.rag_mode``（None → hybrid）。
-    - ``ctx.evidence_thresholds``：见 ``EvalContext``（sweep 注入相似度分档）。
     - ``llm``：**real 模式注入** —— 非 None 时 ``run()`` 直接把它当 LLMBackend 交给
       ``build_agent_graph``（跳过确定性桩）；须实现
       ``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol（``name`` 属性 +
       ``async complete(*, node, messages, json_schema)``）；run 的 finally 仍统一恢复
       ``set_llm_backend(None)``。real 非确定性 / 不可重放 / 需 API key。
-    - ``budget_limits``：**评测侧预算覆盖**（None = 默认 10/15/40000/30000）—— 键为
-      ``BudgetLimits`` 字段名（``max_llm_calls`` / ``max_tool_calls`` / ``max_tokens`` /
-      ``max_latency_ms``），对 ``budget.limits`` 做 model_copy 覆盖（不改生产对象）；
-      **未知键抛 ValueError**（按 model_fields 白名单校验），拼错字不会被静默忽略。
-      用途：real 模式放宽墙钟护栏（真实 LLM 每案 ~9 次串行调用天然 >30s，不放宽则每案
-      都被 LATENCY 超限截胡转人工；scripted 毫秒级跑完不触发）；调 LLM 调用预算档
-      （抬高后仍打满 ⇒ 收敛问题，涨到收敛即止 ⇒ 预算紧）。**生产护栏恒为
-      10/15/40000/30000**，本覆盖只作用于评测装配层注入的 initial_state。
+    - ``max_latency_ms`` / ``max_llm_calls``：**评测侧预算覆盖**（None = 生产默认
+      30000ms / 10 次）—— real 模式放宽墙钟护栏（真实 LLM 每案 ~9 次串行调用天然 >30s，
+      不放宽则每案都被 LATENCY 超限截胡转人工；scripted 毫秒级跑完不触发）与 LLM 调用
+      档位对照。**生产护栏恒为 10/15/40000/30000**，本覆盖只作用于评测装配层注入的
+      initial_state。
     """
 
     name = "agent"
@@ -1240,49 +1198,40 @@ class AgentScheme(SchemeRunner):
         allowed_tools: set[str] | None = None,
         *,
         llm: object | None = None,  # Phase 3 real 模式：注入 LLMBackend（None=确定性桩）
-        budget_limits: dict | None = None,  # 评测侧预算覆盖（None=默认 10/15/40000/30000；real 放宽 latency / 调 llm 档用）
+        max_latency_ms: int | None = None,  # real 模式放宽墙钟护栏（None=生产默认 30000）
+        max_llm_calls: int | None = None,  # real 模式 LLM 调用档位（None=生产默认 10）
     ) -> None:
-        # 审查员后端改为**每次 run 按 ctx 装配**（阈值/裁剪随 EvalContext 变），
-        # 不在构造期缓存 —— sweep/ablation 同进程换 ctx 重跑才能生效。
+        # 审查员后端改为**每次 run 按 ctx 装配**（裁剪随 EvalContext 变），
+        # 不在构造期缓存 —— ablation 同进程换 ctx 重跑才能生效。
         self._allowed_tools: frozenset[str] | None = (
             None if allowed_tools is None else frozenset(allowed_tools)
         )
-        # real 模式注入的后端对象（None → run() 按 ctx 装配 EvalScriptedLLMBackend）；
+        # real 模式注入的后端对象（None → run() 装配 EvalScriptedLLMBackend）；
         # 每次 run 仍统一经 build_agent_graph(llm=...) 注入并在 finally 恢复默认桩。
         self._llm: object | None = llm
-        # 评测侧预算覆盖（None = 不覆盖，默认 10/15/40000/30000；real 模式放宽
-        # max_latency_ms / 调 max_llm_calls 档用 —— 只改每次 run 初始 state 的
-        # budget.limits，见 run()）。
-        self._budget_limits: dict | None = dict(budget_limits or {}) or None
-        if self._budget_limits is not None:
-            # P2-14：装配期即白名单校验（拼错字 → ValueError，不静默以生产默认跑）
-            from pra.domain.models import BudgetLimits  # 惰性 import：仅覆盖路径需要
+        # 评测侧预算覆盖（None = 生产默认）：只改每次 run 初始 state 的 budget.limits，
+        # 不改生产 Budget/BudgetLimits 对象与默认值（见 run()）。
+        self._max_latency_ms: int | None = max_latency_ms
+        self._max_llm_calls: int | None = max_llm_calls
 
-            _validate_budget_limit_keys(self._budget_limits, BudgetLimits)
+    def _apply_budget_limits(self, state: dict) -> dict:
+        """按注入的覆盖值改写 ``build_initial_state`` 的 ``budget.limits``（只动评测装配层）。
 
-    @staticmethod
-    def _apply_budget_limits(state: dict, overrides: dict | None) -> dict:
-        """对 ``build_initial_state`` 产物覆盖 ``budget.limits``（只动评测装配层）。
-
-        overrides 为 ``BudgetLimits`` 字段名→值的 dict（None/空 = 原样返回）；用
-        model_copy 逐层拷贝，不改生产 Budget/BudgetLimits 对象与默认值。
-
-        **键白名单校验**：未知键（如拼错的 ``max_llm_call``）先按
-        ``BudgetLimits.model_fields`` 校验并抛 ValueError —— pydantic v2 的
-        ``model_copy(update=…)`` 对未知键静默挂属性而不生效，若放任会令预算档位
-        实验静默以生产默认 10 跑；装配层失败要响亮。
+        两个覆盖值均 None → 原样返回；用 model_copy 逐层拷贝，不改生产对象与默认值。
         """
-        if not overrides:
+        if self._max_latency_ms is None and self._max_llm_calls is None:
             return state
-        from pra.domain.models import BudgetLimits  # 惰性 import：仅覆盖路径需要
-
-        _validate_budget_limit_keys(overrides, BudgetLimits)
         budget = state.get("budget")
         if budget is None:
             return state  # 防御：初始 state 恒有 budget，缺省不覆盖
-        limits = budget.limits
-        updated = limits.model_copy(update=dict(overrides))
-        state["budget"] = budget.model_copy(update={"limits": updated})
+        overrides: dict = {}
+        if self._max_latency_ms is not None:
+            overrides["max_latency_ms"] = self._max_latency_ms
+        if self._max_llm_calls is not None:
+            overrides["max_llm_calls"] = self._max_llm_calls
+        state["budget"] = budget.model_copy(
+            update={"limits": budget.limits.model_copy(update=overrides)}
+        )
         return state
 
     async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
@@ -1310,7 +1259,6 @@ class AgentScheme(SchemeRunner):
             # 确定性审查员桩（Phase 1/2 默认；同 case 同 ctx → 同输出，可重放）
             backend = EvalScriptedLLMBackend(
                 allowed_tools=set(self._allowed_tools) if self._allowed_tools is not None else None,
-                evidence_thresholds=ctx.evidence_thresholds,
             )
         graph: CompiledStateGraph = build_agent_graph(
             tools=tools,
@@ -1319,10 +1267,7 @@ class AgentScheme(SchemeRunner):
         )
         try:
             initial_state = build_initial_state(case.input)
-            if self._budget_limits is not None:
-                # 评测侧预算覆盖（real 放宽 max_latency_ms / 调 max_llm_calls 档用；
-                # 键 = BudgetLimits 字段名；None 分支原样返回）
-                initial_state = self._apply_budget_limits(initial_state, self._budget_limits)
+            initial_state = self._apply_budget_limits(initial_state)
             # Root trace：每案一条，trace_id 确定性 uuid5
             # （含 LLM 后端名 —— scripted 对照臂与 real 臂各自成 trace）；
             # **不 per-case flush**（320 次太慢）—— 由评测入口整轮结束后

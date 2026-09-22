@@ -147,8 +147,9 @@ class MerchantTool:
         """结果 → Evidence：1 条聚合 ``MERCHANT_HISTORY`` + 1 条 ``MEASUREMENT``。
 
         value 拼成 ``"23 similar / 5 removals / 3 title-relisting, credit=62"``；
-        ``ref_id=merchant_id``（稳定业务标识）；「规避行为模式」的判定由 guardrails
-        确定性层基于 backfill_extra 后的 extra 数据完成，本工具只交付画像事实。
+        ``ref_id=merchant_id``（稳定业务标识）；结构化数值从画像直接写入 ``extra``
+        （``similar`` / ``removals`` / ``title`` / ``credit``），供 guardrails 确定性层
+        读，不由下游反向解析 value。
 
         测量结论按 ``MERCHANT_DIRTY_MIN`` 硬阈值给出：达到阈值 → ``POSITIVE``（行为模式成立），
         否则 → ``NEGATIVE``（**画像全 0 是有效的阴性测量，不是"没查到"**）。
@@ -169,6 +170,12 @@ class MerchantTool:
                 value=value,
                 weight=MERCHANT_HISTORY_WEIGHT,
                 ref_id=p.merchant_id,
+                extra={
+                    "similar": p.similar_product_count,
+                    "removals": p.removals,
+                    "title": p.title_relisting_count,
+                    "credit": p.credit_score,
+                },
             ),
             make_measurement(
                 dimension=DIM_MERCHANT_PROFILE,

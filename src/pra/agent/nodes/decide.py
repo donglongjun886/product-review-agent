@@ -30,31 +30,13 @@ from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, key_tool_fail
 from pra.agent.guardrails.gate import run_decision_overlay
 from pra.agent.guardrails.llm_shell import call_structured_llm
 from pra.agent.guardrails.schemas import DecisionProposal
+from pra.agent.llm_prompts import SYSTEM_PROMPTS
 from pra.observability.tracing import get_tracer
 
 __all__ = ["decide_node"]
 
-# 系统指令 —— 决策提案（MVP 注入版；真实 litellm 的完整 prompt 见 llm_prompts.py）。
-_SYSTEM_PROMPT = (
-    "你是商品审核 Agent 的最终决策步骤（decide）：基于 __STATE__ 中的 hypotheses 与 "
-    "evidence 给出**裁决提案**（仅提案 —— 确定性 overlay 还会做 Gate 校验与兜底）。\n"
-    "三分类语义：\n"
-    "1) PASS：所有高优先假设均被证据证伪（REFUTED）且无未解决的证据缺口 —— 放行；\n"
-    "2) REJECT：有高优先假设被证据支持（SUPPORTED）、证据链充分且可引用政策/先例条款"
-    "支撑 —— 拒绝上架；无据可依时宁可转人工，也不无依据拒绝；\n"
-    "3) HUMAN_REVIEW：证据不足 / 置信不足 / 存在矛盾 / 政策模糊 / 关键取证失败 —— "
-    "克制转人工。\n"
-    "硬性约束：\n"
-    "1. decision / risk_level 只取给定受控词表取值；risk_type 只能从 "
-    "POTENTIAL_IP_RISK / EVASION_PATTERN / FALSE_CLAIM / FIELD_CONFLICT 中选择且必须与"
-    "证据一致；\n"
-    "2. evidence_ids 必须引用 __STATE__ 中真实存在的证据（type + value 引用串）；\n"
-    "3. policy 只能填 __STATE__ 证据中真实出现的 policy_id / 条款号，禁止臆造；\n"
-    "4. confidence ∈ [0,1]，仅表示'自动判定出错风险低'的把握（overlay 会确定性重算为 "
-    "decision_confidence）；\n"
-    "5. 任何不确定 → HUMAN_REVIEW，不要硬判 PASS / REJECT。\n"
-    "输出 JSON 必须严格符合给定 Schema。"
-)
+# 系统指令单一来源：``pra.agent.llm_prompts.SYSTEM_PROMPTS``（真实后端与节点共用同一份）。
+_SYSTEM_PROMPT = SYSTEM_PROMPTS["decide"]
 
 
 def _build_messages(state: dict) -> list[dict]:

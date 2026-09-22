@@ -1,6 +1,6 @@
-"""消融评测：方案级（2a/2b/2c）与组件级（full / −rag / −merchant / −case / −image）。
+"""消融评测：方案级（2a/2b/2c）。
 
-两类消融跑**同一 eval_dataset**：差异唯一归因于装配，判定逻辑与数据集不动。
+变体跑**同一 eval_dataset**：差异唯一归因于装配，判定逻辑与数据集不动。
 
 方案级 —— Single-call 的上下文 vs Agent 的主动调查：
 - ``2a`` = SingleCallScheme 现行为（Raw Input，无任何预塞知识）；
@@ -17,16 +17,8 @@
 替换），**不可分解归因于"主动调查"**。报告差异行据此命名（2c vs 2b 不称"主动调查
 增量"）。
 
-组件级 —— 同图结构逐组件去掉：实现为**装配层裁剪** ``AgentScheme(allowed_tools=…)``
-—— 图工具注册与该方案的 plan tool schema 都只给 ``全工具 − 被裁组件``，判定逻辑不变。
-**0 决策变化 ≠ 组件无用**：证据可能被另一组件**同案冗余替代** —— REJECT Gate 的
-citable 只要 POLICY_REF 或 CASE_PRECEDENT 之一，本评测世界 REJECT 案政策齐备 →
-CaseSearch 证据被 PolicySearch 兜底（实测 −CaseTool 零变化）；报告在 0 变化组件旁
-标注该读法。
-
-**InMemory 种子局限标注**：种子里查不到某工具的证据时，−该工具必然无差异、结论失效
-—— 本模块统计每个组件的"证据覆盖"（哪些 case 的 ``expected.expected_tools`` 含该工具），
-报告如实标注空消融风险。
+**InMemory 种子局限标注**：报告附每个工具的证据覆盖（哪些 case 的
+``expected.expected_tools`` 含该工具），如实标注覆盖为空的工具无法据本数据判定必要性。
 
 确定性：全程无真 LLM / 网络 / 随机；EvalRecord 不含墙钟字段 → 同数据重跑结果一致；
 全部在内存完成（不落 DB）。
@@ -52,7 +44,6 @@ from pra.evaluation.runner import expected_index
 
 __all__ = [
     "ALL_TOOL_NAMES",
-    "COMPONENT_ABLATIONS",
     "SCHEME_LEVEL_VARIANTS",
     "AblationResult",
     "AblationRunner",
@@ -65,7 +56,7 @@ __all__ = [
 
 SCHEME_LEVEL_VARIANTS: tuple[str, ...] = ("2a", "2b", "2c")
 
-# eval 世界 5 个 InMemory 工具（产品/图片/商家/先例/政策）
+# eval 世界 5 个 InMemory 工具（产品/图片/商家/先例/政策）—— 工具证据覆盖标注用
 ALL_TOOL_NAMES: tuple[str, ...] = (
     "ProductTool",
     "ImageAnalysisTool",
@@ -73,24 +64,6 @@ ALL_TOOL_NAMES: tuple[str, ...] = (
     "CaseSearchTool",
     "PolicySearchTool",
 )
-
-# 组件级消融：变体名 → 被裁掉的工具集合（装配层裁剪 = 全工具 − 被裁）
-COMPONENT_ABLATIONS: dict[str, frozenset[str]] = {
-    "full": frozenset(),                      # Full Agent（基线）
-    "-rag": frozenset({"CaseSearchTool", "PolicySearchTool"}),
-    "-merchant": frozenset({"MerchantTool"}),
-    "-case": frozenset({"CaseSearchTool"}),
-    "-image": frozenset({"ImageAnalysisTool"}),
-}
-
-# 人类可读的组件名（报告对照表用）
-COMPONENT_LABELS: dict[str, str] = {
-    "full": "Full Agent（基线）",
-    "-rag": "−RAG（无 CaseSearch+PolicySearch）",
-    "-merchant": "−MerchantTool",
-    "-case": "−CaseTool",
-    "-image": "−ImageTool",
-}
 
 
 # RAG-in-prompt 上下文（2b 的预塞文本；来自评测世界静态事实，不含 expected 答案）
@@ -185,12 +158,11 @@ class VariantOutcome:
 
 @dataclass
 class AblationResult:
-    """一次消融运行的全部产物（方案级 + 组件级可各自独立开启）。"""
+    """一次消融运行的全部产物（方案级）。"""
 
     data_path: str | None = None
     total_cases: int = 0
     scheme_outcomes: dict[str, VariantOutcome] = field(default_factory=dict)  # 2a/2b/2c
-    component_outcomes: dict[str, VariantOutcome] = field(default_factory=dict)  # full/-rag/…
     tool_coverage: dict[str, list[str]] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
@@ -203,7 +175,7 @@ async def _run_records(
 
 
 class AblationRunner:
-    """Ablation runner：方案级（2a/2b/2c）+ 组件级（full/−rag/…）消融。
+    """Ablation runner：方案级（2a/2b/2c）消融。
 
     每变体产出统一 EvalRecord，再走同一 metrics（DecisionEvaluator +
     AbstentionEvaluator）。
@@ -222,8 +194,6 @@ class AblationRunner:
         self,
         *,
         cases: list[EvalCase] | None = None,
-        scheme_level: bool = True,
-        component_level: bool = True,
     ) -> AblationResult:
         if cases is None:
             if self.data_path is None:
@@ -238,64 +208,37 @@ class AblationRunner:
             tool_coverage=expected_tool_coverage(cases),
         )
 
-        if scheme_level:
-            # 2a：Raw Input（现行为）
-            rec_2a = await _run_records(SingleCallScheme(), cases, self.ctx)
-            # 2b：RAG-in-prompt —— 每 case 预塞其类目静态 digest（确定性）
-            rec_2b: list[EvalRecord] = []
-            for case in cases:
-                ctx_text = build_rag_context(case)
-                scheme_2b = SingleCallScheme(
-                    llm_fn=None,
-                    extra_context=ctx_text if ctx_text else None,
-                )
-                rec_2b.append(await scheme_2b.run(case, self.ctx))
-            # 2c：Multi-step Agent（主动调查，现行为）
-            rec_2c = await _run_records(AgentScheme(), cases, self.ctx)
-            for name, records in (("2a", rec_2a), ("2b", rec_2b), ("2c", rec_2c)):
-                result.scheme_outcomes[name] = self._outcome(name, records, exp)
-            result.notes.append(
-                "2b 预塞文本 = 类目静态判例/政策 digest（build_rag_context，无 expected 答案）；"
-                "R-2b 只在'弱 REJECT 候选 + 自动拒绝判例命中表面词'时升级 —— 现行评测世界政策"
-                "口径为转人工、先例摘要不含表面规避词 → 2b 腿 inert（P2-12 实证）：v1/v2 "
-                "全量实测 2a≡2b（0 差异），'更多文本'增益在本数据上不可测；2c−2b 因而 = "
-                "2c−2a = Single-call→Agent 整体差异（工具+多步+ContextAware mock 一并替换），"
-                "不可分解归因于'主动调查' —— 本报告差异行按此口径命名。"
+        # 2a：Raw Input（现行为）
+        rec_2a = await _run_records(SingleCallScheme(), cases, self.ctx)
+        # 2b：RAG-in-prompt —— 每 case 预塞其类目静态 digest（确定性）
+        rec_2b: list[EvalRecord] = []
+        for case in cases:
+            ctx_text = build_rag_context(case)
+            scheme_2b = SingleCallScheme(
+                llm_fn=None,
+                extra_context=ctx_text if ctx_text else None,
             )
+            rec_2b.append(await scheme_2b.run(case, self.ctx))
+        # 2c：Multi-step Agent（主动调查，现行为）
+        rec_2c = await _run_records(AgentScheme(), cases, self.ctx)
+        for name, records in (("2a", rec_2a), ("2b", rec_2b), ("2c", rec_2c)):
+            result.scheme_outcomes[name] = self._outcome(name, records, exp)
+        result.notes.append(
+            "2b 预塞文本 = 类目静态判例/政策 digest（build_rag_context，无 expected 答案）；"
+            "R-2b 只在'弱 REJECT 候选 + 自动拒绝判例命中表面词'时升级 —— 现行评测世界政策"
+            "口径为转人工、先例摘要不含表面规避词 → 2b 腿 inert（P2-12 实证）：v1/v2 "
+            "全量实测 2a≡2b（0 差异），'更多文本'增益在本数据上不可测；2c−2b 因而 = "
+            "2c−2a = Single-call→Agent 整体差异（工具+多步+ContextAware mock 一并替换），"
+            "不可分解归因于'主动调查' —— 本报告差异行按此口径命名。"
+        )
 
-        if component_level:
-            for name, removed in COMPONENT_ABLATIONS.items():
-                allowed = (
-                    None
-                    if not removed
-                    else set(ALL_TOOL_NAMES) - removed
-                )
-                records = await _run_records(AgentScheme(allowed_tools=allowed), cases, self.ctx)
-                result.component_outcomes[name] = self._outcome(name, records, exp)
-                result.notes.append(
-                    f"{COMPONENT_LABELS[name]} 装配裁剪: allowed_tools={sorted(allowed) if allowed else '全工具'}"
-                )
-
-        # 空消融风险标注（工具覆盖）
-        variant_of = {
-            "ProductTool": None,
-            "ImageAnalysisTool": "-image",
-            "MerchantTool": "-merchant",
-            "CaseSearchTool": "-case",
-            "PolicySearchTool": "-rag",
-        }
+        # 工具证据覆盖标注（覆盖为空 = 本数据无法就该工具下结论）
         for name in ALL_TOOL_NAMES:
             covered = result.tool_coverage.get(name) or []
             if not covered:
-                variant_name = variant_of.get(name)
-                suffix = (
-                    f"变体 {variant_name} 无差异时不能判定该组件不必要"
-                    if variant_name
-                    else "（无单独裁剪变体）"
-                )
                 result.notes.append(
-                    f"空消融风险: 评测世界里无 case 的 expected_tools 含 {name} —— 需该工具的案缺失，"
-                    f"{suffix}"
+                    f"覆盖缺口: 评测世界里无 case 的 expected_tools 含 {name} —— "
+                    "本数据无法判定该工具的必要性。"
                 )
         return result
 
@@ -305,7 +248,7 @@ class AblationRunner:
             "2a": "Single-call + Raw Input",
             "2b": "Single-call + RAG-in-prompt",
             "2c": "Multi-step Agent（主动调查）",
-        }.get(name, COMPONENT_LABELS.get(name, name))
+        }.get(name, name)
         return VariantOutcome(
             name=name,
             label=label,
@@ -389,36 +332,21 @@ def render_ablation_report(result: AblationResult) -> str:
             if not _changed:
                 add("    （无决策变化 —— 见 notes 中的机制/覆盖说明）")
 
-    if result.component_outcomes:
-        _section(
-            "组件级消融（Full Agent 基线；逐组件装配层裁剪）",
-            tuple(COMPONENT_ABLATIONS.keys()),
-            result.component_outcomes,
-        )
-        full = result.component_outcomes.get("full")
-        if full is not None:
-            add("")
-            add("[相对 Full Agent 的决策变化]")
-            for name in COMPONENT_ABLATIONS:
-                if name == "full":
-                    continue
-                variant = result.component_outcomes.get(name)
-                if variant is None:
-                    continue
-                _changed, pairs = _decision_diff(full.records, variant.records)
-                if _changed:
-                    add(f"    {COMPONENT_LABELS[name]}: {len(_changed)} 个 case 决策改变")
-                    for p in pairs:
-                        add(f"        {p}")
-                else:
-                    # P2-13 防误读：0 决策变化 ≠ 组件无用 —— 证据可能被另一组件同案冗余替代
-                    #（REJECT Gate 的 citable 只要 POLICY_REF 或 CASE_PRECEDENT 之一；
-                    # 本世界 REJECT 案政策齐备 → CASE_PRECEDENT 被 POLICY_REF 兜底）。
-                    add(
-                        f"    {COMPONENT_LABELS[name]}: 0 个 case 决策改变 —— 勿读成组件无用："
-                        "该组件证据可能被另一组件同案冗余替代（CASE_PRECEDENT 被 POLICY_REF "
-                        "兜底，REJECT Gate 只要二者之一）；须与上方工具覆盖并读。"
-                    )
+    add("")
+    add("=" * 108)
+    add("工具证据覆盖（工具必要性判定的前置标注）:")
+    for name in ALL_TOOL_NAMES:
+        covered = result.tool_coverage.get(name) or []
+        add(f"  · {name}: {len(covered)} 个 case 的 expected_tools 含该工具"
+            + (f"（{', '.join(covered[:8])}{' …' if len(covered) > 8 else ''}）" if covered else "（无覆盖）"))
+    add("")
+    add("注记:")
+    for n in result.notes:
+        add(f"  · {n}")
+    add("结论边界: 工具为 InMemory 种子 + LLM 为桩 → 覆盖有限可能低估 Agent 上限；")
+    add("         工具覆盖为空的组件不做'不必要'判定。")
+    add("=" * 108)
+    return "\n".join(out)
 
     add("")
     add("=" * 108)

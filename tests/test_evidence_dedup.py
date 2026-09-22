@@ -1,16 +1,14 @@
-"""证据质量过滤 + extra 回填（guardrails/evidence.py）与 plan 去重（guardrails/dedup.py）。
+"""证据质量过滤（guardrails/evidence.py）与 plan 去重（guardrails/dedup.py）。
 
 ``quality_filter``：只按 weight 丢弱 ``IMAGE_SIMILARITY``（0.70 保留 / 0.699 丢弃），其它类型全保留。
-``backfill_extra``：按类型从 value 解析派生键（IMAGE_SIMILARITY / MERCHANT_HISTORY / POLICY_REF /
-PRODUCT_FACT / IMAGE_LOGO）；解析失败保留原 extra；不改入参。``dedup_pending``：ok 命中 →
-skipped、error 允许重试、同轮自去重、canonical 键序无关。
+``dedup_pending``：ok 命中 → skipped、error 允许重试、同轮自去重、canonical 键序无关。
 """
 
 from __future__ import annotations
 
 from pra.agent.guardrails.dedup import canonical_args, dedup_pending
-from pra.agent.guardrails.evidence import backfill_extra, quality_filter
-from helpers import ev, make_case
+from pra.agent.guardrails.evidence import quality_filter
+from helpers import ev
 
 
 # quality_filter（EVIDENCE_MIN_SIM=0.70）
@@ -50,98 +48,6 @@ def test_quality_filter_none_and_empty_safe_and_pure():
     e = ev("IMAGE_SIMILARITY", value="similarity=0.99", weight=0.99, ref_id="img1")
     out = quality_filter([e])
     assert out == [e]  # 保留元素内容不变（是否复用同一对象属实现细节，不断言）
-
-
-# backfill_extra：各类型回填
-
-
-def test_backfill_image_similarity():
-    """IMAGE_SIMILARITY → similarity=round(weight,3)、strong=weight>=0.85（确定性派生）。"""
-    strong = ev("IMAGE_SIMILARITY", value="similarity=0.91, match=x", weight=0.91, ref_id="i1")
-    weak = ev("IMAGE_SIMILARITY", value="similarity=0.70, match=y", weight=0.70, ref_id="i2")
-    s, w = backfill_extra([strong, weak])
-    assert s.extra == {"similarity": 0.91, "strong": True}
-    assert w.extra == {"similarity": 0.70, "strong": False}
-
-
-def test_backfill_merchant_history_parses_value():
-    e = ev("MERCHANT_HISTORY", value="23 similar / 5 removals / 3 title-relisting, credit=62",
-           weight=0.85, ref_id="M_5512")
-    out = backfill_extra([e])[0]
-    assert out.extra == {"similar": 23, "removals": 5, "title": 3, "credit": 62}
-
-
-def test_backfill_policy_ref():
-    e = ev("POLICY_REF", value="POLICY_3.2 v2 条款：外观高度模仿知名品牌设计",
-           weight=0.9, ref_id="POLICY_3.2_v2_c1")
-    out = backfill_extra([e])[0]
-    assert out.extra == {"policy_id": "POLICY_3.2", "policy_version": 2}
-
-
-def test_backfill_product_fact_no_drift_when_versions_equal():
-    """PRODUCT_FACT：库中 version == case.product.version → 不写 version_drift 键。"""
-    e = ev("PRODUCT_FACT", value="brand=null, version=3（库中最新）, status=ON_SALE",
-           weight=0.6, ref_id="P_88231")
-    out = backfill_extra([e], case=make_case(version=3))[0]
-    assert "version_drift" not in out.extra
-    assert out.extra == {}
-
-
-def test_backfill_product_fact_drift_when_versions_differ():
-    e = ev("PRODUCT_FACT", value="brand=null, version=3（库中最新）, status=ON_SALE",
-           weight=0.6, ref_id="P_88231")
-    out = backfill_extra([e], case=make_case(version=2))[0]
-    assert out.extra == {"version_drift": True}
-
-
-def test_backfill_product_fact_without_case_no_key():
-    """无 case / 无法解析版本 → 不写键（缺失 == 无漂移）。"""
-    e = ev("PRODUCT_FACT", value="brand=null, version=3（库中最新）, status=ON_SALE",
-           weight=0.6, ref_id="P_88231")
-    assert backfill_extra([e])[0].extra == {}
-    bad = ev("PRODUCT_FACT", value="brand=null（无版本标注）", weight=0.6, ref_id="P_88231")
-    assert backfill_extra([bad], case=make_case(version=2))[0].extra == {}
-
-
-def test_backfill_image_logo():
-    e = ev("IMAGE_LOGO", value="logo=某品牌, conf=0.93", weight=0.93, ref_id="img2")
-    out = backfill_extra([e])[0]
-    assert out.extra == {"logo_brand": "某品牌", "confidence": 0.93}
-
-
-def test_backfill_parse_failure_keeps_original_extra():
-    """解析失败（尽力而为）→ 保留原 extra、不报错。"""
-
-    e = ev("POLICY_REF", value="这段文本不符合 POLICY_x.y vN 前缀", weight=0.9,
-           ref_id="c1", extra={"custom": 1})
-    out = backfill_extra([e])[0]
-    assert out.extra == {"custom": 1}
-
-
-def test_backfill_merges_with_existing_extra():
-    e = ev("MERCHANT_HISTORY", value="1 similar / 2 removals / 0 title-relisting, credit=80",
-           weight=0.85, ref_id="M1", extra={"source_note": "seed"})
-    out = backfill_extra([e])[0]
-    assert out.extra == {"source_note": "seed", "similar": 1, "removals": 2, "title": 0,
-                         "credit": 80}
-
-
-def test_backfill_does_not_mutate_inputs():
-    """不改入参：输入元素的字段内容保持不变；输出携带回填结果。"""
-    e = ev("IMAGE_SIMILARITY", value="similarity=0.91", weight=0.91, ref_id="i1")
-    snapshot_extra = dict(e.extra)
-    out = backfill_extra([e])[0]
-    assert out.extra == {"similarity": 0.91, "strong": True}
-    assert e.extra == snapshot_extra
-    assert e.weight == 0.91 and e.value == "similarity=0.91"
-    # 对无回填类型也原样返回内容（不崩、不丢字段）
-    plain = ev("CASE_PRECEDENT", value="case_1001", weight=0.8, ref_id="c1")
-    assert backfill_extra([plain])[0].extra == {}
-
-
-def test_backfill_none_empty_safe():
-    assert backfill_extra(None) == []
-    assert backfill_extra([]) == []
 
 
 # dedup_pending：plan 输出确定性去重

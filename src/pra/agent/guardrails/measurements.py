@@ -46,8 +46,6 @@ from pra.domain.models import Evidence, ProductReviewCase
 from pra.tools.image_analysis.tool import IMAGE_LOGO_TYPE, IMAGE_SIMILARITY_TYPE
 from pra.tools.merchant.tool import MERCHANT_HISTORY_TYPE
 
-from .evidence import _parse_merchant_history
-
 __all__ = [
     "ALWAYS_COVERED_DIMENSIONS",
     "CoverageReport",
@@ -80,15 +78,12 @@ def _coerce_case(case: Any) -> ProductReviewCase:
 
 
 def _merchant_is_dirty(e: Evidence) -> bool:
-    """``MERCHANT_HISTORY`` 是否达到"系统性规避"硬阈值（extra 优先，缺则解析 value）。"""
+    """``MERCHANT_HISTORY`` 是否达到"系统性规避"硬阈值（读 extra 的 removals / title）。"""
     extra = e.extra or {}
     removals = extra.get("removals")
     title = extra.get("title")
     if removals is None or title is None:
-        parsed = _parse_merchant_history(e.value)
-        if parsed is None:
-            return False
-        removals, title = parsed["removals"], parsed["title"]
+        return False
     return bool(removals >= MERCHANT_DIRTY_MIN or title >= MERCHANT_DIRTY_MIN)
 
 

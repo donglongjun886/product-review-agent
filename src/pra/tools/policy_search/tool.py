@@ -157,7 +157,8 @@ class PolicySearchTool:
         """结果 → Evidence：每个 hit 1 条 POLICY_REF。
 
         ``weight=0.9``（政策条款为强依据）；``ref_id=clause_id`` **必填**（可追溯）；
-        value 形如 ``"POLICY_3.2 v2 条款：…"``。
+        value 形如 ``"POLICY_3.2 v2 条款：…"``；``policy_id`` / ``policy_version`` 从
+        ``PolicyClauseHit`` 直接写入 ``extra``（供 Gate 读引用依据），不反向解析 value。
         """
         evidences: list[Evidence] = []
         for h in result.hits:
@@ -169,6 +170,7 @@ class PolicySearchTool:
                     value=f"{h.policy_id} v{h.version} 条款：{text}",
                     weight=POLICY_REF_WEIGHT,
                     ref_id=h.clause_id,
+                    extra={"policy_id": h.policy_id, "policy_version": h.version},
                 )
             )
         return evidences

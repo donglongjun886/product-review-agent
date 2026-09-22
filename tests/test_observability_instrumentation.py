@@ -175,7 +175,7 @@ class _EchoTool:
 
 
 def _tools_state(*, tool: str = "EchoTool", args: dict | None = None) -> dict:
-    """tools_node 最小 state（case=None → backfill_extra 跳过 version_drift 回填）。"""
+    """tools_node 最小 state（case=None 的最小路径）。"""
     return {
         "budget": Budget(),
         "case": None,
