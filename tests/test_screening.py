@@ -15,7 +15,6 @@ from datetime import datetime
 import pytest
 
 import pra.infra.persist_service as ps
-from pra.domain.measurement import DEFAULT_EVIDENCE_WEIGHT
 from pra.domain.models import (
     Decision,
     ProductImage,
@@ -25,7 +24,7 @@ from pra.domain.models import (
     RiskLevel,
     RiskType,
 )
-from pra.screening.engine import RuleHit, rule_evidence, triage
+from pra.screening.engine import RULE_EVIDENCE_WEIGHT, RuleHit, rule_evidence, triage
 from pra.screening.rule_engine import terms
 from pra.screening.rule_engine.rules import DEFAULT_RULES
 
@@ -307,14 +306,14 @@ def test_rule_evidence_shape():
     """rule_evidence 构造确定性直判证据（只构造不落库）。
 
     行为级：RULE_HIT 证据携带规则 id（machine-readable）+ 可追溯的人读 value
-    （rule_id/name/detail 保真）+ 确定性 weight=DEFAULT_EVIDENCE_WEIGHT；不锁 value 的
+    （rule_id/name/detail 保真）+ 确定性 weight=RULE_EVIDENCE_WEIGHT（规则命中满强度）；不锁 value 的
     拼接格式与 extra 全量键位。
     """
     hit = RuleHit(rule_id="R-102", name="品牌词命中", detail="标题/描述命中品牌词: NIKE")
     ev = rule_evidence(hit)
     assert ev.type == "RULE_HIT"
     assert ev.source == "ScreeningRuleEngine"
-    assert ev.weight == DEFAULT_EVIDENCE_WEIGHT  # 与 engine 的单一来源常量同值
+    assert ev.weight == RULE_EVIDENCE_WEIGHT  # 与 engine 的单一来源常量同值
     assert ev.ref_id is None
     assert ev.extra.get("rule_id") == "R-102"
     assert ev.value.startswith("R-102")  # value 以 rule_id 起头（与直判转发路径同构）
@@ -386,7 +385,7 @@ async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
     ev = evs[0]
     assert ev.type == "RULE_HIT"
     assert ev.source == "ScreeningRuleEngine"
-    assert ev.weight == DEFAULT_EVIDENCE_WEIGHT
+    assert ev.weight == RULE_EVIDENCE_WEIGHT
     assert ev.ref_id is None
     assert ev.extra == {"rule_id": "R-301"}
     assert ev.value.startswith("R-301")  # value = "R-301 {name}: {detail}"

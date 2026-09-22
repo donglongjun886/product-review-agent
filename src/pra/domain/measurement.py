@@ -80,7 +80,8 @@ MEASUREMENT_TYPE = "MEASUREMENT"
 EVIDENCE_MIN_SIM = 0.70
 EVIDENCE_STRONG = 0.85
 
-# 无风险量纲证据类型的默认权重（PRODUCT_FACT / OCR_TEXT / POLICY_REF / RULE_HIT）；不被任何决策读取。
+# 无风险量纲证据类型的默认权重（PRODUCT_FACT / OCR_TEXT / POLICY_REF）；不被任何决策读取。
+# RULE_HIT 是确定性规则命中，按满强度 1.0 单独定义在 pra.screening.engine。
 DEFAULT_EVIDENCE_WEIGHT = 0.5
 
 # 商家历史「系统性规避行为」阈值：removals 或 title-relisting 达到该值即成立。
