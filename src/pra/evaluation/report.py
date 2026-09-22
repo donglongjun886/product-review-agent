@@ -180,6 +180,16 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
     add("  · rule = RuleBaseline（pra.screening 确定性三分流；零 LLM、零工具，COMPLEX → HUMAN_REVIEW）")
     add(f"  · real = {payload['model']}（真实 LLM —— 非确定性、不可重放、需 API key 与费用；")
     add("    本报告 real 数字 = 单次运行抽样，不代表模型固定水平）")
+    llm_cfg = payload.get("real_llm_config") or {}
+    if any(llm_cfg.values()):
+        add(
+            "  · real 思考配置: "
+            f"thinking={llm_cfg.get('thinking') or '默认'} / "
+            f"reasoning_effort={llm_cfg.get('reasoning_effort') or '默认'}"
+            "（非网关默认档 —— 判定分布与成本/墙钟均可能与本报告默认口径不同，勿与默认档结果混读）"
+        )
+    else:
+        add("  · real 思考配置: 网关默认（thinking=enabled / reasoning_effort=high，本次未覆盖）")
     add(f"  · 工具数据源: {EVAL_WORLD_LABEL}（世界固定为 Eval World；两臂同一数据 → LLM 是唯一变量）")
     conc = payload.get("real_concurrency") or 1
     add(

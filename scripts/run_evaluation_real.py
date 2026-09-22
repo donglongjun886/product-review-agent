@@ -8,8 +8,14 @@ HUMAN 是链路降级」一眼可见），以及 ``--out`` 落盘的 real EvalRe
 Agent 指标 + overrides 汇总（``run_error_analysis.py`` 的输入）。
 
 CLI：``--data`` JSONL 或目录（eval_data/v2 → cases_v2.jsonl）；``--model`` / ``--api-key`` /
-``--base-url`` 配 LLM；``--limit N`` / ``--ids "EC_V2_0007,EC_V2_0101"`` 定向取案子集；
-``--concurrency N`` 并发跑 real 臂；``--out PATH`` 写结果 JSON（父目录需已存在）。
+``--base-url`` 配 LLM；``--thinking enabled|disabled`` / ``--reasoning-effort none|low|high|max``
+覆盖网关思考配置（默认都不传 = 网关默认 enabled + high）；``--limit N`` /
+``--ids "EC_V2_0007,EC_V2_0101"`` 定向取案子集；``--concurrency N`` 并发跑 real 臂；
+``--out PATH`` 写结果 JSON（父目录需已存在）。
+
+思考配置是**口径**而非调优旋钮：非默认档（尤其 ``disabled`` 会让 ``temperature`` 生效）会改变
+判定分布与单案墙钟/成本，其产物不得与默认档结果混读 —— ``--out`` 的 payload 带
+``real_llm_config`` 记录本次档位。
 
 成本与结论边界：真实 API 有费用、非确定性（同案重跑输出可能不同，不可重放）——先
 ``--limit 10`` 冒烟确认链路与成本量级再跑全量；report / JSON 已如实标注，real 数字只代表单次
@@ -86,11 +92,19 @@ def _resolve_data_path(raw: str) -> Path:
     raise ValueError(f"评测数据路径不存在: {p}（支持 JSONL 文件，或 eval_data/v2 目录）")
 
 
-def _make_real_backend(*, model: str, api_key: str | None, base_url: str | None) -> object:
+def _make_real_backend(
+    *,
+    model: str,
+    api_key: str | None,
+    base_url: str | None,
+    thinking: str | None = None,
+    reasoning_effort: str | None = None,
+) -> object:
     """构造真实 LLM 后端（延迟 import ``pra.agent.litellm_backend``）。
 
     按 ``LLMBackend`` Protocol 交给 ``AgentScheme(llm=...)``；``tools`` = Eval World 工具列表
-    （供后端提取 function schema / 工具提示），与图侧装配的世界同一份。
+    （供后端提取 function schema / 工具提示），与图侧装配的世界同一份。``thinking`` /
+    ``reasoning_effort`` 为 None → 不下发，用网关默认（enabled + high）。
     """
     try:
         from pra.agent.litellm_backend import LiteLLMBackend
@@ -100,7 +114,12 @@ def _make_real_backend(*, model: str, api_key: str | None, base_url: str | None)
             "`uv sync` 后重试"
         ) from exc
     return LiteLLMBackend(
-        model=model, api_key=api_key, base_url=base_url, tools=make_eval_world_tools()
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        tools=make_eval_world_tools(),
+        thinking=thinking,  # type: ignore[arg-type]
+        reasoning_effort=reasoning_effort,  # type: ignore[arg-type]
     )
 
 
@@ -295,11 +314,14 @@ async def run_comparison(
     model_label: str,
     data_path: str = "",
     real_concurrency: int = 1,
+    real_llm_config: dict | None = None,
 ) -> tuple[dict, dict]:
     """核心跑分：rule（确定性零成本，先行）→ real（注入后端）。
 
     ``real_concurrency > 1`` 时 real 臂并发跑（rule 臂恒串行 —— 无 LLM 调用且是确定性
-    基线，不需要并发）；并发只改**调度**，不改判定 / 指标 / 数据。
+    基线，不需要并发）；并发只改**调度**，不改判定 / 指标 / 数据。``real_llm_config``
+    记录 real 臂的思考配置（``{"thinking": ..., "reasoning_effort": ...}``，None = 网关默认）
+    —— 落进 payload，避免不同口径的产物互相混淆。
 
     返回 ``(payload, extra)``：``payload`` 可直接落 JSON（含 REAL_NOTE）；``extra`` 是报告
     渲染中间物（逐案行 / by_scene / 两臂 DecisionMetrics / EngineeringMetrics /
@@ -342,6 +364,8 @@ async def run_comparison(
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "count": len(cases),
         "real_concurrency": real_concurrency,
+        # real 臂思考配置（None = 网关默认 enabled + high）：产物自带口径，防跨口径混读
+        "real_llm_config": dict(real_llm_config or {}),
         "agree": len(rows) - len(disagree),
         "disagree": disagree,
         # 逐案 rule 决策（Error Analysis 的决策迁移基线；只留 id + 三分类裁决）
@@ -397,6 +421,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model", default=DEFAULT_MODEL, help=f"real LLM 模型（默认 {DEFAULT_MODEL}）"
+    )
+    parser.add_argument(
+        "--thinking",
+        choices=("enabled", "disabled"),
+        default=None,
+        help=(
+            "思考模式开关（默认 None = 不下发，用网关默认 enabled）。disabled = 非思考模式："
+            "输出与墙钟大幅下降，但 temperature 才生效、判定分布可能变 —— 结果不得与默认口径混读"
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "high", "max"),
+        default=None,
+        help=(
+            "思考强度（默认 None = 不下发，用网关默认 high）。none = 等价关闭思考模式；"
+            "low 比 high 想得少（更快更省）"
+        ),
     )
     parser.add_argument(
         "--api-key",
@@ -480,7 +522,14 @@ async def _main(argv: list[str] | None = None) -> int:
             "（LiteLLMBackend 强制 api_key）——请配置真实 key 后重跑"
         )
 
-    real_backend = _make_real_backend(model=args.model, api_key=api_key, base_url=base_url)
+    real_backend = _make_real_backend(
+        model=args.model,
+        api_key=api_key,
+        base_url=base_url,
+        thinking=args.thinking,
+        reasoning_effort=args.reasoning_effort,
+    )
+    real_llm_config = {"thinking": args.thinking, "reasoning_effort": args.reasoning_effort}
     # 头部：跑分前先亮明成本与可重放边界
     stats = scene_stats(cases)
     by_scene = stats.get("by_scene", {})
@@ -489,6 +538,13 @@ async def _main(argv: list[str] | None = None) -> int:
     print("商品审核 Agent · Evaluation 正式跑分（rule 确定性初筛 vs real 真实 LLM）")
     print("=" * 100)
     print(f"数据集: {data_path}（{len(cases)} 条）| 工具世界: {EVAL_WORLD_LABEL} | real 模型: {args.model}")
+    print(
+        "real 思考配置: "
+        + (
+            f"thinking={args.thinking or '默认'} / reasoning_effort={args.reasoning_effort or '默认'}"
+            + ("（非网关默认档，判定分布可能与默认档不同）" if any(real_llm_config.values()) else "")
+        )
+    )
     print("scene 分布: " + " | ".join(f"{s}={scene_n[s]}" for s in SCENES))
     print("API key: 已配置（--api-key / 环境变量 / .env）（值不入日志/报告/JSON）")
     print(
@@ -506,6 +562,7 @@ async def _main(argv: list[str] | None = None) -> int:
         model_label=args.model,
         data_path=str(data_path),
         real_concurrency=args.concurrency,
+        real_llm_config=real_llm_config,
     )
 
     out_path: str | None = None

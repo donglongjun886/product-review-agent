@@ -12,7 +12,9 @@
 配置：``model`` 默认 ``"deepseek/deepseek-flash"``；``api_key`` 构造传入或读
 ``DEEPSEEK_API_KEY``（两处都缺不报错，首次 ``complete`` 前才抛 ``LLMBackendError``）；
 ``base_url`` 非 None 时以 ``api_base`` 传 litellm；``tools`` 提取
-``{name, description, args_schema}`` 存为 plan 渲染用工具目录。
+``{name, description, args_schema}`` 存为 plan 渲染用工具目录；``thinking`` /
+``reasoning_effort`` 为 None 时不传（用网关默认 enabled + high），非 None 时按
+DeepSeek 口径下发（详见 ``__init__``）。
 
 失败形态：任一错误（网络/超时/HTTP/无 key/上游异常）→ ``LLMBackendError``（llm_shell
 按 transport 类处理：退避重试 1 次）；内容提取失败不抛，返回原样文本 + ``truncated``
@@ -23,7 +25,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 
 from pra.agent.guardrails.llm_shell import (
     LLMBackend,
@@ -67,6 +69,8 @@ class LiteLLMBackend(LLMBackend):
         timeout_s: float = 60.0,
         max_tokens: int | None = None,
         tools: list | None = None,
+        thinking: Literal["enabled", "disabled"] | None = None,
+        reasoning_effort: Literal["none", "low", "high", "max"] | None = None,
     ) -> None:
         """构造真实 LLM 后端（只固化参数，不触发任何网络/API 调用）。
 
@@ -77,7 +81,11 @@ class LiteLLMBackend(LLMBackend):
         :param temperature: 采样温度（0.0 —— 尽量稳定，但真实模型仍非确定性）；
         :param timeout_s: 单次请求超时秒数；max_tokens：输出上限（None = 模型默认）；
         :param tools: ``Tool`` 协议对象列表 —— 提取 {name, description, args_schema}
-            存为 plan 渲染用工具目录；None/空 → plan 上下文说明"无可用工具"。
+            存为 plan 渲染用工具目录；None/空 → plan 上下文说明"无可用工具"；
+        :param thinking: 思考模式开关（网关默认 ``enabled``）—— 非 None 时以
+            ``extra_body={"thinking": {"type": ...}}`` 下发；``disabled`` 为非思考模式；
+        :param reasoning_effort: 思考强度（网关默认 ``high``）—— 非 None 时以顶层
+            ``reasoning_effort`` 下发；``none`` 等价关闭思考模式。
         """
         self.model = model
         self.name = f"litellm-{model}"
@@ -85,6 +93,8 @@ class LiteLLMBackend(LLMBackend):
         self.timeout_s = timeout_s
         self.max_tokens = max_tokens
         self.base_url = base_url
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
         self._api_key: str | None = (api_key or os.environ.get(_API_KEY_ENV) or None)
         self._tool_catalog: list[dict] = self._extract_tool_catalog(tools)
 
@@ -192,6 +202,11 @@ class LiteLLMBackend(LLMBackend):
             kwargs["api_base"] = self.base_url
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
+        # 思考模式开关 / 强度：None = 不传，用网关默认（enabled + high）
+        if self.thinking is not None:
+            kwargs["extra_body"] = {"thinking": {"type": self.thinking}}
+        if self.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self.reasoning_effort
         try:
             # 离线化：litellm import 时默认联网拉远程 model cost map，无外网会白等一次
             # 超时 —— 置 LITELLM_LOCAL_MODEL_COST_MAP=True 用本地备份，import 零网络。

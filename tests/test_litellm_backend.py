@@ -283,6 +283,28 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
     assert "decision" in user and "HUMAN_REVIEW" in user  # schema 要点（字段/枚举值）入 user
 
 
+async def test_thinking_config_kwargs_only_when_set(monkeypatch):
+    """思考配置显式入口：为 None 不下发（用网关默认），非 None 才进 kwargs。
+
+    不下发与"下发默认值"是两回事 —— 后者会把网关默认档钉死在本仓库里，改变真实行为。
+    """
+    fake = _patch_acompletion(monkeypatch, contents=['{"foo": 1}', '{"foo": 1}'], tokens=7)
+
+    await LiteLLMBackend(api_key="sk-test").complete(
+        node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
+    )
+    default_kwargs = fake.calls[-1]["kwargs"]
+    assert "extra_body" not in default_kwargs
+    assert "reasoning_effort" not in default_kwargs
+
+    await LiteLLMBackend(api_key="sk-test", thinking="disabled", reasoning_effort="low").complete(
+        node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
+    )
+    kwargs = fake.calls[-1]["kwargs"]
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert kwargs["reasoning_effort"] == "low"
+
+
 async def test_complete_network_failure_raises_llm_backend_error(monkeypatch):
     """mock 网络失败：acompletion 抛任意异常 → complete 抛 LLMBackendError（非裸异常）。"""
     async def boom_acompletion(**kwargs):
