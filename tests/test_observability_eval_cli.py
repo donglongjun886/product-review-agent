@@ -4,7 +4,8 @@
 2. 不传 ``--experiment`` → 取环境变量，再缺省 ``baseline``；
 3. ``flush_tracer()`` 在评测收尾恰好调用一次（成功与异常路径都只一次）；
 4. 无凭据时 ``--langfuse`` 不报错、退出码 0（观测失败绝不中断评测）；
-5. ``demo_langfuse_trace.py`` 无凭据路径跑完且退出码 0，stdout 含 ``tracing disabled``；
+5. ``demo_langfuse_trace.py`` 无**观测**凭据路径跑完且退出码 0，stdout 含 ``tracing disabled``
+   （业务侧 LLM 由 ``tests/conftest.py`` 钉回 scripted 桩）；
 6. 加 ``--experiment`` 后报告与不加时逐字节一致（不改评测指标）。
 
 数据集：``eval_data/v1`` 前 3 条写临时 JSONL。
@@ -12,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import runpy
@@ -77,13 +79,6 @@ def _offline_observability(monkeypatch):
         T.set_tracer(None)
 
 
-def _clean_subprocess_env() -> dict[str, str]:
-    # PRA_LANGFUSE_ENABLED=0 保证即便仓库根 .env 配了真实凭据也走 NullTracer（不联网、不 import SDK）
-    env = {k: v for k, v in os.environ.items() if k not in _OBS_ENV_KEYS}
-    env["PRA_LANGFUSE_ENABLED"] = "0"
-    return env
-
-
 @pytest.fixture(scope="module")
 def smoke_data(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """最小评测集（v1 前 3 条）：确定性、不触网。"""
@@ -104,6 +99,24 @@ def _run_eval(argv: list[str]) -> tuple[int, str]:
     buf = io.StringIO()
     with redirect_stdout(buf):
         code = module["main"](argv)
+    return code, buf.getvalue()
+
+
+def _load_demo_script() -> Any:
+    return runpy.run_path(str(DEMO_SCRIPT), run_name="_s5b_demo_langfuse_trace")
+
+
+def _run_demo(argv: list[str]) -> tuple[int, str]:
+    """in-process 跑 demo CLI，返回 (退出码, stdout)。
+
+    **必须 in-process**：子进程会绕开 ``tests/conftest.py`` 对生产入口 LLM 装配的钉回 ——
+    CI 无凭据时装配期即失败、本机有凭据时真的联网调模型（非确定性 + 按量计费）。``argv``
+    须显式传空列表：``_parse_args(None)`` 会去读 pytest 自己的 ``sys.argv``。
+    """
+    module = _load_demo_script()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = asyncio.run(module["main"](argv))
     return code, buf.getvalue()
 
 
@@ -189,40 +202,44 @@ def test_default_path_prints_no_langfuse_noise(smoke_data: Path) -> None:
 
 
 def test_demo_script_without_credentials_exits_zero() -> None:
-    proc = subprocess.run(
-        [sys.executable, str(DEMO_SCRIPT)],
-        capture_output=True,
-        text=True,
-        env=_clean_subprocess_env(),
-        cwd=str(REPO_ROOT),
-        timeout=300,
-        check=False,
-    )
+    code, out = _run_demo([])
 
-    assert proc.returncode == 0, proc.stderr
-    assert "tracing disabled" in proc.stdout
-    assert "decision:" in proc.stdout  # 业务照常：仍然产出裁决
-    assert "trace_id:" in proc.stdout
-    assert "/project/pra-local/traces/" in proc.stdout  # v4 UI 路由
+    assert code == 0
+    assert "tracing disabled" in out
+    assert "decision:" in out  # 业务照常：仍然产出裁决
+    assert "trace_id:" in out
+    assert "/project/pra-local/traces/" in out  # v4 UI 路由
 
 
 def test_demo_script_accepts_explicit_run_id() -> None:
     """``--run-id`` 可复现同一条 trace（32-hex 时 trace_id 原样等于 run_id）。"""
 
     run_id = "0123456789abcdef0123456789abcdef"
+    code, out = _run_demo(["--run-id", run_id])
+
+    assert code == 0
+    assert f"run_id:              {run_id}" in out
+    assert f"trace_id:            {run_id}" in out
+
+
+def test_demo_script_starts_as_standalone_process() -> None:
+    """子进程冒烟：脚本作为独立进程可启动、参数面可用（``--run-id`` 存在）。
+
+    ``--help`` 由 argparse 在 ``main()`` **之前** ``SystemExit(0)`` ⇒ 不装配图、不联网、不需要
+    key，因此不会绕过 ``tests/conftest.py`` 的 LLM 钉回。业务与观测路径由上面两条 in-process
+    用例覆盖，这条只补"独立进程入口 + 命令行参数面"。
+    """
     proc = subprocess.run(
-        [sys.executable, str(DEMO_SCRIPT), "--run-id", run_id],
+        [sys.executable, str(DEMO_SCRIPT), "--help"],
         capture_output=True,
         text=True,
-        env=_clean_subprocess_env(),
         cwd=str(REPO_ROOT),
-        timeout=300,
+        timeout=120,
         check=False,
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert f"run_id:              {run_id}" in proc.stdout
-    assert f"trace_id:            {run_id}" in proc.stdout
+    assert "--run-id" in proc.stdout
 
 
 # 6. 不改评测指标：加观测参数后报告输出逐字节一致

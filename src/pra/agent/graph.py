@@ -10,8 +10,8 @@
 - 唯一回环是 ``plan → tools → reevaluate → plan``；离开回环只有条件出口。
 - DECIDED 是图唯一终态：``decide → END`` 之后无出边可继续。
 - 路由/预算/收敛全为确定性纯函数（无随机、无 LLM），同 state 必同后继。
-- 本模块只负责装配；``llm`` 经 ``set_llm_backend`` 设进程级全局后端（缺省 scripted
-  桩）；``checkpointer`` 默认 None = 不持久化。
+- 本模块只负责装配；``llm`` 经 ``set_llm_backend`` 设进程级全局后端（进程内缺省为 scripted
+  桩；生产入口由组合根 ``pra.wiring`` 显式注入真实后端）；``checkpointer`` 默认 None = 不持久化。
 """
 
 from __future__ import annotations
@@ -182,7 +182,9 @@ def build_agent_graph(*, tools: list | None = None, checkpointer=None, llm=None)
     :param checkpointer: LangGraph checkpointer（demo 用 ``make_memory_checkpointer()``
         的 InMemorySaver）；None = 不持久化，仅调试。
     :param llm: 可选 ``LLMBackend``；非 None → ``set_llm_backend(llm)``（进程级全局后端，
-        调用方负责适时 ``set_llm_backend(None)`` 恢复默认 scripted 桩）。
+        调用方负责适时 ``set_llm_backend(None)`` 恢复默认 scripted 桩）；None = 不改动进程级
+        当前后端（装配期未注入过时即缺省 scripted 桩）；生产入口由
+        ``pra.wiring.get_production_graph`` 显式传入真实后端。
 
     5 个 add_node 一律经 ``_wrap_node`` 包一层 node span（只多一层旁路观测）。
     """

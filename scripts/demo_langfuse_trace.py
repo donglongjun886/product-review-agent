@@ -8,8 +8,10 @@
 ``run_id`` 为 32-hex（``uuid4().hex``）→ ``trace_id_from_run_id`` 原样返回 → Langfuse trace
 与 MySQL ``review_run.run_id`` 一一对应；``--run-id`` 可复现同一条 trace。
 
-无凭据 / SDK 未装时打印 ``tracing disabled (NullTracer: <reason>)`` 与启用方式，仍照常跑完
-Agent 并打印决策，退出码 0。只依赖标准库 + 项目内模块；不联网（除非凭据已配置且 SDK 已装）。
+Langfuse 凭据缺失 / SDK 未装时打印 ``tracing disabled (NullTracer: <reason>)`` 与启用方式，仍照常
+跑完 Agent 并打印决策 —— 观测凭据不影响业务判定。业务侧走生产入口的真实 LLM：需 ``.env`` 配
+``DEEPSEEK_API_KEY``（缺 key 时 ``run_review`` 抛 ``RuntimeError``，脚本非 0 退出），LLM 调用联网
+（DeepSeek 网关）并有费用。只依赖标准库 + 项目内模块。
 """
 
 from __future__ import annotations
@@ -147,7 +149,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def main(argv: list[str] | None = None) -> int:
-    """跑案件 → 打印关联信息与决策 → flush；退出码恒 0。"""
+    """跑案件 → 打印关联信息与决策 → flush；正常路径退出码 0。"""
     args = _parse_args(argv)
     case = build_demo_case()
     run_id = args.run_id or uuid4().hex

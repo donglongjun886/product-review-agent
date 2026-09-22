@@ -64,9 +64,13 @@ class Settings(BaseSettings):
     # 生产/测试必须经 .env 的 DATABASE_URL 覆盖。
     database_url: str = "mysql+aiomysql://root:root@127.0.0.1:3306/product_review"
 
-    # 可选：真实 LLM 评测脚本的网关凭据。.env 同时承载 DB 配置与评测凭据，而 extra="forbid"
-    # 会让未声明的键把 Settings() 整体炸成 ValidationError，沿 get_sessionmaker →
-    # process_review 一路到 HTTP 500。infra 自身不消费这两个值（默认 None）。
+    # 生产 LLM 网关的模型名（provider 前缀写法，如 deepseek/deepseek-chat）。同样必须显式声明：
+    # extra="forbid" 下 .env 里未声明的键会把 Settings() 整体炸成 ValidationError。
+    deepseek_model: str = "deepseek/deepseek-chat"
+
+    # 真实 LLM 网关凭据（生产入口经 ``pra.wiring`` 消费，评测 real 脚本亦用）。.env 同时承载 DB
+    # 配置与这些凭据，而 extra="forbid" 会让未声明的键把 Settings() 整体炸成 ValidationError，
+    # 沿 get_sessionmaker → process_review 一路到 HTTP 500。infra 自身不消费这两个值（默认 None）。
     deepseek_api_key: str | None = None
     deepseek_base_url: str | None = None
 

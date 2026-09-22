@@ -7,12 +7,12 @@
 run_id 语义：案件身份不进 AgentState，接入层映射为 LangGraph 线程维度 ``thread_id = run_id``；
 缺省自动生成 ``uuid4().hex`` —— 每请求独立线程，InMemorySaver 线程状态互不串扰（也可传可读
 形式如 ``RUN_{case_id}``）。图装配由组合根 ``pra.wiring.get_production_graph`` 提供（模块级单例，
-首次调用才装配生产工具世界：商品与商家读 MySQL、案例与政策读真实 RAG；scripted LLM 桩，无需
-API key），图不挂在 FastAPI app 上。单测不连库/不连 Chroma —— ``tests/conftest.py`` 把生产装配
-钉回 InMemory 世界。
+首次调用才装配生产工具世界：商品与商家读 MySQL、案例与政策读真实 RAG；LLM 后端由
+``pra.wiring.build_llm_backend`` 读 ``Settings`` 构造并经 ``build_agent_graph(llm=...)`` 显式注入，
+缺 ``DEEPSEEK_API_KEY`` 抛 ``RuntimeError``），图不挂在 FastAPI app 上。单测不连库/不连 Chroma、
+不调真实模型 —— ``tests/conftest.py`` 把生产装配钉回 InMemory 世界与 scripted 桩。
 
-约束：不注入 llm → 保持 scripted 桩；注入真实 LLM 属未来配置化（调用方先 ``set_llm_backend``
-或传 ``llm=`` 并重建图缓存）。
+``build_agent_graph(llm=None)`` 不改动进程级当前后端（装配期未注入过时即缺省 scripted 桩）。
 """
 
 from __future__ import annotations
@@ -45,8 +45,9 @@ async def run_review(
     :return: ``ReviewRunResult{run_id, review_decision}``，review_decision 为图终态 decision
         （三分类 + 风险等级/类型 + 置信度 + 证据链 + 假设轨迹 + 预算快照）。
 
-    :raises RuntimeError: 图执行完成但终态缺少 decision（理论不可达 —— decide 是图唯一终态
-        出口；HTTP 层捕获转 500，worker 捕获转失败重试/死信）。
+    :raises RuntimeError: 图装配期缺 LLM 凭据（``pra.wiring.build_llm_backend`` 缺
+        ``DEEPSEEK_API_KEY``）；或图执行完成但终态缺少 decision（理论不可达 —— decide 是图唯一
+        终态出口；HTTP 层捕获转 500，worker 捕获转失败重试/死信）。
     """
     resolved_run_id = run_id or uuid4().hex
     config = {"configurable": {"thread_id": resolved_run_id}}

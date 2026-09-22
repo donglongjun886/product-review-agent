@@ -5,6 +5,8 @@ asyncio 由 pyproject 的 asyncio_mode="auto" 驱动。
 进程级全局，注入假后端后必须还原，否则后续依赖默认 scripted 桩的测试会被污染；
 惰性默认桩缓存 ``_default_backend`` 一并还原。
 ``_disable_langfuse_tracing`` 保证测试永不联网、观测为 no-op（见下）。
+``_production_tools_use_inmemory_world`` / ``_production_entry_uses_scripted_llm`` 把生产入口
+的工具与 LLM 装配钉回确定性桩世界（见下）。
 """
 
 from __future__ import annotations
@@ -58,3 +60,20 @@ def _production_tools_use_inmemory_world(monkeypatch):
     from pra.tools import build_tools
 
     monkeypatch.setattr(tools_pkg, "build_production_tools", build_tools)
+
+
+@pytest.fixture(autouse=True)
+def _production_entry_uses_scripted_llm(monkeypatch):
+    """单测/CI 不调真实模型：把生产入口的 LLM 装配钉回 ``ScriptedLLMBackend``。
+
+    生产入口唯一装配处 ``pra.wiring.get_production_graph`` 按设计调
+    ``pra.wiring.build_llm_backend`` 读 ``Settings``（本机 `.env` 配了真实 key）；不钉回则走生产
+    入口的用例会真的联网调模型：结果不确定、按量计费，CI 上没有凭据还会直接报错。故把该装配
+    函数替换为构造确定性桩的替身（签名吃 ``tools=`` 关键字）。
+    """
+    from pra.agent.scripted_llm import ScriptedLLMBackend
+
+    monkeypatch.setattr(
+        "pra.wiring.build_llm_backend",
+        lambda *, tools=None: ScriptedLLMBackend(),
+    )

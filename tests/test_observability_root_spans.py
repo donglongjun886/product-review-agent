@@ -469,8 +469,8 @@ async def test_default_path_behaves_identically_and_never_imports_sdk(monkeypatc
     T.set_tracer(None)
 
 
-async def test_run_review_default_stub_decision_is_unchanged(monkeypatch) -> None:
-    """默认 scripted 桩 + 默认 run_id：决策与埋点前一致（实测 HUMAN_REVIEW/HIGH 档）。"""
+async def test_run_review_with_llm_pinned_to_stub_decision_is_unchanged(monkeypatch) -> None:
+    """生产入口的 LLM 由 ``tests/conftest.py`` 钉回 scripted 桩：决策确定（实测 HUMAN_REVIEW/HIGH 档）。"""
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
     T.set_tracer(None)

@@ -35,8 +35,9 @@
   PASS/REJECT Gate 依据**证据事实**（必需测量维度是否全覆盖、是否存在维度匹配的阳性证据、规则命中、
   证据冲突）决定；每次改判的原因码写入 `ReviewDecision.overrides`，可审计。
 - **6 个可插拔调查工具**：商品事实、商家历史、图像分析、OCR、案例检索、政策检索，统一 `Tool` 抽象。
-- **确定性可重放**：默认使用 scripted LLM 桩 + InMemory 数据源 + InMemory Checkpointer，
-  无 API key、无网络即可跑通全链路与评测。
+- **确定性可重放**：测试、评测与 `demo_walkthrough.py`（自建图）使用 scripted LLM 桩 + InMemory
+  数据源 + InMemory Checkpointer，无 API key、无网络即可跑通；`demo_api.py` / `demo_langfuse_trace.py`
+  与生产 HTTP 入口走组合根装配的真实 LLM（配置见下）。
 - **检索增强（RAG）**：政策库与案例库由 ChromaDB + LlamaIndex + BGE + BM25/jieba + RRF
   混合检索提供（需 `--extra rag`）。
 - **评测体系**：三方案对比（Rule / Single-call LLM / Agent）、业务与 abstention 指标、消融、阈值扫描、
@@ -75,6 +76,9 @@ uv run pytest tests/ -q
 
 ### 启动服务并受理一次审核
 
+生产入口装配真实 LLM 后端：需在仓库根 `.env` 配置 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`
+/ `DEEPSEEK_MODEL`）；缺 key 时图装配期显式失败（HTTP 500），不回退 scripted 桩。
+
 ```bash
 uv run uvicorn pra.api.app:app --reload            # http://127.0.0.1:8000
 curl http://127.0.0.1:8000/api/v1/health           # {"status":"ok"}
@@ -87,7 +91,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/reviews -H 'Content-Type: application/
 请求体为 `ProductReviewCase`，关键字段 `case_id` / `product`（`product_id`、`title`、`category`、
 `images` …）/ `merchant_id` / `event_type` / `screening_signals`，完整契约见 `src/pra/domain/models.py`。
 服务端**受理即分流**：`COMPLEX` 进入调查子图并落库，`PASS` / `REJECT` 由规则直判落库（无 trace）。
-不经 HTTP 的执行器级演示见 `scripts/demo_api.py`。
+不经 HTTP 的执行器级演示见 `scripts/demo_api.py`（同走生产入口，需 `.env` 凭据）。
 
 ### 数据库（可选）
 
@@ -110,7 +114,7 @@ DDL 位于 `migrations/`：`001_review_core_tables.sql`（审核核心 5 表）�
 | 变量 | 说明 |
 |---|---|
 | `DATABASE_URL` | MySQL 连接串（aiomysql 异步驱动） |
-| `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` | 仅真实 LLM 评测脚本使用，可选 |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 真实 LLM 网关凭据与模型名（`DEEPSEEK_MODEL` 缺省 `deepseek/deepseek-chat`）；生产 HTTP 入口与 `scripts/demo_api.py` 等生产入口调用方必填 `DEEPSEEK_API_KEY`（缺则装配期报错），`run_evaluation_real.py` 亦用 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Langfuse 凭据，缺省走 `NullTracer` |
 | `PRA_LANGFUSE_ENABLED` | 总开关；`0/false/no/off` 关闭，未设置 = 有凭据即启用 |
 | `PRA_LANGFUSE_EXPERIMENT` / `PRA_LANGFUSE_SAMPLE` / `PRA_LANGFUSE_SESSION` | trace 版本名 / 采样率 / 会话分组 |
@@ -198,7 +202,7 @@ docs/              系统设计与评测口径 · migrations/ DDL · scripts/ �
 | 语言 / 包管理 | Python 3.12+ · uv（`rag` / `observability` / `dev` 依赖组） |
 | 接入层 | FastAPI + uvicorn |
 | 调查编排 | LangGraph StateGraph（5 节点 7 边单回环）+ InMemory Checkpointer |
-| LLM | `LLMBackend` 抽象：默认确定性 scripted 桩；`LiteLLMBackend` 经 `set_llm_backend` / `build_agent_graph(llm=)` 注入 |
+| LLM | `LLMBackend` 抽象：`build_agent_graph(llm=None)` 不注入后端（沿用进程级当前后端，测试 / 评测 / `demo_walkthrough.py` 的确定性世界为 scripted 桩）；生产入口由 `pra.wiring.build_llm_backend` 按 `.env` 装配 `LiteLLMBackend` 并经 `build_agent_graph(llm=)` 注入，缺 `DEEPSEEK_API_KEY` 直接报错 |
 | 检索 | chroma（ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF）；默认装配与评测世界为 InMemory 种子 |
 | 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL |
 | 可观测性 | Langfuse v4（自托管）· Null Object 兜底 |
@@ -206,16 +210,18 @@ docs/              系统设计与评测口径 · migrations/ DDL · scripts/ �
 
 ## 当前实现边界
 
-- **默认全链路为 scripted LLM 桩 + InMemory 数据源**，保证确定性可重放；该路径下 token = 0、
-  latency ≈ 0、cost 为空是真实情况，不做填充。
+- **测试 / 评测 / `demo_walkthrough.py` 的全链路为 scripted LLM 桩 + InMemory 数据源**，保证确定性可重放；
+  该路径下 token = 0、latency ≈ 0、cost 为空是真实情况，不做填充。
 - **生产 / HTTP 入口 `build_production_tools()` 使用真实数据源**：商品、商家接 MySQL，
-  案例、政策接真实 RAG（惰性构建，首次检索才建库连服务端；失败记 warn failure，不静默回退种子）。
+  案例、政策接真实 RAG（惰性构建，首次检索才建库连服务端；失败记 warn failure，不静默回退种子）；
+  LLM 由 `pra.wiring.build_llm_backend` 按 `.env` 装配 `LiteLLMBackend`，缺 `DEEPSEEK_API_KEY`
+  直接失败、不回落桩 —— 该路径 token / latency 为真实值，结果非确定性。
   默认 `build_tools()` 与评测世界仍是 InMemory；评测世界为 5 个工具，比生产少一个 `OCRTool`。
 - `image_analysis` 与 `ocr` 尚未接入真实视觉模型与 OCR 服务，为 Mock 桩；生产装配据此把
   "外观测量"声明为**不可测**（带图案件不会因此自动放行，属已声明的覆盖缺口而非静默降级）。
-- 真实 LLM 评测仅通过 `scripts/run_evaluation_real.py` 触发，需 API key、有费用、**非确定性且不可重放**；
-  已发布的对照为单次运行（v1 35 案与 v2 320 案各一次，见 [docs/02-evaluation.md](docs/02-evaluation.md) §12/§14），
-  **不代表模型固定水平**。
+- 真实 LLM 除生产 HTTP 入口外，评测侧仅通过 `scripts/run_evaluation_real.py` 触发，需 API key、有费用、
+  **非确定性且不可重放**；已发布的对照为单次运行（v1 35 案与 v2 320 案各一次，见
+  [docs/02-evaluation.md](docs/02-evaluation.md) §12/§14），**不代表模型固定水平**。
 - 评测集由单一标注者按与审查员同源的规则构造，未做多标注者交叉校验，因此 scripted 高分只反映实现一致性。
 - **已识别但未排期的边界**：生产预算档位调优（`LLM_CALLS=10 → 12/15`）、`GT=REJECT→HUMAN_REVIEW`
   回收（回环/取证）、`listing_registry` 阳性路径（案件声明与在库事实的确定性比对）、真实视觉/OCR 数据源。
