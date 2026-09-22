@@ -28,6 +28,9 @@ htmlcov/
 # 本地缓存（fastembed 模型缓存 / qdrant 本地持久索引统一落 .cache/）
 .cache/
 
+# onnxruntime 遥测 device ID（fastembed 加载 BGE 时由 onnxruntime 落在 CWD；内容=时间戳+UUID，非项目产物）
+:memory:.ses
+
 # IDE / editor
 .idea/
 .vscode/
