@@ -79,16 +79,18 @@ def test_eval_world_has_exactly_five_tools_without_ocr():
 
 
 def test_rag_world_has_five_tools_with_swapped_knowledge_sources(monkeypatch):
-    """RAG 世界：5 件、无 OCRTool；Case/Policy 构造时就注入了 RAG 侧数据源。"""
+    """RAG 世界：5 件、无 OCRTool；Case/Policy 构造时就注入了 RAG 侧数据源（hybrid）。"""
     sentinel_case = InMemoryCaseIndex([])
     sentinel_policy = InMemoryPolicyIndex([])
     from pra.rag import factory
 
-    # 注入假 builder：避免真 chroma / fastembed（CI 无 extra 也能跑）；只验「换了数据源」这一层。
+    # 注入假 builder + 假编码器：避免真 chroma / fastembed（CI 无 extra 也能跑）；
+    # 只验「换了数据源」「固定 hybrid」这两层。
     monkeypatch.setattr(factory, "build_case_index", lambda *a, **kw: sentinel_case)
     monkeypatch.setattr(factory, "build_policy_index", lambda *a, **kw: sentinel_policy)
+    monkeypatch.setattr(tools_pkg, "production_embedder", lambda **kw: object())
 
-    rag = make_rag_world_tools(options={"embedding_model": object()})
+    rag = make_rag_world_tools()
     assert len(rag) == 5
     names = {t.name for t in rag}
     assert "OCRTool" not in names
@@ -106,6 +108,26 @@ def test_rag_world_has_five_tools_with_swapped_knowledge_sources(monkeypatch):
     assert rag_policy is not tool_by_name(eval_tools, "PolicySearchTool"), (
         "RAG 世界的 PolicySearchTool 必须与 eval 世界不是同一实例（换了数据源）"
     )
+
+
+def test_rag_world_builders_use_production_hybrid_mode(monkeypatch):
+    """RAG 世界固定生产口径 ``hybrid``：评测不暴露 bm25/vector 模式配置面。"""
+    calls: list[tuple[str, dict]] = []
+    from pra.rag import factory
+
+    monkeypatch.setattr(
+        factory, "build_case_index", lambda *a, **kw: calls.append(("case", kw)) or object()
+    )
+    monkeypatch.setattr(
+        factory, "build_policy_index", lambda *a, **kw: calls.append(("policy", kw)) or object()
+    )
+    monkeypatch.setattr(tools_pkg, "production_embedder", lambda **kw: object())
+
+    make_rag_world_tools()
+
+    assert [kind for kind, _ in calls] == ["case", "policy"]
+    assert all(kw.get("mode") == "hybrid" for _, kw in calls)
+    assert all(kw.get("embedding_model") is not None for _, kw in calls)
 
 
 # ---------------------------------------------------------------------------

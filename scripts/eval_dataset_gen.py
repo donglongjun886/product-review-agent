@@ -85,31 +85,40 @@ _MERCHANT_TIER = {
 _MERCHANT_REMOVALS = {mid: int(row["removals"]) for mid, row in EVAL_MERCHANTS.items()}
 
 # 图片世界语义（url → 档位）：clean=无命中；weak=0.70~0.85；strong>=0.85；logo。
+# 档位随图片语义固定（url 是中性资源 ID，不含档位语义），故按资源 ID 显式登记 ——
+# 评测输入 URL 一旦暴露 clean/viol/bound 字样就等于把真值直接喂给模型。
+_IMG_BUCKET: dict[str, str] = {
+    "P_88231": "strong:女鞋/运动鞋",
+    "asset-1001": "strong:女鞋/运动鞋",
+    "asset-1002": "strong:箱包/女包",
+    "asset-1003": "strong:服装/卫衣",
+    "asset-1004": "weak:女鞋/运动鞋",
+    "asset-1005": "weak:箱包/女包",
+    "asset-1006": "logo",
+    "asset-1007": "clean:女鞋/运动鞋",
+    "asset-1008": "clean:女鞋/运动鞋",
+    "asset-1009": "clean:箱包/女包",
+    "asset-1010": "clean:服装/卫衣",
+}
 _IMG_STRONG: dict[str, list[str]] = {c: [] for c in EVAL_CATEGORIES}
 _IMG_WEAK: dict[str, list[str]] = {c: [] for c in EVAL_CATEGORIES}
 _IMG_CLEAN: dict[str, list[str]] = {c: [] for c in EVAL_CATEGORIES}
 _IMG_LOGO: list[str] = []
-for url, row in EVAL_IMAGE_MATCHES.items():
-    sims = [m.get("similarity", 0.0) for m in row.get("top_similar", [])]
-    if row.get("logos"):
+for url in EVAL_IMAGE_MATCHES:
+    bucket = _IMG_BUCKET.get(url.rsplit("/", 2)[-2])
+    if bucket is None:
+        raise ValueError(f"图片世界种子有未登记档位的资源: {url}")
+    kind, _, cat = bucket.partition(":")
+    if kind == "logo":
         _IMG_LOGO.append(url)
-    elif sims and max(sims) >= 0.85:
-        for cat, keys in (("女鞋/运动鞋", ("shoe", "P_88231")), ("箱包/女包", ("bag",)),
-                          ("服装/卫衣", ("hoodie",))):
-            if any(k in url for k in keys):
-                _IMG_STRONG[cat].append(url)
-                break
-    elif sims:
-        for cat, keys in (("女鞋/运动鞋", ("bound_shoe",)), ("箱包/女包", ("bound_bag",))):
-            if any(k in url for k in keys):
-                _IMG_WEAK[cat].append(url)
-                break
+    elif kind == "strong":
+        _IMG_STRONG[cat].append(url)
+    elif kind == "weak":
+        _IMG_WEAK[cat].append(url)
+    elif kind == "clean":
+        _IMG_CLEAN[cat].append(url)
     else:
-        for cat, keys in (("女鞋/运动鞋", ("clean_shoe",)), ("箱包/女包", ("clean_bag",)),
-                          ("服装/卫衣", ("clean_hoodie",))):
-            if any(k in url for k in keys):
-                _IMG_CLEAN[cat].append(url)
-                break
+        raise ValueError(f"未知图片档位 {bucket!r}（资源 {url}）")
 
 _PID_INFO = {pid: row for pid, row in EVAL_PRODUCTS.items()}
 _OWN_ANCHORS: dict[str, list[dict]] = {}   # cat -> [{pid, mid, brand}]

@@ -9,10 +9,12 @@ R3 预算截胡 / R3+R5 混合案）—— 「整卷全 HUMAN 是链路降级」
 
 CLI：``--limit N`` / ``--ids "EC_0007,EC_0101"`` 定向取案子集；``--data`` 给 JSONL 或目录
 （eval_data/v1 → cases_v1.jsonl）；``--world {eval,rag}`` 选工具数据源世界（rag = 真实 KB
-检索，mode=hybrid）；``--model`` / ``--api-key`` / ``--base-url`` 配 LLM；``--max-latency-ms``
-放宽 real 臂墙钟护栏（默认 600000=10min，生产护栏 30s 对真实 LLM 过紧，每案 ~9 次串行调用
-天然 >30s，不放宽会每案 LATENCY 截胡转人工）；``--llm-budget N`` 覆盖 real 臂 max_llm_calls
-档（默认 None = 生产默认 10）；``--out`` 写结果 JSON（父目录需已存在）。
+检索，hybrid）；``--model`` / ``--api-key`` / ``--base-url`` 配 LLM；``--out`` 写结果 JSON
+（父目录需已存在）。
+
+**两臂同预算**：real 与 scripted 都跑**生产默认 Guardrail 档**（10/15/40000/30000），评测不
+覆盖预算 —— 真实 LLM 每案 ~9 次串行调用天然 >30s，会按生产语义被 LATENCY 护栏截胡转人工；
+这正是"预算是否够用"的观测结果，报告以 R3 截胡维度呈现，不做评测侧放宽。
 
 成本与结论边界：
 
@@ -26,6 +28,8 @@ CLI：``--limit N`` / ``--ids "EC_0007,EC_0101"`` 定向取案子集；``--data`
   必填 —— 缺 key 预检即报错。
 - 工具数据源 = 评测种子世界（eval / RAG，与 scripted 同一世界）→ 两臂差异只归因于 LLM。
   EvalRecord 不含墙钟 latency；real 墙钟只进进程内进度打印，不落 JSON。
+- 预算 = 生产默认档（评测不覆盖 Guardrail）：real 臂超限转 HUMAN_REVIEW 是生产语义，
+  归因走 ``detail.budget_hit_dim``，不靠调档位回避。
 - ``pra.agent.litellm_backend`` 为延迟 import：缺失时本模块仍可 import，scripted / fake 干跑
   可用，只有 real 运行需要它就绪。
 """
@@ -101,7 +105,7 @@ def _world_tools(world: str):
     """按 world 取工具列表，给 real 后端构造 ``tools`` 参数；图侧工具由
     ``AgentScheme.run`` 按 ctx.tool_world 自行装配，两处同一世界。"""
     if world == "rag":
-        return make_rag_world_tools(mode="hybrid")  # rag_mode=None → hybrid（与 ctx 默认一致）
+        return make_rag_world_tools()  # 检索模式固定生产口径 hybrid
     return make_eval_world_tools()
 
 
@@ -110,10 +114,8 @@ def _world_label(world: str) -> str:
 
 
 def _build_ctx(world: str) -> EvalContext:
-    """ctx = EvalContext(tool_world=world)；rag 时 rag_mode=None → hybrid。"""
-    if world == "rag":
-        return EvalContext(tool_world="rag", rag_mode=None)
-    return EvalContext(tool_world="eval")
+    """ctx = EvalContext(tool_world=world)（RAG 世界检索模式固定 hybrid）。"""
+    return EvalContext(tool_world=world)
 
 
 def _make_real_backend(
@@ -293,8 +295,6 @@ async def run_comparison(
     model_label: str,
     world: str = "eval",
     data_path: str = "",
-    max_latency_ms: int | None = None,
-    max_llm_calls: int | None = None,
     real_concurrency: int = 1,
 ) -> tuple[dict, dict]:
     """核心对比：scripted（确定性桩，先行、可复现）→ real（注入后端，逐案串行）。
@@ -306,14 +306,11 @@ async def run_comparison(
     ``extra`` 是报告渲染用中间物（rows / by_scene / 两臂 DecisionMetrics /
     scripted_records / truth_human 计数等，不进 JSON）。
 
-    ``max_latency_ms`` / ``max_llm_calls`` 只作用于 real 臂的评测侧预算覆盖；scripted 臂
-    恒为生产默认预算（毫秒级跑完，不触发墙钟护栏）。
+    两臂预算恒为生产默认档（评测不覆盖 Guardrail）；real 臂超限按生产语义转 HUMAN_REVIEW。
     """
     exp = expected_index(cases)
     scripted = AgentScheme()
-    real = AgentScheme(
-        llm=real_backend, max_latency_ms=max_latency_ms, max_llm_calls=max_llm_calls
-    )
+    real = AgentScheme(llm=real_backend)
 
     print("-" * 100)
     print("① scripted（确定性审查员桩 EvalScriptedLLMBackend · 可复现基线）")
@@ -807,31 +804,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--world",
         default="eval",
         choices=list(WORLDS),
-        help="Agent 工具数据源世界（默认 eval；rag = RAG 世界真实 KB 检索，mode=hybrid）",
-    )
-    parser.add_argument(
-        "--max-latency-ms",
-        type=int,
-        default=600000,
-        help=(
-            "real 评测的预算墙钟护栏上限（毫秒；默认 600000=10min）—— 生产护栏 30s "
-            "对真实 LLM 太紧（每案 ~9 次串行调用天然 >30s），不放宽则每案都被 "
-            "LATENCY 超限截胡转人工、测不到决策质量；scripted 毫秒级不受影响。llm/"
-            "tool/token 护栏默认 10/15/40000（--llm-budget 可覆盖 llm 档）。报告注明"
-            "本口径差异"
-        ),
-    )
-    parser.add_argument(
-        "--llm-budget",
-        type=int,
-        default=None,
-        help=(
-            "real 臂的 LLM 调用预算上限（max_llm_calls 覆盖；默认 None = 生产默认 10"
-            " 不变）—— 预算档位对照实验：10/12/15 档跑同一批数据，回答真实案件打满 10 被"
-            "截胡转人工是预算太紧还是 Agent 收敛差（档位抬高仍打满 ⇒ 收敛问题；涨到"
-            "收敛即止 ⇒ 预算紧）。只作用于 real 臂，scripted 对照臂恒默认，生产护栏"
-            "不受影响"
-        ),
+        help="Agent 工具数据源世界（默认 eval；rag = RAG 世界真实 KB 检索，hybrid 固定）",
     )
     parser.add_argument(
         "--out",
@@ -849,22 +822,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     return parser.parse_args(argv)
-
-
-def _build_budget_limits(*, max_latency_ms: int, llm_budget: int | None) -> dict:
-    """real 臂评测侧预算覆盖装配（键 = ``BudgetLimits`` 字段名）。
-
-    ``llm_budget=None`` → 只放宽 ``max_latency_ms``（与改动前逐字节一致）；
-    ``--llm-budget N`` → 追加 ``max_llm_calls=N``（本覆盖只作用于 real 臂，生产护栏
-    仍固定 10）。``llm_budget`` 须为正整数（``BudgetLimits.max_llm_calls`` 约束 gt=0），
-    非法值在此显式报错，不静默带进预算对象。
-    """
-    limits = {"max_latency_ms": max_latency_ms}
-    if llm_budget is not None:
-        if llm_budget <= 0:
-            raise ValueError(f"--llm-budget 须为正整数（got {llm_budget}）")
-        limits["max_llm_calls"] = llm_budget
-    return limits
 
 
 async def _main(argv: list[str] | None = None) -> int:
@@ -902,12 +859,6 @@ async def _main(argv: list[str] | None = None) -> int:
     real_backend = _make_real_backend(
         model=args.model, api_key=api_key, base_url=base_url, world=args.world
     )
-    # real 评测只测 LLM 决策质量：放宽墙钟护栏（默认 10min）避免 LATENCY 截胡，
-    # --llm-budget N 再覆盖 LLM 调用预算档；scripted 臂保持默认预算。
-    budget_limits = _build_budget_limits(
-        max_latency_ms=args.max_latency_ms, llm_budget=args.llm_budget
-    )
-
     # 头部：跑分前先亮明成本与可重放边界
     stats = scene_stats(cases)
     by_scene = stats.get("by_scene", {})
@@ -924,14 +875,9 @@ async def _main(argv: list[str] | None = None) -> int:
         f"建议先 --limit 10 冒烟 —— 本次跑 {len(cases)} 条"
     )
     print(
-        f"[NOTE] real 臂预算墙钟护栏放宽至 {args.max_latency_ms}ms（默认 600000；"
-        "生产护栏 30s 对真实 LLM 过紧会截胡转人工）；llm/tool/token 护栏保持默认"
+        "[NOTE] 两臂预算恒为生产默认档（10/15/40000/30000，评测不覆盖 Guardrail）："
+        "real 臂超限 → HUMAN_REVIEW 是生产语义，归因见 R3 截胡维度"
     )
-    if args.llm_budget is not None:
-        print(
-            f"[NOTE] B-2 对照：real 臂 LLM 调用预算上限覆盖为 {args.llm_budget}"
-            "（默认 None = 生产默认 10）；scripted 臂与生产护栏不受影响"
-        )
 
     payload, extra = await run_comparison(
         cases=cases,
@@ -940,8 +886,6 @@ async def _main(argv: list[str] | None = None) -> int:
         model_label=args.model,
         world=args.world,
         data_path=str(data_path),
-        max_latency_ms=budget_limits.get("max_latency_ms"),
-        max_llm_calls=budget_limits.get("max_llm_calls"),
         real_concurrency=args.concurrency,
     )
 

@@ -37,11 +37,7 @@ class EvalContext(BaseModel):
     - ``tool_world``：Agent 的工具数据源 —— "eval" = 与 eval_data/v1 同一份种子世界
       （公平性：Rule/Single-call 只用基础输入，Agent 经工具取"基础输入之外"的证据）；
       "default" = 仓库默认演示种子；"rag" = RAG 世界（CaseSearch / PolicySearch 注入
-      真实 RAG 索引，事实工具沿用 eval 世界）。评测默认 "eval"。
-    - RAG 世界参数（仅 tool_world="rag" 生效）：``rag_mode`` = "bm25" / "vector" /
-      "hybrid"；``rag_options`` = 索引装配参数透传（键名与 ``pra.rag.factory`` 构造参数
-      逐字对应，None = 不传），经 ``make_rag_world_tools`` 透传。
-      只影响索引装配，零判定逻辑改动。
+      真实 RAG 索引，模式固定生产口径 hybrid；事实工具沿用 eval 世界）。评测默认 "eval"。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -52,14 +48,6 @@ class EvalContext(BaseModel):
     tool_world: Literal["eval", "default", "rag"] = Field(
         default="eval",
         description="Agent 工具数据源：eval=评测种子世界 / default=仓库默认演示种子 / rag=RAG 世界（真实 Policy/Case KB）",
-    )
-    rag_mode: Literal["bm25", "vector", "hybrid"] | None = Field(
-        default=None,
-        description="RAG 世界检索模式（tool_world='rag' 时生效；None → hybrid 0.5/0.5）",
-    )
-    rag_options: dict | None = Field(
-        default=None,
-        description="RAG 索引装配参数透传（None = 不传；键名同 pra.rag.factory 参数）",
     )
 
 

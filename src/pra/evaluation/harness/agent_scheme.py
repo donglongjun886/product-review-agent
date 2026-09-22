@@ -97,43 +97,43 @@ EVAL_IMAGE_MATCHES: dict[str, dict[str, Any]] = {
         "logos": [],
         "visual_risk": "外观与某品牌经典复古跑鞋高度相似",
     },
-    "https://cdn.example.com/eval/viol_shoe/img1.jpg": {
+    "https://cdn.example.com/eval/asset-1001/img1.jpg": {
         "top_similar": [{"brand_ref": "某品牌经典鞋款", "similarity": 0.93}],
         "logos": [],
         "visual_risk": "外观与某品牌经典鞋款高度相似",
     },
-    "https://cdn.example.com/eval/viol_bag/img1.jpg": {
+    "https://cdn.example.com/eval/asset-1002/img1.jpg": {
         "top_similar": [{"brand_ref": "某品牌托特包", "similarity": 0.95}],
         "logos": [],
         "visual_risk": "外观与某品牌托特包高度相似",
     },
-    "https://cdn.example.com/eval/viol_hoodie/img1.jpg": {
+    "https://cdn.example.com/eval/asset-1003/img1.jpg": {
         "top_similar": [{"brand_ref": "某品牌卫衣", "similarity": 0.90}],
         "logos": [],
         "visual_risk": "图案/版型与某品牌卫衣高度相似",
     },
     # 弱相似（0.70~0.85 单信号）：需与商家/在库事实交叉才可判
-    "https://cdn.example.com/eval/bound_shoe/img1.jpg": {
+    "https://cdn.example.com/eval/asset-1004/img1.jpg": {
         "top_similar": [{"brand_ref": "某品牌经典鞋款", "similarity": 0.72}],
         "logos": [],
         "visual_risk": "外观与某品牌经典鞋款存在一定相似",
     },
-    "https://cdn.example.com/eval/bound_bag/img1.jpg": {
+    "https://cdn.example.com/eval/asset-1005/img1.jpg": {
         "top_similar": [{"brand_ref": "某品牌托特包", "similarity": 0.73}],
         "logos": [],
         "visual_risk": "外观与某品牌托特包存在一定相似",
     },
     # Logo 检测命中（仅工具可得；与文本解耦）
-    "https://cdn.example.com/eval/logo_bag/img1.jpg": {
+    "https://cdn.example.com/eval/asset-1006/img1.jpg": {
         "top_similar": [],
         "logos": [{"brand": "GUCCI", "confidence": 0.90}],
         "visual_risk": "检测到疑似品牌 Logo",
     },
     # 干净图（无命中 → 无外观证据；"没查到"按低先验 UNRESOLVED 处理）
-    "https://cdn.example.com/eval/clean_shoe1/img1.jpg": {},
-    "https://cdn.example.com/eval/clean_shoe2/img1.jpg": {},
-    "https://cdn.example.com/eval/clean_bag/img1.jpg": {},
-    "https://cdn.example.com/eval/clean_hoodie/img1.jpg": {},
+    "https://cdn.example.com/eval/asset-1007/img1.jpg": {},
+    "https://cdn.example.com/eval/asset-1008/img1.jpg": {},
+    "https://cdn.example.com/eval/asset-1009/img1.jpg": {},
+    "https://cdn.example.com/eval/asset-1010/img1.jpg": {},
 }
 
 # 商家行为画像种子（removals/title_relisting_count >= 3 = 系统性信号）
@@ -222,7 +222,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": None,
         "attributes": {"鞋面": "帆布", "适用人群": "男女通用"},
         "sku_list": [{"sku_id": "S_1", "color": "黑色", "size": "38-44", "price": 99.0}],
-        "images": [{"url": "https://cdn.example.com/eval/viol_shoe/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1001/img1.jpg", "source": "主图"}],
         "version": 1,
         "listing_time": "2024-09-10 10:00:00",
         "status": "ON_SALE",
@@ -236,7 +236,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": "潮动",
         "attributes": {"材质": "织物", "适用人群": "女士"},
         "sku_list": [{"sku_id": "S_1", "color": "浅灰", "size": "36-40", "price": 159.0}],
-        "images": [{"url": "https://cdn.example.com/eval/viol_shoe/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1001/img1.jpg", "source": "主图"}],
         "version": 2,
         "listing_time": "2024-09-12 11:00:00",
         "status": "ON_SALE",
@@ -250,7 +250,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": None,
         "attributes": {"材质": "帆布", "容量": "大容量"},
         "sku_list": [{"sku_id": "S_1", "color": "米色", "size": "均码", "price": 49.0}],
-        "images": [{"url": "https://cdn.example.com/eval/bound_bag/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1005/img1.jpg", "source": "主图"}],
         "version": 1,
         "listing_time": "2024-09-08 09:00:00",
         "status": "ON_SALE",
@@ -264,7 +264,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": None,
         "attributes": {"材质": "PU", "容量": "大容量"},
         "sku_list": [{"sku_id": "S_1", "color": "黑色", "size": "均码", "price": 89.0}],
-        "images": [{"url": "https://cdn.example.com/eval/viol_bag/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1002/img1.jpg", "source": "主图"}],
         "version": 2,
         "listing_time": "2024-09-09 15:00:00",
         "status": "ON_SALE",
@@ -278,7 +278,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": None,
         "attributes": {"材质": "PU", "容量": "中容量"},
         "sku_list": [{"sku_id": "S_1", "color": "棕色", "size": "均码", "price": 79.0}],
-        "images": [{"url": "https://cdn.example.com/eval/logo_bag/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1006/img1.jpg", "source": "主图"}],
         "version": 1,
         "listing_time": "2024-09-07 12:00:00",
         "status": "ON_SALE",
@@ -292,7 +292,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": None,
         "attributes": {"材质": "棉", "版型": "宽松"},
         "sku_list": [{"sku_id": "S_1", "color": "灰色", "size": "M-2XL", "price": 129.0}],
-        "images": [{"url": "https://cdn.example.com/eval/viol_hoodie/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1003/img1.jpg", "source": "主图"}],
         "version": 1,
         "listing_time": "2024-09-11 16:00:00",
         "status": "ON_SALE",
@@ -306,7 +306,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": "云步",
         "attributes": {"材质": "织物", "适用人群": "女士"},
         "sku_list": [{"sku_id": "S_1", "color": "白色", "size": "36-40", "price": 199.0}],
-        "images": [{"url": "https://cdn.example.com/eval/clean_shoe1/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1007/img1.jpg", "source": "主图"}],
         "version": 2,
         "listing_time": "2024-08-01 10:00:00",
         "status": "ON_SALE",
@@ -320,7 +320,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": "云步",
         "attributes": {"材质": "皮革", "适用人群": "女士"},
         "sku_list": [{"sku_id": "S_1", "color": "白色", "size": "35-39", "price": 169.0}],
-        "images": [{"url": "https://cdn.example.com/eval/clean_shoe2/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1008/img1.jpg", "source": "主图"}],
         "version": 1,
         "listing_time": "2024-08-10 10:00:00",
         "status": "ON_SALE",
@@ -334,7 +334,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": "简行",
         "attributes": {"材质": "帆布", "容量": "大容量"},
         "sku_list": [{"sku_id": "S_1", "color": "米白", "size": "均码", "price": 139.0}],
-        "images": [{"url": "https://cdn.example.com/eval/clean_bag/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1009/img1.jpg", "source": "主图"}],
         "version": 1,
         "listing_time": "2024-08-20 10:00:00",
         "status": "ON_SALE",
@@ -348,7 +348,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": "山丘",
         "attributes": {"材质": "棉", "版型": "宽松"},
         "sku_list": [{"sku_id": "S_1", "color": "黑色", "size": "M-2XL", "price": 99.0}],
-        "images": [{"url": "https://cdn.example.com/eval/clean_hoodie/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1010/img1.jpg", "source": "主图"}],
         "version": 1,
         "listing_time": "2024-08-15 10:00:00",
         "status": "ON_SALE",
@@ -362,7 +362,7 @@ EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
         "brand": "山野",
         "attributes": {"材质": "棉", "版型": "宽松"},
         "sku_list": [{"sku_id": "S_1", "color": "藏青", "size": "M-2XL", "price": 89.0}],
-        "images": [{"url": "https://cdn.example.com/eval/clean_hoodie/img1.jpg", "source": "主图"}],
+        "images": [{"url": "https://cdn.example.com/eval/asset-1010/img1.jpg", "source": "主图"}],
         "version": 1,
         "listing_time": "2024-08-25 10:00:00",
         "status": "ON_SALE",
@@ -456,9 +456,8 @@ EVAL_POLICY_CLAUSES: list[dict[str, Any]] = [
 
 # 评测世界标识（报告"结论边界"标注用）
 EVAL_WORLD_LABEL = "InMemory 种子世界 v1（含 P_88231/M_5512 演示种子扩展）"
-# RAG 世界标识：真实 Policy KB / Case KB + 确定性 mock embedding + BM25 + 余弦
-# （mode 由运行 ctx 注入，报告里拼上实际 mode）
-RAG_WORLD_LABEL = "RAG 世界（真实 Policy/Case KB · 确定性 mock embedding + BM25 + 余弦）"
+# RAG 世界标识：真实 Policy KB / Case KB + 生产 BGE 编码器 + hybrid（BM25 + 余弦）
+RAG_WORLD_LABEL = "RAG 世界（真实 Policy/Case KB · 生产 BGE 编码器 · hybrid 检索）"
 
 
 def make_eval_world_tools(*, case_index=None, policy_index=None):
@@ -505,35 +504,26 @@ def make_eval_world_tools(*, case_index=None, policy_index=None):
     return tools
 
 
-def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
-    """构造 RAG 世界的 Agent 工具（评测 RAG 单独模式）。
+def make_rag_world_tools():
+    """构造 RAG 世界的 Agent 工具（先例/政策检索走真实 RAG 索引）。
 
     复用 ``make_eval_world_tools()`` 的 5 件工具（Product / Image / Merchant 沿用 eval 世界
     种子，事实锚点两世界共用），把 CaseSearchTool / PolicySearchTool 的索引换成**真实 RAG
-    索引**（BM25 + 向量 + RRF/余弦，三模式可切换）—— 输出仍恰好 5 件、无 OCR。
-
-    :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid）。
-    :param options: 索引装配参数透传（缺省 None = 不传 → 全走 factory 缺省）；键名与
-        ``pra.rag.factory`` 构造参数逐字对应（``embedding_model`` / ``config`` —— Chroma 连接与
-        collection 参数走 ``config=ChromaConfig(...)``）。``embedding_model`` 缺省 None → 类内自建
-        fastembed；显式传入时须为真实语义 ``BaseEmbedding``（``src/`` 内已无确定性 / mock
-        编码器）。未知键由 factory 抛错（不吞键）。
+    索引** —— 输出仍恰好 5 件、无 OCR。检索模式固定为**生产口径 hybrid**：评测不做
+    bm25 / vector 的模式对照（模式调参见 ``pra.rag.retrieval.MODES``，调试 BM25 / Vector 用
+    独立 demo，不占评测 harness 的配置面）。
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index
+    from pra.tools import production_embedder
 
-    opts = dict(options or {})
-    # RAG 世界的编码器必须显式给出（factory 不再代为构造）。调用方可在 options 里覆盖；
-    # 缺省用只读本地缓存的 BGE 编码器 —— 这里就是"决定用 RAG 世界"的那一层。
-    if "embedding_model" not in opts:
-        from pra.tools import production_embedder
-
-        opts["embedding_model"] = production_embedder()
-    # 事实三件沿用 eval 世界种子，两个检索工具**构造时**注入真实 RAG 索引。装配参数逐字透传给
-    # factory（未知键由它抛错：不吞键、不静默忽略拼错字）。
+    # RAG 世界的编码器必须显式给出（factory 不再代为构造）：只读本地缓存的 BGE 编码器，
+    # 两个索引共用同一实例 —— 这里就是"决定用 RAG 世界"的那一层。
+    embedder = production_embedder()
+    # 事实三件沿用 eval 世界种子，两个检索工具**构造时**注入真实 RAG 索引。
     return make_eval_world_tools(
-        case_index=build_case_index(mode=mode, **opts),
-        policy_index=build_policy_index(mode=mode, **opts),
+        case_index=build_case_index(mode="hybrid", embedding_model=embedder),
+        policy_index=build_policy_index(mode="hybrid", embedding_model=embedder),
     )
 
 
@@ -717,18 +707,9 @@ class EvalScriptedLLMBackend:
     要点：reevaluate / decide 的 __STATE__ 只含 hypotheses + evidence（节点契约不带
     case）→ 本层不自造事实，只消费假设标记与证据；hypothesize 阶段已把表面信号固化
     进假设 prior/statement。
-
-    可注入参数（默认 None → 行为逐字节不变）：
-    - ``allowed_tools``：装配层裁剪（组件级 Ablation）—— plan 只排程该子集内的工具，
-      图工具注册由 AgentScheme 另行过滤；None = 全工具。
     """
 
     name = "eval-scripted-reviewer"
-
-    def __init__(self, *, allowed_tools: set[str] | None = None) -> None:
-        self._allowed_tools: frozenset[str] | None = (
-            None if allowed_tools is None else frozenset(allowed_tools)
-        )
 
     async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
         from pra.agent.guardrails.llm_shell import LLMBackendError
@@ -863,11 +844,6 @@ class EvalScriptedLLMBackend:
                           "filters": _risk_filters(category), "top_k": 5, "effective_only": True},
                  "reason": "检索外观高度模仿品牌设计的政策条款", "priority": 5}
             )
-
-        if self._allowed_tools is not None:
-            # 装配层裁剪（组件级 Ablation）：plan 的 tool schema 侧不给被裁工具 ——
-            # 候选仍按原缺口逻辑生成，但只排程允许子集内工具（不动判定逻辑）。
-            candidates = [c for c in candidates if c["tool"] in self._allowed_tools]
 
         if not candidates:
             # 已无新证据可补（商品/商家缺失的畸形案由上面条件自然收尾）
@@ -1150,7 +1126,6 @@ def _root_trace_context(
         "experiment": experiment,
         "llm_backend": backend_name,
         "tool_world": ctx.tool_world,
-        "rag_mode": ctx.rag_mode,
         "source": "evaluation",
     }
     limits = getattr(initial_state.get("budget"), "limits", None)
@@ -1183,101 +1158,53 @@ class AgentScheme(SchemeRunner):
     每 case 独立 build + compile 一个图（checkpointer=InMemory、thread_id 唯一），
     天然隔离、可重放；LLM 后端每案**显式注入** ``build_agent_graph(llm=...)``，
     不碰任何进程级全局、无需收尾复位。
-    装配参数均默认 None → 行为逐字节不变：
-    - ``allowed_tools``：**装配层裁剪** —— 图工具注册与 plan 的 tool schema 都只给该
-      子集（不动判定逻辑）；None = eval 世界全 5 工具。裁剪后 plan 不再排程被裁工具，
-      证据链自然缺该类证据 → 决策差异即"该组件必要性"的归因。
-    - ``ctx.tool_world`` == "rag"：CaseSearch/PolicySearch 注入真实 RAG 索引，其余事实
-      工具沿用 eval 世界；检索模式随 ``ctx.rag_mode``（None → hybrid）。
+
+    - ``ctx.tool_world`` == "rag"：CaseSearch/PolicySearch 注入真实 RAG 索引（hybrid），
+      其余事实工具沿用 eval 世界；
     - ``llm``：**real 模式注入** —— 非 None 时 ``run()`` 直接把它当 LLMBackend 交给
       ``build_agent_graph``（跳过确定性桩）；须实现
       ``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol（``name`` 属性 +
       ``async complete(*, node, messages, json_schema)``）。real 非确定性 / 不可重放 /
       需 API key。
-    - ``max_latency_ms`` / ``max_llm_calls``：**评测侧预算覆盖**（None = 生产默认
-      30000ms / 10 次）—— real 模式放宽墙钟护栏（真实 LLM 每案 ~9 次串行调用天然 >30s，
-      不放宽则每案都被 LATENCY 超限截胡转人工；scripted 毫秒级跑完不触发）与 LLM 调用
-      档位对照。**生产护栏恒为 10/15/40000/30000**，本覆盖只作用于评测装配层注入的
-      initial_state。
+
+    预算恒为**生产默认**（10/15/40000/30000）—— 评测不覆盖 Guardrail 档位：预算是否够用
+    本身就是被测行为，超限 → HUMAN_REVIEW 由生产 Gate 收口。
     """
 
     name = "agent"
 
     def __init__(
         self,
-        allowed_tools: set[str] | None = None,
         *,
-        llm: object | None = None,  # Phase 3 real 模式：注入 LLMBackend（None=确定性桩）
-        max_latency_ms: int | None = None,  # real 模式放宽墙钟护栏（None=生产默认 30000）
-        max_llm_calls: int | None = None,  # real 模式 LLM 调用档位（None=生产默认 10）
+        llm: object | None = None,  # real 模式：注入 LLMBackend（None=确定性桩）
     ) -> None:
-        # 审查员后端改为**每次 run 按 ctx 装配**（裁剪随 EvalContext 变），
-        # 不在构造期缓存 —— ablation 同进程换 ctx 重跑才能生效。
-        self._allowed_tools: frozenset[str] | None = (
-            None if allowed_tools is None else frozenset(allowed_tools)
-        )
-        # real 模式注入的后端对象（None → run() 装配 EvalScriptedLLMBackend）；
         # 每次 run 统一经 build_agent_graph(llm=...) 显式注入（无进程级全局、无收尾复位）。
         self._llm: object | None = llm
-        # 评测侧预算覆盖（None = 生产默认）：只改每次 run 初始 state 的 budget.limits，
-        # 不改生产 Budget/BudgetLimits 对象与默认值（见 run()）。
-        self._max_latency_ms: int | None = max_latency_ms
-        self._max_llm_calls: int | None = max_llm_calls
-
-    def _apply_budget_limits(self, state: dict) -> dict:
-        """按注入的覆盖值改写 ``build_initial_state`` 的 ``budget.limits``（只动评测装配层）。
-
-        两个覆盖值均 None → 原样返回；用 model_copy 逐层拷贝，不改生产对象与默认值。
-        """
-        if self._max_latency_ms is None and self._max_llm_calls is None:
-            return state
-        budget = state.get("budget")
-        if budget is None:
-            return state  # 防御：初始 state 恒有 budget，缺省不覆盖
-        overrides: dict = {}
-        if self._max_latency_ms is not None:
-            overrides["max_latency_ms"] = self._max_latency_ms
-        if self._max_llm_calls is not None:
-            overrides["max_llm_calls"] = self._max_llm_calls
-        state["budget"] = budget.model_copy(
-            update={"limits": budget.limits.model_copy(update=overrides)}
-        )
-        return state
 
     async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
         if ctx.tool_world == "eval":
             tools = make_eval_world_tools()
         elif ctx.tool_world == "rag":
-            # RAG 世界：先例/政策检索注入真实 RAG 索引；检索模式（rag_mode，默认 None →
-            # hybrid）与索引装配参数（rag_options，默认 None → factory 缺省）由 ctx 注入，
+            # RAG 世界：先例/政策检索注入真实 RAG 索引（生产口径 hybrid）；
             # 评测默认路径（tool_world="eval"）不动。
-            tools = make_rag_world_tools(
-                mode=ctx.rag_mode or "hybrid",
-                options=ctx.rag_options,
-            )
+            tools = make_rag_world_tools()
         else:  # "default" = 仓库默认演示种子（InMemory）—— 显式装配，不依赖图侧缺省回落
             from pra.tools import build_tools
 
             tools = build_tools()
-        if self._allowed_tools is not None:
-            # 工具注册层裁剪（只保留允许子集；连同 plan 侧裁剪 = 完整装配裁剪）
-            tools = [t for t in tools if t.name in self._allowed_tools]
         if self._llm is not None:
-            # Phase 3 real 模式：调用方注入对象即为 LLM 后端（构造与 tools 配置由
-            # 调用方负责，本层不额外处理）；工具仍按 ctx.tool_world 装配（同上）。
+            # real 模式：调用方注入对象即为 LLM 后端（构造与 tools 配置由调用方负责，
+            # 本层不额外处理）；工具仍按 ctx.tool_world 装配（同上）。
             backend = self._llm
         else:
-            # 确定性审查员桩（Phase 1/2 默认；同 case 同 ctx → 同输出，可重放）
-            backend = EvalScriptedLLMBackend(
-                allowed_tools=set(self._allowed_tools) if self._allowed_tools is not None else None,
-            )
+            # 确定性审查员桩（默认；同 case 同 ctx → 同输出，可重放）
+            backend = EvalScriptedLLMBackend()
         graph: CompiledStateGraph = build_agent_graph(
             tools=tools,
             checkpointer=make_memory_checkpointer(),
             llm=backend,
         )
         initial_state = build_initial_state(case.input)
-        initial_state = self._apply_budget_limits(initial_state)
         # Root trace：每案一条，trace_id 确定性 uuid5
         # （含 LLM 后端名 —— scripted 对照臂与 real 臂各自成 trace）；
         # **不 per-case flush**（320 次太慢）—— 由评测入口整轮结束后

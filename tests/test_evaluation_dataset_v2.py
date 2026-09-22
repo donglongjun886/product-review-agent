@@ -112,6 +112,28 @@ def test_v2_rows_are_valid_product_review_cases() -> None:
             assert img.url.startswith("https://cdn.example.com/")
 
 
+def test_eval_image_urls_carry_no_class_semantics() -> None:
+    """评测输入 URL 不得含类别语义（== 把 GT 直接喂给模型）。
+
+    v1/v2 的图片 url 一律为中性资源 ID（``…/eval/asset-NNNN/img1.jpg``）：真实 LLM 会连
+    url 字面一起看到，``viol_*`` / ``clean_*`` / ``bound_*`` / ``logo_*`` 这类路径段等同于
+    泄漏真值类目。本守护锁死「中性」这条不变量，防再手写回语义 url。
+    """
+    leaked = ("viol", "clean", "bound", "logo", "brand", "risk", "reject", "pass", "human")
+    for path in (V1_PATH, V2_PATH):
+        for c in load_dataset(path):
+            for img in c.input.product.images:
+                name = img.url.rsplit("/", 1)[-1].lower()
+                segment = img.url.rsplit("/", 2)[-2].lower()
+                assert segment.startswith("asset-") or segment.startswith("p_"), (
+                    f"{c.eval_case_id} 的图片 url 资源段非中性: {img.url}"
+                )
+                for token in leaked:
+                    assert token not in segment and token not in name, (
+                        f"{c.eval_case_id} 的图片 url 含类别语义 {token!r}: {img.url}"
+                    )
+
+
 def test_v2_families_cover_all_intended_shapes() -> None:
     cases = load_dataset(V2_PATH)
     fams = {c.annotation["family"] for c in cases if c.annotation}

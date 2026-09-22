@@ -1,8 +1,7 @@
-"""Evaluation Phase 2 测试：Abstention / Ablation / Regression 三组。
+"""Evaluation Phase 2 测试：Abstention / Regression 两组。
 
 - ``test_abstention_*``：五指标在手工可算小样本上数值正确（SHOULD_ABSTAIN 被自动
   只表现为 recall 缺口、不进 wrong_auto；分母 0 → None；老数据无 abstain_label 兼容）；
-- ``test_ablation_*``：方案级 2b vs 2a 在"预塞政策文本能命中"的案上决策不同；
 - ``test_regression_*``：篡改记录后比对失败，真实跑 v1 集两次 digest 一致。
 
 全程离线确定性；测试数据来自 eval_data/v1（只读），基线快照一律写 tmp_path。
@@ -14,13 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from pra.evaluation.ablation import build_rag_context
 from pra.evaluation.dataset.loader import load_dataset
-from pra.evaluation.dataset.schema import EvalCase
-from pra.evaluation.harness.base import EvalContext, EvalRecord
-from pra.evaluation.harness.single_call_scheme import SingleCallScheme
+from pra.evaluation.harness.base import EvalRecord
 from pra.evaluation.metrics.abstention import AbstentionEvaluator
 from pra.evaluation.regression import (
+    canonical_digest,
     compare_snapshots,
     compute_current_snapshot,
     snapshot_from_records,
@@ -32,15 +29,6 @@ DATA_PATH = Path(__file__).resolve().parents[1] / "eval_data" / "v1" / "cases_v1
 
 def _make_record(case_id: str, decision: str, scheme: str = "rule") -> EvalRecord:
     return EvalRecord(eval_case_id=case_id, scheme=scheme, decision=decision)  # type: ignore[arg-type]
-
-
-def _cases_by_id() -> dict[str, EvalCase]:
-    return {c.eval_case_id: c for c in load_dataset(DATA_PATH)}
-
-
-async def _run_scheme(scheme, case: EvalCase, ctx: EvalContext) -> EvalRecord:
-    """await 单个 scheme.run —— 供 async 测试复用（pytest-asyncio auto 模式驱动）。"""
-    return await scheme.run(case, ctx)
 
 
 def test_abstention_five_metrics_hand_calculated() -> None:
@@ -123,59 +111,6 @@ def test_abstention_label_missing_but_human_truth_inferred() -> None:
     assert m.wrong_auto_decision_rate is None  # AUTO 案数 0
 
 
-async def test_single_call_2b_beats_2a_on_decisive_policy() -> None:
-    """OCR 弱证据案：2a（Raw Input）→ HUMAN（置信不足转人工）；2b（预塞命中本案的自动拒绝判例文本）→ REJECT —— 仅当 RAG 文本命中时决策不同。"""
-    from pra.domain.models import ProductImage, ProductInfo
-
-    # 复用 EC_0406 的真实基础输入形状（标题无规避词），但把图片 OCR 换成命中"复刻"
-    # （弱证据 REJECT 候选）→ base 规则② REJECT conf 0.60 → 2a 确定性转人工
-    base = _cases_by_id()["EC_0406"]
-    product: ProductInfo = base.input.product
-    images = [
-        ProductImage(
-            url="https://cdn.example.com/eval/bound_bag/img1.jpg",
-            ocr_text="复刻经典托特包图案",  # OCR 仿冒词 → base 规则② REJECT conf 0.60
-            source="主图",
-        )
-    ]
-    new_input = base.input.model_copy(
-        update={"product": product.model_copy(update={"images": images})}
-    )
-    case = base.model_copy(update={"input": new_input})
-
-    ctx = EvalContext()  # abstain threshold 0.7
-    rec_2a = await _run_scheme(SingleCallScheme(), case, ctx)
-    assert rec_2a.decision == "HUMAN_REVIEW", "2a：OCR 弱证据 REJECT 候选 conf<0.7 → 转人工"
-
-    # 2b：预塞一条"类目同型、含复刻词、结论 → REJECT"的判例 digest（静态事实文本）
-    context = ["判例: CASE_TEST_9 类目[箱包/女包] 复刻 仿冒确证 判定拒绝 → REJECT"]
-    rec_2b = await _run_scheme(SingleCallScheme(extra_context=context), case, ctx)
-    assert rec_2b.decision == "REJECT", "2b：RAG 命中同型自动拒绝判例 → 不再转人工"
-
-    # 预塞的是转人工口径/无命中词 → 维持原样（机制不"见 REJECT 就升级"）
-    context_human = ["判例: CASE_TEST_8 类目[箱包/女包] 复刻 判定转人工 → HUMAN_REVIEW"]
-    rec_noop = await _run_scheme(SingleCallScheme(extra_context=context_human), case, ctx)
-    assert rec_noop.decision == "HUMAN_REVIEW"
-
-    # 无 extra_context 的默认构造 = Phase 1 行为（llm_fn 直接消费 case_json，无注入键）
-    scheme_plain = SingleCallScheme()
-    assert scheme_plain.extra_context is None
-    assert (await _run_scheme(scheme_plain, case, ctx)).decision == "HUMAN_REVIEW"
-
-
-def test_rag_context_from_eval_world_has_no_expected_answer() -> None:
-    """build_rag_context 只含评测世界静态判例/政策文本 —— 不含任何 expected 字段值。"""
-    cases = _cases_by_id()
-    for cid in ("EC_0105", "EC_0401", "EC_0001"):
-        case = cases[cid]
-        for line in build_rag_context(case):
-            # 只允许真实先例/政策来源的素材字段出现在 digest 行里
-            assert not any(
-                marker in line
-                for marker in ("expected", "abstain_label", "SHOULD_ABSTAIN", "AUTO_DECIDABLE")
-            )
-
-
 def test_regression_tampered_record_fails() -> None:
     """篡改一条记录后快照 digest/序列不匹配 → FAIL（regression 能抓到漂移）。"""
     cases = [c for c in load_dataset(DATA_PATH)][:4]
@@ -197,8 +132,6 @@ def test_regression_tampered_record_fails() -> None:
             "agent": ["PASS", "HUMAN_REVIEW", "PASS", "PASS"],
         },
     }
-    from pra.evaluation.regression import canonical_digest
-
     tampered["digest"] = canonical_digest(tampered["per_case_ids"], tampered["decisions"])
     report = compare_snapshots(tampered, baseline)
     assert report.ok is False and report.status == "FAIL"
