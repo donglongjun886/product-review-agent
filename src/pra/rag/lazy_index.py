@@ -33,20 +33,9 @@ __all__ = ["LazyCaseIndex", "LazyPolicyIndex"]
 class _LazyIndex:
     """共享的「构造期不建、首次用到才建」骨架（``LazyPolicyIndex`` / ``LazyCaseIndex`` 的基类）。"""
 
-    def __init__(self, builder: Callable[[], Any], *, label: str) -> None:
+    def __init__(self, builder: Callable[[], Any]) -> None:
         self._builder = builder
-        self._label = label
         self._index: Any | None = None
-
-    @property
-    def is_built(self) -> bool:
-        """是否已构建（测试/观测用；构建成功后恒 True）。"""
-        return self._index is not None
-
-    @property
-    def index(self) -> Any | None:
-        """已构建的底层索引；未构建时为 None（**不触发**构建）。"""
-        return self._index
 
     def _resolve(self) -> Any:
         if self._index is None:
@@ -57,8 +46,8 @@ class _LazyIndex:
 class LazyPolicyIndex(_LazyIndex):
     """``PolicyIndex`` 的惰性代理：``builder`` 为无参可调用，返回任意实现该 Protocol 的索引。"""
 
-    def __init__(self, builder: Callable[[], PolicyIndex], *, label: str = "PolicyIndex") -> None:
-        super().__init__(builder, label=label)
+    def __init__(self, builder: Callable[[], PolicyIndex]) -> None:
+        super().__init__(builder)
 
     async def search(
         self,
@@ -73,8 +62,8 @@ class LazyPolicyIndex(_LazyIndex):
 class LazyCaseIndex(_LazyIndex):
     """``CaseIndex`` 的惰性代理：``builder`` 为无参可调用，返回任意实现该 Protocol 的索引。"""
 
-    def __init__(self, builder: Callable[[], CaseIndex], *, label: str = "CaseIndex") -> None:
-        super().__init__(builder, label=label)
+    def __init__(self, builder: Callable[[], CaseIndex]) -> None:
+        super().__init__(builder)
 
     async def search(
         self, query: str, filters: CaseSearchFilters, top_k: int

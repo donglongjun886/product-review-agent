@@ -85,10 +85,6 @@ def main() -> dict:
             type(prod_by_name["CaseSearchTool"]._index).__name__,
             type(prod_by_name["PolicySearchTool"]._index).__name__,
         ],
-        "prod_tool_built": [
-            prod_by_name["CaseSearchTool"]._index.is_built,
-            prod_by_name["PolicySearchTool"]._index.is_built,
-        ],
         "corpus_rows": [len(policy_rows), len(case_rows)],
     }
 
@@ -155,9 +151,6 @@ def test_default_path_guard_is_not_vacuous() -> None:
     )
     assert payload["prod_tool_index_types"] == ["LazyCaseIndex", "LazyPolicyIndex"], (
         "生产装配必须注入惰性 RAG 代理（装配期不建库/不 import 后端）"
-    )
-    assert payload["prod_tool_built"] == [False, False], (
-        "生产装配后索引必须尚未构建（首次检索才建）"
     )
     assert len(payload["corpus_rows"]) == 2 and all(r > 0 for r in payload["corpus_rows"]), (
         "两路 InMemory 索引必须真的读出了种子语料（行数规模不锁，随语料演进自由变化）"

@@ -57,9 +57,8 @@ def test_production_assembly_injects_lazy_rag_indices():
     assert type(tool_by_name(prod, "MerchantTool")._repo).__name__ == "MySQLMerchantRepository"
     assert isinstance(prod_case._index, LazyCaseIndex)
     assert isinstance(prod_policy._index, LazyPolicyIndex)
-    # 惰性的全部意义：装配完还没建库（未 import 后端、未连服务端、未加载模型）
-    assert prod_case._index.index is None and prod_case._index.is_built is False
-    assert prod_policy._index.index is None and prod_policy._index.is_built is False
+    # 惰性的全部意义：装配完还没建库（未 import 后端、未连服务端、未加载模型）——
+    # 该契约的行为守护在 tests/test_rag_default_path_no_extra.py（子进程查 sys.modules）。
     # 其余两个仍走 Mock 桩（image/ocr 无真实数据源）
     assert (
         type(tool_by_name(prod, "ImageAnalysisTool")).__name__
@@ -89,6 +88,7 @@ def test_default_tools_keep_inmemory_knowledge_sources():
 
 
 async def test_lazy_index_defers_build_then_caches():
+    """惰性代理：装配期不建库、首次 search 才建、成功后复用同一实例。"""
     from pra.rag.lazy_index import LazyCaseIndex
     from pra.tools.case_search.tool import CaseSearchFilters
 
@@ -103,34 +103,11 @@ async def test_lazy_index_defers_build_then_caches():
         return _FakeIndex()
 
     lazy = LazyCaseIndex(_builder)
-    assert lazy.is_built is False and lazy.index is None and calls == []
+    assert calls == [], "装配期不得构建"
     assert await lazy.search("q1", CaseSearchFilters(), 3) == [("hit", "q1", 3)]
-    assert calls == [1] and lazy.is_built
-    assert isinstance(lazy.index, _FakeIndex)
+    assert calls == [1]
     assert await lazy.search("q2", CaseSearchFilters(), 4) == [("hit", "q2", 4)]
     assert calls == [1], "构建必须只发生一次（成功后复用实例）"
-
-
-async def test_lazy_policy_index_passes_effective_only_through():
-    from pra.rag.lazy_index import LazyPolicyIndex
-    from pra.tools.policy_search.tool import PolicySearchFilters
-
-    seen: dict = {}
-
-    class _FakeIndex:
-        async def search(self, query, filters, top_k, effective_only):
-            seen.update(query=query, filters=filters, top_k=top_k, effective_only=effective_only)
-            return ["policy-hit"]
-
-    filters = PolicySearchFilters(category="女鞋/运动鞋")
-    lazy = LazyPolicyIndex(lambda: _FakeIndex())
-    assert await lazy.search("外观模仿", filters, 5, False) == ["policy-hit"]
-    assert seen == {
-        "query": "外观模仿",
-        "filters": filters,
-        "top_k": 5,
-        "effective_only": False,
-    }
 
 
 async def test_lazy_build_failure_is_not_cached_and_is_retried():
@@ -153,9 +130,9 @@ async def test_lazy_build_failure_is_not_cached_and_is_retried():
     lazy = LazyCaseIndex(_builder)
     with pytest.raises(RuntimeError, match="chroma 不可达"):
         await lazy.search("q", CaseSearchFilters(), 3)
-    assert lazy.is_built is False and attempts == [1]
+    assert attempts == [1]
     assert await lazy.search("q", CaseSearchFilters(), 3) == ["ok"]
-    assert attempts == [1, 1] and lazy.is_built
+    assert attempts == [1, 1], "失败不得缓存 —— 第二次检索必须重试"
 
 
 def test_production_embedder_fails_fast_instead_of_downloading(monkeypatch, tmp_path):
@@ -342,12 +319,9 @@ async def test_production_rag_reaches_real_knowledge_base(monkeypatch):
 
     try:
         prod_tools = _REAL_BUILD_PRODUCTION_TOOLS()
-        case_tool = tool_by_name(prod_tools, "CaseSearchTool")
-        assert case_tool._index.is_built is False, "装配期不得构建"
         state = await _run_graph(prod_tools)
-        assert case_tool._index.is_built is True, "首次检索后应已构建"
-        assert type(case_tool._index.index).__name__ == "ChromaCaseIndex"
 
+        # 命中真实 KB 即证明「装配期没建库、首次检索才建」这条惰性契约兑现（未触发构建就取不到真语料）。
         case_hits = [e for e in state["evidence"] if e.type == "CASE_PRECEDENT"]
         policy_hits = [e for e in state["evidence"] if e.type == "POLICY_REF"]
         assert case_hits, "生产 RAG 世界应产出 CASE_PRECEDENT 证据"

@@ -146,7 +146,6 @@ class _ChromaIndexBase:
         self._rows: list[Any] = _normalize_rows(rows, self._record_type)
         self.mode: RetrievalMode = _validate_mode(mode)
         cfg = config or ChromaConfig()
-        self.collection_prefix = cfg.collection_prefix
         # 空语料不建库（``collection_name`` 保持 ""）：该可见属性必须先有默认值，否则空 KB 上
         # 读它会抛 AttributeError。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算）。
         self._vec_index: Any | None = None
@@ -154,7 +153,6 @@ class _ChromaIndexBase:
         self._node_ids: list[str] = []
         self._dim = 0
         self.collection_name = ""
-        self._doc_vectors: list[list[float]] = []
         # 客户端在构造期解析一次（缺 rag extra / 客户端装配错误即刻暴露），回填进 config →
         # 后续各层拿到的都是同一个实例，不再逐层重算 host/port/ephemeral。
         self._config = replace(cfg, client=make_chroma_client(cfg))
@@ -166,13 +164,13 @@ class _ChromaIndexBase:
         self._embed_model: Any = embedding_model
         if self._rows:
             # 空 KB 走不到这里（不建库，故不 embed / 不留 collection_name）。
-            self._doc_vectors = [
+            doc_vectors = [
                 self._embed_model.get_text_embedding(self._text_of(r)) for r in self._rows
             ]
             # 维度唯一来源 = 实际编码出的向量长度。
-            self._dim = len(self._doc_vectors[0])
+            self._dim = len(doc_vectors[0])
             self.collection_name = _collection_name(cfg.collection_prefix, self._kind, self._dim)
-            self._seed()
+            self._seed(doc_vectors)
 
     # -- 逐类钩子（子类实现；基类不替任何一方兜底）------------------------------
 
@@ -201,7 +199,7 @@ class _ChromaIndexBase:
 
     # -- 装配 ---------------------------------------------------------------
 
-    def _seed(self) -> None:
+    def _seed(self, doc_vectors: list[list[float]]) -> None:
         """建/复用 collection（``embedding_function=None`` **+ 显式 cosine 空间**）+ 先删后加重建。
 
         node 向量 = 文本向量（对同一文本编码，逐位一致）；节点按「1 行 = 1 node」写入，
@@ -219,8 +217,8 @@ class _ChromaIndexBase:
             text_of=self._text_of,
             meta_of=self._meta_of,
         )
-        # ``add`` 取 ``node.get_embedding()``，故把文本向量回填到 node（与 ``_doc_vectors`` 同源）。
-        for node, vec in zip(self._nodes, self._doc_vectors):
+        # ``add`` 取 ``node.get_embedding()``，故把文本向量回填到 node。
+        for node, vec in zip(self._nodes, doc_vectors):
             node.embedding = list(vec)
         # 读写共用同一个 store 实例。``embed_model`` **必须显式传** —— 不传会回落 ``Settings.embed_model`` →
         # ``resolve_embed_model("default")`` → 拉 ``llama_index.embeddings.openai``（本仓不装）。
@@ -235,20 +233,6 @@ class _ChromaIndexBase:
         self._vec_index = llama().VectorStoreIndex.from_vector_store(
             store, embed_model=self._embed_model
         )
-
-    # -- size / 统计 ---------------------------------------------------------
-
-    @property
-    def size(self) -> int:
-        return len(self._rows)
-
-    @property
-    def node_ids(self) -> list[str]:
-        return list(self._node_ids)
-
-    @property
-    def nodes(self) -> list[Any]:
-        return list(self._nodes)
 
     # -- 装配子件 -----------------------------------------------------------
 
@@ -270,12 +254,12 @@ class _ChromaIndexBase:
         )
 
     def _to_ranked(self, nodes: list[Any], ctx: _RetrievalContext) -> list[tuple[int, float]]:
-        """检索结果 → ``[(行索引, 6 位检索分)]``（按 ``(分降序, corpus 原序)`` 排序）。
+        """检索结果 → ``[(行索引, 检索分)]``（按 ``(分降序, corpus 原序)`` 排序）。
 
         ``ctx`` 之外的 node 直接丢弃 —— collection 里可能残留已不在语料中的旧 node id。
         """
         ranked = [
-            (ctx.row_index_by_key[n.node.node_id], round(float(n.score or 0.0), 6))
+            (ctx.row_index_by_key[n.node.node_id], float(n.score or 0.0))
             for n in nodes
             if n.node.node_id in ctx.row_index_by_key
         ]
@@ -346,7 +330,7 @@ class _ChromaIndexBase:
         *,
         top_k: int,
     ) -> list[tuple[int, float]]:
-        """三模式检索 → ``[(行索引, 6 位检索分)]``（已按 ``(分降序, 原序)`` 排序、已截断 Top-K）。
+        """三模式检索 → ``[(行索引, 检索分)]``（已按 ``(分降序, 原序)`` 排序、已截断 Top-K）。
 
         两路的**打分域不同**：向量路用全量 ctx + ``where``（过滤已下推给 Chroma），BM25 路用
         Python 候选子集（``candidates``）—— ``bm25s`` 内存索引没有 ``where``。
@@ -424,7 +408,7 @@ class ChromaPolicyIndex(_ChromaIndexBase):
         """检索政策条款（三模式；无命中 → ``[]``，工具 ok=True）。
 
         流程：业务过滤（向量路下推 Chroma ``where``；BM25 路走 Python 候选集）→ 打分/融合 →
-        ``(分降序, corpus 原序)`` 排序 + 6 位取整 → Top-K。
+        ``(分降序, corpus 原序)`` 排序 → Top-K。
         """
         candidates = _policy_candidates(self._rows, filters, effective_only)
         ranked = self._retrieve_ranked(

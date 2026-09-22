@@ -153,12 +153,13 @@ def test_reseed_on_existing_collection_overwrites_same_id(
 ) -> None:
     """同一 collection 上重建必须覆盖同 id 的旧记录（写前先删）。
 
-    断言：改写首条 policy 的正文后重建，库里该 node id 的 document 变成新正文，且 ``node_ids``
-    与首次逐位相同。意义：库的 ``add`` 对**已存在的 id 静默跳过**（既不覆盖也不抛错，chromadb
-    1.5.9 实测：重复 ``add`` 后 ``count`` 仍为 1）⇒ 删掉写前的 ``delete_nodes`` 这条断言必失败，
-    库里留下的是改写前的旧正文。断言必须直接读库：BM25 路读内存 node、不经库，用检索观察不到。
+    断言：改写首条 policy 的正文后重建，库里该 node id 的 document 变成新正文；库内 id 集合仍
+    等于语料算出的 id 集合（同语料 → 同 id）。意义：库的 ``add`` 对**已存在的 id 静默跳过**
+    （既不覆盖也不抛错，chromadb 1.5.9 实测：重复 ``add`` 后 ``count`` 仍为 1）⇒ 删掉写前的
+    ``delete_nodes`` 这条断言必失败，库里留下的是改写前的旧正文。断言必须直接读库：BM25 路读
+    内存 node、不经库，用检索观察不到。
     """
-    from pra.rag.chroma_store import ChromaConfig, make_chroma_client
+    from pra.rag.chroma_store import ChromaConfig, _node_id, make_chroma_client
     from pra.rag.factory import build_policy_index
 
     prefix = "pytest_rag_ret_idem"
@@ -166,17 +167,16 @@ def test_reseed_on_existing_collection_overwrites_same_id(
     shared = ChromaConfig(
         ephemeral=True, collection_prefix=prefix, client=make_chroma_client(base)
     )
-    first = build_policy_index(
-        rows=policy_rows, embedding_model=embedder, mode="bm25", config=shared
-    )
+    build_policy_index(rows=policy_rows, embedding_model=embedder, mode="bm25", config=shared)
     marker = "重建改写标记字"
     patched = [policy_rows[0].model_copy(update={"text": marker}), *policy_rows[1:]]
     second = build_policy_index(
         rows=patched, embedding_model=embedder, mode="bm25", config=shared
     )
-    assert second.node_ids == first.node_ids
+    expected_ids = [_node_id(second.collection_name, r.clause_id) for r in patched]
     collection = shared.client.get_collection(second.collection_name)
-    stored = collection.get(ids=[second.node_ids[0]])["documents"]
+    assert set(collection.get(include=[])["ids"]) == set(expected_ids)
+    stored = collection.get(ids=[expected_ids[0]])["documents"]
     assert stored and marker in stored[0], f"同 id 未被覆盖：{stored}"
 
 
@@ -185,11 +185,11 @@ def test_reseed_on_shrunk_corpus_purges_stale_node_ids(
 ) -> None:
     """语料缩减后重建：collection 内 id 集合与当前语料严格一致，残留旧 id 被清除。
 
-    断言：先按全量 policy 建库、再用去掉末行的语料重建，collection 的 id 集合 == 当前 corpus 的
-    ``node_ids`` 集合，且 ``count`` == 当前行数。意义：不清理差集时被删行的 node 会永久残留，
-    占掉向量路 ``similarity_top_k`` 的名额（``_to_ranked`` 会把它丢弃）。
+    断言：先按全量 policy 建库、再用去掉末行的语料重建，collection 的 id 集合 == 当前语料算出的
+    id 集合，且 ``count`` == 当前行数。意义：不清理差集时被删行的 node 会永久残留，占掉向量路
+    ``similarity_top_k`` 的名额（``_to_ranked`` 会把它丢弃）。
     """
-    from pra.rag.chroma_store import ChromaConfig, make_chroma_client
+    from pra.rag.chroma_store import ChromaConfig, _node_id, make_chroma_client
     from pra.rag.factory import build_policy_index
 
     prefix = "pytest_rag_ret_stale"
@@ -204,12 +204,12 @@ def test_reseed_on_shrunk_corpus_purges_stale_node_ids(
     shrunk = build_policy_index(
         rows=shrunk_rows, embedding_model=embedder, mode="bm25", config=shared
     )
-    assert len(full.node_ids) == len(shrunk.node_ids) + 1, "前置：全量应比缩减多一 node"
+    full_ids = {_node_id(full.collection_name, r.clause_id) for r in policy_rows}
+    expected_ids = {_node_id(shrunk.collection_name, r.clause_id) for r in shrunk_rows}
+    assert len(full_ids) == len(expected_ids) + 1, "前置：全量应比缩减多一 node"
     collection = shared.client.get_collection(shrunk.collection_name)
     stored_ids = set(collection.get(include=[])["ids"])
-    assert stored_ids == set(shrunk.node_ids), (
-        f"残留旧 node id：{sorted(stored_ids - set(shrunk.node_ids))}"
-    )
+    assert stored_ids == expected_ids, f"残留旧 node id：{sorted(stored_ids - expected_ids)}"
     assert collection.count() == len(shrunk_rows)
 
 
@@ -520,16 +520,17 @@ async def test_index_search_returns_hit_models(policy_bm25: Any, case_hybrid: An
     """索引检索返回的是工具契约的 Hit 模型（而非内部 node / dict）。
 
     断言：``ChromaPolicyIndex.search`` 返回 ``PolicyClauseHit``；``ChromaCaseIndex.search`` 返回
-    ``CaseHit``，且检索分为非零正数（hybrid/RRF 后端自身口径）。
-    ⚠️ **不再断言取值域 ⊂ [0,1]** —— ``retrieval_score`` 已不设上下界约束（三模式量纲互不可比，
-    量纲归后端定义，详见 ``docs/00-system-design.md`` 的 RAG 分数口径）。
-    意义：工具层只认 Hit 契约，索引若透出内部结构会让上层协议形同虚设。
+    ``CaseHit``。意义：工具层只认 Hit 契约，索引若透出内部结构会让上层协议形同虚设。
+    分数语义不在此锁定 —— hybrid 的 RRF 分口径见
+    :func:`test_hybrid_scores_are_rrf_fusion_not_similarity`。
     """
+    from pra.tools.case_search.tool import CaseHit
+    from pra.tools.policy_search.tool import PolicyClauseHit
+
     p_hits = await policy_bm25.search("外观模仿", PolicySearchFilters(), 3, True)
     c_hits = await case_hybrid.search("外观模仿", CaseSearchFilters(), 3)
-    assert p_hits and all(type(h).__name__ == "PolicyClauseHit" for h in p_hits)
-    assert c_hits and all(type(h).__name__ == "CaseHit" for h in c_hits)
-    assert all(h.retrieval_score > 0.0 for h in c_hits), "hybrid（RRF）检索分恒 > 0"
+    assert p_hits and all(isinstance(h, PolicyClauseHit) for h in p_hits)
+    assert c_hits and all(isinstance(h, CaseHit) for h in c_hits)
 
 
 async def test_policy_search_tool_produces_policy_ref_evidence(policy_bm25: Any) -> None:
