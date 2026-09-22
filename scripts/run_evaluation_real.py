@@ -54,7 +54,7 @@ from pra.evaluation.report import print_report
 from pra.evaluation.runner import expected_index
 
 DEFAULT_DATA = "eval_data/v2"
-DEFAULT_MODEL = "deepseek/deepseek-chat"
+DEFAULT_MODEL = "deepseek/deepseek-flash"
 ENV_API_KEY = "DEEPSEEK_API_KEY"
 ENV_BASE_URL = "DEEPSEEK_BASE_URL"
 SCENES = ("normal", "violation", "boundary", "multi-signal", "evasion")

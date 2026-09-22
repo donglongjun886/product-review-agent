@@ -9,7 +9,7 @@
   (node, state) 不保证同结果、不可重放，与桩的"逐字节一致"口径不可混用。schema
   强校验 / 重试 1 次仍在 llm_shell（``model_validate_json``），后端不做内容校验。
 
-配置：``model`` 默认 ``"deepseek/deepseek-chat"``；``api_key`` 构造传入或读
+配置：``model`` 默认 ``"deepseek/deepseek-flash"``；``api_key`` 构造传入或读
 ``DEEPSEEK_API_KEY``（两处都缺不报错，首次 ``complete`` 前才抛 ``LLMBackendError``）；
 ``base_url`` 非 None 时以 ``api_base`` 传 litellm；``tools`` 提取
 ``{name, description, args_schema}`` 存为 plan 渲染用工具目录。
@@ -60,7 +60,7 @@ class LiteLLMBackend(LLMBackend):
     def __init__(
         self,
         *,
-        model: str = "deepseek/deepseek-chat",
+        model: str = "deepseek/deepseek-flash",
         api_key: str | None = None,
         base_url: str | None = None,
         temperature: float = 0.0,

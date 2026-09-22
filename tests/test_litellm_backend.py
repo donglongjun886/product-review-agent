@@ -163,10 +163,10 @@ def _patch_acompletion(monkeypatch, contents: list, tokens: int = 7, finish_reas
 
 
 def test_constructor_default_model_and_name_format():
-    """默认 model="deepseek/deepseek-chat"；name = f"litellm-{model}"（构造无 key 不抛）。"""
+    """默认 model="deepseek/deepseek-flash"；name = f"litellm-{model}"（构造无 key 不抛）。"""
     backend = LiteLLMBackend()
-    assert backend.model == "deepseek/deepseek-chat"
-    assert backend.name == "litellm-deepseek/deepseek-chat"
+    assert backend.model == "deepseek/deepseek-flash"
+    assert backend.name == "litellm-deepseek/deepseek-flash"
     # 自定义 model 时 name 跟着变（Protocol.name 只做审计/展示标识）
     alt = LiteLLMBackend(model="openai/gpt-4o-mini")
     assert alt.name == "litellm-openai/gpt-4o-mini"
@@ -265,7 +265,7 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
 
     assert len(fake.calls) == 1  # 恰好一次调用（无额外泄漏）
     kwargs = fake.calls[0]["kwargs"]
-    assert kwargs["model"] == "deepseek/deepseek-chat"
+    assert kwargs["model"] == "deepseek/deepseek-flash"
     assert kwargs["temperature"] == 0.0
     assert isinstance(kwargs["timeout"], (int, float)) and kwargs["timeout"] > 0  # 必须设超时，默认值是实现选择
     assert kwargs["response_format"] == {"type": "json_object"}  # 强制 JSON 对象输出
