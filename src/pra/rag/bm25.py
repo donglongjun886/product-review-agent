@@ -39,24 +39,13 @@ def _jieba_tokens(text: str) -> list[str]:
 
 
 def _tokenize(texts: Any) -> Any:
-    """文本（单条或列表）→ ``bm25s`` 的 ``Tokenized(ids, vocab)``；语料与查询共用。
+    """文本（单条或列表）→ token 字符串的二维列表；语料与查询共用。
 
-    词表按「首次出现即编号」在本次调用内生成；``bm25s`` 检索时把查询 token 经字符串映回索引
-    词表，故查询与索引必为同一分词器，缺失查询词也不会触发越界 token id 报错。
+    词表由 ``bm25s`` 在 ``index`` / ``retrieve`` 内部按 token 字符串自建，查询侧的 OOV token
+    由库自行过滤，故调用方只需保证两侧走同一套分词口径。
     """
-    from bm25s.tokenization import Tokenized
-
     items = [texts] if isinstance(texts, str) else list(texts)
-    vocab: dict[str, int] = {}
-    ids: list[list[int]] = []
-    for text in items:
-        doc_ids: list[int] = []
-        for tok in _jieba_tokens(str(text)):
-            if tok not in vocab:
-                vocab[tok] = len(vocab)
-            doc_ids.append(vocab[tok])
-        ids.append(doc_ids)
-    return Tokenized(ids=ids, vocab=vocab)
+    return [_jieba_tokens(str(text)) for text in items]
 
 
 @functools.cache

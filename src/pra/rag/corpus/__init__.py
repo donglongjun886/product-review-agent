@@ -45,9 +45,9 @@ def _load_envelope(path: Path, model_type: type) -> tuple[list[Any], dict]:
     )
 
 
-def load_policies(path: str | Path | None = None) -> tuple[list[PolicyClauseRecord], dict]:
-    return _load_envelope(Path(path) if path is not None else _POLICIES_FILE, PolicyCorpus)
+def load_policies() -> tuple[list[PolicyClauseRecord], dict]:
+    return _load_envelope(_POLICIES_FILE, PolicyCorpus)
 
 
-def load_cases(path: str | Path | None = None) -> tuple[list[CasePrecedentRecord], dict]:
-    return _load_envelope(Path(path) if path is not None else _CASES_FILE, CaseCorpus)
+def load_cases() -> tuple[list[CasePrecedentRecord], dict]:
+    return _load_envelope(_CASES_FILE, CaseCorpus)

@@ -142,10 +142,13 @@ def _ranked(index: Any, kind: str, path: str, query: str, filters: Any, *,
     bundle = llama().QueryBundle(query_str=query)
     if path == "bm25":
         ranked = index._rank_bm25(index._sub_context(candidates), bundle, len(candidates))
-    else:
+    elif kind == "policy":
         ranked = index._rank_vector(
             index._full_context(), bundle, index._filters_of(filters, effective_only)
         )
+    else:
+        # case 无 effective_only 语义（其 ``_filters_of`` 只收 filters）
+        ranked = index._rank_vector(index._full_context(), bundle, index._filters_of(filters))
     return ranked if top_k is None else ranked[:top_k]
 
 
@@ -231,6 +234,23 @@ def test_reseed_on_shrunk_corpus_purges_stale_node_ids(
     stored_ids = set(collection.get(include=[])["ids"])
     assert stored_ids == expected_ids, f"残留旧 node id：{sorted(stored_ids - expected_ids)}"
     assert collection.count() == len(shrunk_rows)
+
+
+def test_empty_corpus_raises_instead_of_building_empty_index(embedder: Any) -> None:
+    """空语料必须显式失败（``ValueError``），不得静默建成空索引。
+
+    断言：``rows=[]`` 构造 policy / case 索引均抛 ``ValueError``。意义：静默不建库会让「检索不到」
+    与「没有语料」混为一谈（旧行为是 ``collection_name=""`` / ``_dim=0`` 的空壳索引），本仓红线是
+    数据不可用时显式失败，不静默降级。
+    """
+    from pra.rag.chroma_store import ChromaConfig
+    from pra.rag.factory import build_case_index, build_policy_index
+
+    config = ChromaConfig(ephemeral=True)
+    with pytest.raises(ValueError):
+        build_policy_index(rows=[], embedding_model=embedder, config=config)
+    with pytest.raises(ValueError):
+        build_case_index(rows=[], embedding_model=embedder, config=config)
 
 
 # ---------------------------------------------------------------------------

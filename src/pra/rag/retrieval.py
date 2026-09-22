@@ -14,9 +14,9 @@ from typing import Any
 
 @dataclass
 class _RetrievalContext:
-    """一次检索的上下文：候选子集上的 node / node id / 行索引映射（只有检索链路会读的字段）。"""
+    """一次检索的上下文：候选子集上的 node / node id / 行索引（三个列表同序并行）。"""
 
     node_ids: list[str]
     nodes: list[Any]
-    #: node_id → corpus 原序行索引（排序 tie-break 用原序，不依赖底层库返回顺序）。
-    row_index_by_key: dict[str, int] = field(default_factory=dict)
+    #: 与 ``node_ids`` / ``nodes`` 同序并行的 corpus 原序行索引（排序 tie-break 用原序）。
+    row_index: list[int] = field(default_factory=list)

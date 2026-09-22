@@ -13,7 +13,8 @@
 一类 corpus 的全部逐类差异 = 子类声明的类级钩子（``_record_type`` / ``_text_of`` / ``_key_of`` /
 ``_meta_of`` / ``_filters_of``）+ ``_kind``，本模块不出现 ``if kind == ...`` 分派。
 ``effective_only`` / ``category``（含「全类目」）/ ``risk_type``（交叠非空）三个过滤语义与既有实现
-逐条一致。链路零 LLM 调用、零随机；tie-break = (分降序, corpus 原序升序)。
+逐条一致。链路零 LLM 调用、零随机；**最终排序** tie-break = (分降序, corpus 原序升序)
+（融合前的名次域口径见 :meth:`_ChromaIndexBase._rank_hybrid`）。
 hybrid 的融合在 :meth:`_ChromaIndexBase._rank_hybrid`（``QueryFusionRetriever`` + RRF）。
 """
 
@@ -127,38 +128,32 @@ class _ChromaIndexBase:
 
     def __init__(
         self,
-        rows: Iterable[dict | Any],
+        rows: Iterable[Any],
         *,
         embedding_model: Any,
         config: ChromaConfig | None = None,
     ) -> None:
         self._rows: list[Any] = _normalize_rows(rows, self._record_type)
+        # 空语料显式失败：没有行就没有可编码的文本、也解析不出向量维度 → 不建库、不静默降级。
+        if not self._rows:
+            raise ValueError(f"{type(self).__name__} 语料为空：至少需要 1 行才能建库")
         cfg = config or ChromaConfig()
-        # 空语料不建库（``collection_name`` 保持 ""）：该可见属性必须先有默认值，否则空 KB 上
-        # 读它会抛 AttributeError。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算）。
-        self._vec_index: Any | None = None
-        self._nodes: list[Any] = []
-        self._node_ids: list[str] = []
-        self._dim = 0
-        self.collection_name = ""
         # 客户端在构造期解析一次（缺 rag extra / 客户端装配错误即刻暴露），回填进 config →
         # 后续各层拿到的都是同一个实例，不再逐层重算 host/port/ephemeral。
         self._config = replace(cfg, client=make_chroma_client(cfg))
-        # LlamaIndex 装配面同样在构造期解析（空 KB 也不例外 —— 缺 rag extra 不推迟到检索期）。
+        # LlamaIndex 装配面同样在构造期解析（缺 rag extra 不推迟到检索期）。
         llama()
         # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
         # **必填、无兜底** —— 构造编码器的唯一位置是 ``pra.tools.production_embedder``
         # （或调用方自己注入），不许在请求期联网下载模型。
         self._embed_model: Any = embedding_model
-        if self._rows:
-            # 空 KB 走不到这里（不建库，故不 embed / 不留 collection_name）。
-            doc_vectors = [
-                self._embed_model.get_text_embedding(self._text_of(r)) for r in self._rows
-            ]
-            # 维度唯一来源 = 实际编码出的向量长度。
-            self._dim = len(doc_vectors[0])
-            self.collection_name = _collection_name(cfg.collection_prefix, self._kind, self._dim)
-            self._seed(doc_vectors)
+        doc_vectors = [
+            self._embed_model.get_text_embedding(self._text_of(r)) for r in self._rows
+        ]
+        # 维度唯一来源 = 实际编码出的向量长度。
+        self._dim = len(doc_vectors[0])
+        self.collection_name = _collection_name(cfg.collection_prefix, self._kind, self._dim)
+        self._seed(doc_vectors)
 
     # -- 逐类钩子（子类实现；基类不替任何一方兜底）------------------------------
 
@@ -174,8 +169,10 @@ class _ChromaIndexBase:
         """node metadata（不进检索文本，见 ``chroma_store._build_nodes``）。"""
         raise NotImplementedError
 
-    def _filters_of(self, filters: Any, effective_only: bool = False) -> Any | None:
+    def _filters_of(self, filters: Any) -> Any | None:
         """业务过滤 → Chroma ``where`` 表达式（``MetadataFilters``；``None`` = 无过滤）。
+
+        policy 侧额外收 ``effective_only``（case 无该语义），故其实现多一个参数。
 
         **必须与 ``_*_candidates`` 的 Python 谓词逐条等价** —— 前者是向量路的打分域，后者是
         BM25 路的打分域，两处不一致时「带过滤就会静默漏召回」（漏召回只在带过滤时暴露）。
@@ -226,11 +223,10 @@ class _ChromaIndexBase:
 
     def _sub_context(self, candidates: list[int]) -> _RetrievalContext:
         """候选子集上的检索上下文（node / node id / 行索引映射都只含候选）。"""
-        sub_ids = [self._node_ids[i] for i in candidates]
         return _RetrievalContext(
-            node_ids=sub_ids,
+            node_ids=[self._node_ids[i] for i in candidates],
             nodes=[self._nodes[i] for i in candidates],
-            row_index_by_key={nid: candidates[offset] for offset, nid in enumerate(sub_ids)},
+            row_index=list(candidates),
         )
 
     def _full_context(self) -> _RetrievalContext:
@@ -238,19 +234,22 @@ class _ChromaIndexBase:
         return _RetrievalContext(
             node_ids=list(self._node_ids),
             nodes=list(self._nodes),
-            row_index_by_key={nid: i for i, nid in enumerate(self._node_ids)},
+            row_index=list(range(len(self._node_ids))),
         )
 
     def _to_ranked(self, nodes: list[Any], ctx: _RetrievalContext) -> list[tuple[int, float]]:
-        """检索结果 → ``[(行索引, 检索分)]``（按 ``(分降序, corpus 原序)`` 排序）。
+        """检索结果 → ``[(行索引, 检索分)]``（按 ``(分降序, corpus 原序)`` 做**最终排序**）。
 
         ``ctx`` 之外的 node 直接丢弃 —— collection 里可能残留已不在语料中的旧 node id。
+        融合前的名次域不由本方法决定，见 :meth:`_rank_hybrid`。
         """
-        ranked = [
-            (ctx.row_index_by_key[n.node.node_id], float(n.score or 0.0))
-            for n in nodes
-            if n.node.node_id in ctx.row_index_by_key
-        ]
+        ranked: list[tuple[int, float]] = []
+        for item in nodes:
+            try:
+                position = ctx.node_ids.index(item.node.node_id)
+            except ValueError:
+                continue
+            ranked.append((ctx.row_index[position], float(item.score or 0.0)))
         ranked.sort(key=lambda t: (-t[1], t[0]))
         return ranked
 
@@ -288,6 +287,10 @@ class _ChromaIndexBase:
         （缺省 4 会让它调 LLM 生成扩展查询，本仓不做多查询扩展）；``use_async=False``
         （缺省 True 会在调用方已有事件循环时另起线程跑检索）。``similarity_top_k`` 传库内全集
         行数 —— 截断由调用方在融合之后统一做。
+
+        ⚠️ 名次域口径：RRF 的名次来自**各路自身的返回序**（``QueryFusionRetriever`` 对每路按分
+        稳定排序），BM25 腿的并列序即 ``bm25s`` 的返回序，**不是** corpus 原序；``_to_ranked`` 的
+        ``(分降序, corpus 原序)`` 只约束融合后的最终排序。
         """
         full_ctx = self._full_context()
         sub_ctx = self._sub_context(candidates)
@@ -326,7 +329,7 @@ class _ChromaIndexBase:
         ``top_k`` 截断在**排序之后**统一做；各路内部取「所在打分域的全长」，先拿到完整排名
         （RRF 的排名列表必须覆盖完整域，不能按 ``top_k`` 预截断）。
         """
-        if top_k < 1 or not candidates:
+        if not candidates:
             return []
         return self._rank_hybrid(query, candidates, filters)[:top_k]
 
@@ -429,15 +432,12 @@ class ChromaCaseIndex(_ChromaIndexBase):
     def _meta_of(self, row: CasePrecedentRecord) -> dict[str, Any]:
         return case_node_metadata(row)
 
-    def _filters_of(
-        self, filters: CaseSearchFilters, effective_only: bool = False
-    ) -> Any | None:
+    def _filters_of(self, filters: CaseSearchFilters) -> Any | None:
         """业务过滤 → Chroma ``where``（**与 :func:`_case_candidates` 逐条等价**）。
 
-        case **没有** ``effective_only`` 语义（``effective_only`` 形参只为与基类钩子同签名，
-        恒被忽略）；``category`` 是**精确相等**（不是 policy 的「占位 / 值 / 全类目」三态）。
+        case **没有** ``effective_only`` 语义；``category`` 是**精确相等**（不是 policy 的
+        「占位 / 值 / 全类目」三态）。
         """
-        del effective_only
         llama_ = llama()
         clauses: list[Any] = []
         if filters.category:

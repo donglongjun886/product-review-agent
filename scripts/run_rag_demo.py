@@ -1,4 +1,4 @@
-"""RAG 检索 Demo（真实 Policy/Case KB · hybrid + 两路单路对照）。
+"""RAG 检索 Demo（真实 Policy/Case KB · hybrid）。
 
 用法::
 
@@ -6,9 +6,8 @@
     uv run python scripts/run_rag_demo.py --query "..."   # 追加自定义 query
     uv run python scripts/run_rag_demo.py --top-k 5
 
-展示固定 query 集在 **hybrid（生产唯一口径）** 与 **BM25 / Vector 两条内部路径** 下的
-Policy / Case Top-K 命中（并排如实展示，不预设谁优）。单路结果由 demo **直调索引内部两路
-检索器**得到 —— 生产/评测没有模式开关（见 ``docs/00`` 检索口径），单路只作调试入口。
+展示固定 query 集在 **hybrid（生产唯一口径）** 下的 Policy / Case Top-K 命中 ——
+生产/评测没有模式开关（见 ``docs/00`` 检索口径），本 demo 走公共 ``index.search()``。
 
 以及经真实 Tool（PolicySearchTool / CaseSearchTool 注入 RAG 索引）检索后的证据引用：
 ``POLICY_REF`` weight=0.9 / ref_id=clause_id，``CASE_PRECEDENT`` weight=retrieval_score /
@@ -45,9 +44,6 @@ from pra.tools.policy_search.tool import (
     PolicySearchTool,
 )
 
-#: 单路调试路径（hybrid 由 ``index.search`` 提供，不走这里）。
-PATHS = ("bm25", "vector")
-
 
 def _build(kind: str) -> Any:
     """装配一个 chroma 索引：真实语义编码器 + 进程内 EphemeralClient（不连服务端）。
@@ -60,27 +56,6 @@ def _build(kind: str) -> Any:
         embedding_model=production_embedder(),
         config=ChromaConfig(ephemeral=True),
     )
-
-
-def _path_ranked(index: Any, kind: str, *, path: str, query: str, filters: Any,
-                 effective_only: bool = False) -> list[tuple[int, float]]:
-    """直调索引内部单路检索器 → ``[(行索引, 该路原始分)]``（仅 demo/调试用）。
-
-    生产与评测都只走 hybrid；这里不是模式开关，只是把两条路径单独拿出来看。
-    """
-    from pra.rag.deps import llama
-    from pra.rag.index import _case_candidates, _policy_candidates
-
-    if kind == "policy":
-        candidates = _policy_candidates(index._rows, filters, effective_only)
-    else:
-        candidates = _case_candidates(index._rows, filters)
-    if not candidates:
-        return []
-    bundle = llama().QueryBundle(query_str=query)
-    if path == "bm25":
-        return index._rank_bm25(index._sub_context(candidates), bundle, len(candidates))
-    return index._rank_vector(index._full_context(), bundle, index._filters_of(filters, effective_only))
 
 
 _POLICY_QUERIES = [
@@ -117,26 +92,15 @@ def _case_cell(row: Any, score: float) -> str:
 
 async def _policy_table(index: Any, query: str, top_k: int) -> None:
     print(f"\n▶ 政策检索   query = {query}")
-    filters = PolicySearchFilters()
-    hits = await index.search(query, filters, top_k, True)
+    hits = await index.search(query, PolicySearchFilters(), top_k, True)
     print("  [hybrid ] " + (" | ".join(_policy_cell(h) for h in hits) if hits else "(无命中)"))
-    for path in PATHS:
-        ranked = _path_ranked(index, "policy", path=path, query=query,
-                              filters=filters, effective_only=True)
-        cells = [_policy_cell(index._rows[i]) for i, _ in ranked[:top_k]]
-        print(f"  [{path:<7}] " + (" | ".join(cells) if cells else "(无命中)"))
 
 
 async def _case_table(index: Any, query: str, top_k: int) -> None:
     print(f"\n▶ 先例检索   query = {query}")
-    filters = CaseSearchFilters()
-    hits = await index.search(query, filters, top_k)
+    hits = await index.search(query, CaseSearchFilters(), top_k)
     print("  [hybrid ] " + (" | ".join(_case_cell(h, h.retrieval_score) for h in hits)
                             if hits else "(无命中)"))
-    for path in PATHS:
-        ranked = _path_ranked(index, "case", path=path, query=query, filters=filters)
-        cells = [_case_cell(index._rows[i], score) for i, score in ranked[:top_k]]
-        print(f"  [{path:<7}] " + (" | ".join(cells) if cells else "(无命中)"))
 
 
 def _tool_ctx() -> ToolContext:
@@ -165,8 +129,8 @@ async def _evidence_demo() -> None:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="RAG 检索 Demo（hybrid + BM25/Vector 单路对照）")
-    parser.add_argument("--top-k", type=int, default=3, help="每路 Top-K（默认 3）")
+    parser = argparse.ArgumentParser(description="RAG 检索 Demo（hybrid 单一口径）")
+    parser.add_argument("--top-k", type=int, default=3, help="Top-K（默认 3）")
     parser.add_argument("--query", action="append", default=[], help="追加自定义 query（政策+先例各跑）")
     return parser.parse_args(argv)
 
@@ -180,7 +144,7 @@ async def _main(argv: list[str] | None = None) -> int:
     for q in _CASE_QUERIES + args.query:
         await _case_table(case_index, q, args.top_k)
     await _evidence_demo()
-    print("\n[OK] RAG demo 完成（chroma 后端 · 真语义 BGE 编码器 + BM25 + RRF）")
+    print("\n[OK] RAG demo 完成（chroma 后端 · hybrid 检索：真语义 BGE 编码器 + BM25 + RRF）")
     return 0
 
 

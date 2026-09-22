@@ -1,12 +1,11 @@
 """RAG 索引装配 —— ``build_policy_index`` / ``build_case_index``。
 
-注入点：corpus 路径（缺省取 rag/corpus/ 内静态 JSON，失败即报错不静默）；``embedding_model``
-（LlamaIndex ``BaseEmbedding``，缺省 None → chroma 类内自建 fastembed 集成）；
-``config``（``ChromaConfig``：client / host / port / ephemeral / collection 前缀，缺省全取默认值）。
+语料固定取 ``rag/corpus/`` 内静态 JSON（文件缺失即抛带指引的 ``ValueError``，不静默）。
+注入点：``embedding_model``（LlamaIndex ``BaseEmbedding``，缺省 None → chroma 类内自建 fastembed
+集成）；``config``（``ChromaConfig``：client / host / port / ephemeral / collection 前缀，缺省全取默认值）。
 索引固定走 hybrid 检索（BM25 + Vector + RRF），无模式开关。
 
-两个 builder 只在「行类型 + corpus 加载器 + 缺省语料文件」上有别，实现只有 ``_build_index`` 一份
-（corpus_path 缺省由加载器自己兜底）。
+两个 builder 只在「行类型 + corpus 加载器」上有别，实现只有 ``_build_index`` 一份。
 
 检索后端只有 chroma（ChromaDB cosine + LlamaIndex 检索器 + RRF）；``pra.rag.index`` / ``chroma_store``
 在函数体内**延迟 import**，故本模块被 tools 层 import 时顶层零额外依赖；缺 ``--extra rag`` 时抛出
@@ -16,7 +15,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pra.rag.corpus import load_cases, load_policies
@@ -35,22 +33,20 @@ __all__ = [
 def _build_index(
     index_cls: type,
     *,
-    loader: Callable[[str | Path | None], tuple[list[Any], dict]],
+    loader: Callable[[], tuple[list[Any], dict]],
     embedding_model: Any,
-    corpus_path: str | Path | None = None,
     rows: Iterable[Any] | None = None,
     config: ChromaConfig | None = None,
 ) -> Any:
     """两个公开 builder 的唯一实现；差异只在调用方传进来的 ``index_cls`` / ``loader``。
 
-    ``rows`` 显式注入时优先（跳过文件 IO，``corpus_path`` 随之失效）；否则 ``loader(corpus_path)``
-    （``corpus_path=None`` → 加载器自带的缺省语料文件）。
+    ``rows`` 显式注入时优先（跳过文件 IO）；否则 ``loader()`` 读缺省语料文件。
 
     ``embedding_model`` **必填**：本层不构造任何编码器 —— 谁要 RAG，谁给编码器（``pra.tools.
     production_embedder`` 或自备 ``BaseEmbedding``）。漏传即为 ``TypeError``，不会悄悄替你造一个。
     """
     if rows is None:
-        record_rows, _meta = loader(corpus_path)
+        record_rows, _meta = loader()
     else:
         record_rows = list(rows)
     return index_cls(
@@ -62,10 +58,9 @@ def build_policy_index(
     rows: Iterable[Any] | None = None,
     *,
     embedding_model: Any,
-    corpus_path: str | Path | None = None,
     config: ChromaConfig | None = None,
 ) -> PolicyIndex:
-    """构造 PolicyIndex（corpus_path 缺省 = rag/corpus/policies.json）。
+    """构造 PolicyIndex（语料 = rag/corpus/policies.json）。
 
     ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` **必填**（``BaseEmbedding``；
     常用 ``pra.tools.production_embedder()``）—— 本函数不替你构造。
@@ -78,7 +73,6 @@ def build_policy_index(
     return _build_index(
         ChromaPolicyIndex,
         loader=load_policies,
-        corpus_path=corpus_path,
         rows=rows,
         embedding_model=embedding_model,
         config=config,
@@ -89,16 +83,14 @@ def build_case_index(
     rows: Iterable[Any] | None = None,
     *,
     embedding_model: Any,
-    corpus_path: str | Path | None = None,
     config: ChromaConfig | None = None,
 ) -> CaseIndex:
-    """构造 CaseIndex（corpus_path 缺省 = rag/corpus/cases.json）；参数语义同 ``build_policy_index``。"""
+    """构造 CaseIndex（语料 = rag/corpus/cases.json）；参数语义同 ``build_policy_index``。"""
     from pra.rag.index import ChromaCaseIndex
 
     return _build_index(
         ChromaCaseIndex,
         loader=load_cases,
-        corpus_path=corpus_path,
         rows=rows,
         embedding_model=embedding_model,
         config=config,

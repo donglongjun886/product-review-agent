@@ -37,9 +37,10 @@ CHROMA_DEFAULT_HOST = "127.0.0.1"
 CHROMA_DEFAULT_PORT = 8001
 
 _DEFAULT_COLLECTION_PREFIX = "pra"
-#: metadata 形状版本（collection 名末段）。**metadata 键形状变更时必须递增** —— 否则服务端上
-#: 已存在的同名 collection 会被 ``_open_collection`` 的 get 原样复用（新 ``where`` 一条都查不到、
-#: 静默全空）。v2 = ``risk_type`` 数组键改为 ``rt_<值>`` 整数键；v3 = 写入 ``_node_content``；
+#: schema 版本（collection 名末段；全名 ``<prefix or 'pra'>_<kind>_<dim>_v<schema>``）。
+#: **metadata 键形状变更时必须递增** —— 否则服务端上已存在的同名 collection 会被
+#: ``_open_collection`` 的 get 原样复用（新 ``where`` 一条都查不到、静默全空）。
+#: v2 = ``risk_type`` 数组键改为 ``rt_<值>`` 整数键；v3 = 写入 ``_node_content``；
 #: v4 = metadata 改由 ``ChromaVectorStore.add`` 生成（``_node_content`` 内的 text 被清空）。
 _SCHEMA_VERSION = 4
 #: ``risk_type`` 过滤键前缀：**每个枚举值一个整数键**（``rt_FALSE_CLAIM: 1``），不用数组。
@@ -63,7 +64,7 @@ class ChromaConfig:
 
     ``client`` 非 None 即用注入的客户端；否则按 ``ephemeral`` 建进程内 ``EphemeralClient``
     或按 ``host`` / ``port`` 建 ``HttpClient``。``collection_prefix`` 参与 collection 名
-    （``<prefix or 'pra'>_<policy|case>_<dim>``）与 collection metadata。
+    （``<prefix or 'pra'>_<kind>_<dim>_v<schema>``）。
     """
 
     client: Any | None = None
@@ -113,7 +114,6 @@ def _open_collection(config: ChromaConfig, *, name: str) -> Any:
     ⚠️ 空间是 collection 级属性、**创建时定死**，且 ``get_collection`` 命中同名旧库会原样复用
     —— 换空间只能换 collection 名。
     """
-    chroma()  # 缺包早失败（提示装 extra）；客户端由 config 解析（注入优先）
     client = make_chroma_client(config)
     try:
         return client.get_collection(name=name)
@@ -176,11 +176,12 @@ def _build_nodes(
     检索文本 = 正文（``text_of``：policy 为 ``title。text``、case 为 ``summary``），
     与向量路 embed 的文本同一份。
 
-    **metadata 不进检索文本**：``excluded_embed_metadata_keys`` / ``excluded_llm_metadata_keys``
-    设为全部 metadata 键，使 ``get_content(metadata_mode=EMBED)`` 只返回正文 —— 这对 BM25 路
+    **metadata 不进检索文本**：``excluded_embed_metadata_keys`` 设为全部 metadata 键，使
+    ``get_content(metadata_mode=EMBED)`` 只返回正文 —— 这对 BM25 路
     **必需**（`bm25.py` 的检索器用 ``MetadataMode.EMBED`` 取索引文本），不排除就会把 ``case_id`` /
     ``category`` / ``decision`` / ``rt_*`` 的字面值索引进去，出现「按 metadata 字面值就能
-    命中」的伪检索。排除设置随 ``_node_content`` JSON 往返存活；metadata 本身仍完整保留。
+    命中」的伪检索。排除设置随 ``_node_content`` JSON 往返存活；metadata 本身仍完整保留
+    （``MetadataMode.ALL`` 仍可见）。
     """
     llama_ = llama()
     nodes: list[Any] = []
@@ -195,9 +196,8 @@ def _build_nodes(
                 id_=nid,
                 text=text,
                 metadata=meta,
-                # metadata 不进检索文本（EMBED/LLM 两个模式都排除；ALL 仍保留供审计）。
+                # metadata 不进 EMBED 检索文本（ALL 仍保留供审计）。
                 excluded_embed_metadata_keys=list(meta.keys()),
-                excluded_llm_metadata_keys=list(meta.keys()),
             )
         )
     return nodes, node_ids
@@ -206,9 +206,7 @@ def _build_nodes(
 def _normalize_rows(rows: Iterable[Any], record_type: type) -> list[Any]:
     out: list[Any] = []
     for row in rows:
-        if isinstance(row, dict):
-            row = record_type.model_validate(row)
         if not isinstance(row, record_type):
-            raise TypeError(f"corpus 行须为 {record_type.__name__} 或 dict: got {type(row)!r}")
+            raise TypeError(f"corpus 行须为 {record_type.__name__}: got {type(row)!r}")
         out.append(row)
     return out
