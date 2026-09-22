@@ -253,6 +253,12 @@ class _ChromaIndexBase:
         ranked.sort(key=lambda t: (-t[1], t[0]))
         return ranked
 
+    def _make_vector_retriever(self, ctx: _RetrievalContext, filters: Any | None) -> Any:
+        """向量路检索器（过滤在库侧按 ``filters`` 收窄，故 ``similarity_top_k`` 取 ``ctx`` 全长）。"""
+        return self._vec_index.as_retriever(
+            similarity_top_k=max(1, len(ctx.node_ids)), filters=filters
+        )
+
     def _rank_vector(
         self, ctx: _RetrievalContext, query_bundle: Any, filters: Any | None
     ) -> list[tuple[int, float]]:
@@ -260,10 +266,9 @@ class _ChromaIndexBase:
 
         故传**全量** ctx（``_full_context``）而非候选子集。
         """
-        retriever = self._vec_index.as_retriever(
-            similarity_top_k=max(1, len(ctx.node_ids)), filters=filters
+        return self._to_ranked(
+            self._make_vector_retriever(ctx, filters).retrieve(query_bundle), ctx
         )
-        return self._to_ranked(retriever.retrieve(query_bundle), ctx)
 
     def _rank_bm25(
         self, sub_ctx: _RetrievalContext, query_bundle: Any, top_k: int
@@ -296,9 +301,7 @@ class _ChromaIndexBase:
         sub_ctx = self._sub_context(candidates)
         fusion = llama().QueryFusionRetriever(
             retrievers=[
-                self._vec_index.as_retriever(
-                    similarity_top_k=max(1, len(full_ctx.node_ids)), filters=filters
-                ),
+                self._make_vector_retriever(full_ctx, filters),
                 make_bm25_retriever(sub_ctx, len(candidates)),
             ],
             # ⚠️ 构造期只校验它是 LLM 实例；``num_queries=1`` 时一次都不会被调用。
