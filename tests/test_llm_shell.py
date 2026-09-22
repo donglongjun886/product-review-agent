@@ -7,18 +7,20 @@
 - 后端异常（transport 类：超时/网络等）→ 无输出可修正，不追加 schema 修正文案，退避后原样重试；
 - 截断（``LLMResponse.truncated``，finish_reason=length）且校验失败 → 不重试，attempts=1；
 - 恒失败 → ``model=None``、attempts=2、不抛异常；
-- ``set_llm_backend(None)`` 恢复默认 scripted 桩；
+- ``llm=None``（装配缺陷）→ ``TypeError``，不回落任何默认桩；
 - 调用方 messages 不被污染（修正提示只追加在工作副本）。
+
+后端一律经 ``call_structured_llm(llm=...)`` 显式注入（无进程级全局可设）。
 """
 
 from __future__ import annotations
+
+import pytest
 
 from pra.agent.guardrails.llm_shell import (
     LLMCallOutcome,
     LLMResponse,
     call_structured_llm,
-    get_llm_backend,
-    set_llm_backend,
 )
 from pra.agent.guardrails.schemas import PlanOutput
 from helpers import AlwaysRaiseBackend, SequenceBackend, plan_conclude_json
@@ -31,11 +33,12 @@ _SCHEMA_BAD = '{"next_action": "SOMETHING_ELSE", "tools": []}'
 
 async def _call(backend, *, output_model=PlanOutput, node="plan",
                 messages=None):
-    """设置全局后端并跑一次 call_structured_llm。"""
-    set_llm_backend(backend)
+    """用显式注入的 backend 跑一次 call_structured_llm。"""
     return await call_structured_llm(
-        OutputModel=output_model, node=node, messages=messages if messages is not None
-        else [dict(m) for m in _MESSAGES],
+        OutputModel=output_model,
+        node=node,
+        llm=backend,
+        messages=messages if messages is not None else [dict(m) for m in _MESSAGES],
     )
 
 
@@ -106,19 +109,18 @@ async def test_caller_messages_not_polluted():
     assert len(messages) == len(_MESSAGES)
 
 
-async def test_set_llm_backend_none_restores_default():
-    set_llm_backend(SequenceBackend(contents=[plan_conclude_json()]))
-    assert get_llm_backend().name == "test-sequence"
-    set_llm_backend(None)
-    backend = get_llm_backend()
-    assert backend.name == "scripted-walkthrough"
-    # 默认桩可正常服务（node=plan 需 __STATE__ 兜底 → conclude）
-    resp = await backend.complete(node="plan", messages=[], json_schema={})
-    assert "conclude" in resp.content
+async def test_missing_backend_raises_type_error():
+    """``llm=None``（装配缺陷）→ ``TypeError``：不回落默认桩、不降级成 HUMAN_REVIEW 掩盖。"""
+    with pytest.raises(TypeError, match="llm=None"):
+        await call_structured_llm(
+            OutputModel=PlanOutput, node="plan", messages=list(_MESSAGES), llm=None
+        )
 
 
 async def test_invalid_output_model_type_returns_error():
-    outcome = await call_structured_llm(OutputModel=dict, node="plan", messages=[])
+    outcome = await call_structured_llm(
+        OutputModel=dict, node="plan", messages=[], llm=AlwaysRaiseBackend()
+    )
     assert outcome.model is None
     assert outcome.attempts == 1
     assert outcome.error  # 有可归因的错误文本

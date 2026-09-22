@@ -299,9 +299,12 @@ def _demo_case():
 
 async def _run_graph(tools) -> dict:
     from pra.agent.graph import build_agent_graph
+    from pra.agent.scripted_llm import ScriptedLLMBackend
     from pra.agent.state import build_initial_state
 
-    graph = build_agent_graph(tools=tools, checkpointer=None)
+    graph = build_agent_graph(
+        tools=tools, llm=ScriptedLLMBackend(), checkpointer=None
+    )
     return await graph.ainvoke(
         build_initial_state(_demo_case()),
         {"configurable": {"thread_id": f"prod-rag-{uuid4().hex[:8]}"}},

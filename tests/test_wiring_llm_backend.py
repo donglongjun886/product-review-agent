@@ -154,7 +154,7 @@ def test_production_graph_injects_backend_and_same_tools(monkeypatch):
     graph = wiring.get_production_graph()
 
     assert graph is sentinel_graph
-    assert "llm" in graph_kwargs, "生产装配未把 llm= 交给 build_agent_graph（会回落 scripted 桩）"
+    assert "llm" in graph_kwargs, "生产装配未把 llm= 交给 build_agent_graph（缺它会直接 TypeError）"
     assert graph_kwargs["llm"] is sentinel_backend
     assert "tools" in graph_kwargs, "生产装配未把 tools= 交给 build_agent_graph"
     factory_tools = factory_calls.get("tools")
@@ -165,9 +165,8 @@ def test_production_graph_injects_backend_and_same_tools(monkeypatch):
 async def test_production_graph_runs_on_injected_backend(monkeypatch):
     """行为守护：生产图**运行时**真的经注入后端调 LLM —— 删 ``llm=`` 或节点读不到注入后端即变红。
 
-    与上一条的区别：上一条只锁 ``build_agent_graph`` 收到的 kwargs。``build_agent_graph`` 仅把 llm
-    写进 ``llm_shell`` 的进程级全局、节点**调用时**才去读，所以"传了 kwargs"不等于"运行时用上了"。
-    本用例真的跑一遍生产图（InMemory 工具世界 + 记录调用的桩后端），断言注入的后端被调用过。
+    与上一条的区别：上一条只锁 ``build_agent_graph`` 收到的 kwargs。本用例真的跑一遍生产图
+    （InMemory 工具世界 + 记录调用的桩后端），断言注入的后端被调用过。
     """
     nodes: list[str] = []
 

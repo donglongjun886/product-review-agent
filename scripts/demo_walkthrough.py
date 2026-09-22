@@ -6,8 +6,9 @@
 要点：
 - 直接可执行：``uv run python scripts/demo_walkthrough.py``（默认 6 tools + scripted
   LLM 桩，无 API key）。
-- ``build_agent_graph(checkpointer=make_memory_checkpointer())``；每次 stream 传
-  ``build_initial_state(case)``；checkpointer 场景下终态用
+- ``build_agent_graph(tools=build_tools(), llm=ScriptedLLMBackend(),
+  checkpointer=make_memory_checkpointer())``（工具与 LLM 均显式注入，无进程级缺省）；
+  每次 stream 传 ``build_initial_state(case)``；checkpointer 场景下终态用
   ``(await app.aget_state(config))["values"]`` 读取。兼容注记：仓库锁定
   langgraph 1.2.11，其 ``StateSnapshot`` 是 **NamedTuple**（``snap["values"]`` 抛
   TypeError），故先按字面写法、失败后回退 ``snapshot.values`` 属性。
@@ -337,7 +338,7 @@ def _print_summary(final_state: dict) -> None:
 
 
 def _build_app():
-    """构造编译图；graph.py 未落盘时给出明确报错。"""
+    """构造编译图（显式注入默认工具世界 + 确定性 scripted 桩）；graph.py 未落盘时明确报错。"""
     try:
         from pra.agent.graph import build_agent_graph  # 延迟 import：防未落盘/循环
     except Exception as exc:  # pragma: no cover - 仅 graph.py 未就绪时触发
@@ -345,7 +346,14 @@ def _build_app():
             "无法 import pra.agent.graph.build_agent_graph —— graph.py 尚未落盘或未实现 "
             f"（原错误: {exc!r}）。demo 依赖批 2 graph.py 装配，待协调者验收时执行。"
         ) from exc
-    return build_agent_graph(checkpointer=make_memory_checkpointer())
+    from pra.agent.scripted_llm import ScriptedLLMBackend
+    from pra.tools import build_tools
+
+    return build_agent_graph(
+        tools=build_tools(),
+        llm=ScriptedLLMBackend(),
+        checkpointer=make_memory_checkpointer(),
+    )
 
 
 async def main() -> None:

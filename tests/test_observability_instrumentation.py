@@ -8,7 +8,7 @@ schema 校验失败重试 → 2 个 generation（**最关键**：埋点在内层
 usage 透出（多次尝试按键累加、litellm 提取三键、scripted 桩不伪造）。
 
 隔离：用到 tracer 的测试经 ``_fake_tracer`` 注入并在结束时 ``set_tracer(None)``
-复原；LLM 后端由 tests/conftest.py 的 autouse fixture 还原。全程不联网。
+复原；LLM 后端一律经 ``call_structured_llm(llm=...)`` 显式注入（无进程级全局）。全程不联网。
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from pra.agent.guardrails.llm_shell import (
     LLMBackendError,
     LLMResponse,
     call_structured_llm,
-    set_llm_backend,
 )
 from pra.agent.guardrails.schemas import PlanOutput
 from pra.agent.scripted_llm import ScriptedLLMBackend
@@ -193,10 +192,9 @@ _CONFIG = {"configurable": {"thread_id": "run-obs-test"}}
 async def test_success_records_one_generation_with_model_input_output_latency(fake_tracer) -> None:
     """一次成功调用 → 1 个 generation：name=llm.{node}、model=后端自报、input/output/latency。"""
     backend = SequenceBackend(contents=[plan_conclude_json()], tokens=5)
-    set_llm_backend(backend)
-
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
+        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        llm=backend,
     )
 
     assert outcome.model is not None and outcome.attempts == 1 and outcome.error is None
@@ -226,10 +224,9 @@ async def test_schema_retry_records_two_generations(fake_tracer) -> None:
     Langfuse 必须看到**两次真实 ``backend.complete()``**，而不是只记外壳的 1 次。
     """
     backend = SequenceBackend(contents=[_SCHEMA_BAD, plan_conclude_json()], tokens=5)
-    set_llm_backend(backend)
-
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
+        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        llm=backend,
     )
 
     assert outcome.model is not None
@@ -265,10 +262,9 @@ async def test_schema_retry_records_two_generations(fake_tracer) -> None:
 async def test_backend_exception_records_error_and_outcome_unchanged(fake_tracer) -> None:
     """后端抛异常 → 每次尝试的 generation 收到 record_error；既有失败语义不变。"""
     backend = AlwaysRaiseBackend()
-    set_llm_backend(backend)
-
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
+        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        llm=backend,
     )
 
     # 既有行为（埋点前一致）：两次尝试、model=None、error=最后一次异常文本、tokens=0
@@ -288,10 +284,9 @@ async def test_backend_exception_records_error_and_outcome_unchanged(fake_tracer
 async def test_transport_retry_then_success_records_two_generations(fake_tracer) -> None:
     """transport 类失败重试（第 1 次抛、第 2 次成功）→ 同样 2 个 generation。"""
     backend = SequenceBackend(contents=[None, plan_conclude_json()], tokens=7)
-    set_llm_backend(backend)
-
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
+        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        llm=backend,
     )
 
     assert outcome.model is not None and outcome.attempts == 2 and outcome.tokens == 7
@@ -397,9 +392,9 @@ async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) 
         assert isinstance(T.get_tracer(), T.NullTracer)
 
         backend = SequenceBackend(contents=[plan_conclude_json()], tokens=3)
-        set_llm_backend(backend)
         outcome = await call_structured_llm(
-            OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
+            OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+            llm=backend,
         )
         assert outcome.model is not None and outcome.attempts == 1
         assert outcome.tokens == 3
@@ -440,10 +435,9 @@ async def test_outcome_usage_accumulated_across_attempts(fake_tracer) -> None:
             (plan_conclude_json(), {"input": 4, "output": 5, "total": 9}),
         ]
     )
-    set_llm_backend(backend)
-
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
+        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        llm=backend,
     )
 
     assert outcome.attempts == 2
@@ -464,10 +458,9 @@ async def test_outcome_usage_accumulated_across_attempts(fake_tracer) -> None:
 
 async def test_outcome_usage_none_when_all_responses_lack_usage() -> None:
     """全部响应无 usage → outcome.usage 保持 None（不伪造 0）。"""
-    set_llm_backend(_UsageBackend([(plan_conclude_json(), None)]))
-
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
+        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        llm=_UsageBackend([(plan_conclude_json(), None)]),
     )
 
     assert outcome.model is not None
@@ -477,12 +470,9 @@ async def test_outcome_usage_none_when_all_responses_lack_usage() -> None:
 
 async def test_outcome_usage_partial_when_only_one_attempt_has_usage() -> None:
     """仅某次尝试有 usage → 累加该次（缺失的不补 0）。"""
-    set_llm_backend(
-        _UsageBackend([(_SCHEMA_BAD, None), (plan_conclude_json(), {"total": 8})])
-    )
-
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES]
+        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        llm=_UsageBackend([(_SCHEMA_BAD, None), (plan_conclude_json(), {"total": 8})]),
     )
 
     assert outcome.model is not None and outcome.attempts == 2

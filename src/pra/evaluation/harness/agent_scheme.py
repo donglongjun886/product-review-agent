@@ -461,7 +461,7 @@ EVAL_WORLD_LABEL = "InMemory 种子世界 v1（含 P_88231/M_5512 演示种子�
 RAG_WORLD_LABEL = "RAG 世界（真实 Policy/Case KB · 确定性 mock embedding + BM25 + 余弦）"
 
 
-def make_eval_world_tools():
+def make_eval_world_tools(*, case_index=None, policy_index=None):
     """构造评测世界的 5 个 InMemory 工具（比 ``pra.tools.build_tools`` 少一个 ``OCRTool``）。
 
     **刻意不补 OCRTool**：评测集把 OCR 文本当基础输入（``input.product.images[].ocr_text``）
@@ -469,8 +469,12 @@ def make_eval_world_tools():
     只会多一个拿不到数据的工具。工具清单与生产各自维护（生产是 6 个），**不存在"同构"约束**，
     对标时以本函数为准。
 
-    注入本模块评测种子（默认演示种子 P_88231 / M_5512 / POLICY_3.2 / CASE_1832 已并入
+    默认注入本模块评测种子（默认演示种子 P_88231 / M_5512 / POLICY_3.2 / CASE_1832 已并入
     EVAL_* 常量）—— 数据源与 eval_data/v1 同一份事实，杜绝"评测集与工具世界漂移"。
+
+    :param case_index: CaseSearchTool 的检索索引；None → 评测种子 ``InMemoryCaseIndex``
+        （RAG 世界由 ``make_rag_world_tools`` 显式注入真实索引）。
+    :param policy_index: PolicySearchTool 的检索索引；None → 评测种子 ``InMemoryPolicyIndex``。
     """
     # 延迟 import：避免 evaluation 包导入期拉起全部工具子包（防环/省启动）
     from pra.tools.base import Tool
@@ -487,8 +491,16 @@ def make_eval_world_tools():
         ProductTool(repo=InMemoryProductRepository(EVAL_PRODUCTS)),
         ImageAnalysisTool(provider=MockImageAnalysisProvider(EVAL_IMAGE_MATCHES)),
         MerchantTool(repo=InMemoryMerchantRepository(EVAL_MERCHANTS)),
-        CaseSearchTool(index=InMemoryCaseIndex(EVAL_PRECEDENTS)),
-        PolicySearchTool(index=InMemoryPolicyIndex(EVAL_POLICY_CLAUSES)),
+        CaseSearchTool(
+            index=case_index if case_index is not None else InMemoryCaseIndex(EVAL_PRECEDENTS)
+        ),
+        PolicySearchTool(
+            index=(
+                policy_index
+                if policy_index is not None
+                else InMemoryPolicyIndex(EVAL_POLICY_CLAUSES)
+            )
+        ),
     ]
     return tools
 
@@ -497,8 +509,8 @@ def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
     """构造 RAG 世界的 Agent 工具（评测 RAG 单独模式）。
 
     复用 ``make_eval_world_tools()`` 的 5 件工具（Product / Image / Merchant 沿用 eval 世界
-    种子，事实锚点两世界共用），再把 CaseSearchTool / PolicySearchTool 按名替换为**真实 RAG
-    索引**（确定性 mock embedding + BM25 + 余弦，三模式可切换）—— 输出仍恰好 5 件、无 OCR。
+    种子，事实锚点两世界共用），把 CaseSearchTool / PolicySearchTool 的索引换成**真实 RAG
+    索引**（BM25 + 向量 + RRF/余弦，三模式可切换）—— 输出仍恰好 5 件、无 OCR。
 
     :param mode: "bm25" / "vector" / "hybrid"（默认 hybrid）。
     :param options: 索引装配参数透传（缺省 None = 不传 → 全走 factory 缺省）；键名与
@@ -509,9 +521,6 @@ def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index
-    from pra.tools import replace_tool_by_name
-    from pra.tools.case_search.tool import CaseSearchTool
-    from pra.tools.policy_search.tool import PolicySearchTool
 
     opts = dict(options or {})
     # RAG 世界的编码器必须显式给出（factory 不再代为构造）。调用方可在 options 里覆盖；
@@ -520,12 +529,12 @@ def make_rag_world_tools(*, mode: str = "hybrid", options: dict | None = None):
         from pra.tools import production_embedder
 
         opts["embedding_model"] = production_embedder()
-    # 事实三件沿用 eval 世界种子；两个检索工具按名换上真实 RAG 索引。装配参数逐字透传给
+    # 事实三件沿用 eval 世界种子，两个检索工具**构造时**注入真实 RAG 索引。装配参数逐字透传给
     # factory（未知键由它抛错：不吞键、不静默忽略拼错字）。
-    tools = make_eval_world_tools()
-    replace_tool_by_name(tools, CaseSearchTool(index=build_case_index(mode=mode, **opts)))
-    replace_tool_by_name(tools, PolicySearchTool(index=build_policy_index(mode=mode, **opts)))
-    return tools
+    return make_eval_world_tools(
+        case_index=build_case_index(mode=mode, **opts),
+        policy_index=build_policy_index(mode=mode, **opts),
+    )
 
 
 # 表面信号 / 证据统计辅助（纯函数）
@@ -1172,7 +1181,8 @@ class AgentScheme(SchemeRunner):
     """System 3 —— 完整调查 Agent（scripted 模式：eval 世界 + eval 审查员桩）。
 
     每 case 独立 build + compile 一个图（checkpointer=InMemory、thread_id 唯一），
-    天然隔离、可重放；运行后把进程级 LLM 后端恢复为默认桩（防污染后续进程）。
+    天然隔离、可重放；LLM 后端每案**显式注入** ``build_agent_graph(llm=...)``，
+    不碰任何进程级全局、无需收尾复位。
     装配参数均默认 None → 行为逐字节不变：
     - ``allowed_tools``：**装配层裁剪** —— 图工具注册与 plan 的 tool schema 都只给该
       子集（不动判定逻辑）；None = eval 世界全 5 工具。裁剪后 plan 不再排程被裁工具，
@@ -1182,8 +1192,8 @@ class AgentScheme(SchemeRunner):
     - ``llm``：**real 模式注入** —— 非 None 时 ``run()`` 直接把它当 LLMBackend 交给
       ``build_agent_graph``（跳过确定性桩）；须实现
       ``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol（``name`` 属性 +
-      ``async complete(*, node, messages, json_schema)``）；run 的 finally 仍统一恢复
-      ``set_llm_backend(None)``。real 非确定性 / 不可重放 / 需 API key。
+      ``async complete(*, node, messages, json_schema)``）。real 非确定性 / 不可重放 /
+      需 API key。
     - ``max_latency_ms`` / ``max_llm_calls``：**评测侧预算覆盖**（None = 生产默认
       30000ms / 10 次）—— real 模式放宽墙钟护栏（真实 LLM 每案 ~9 次串行调用天然 >30s，
       不放宽则每案都被 LATENCY 超限截胡转人工；scripted 毫秒级跑完不触发）与 LLM 调用
@@ -1207,7 +1217,7 @@ class AgentScheme(SchemeRunner):
             None if allowed_tools is None else frozenset(allowed_tools)
         )
         # real 模式注入的后端对象（None → run() 装配 EvalScriptedLLMBackend）；
-        # 每次 run 仍统一经 build_agent_graph(llm=...) 注入并在 finally 恢复默认桩。
+        # 每次 run 统一经 build_agent_graph(llm=...) 显式注入（无进程级全局、无收尾复位）。
         self._llm: object | None = llm
         # 评测侧预算覆盖（None = 生产默认）：只改每次 run 初始 state 的 budget.limits，
         # 不改生产 Budget/BudgetLimits 对象与默认值（见 run()）。
@@ -1235,9 +1245,6 @@ class AgentScheme(SchemeRunner):
         return state
 
     async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
-        from pra.agent.guardrails import llm_shell
-
-        tools = None
         if ctx.tool_world == "eval":
             tools = make_eval_world_tools()
         elif ctx.tool_world == "rag":
@@ -1248,7 +1255,11 @@ class AgentScheme(SchemeRunner):
                 mode=ctx.rag_mode or "hybrid",
                 options=ctx.rag_options,
             )
-        if tools is not None and self._allowed_tools is not None:
+        else:  # "default" = 仓库默认演示种子（InMemory）—— 显式装配，不依赖图侧缺省回落
+            from pra.tools import build_tools
+
+            tools = build_tools()
+        if self._allowed_tools is not None:
             # 工具注册层裁剪（只保留允许子集；连同 plan 侧裁剪 = 完整装配裁剪）
             tools = [t for t in tools if t.name in self._allowed_tools]
         if self._llm is not None:
@@ -1265,31 +1276,28 @@ class AgentScheme(SchemeRunner):
             checkpointer=make_memory_checkpointer(),
             llm=backend,
         )
-        try:
-            initial_state = build_initial_state(case.input)
-            initial_state = self._apply_budget_limits(initial_state)
-            # Root trace：每案一条，trace_id 确定性 uuid5
-            # （含 LLM 后端名 —— scripted 对照臂与 real 臂各自成 trace）；
-            # **不 per-case flush**（320 次太慢）—— 由评测入口整轮结束后
-            # ``tracing.flush_tracer()`` 统一刷出（S5 CLI 收尾调用）。
-            root_ctx = _root_trace_context(
-                case, ctx, initial_state, backend_name=getattr(backend, "name", "unknown")
+        initial_state = build_initial_state(case.input)
+        initial_state = self._apply_budget_limits(initial_state)
+        # Root trace：每案一条，trace_id 确定性 uuid5
+        # （含 LLM 后端名 —— scripted 对照臂与 real 臂各自成 trace）；
+        # **不 per-case flush**（320 次太慢）—— 由评测入口整轮结束后
+        # ``tracing.flush_tracer()`` 统一刷出（S5 CLI 收尾调用）。
+        root_ctx = _root_trace_context(
+            case, ctx, initial_state, backend_name=getattr(backend, "name", "unknown")
+        )
+        with get_tracer().trace_root(root_ctx) as root:
+            final_state = await graph.ainvoke(
+                initial_state,
+                {"configurable": {"thread_id": f"eval-agent-{case.eval_case_id}"}},
             )
-            with get_tracer().trace_root(root_ctx) as root:
-                final_state = await graph.ainvoke(
-                    initial_state,
-                    {"configurable": {"thread_id": f"eval-agent-{case.eval_case_id}"}},
+            _decision = final_state.get("decision")
+            if _decision is not None:
+                root.update(
+                    output={
+                        "decision": _decision.decision.value,
+                        "risk_level": _decision.risk_level.value,
+                    }
                 )
-                _decision = final_state.get("decision")
-                if _decision is not None:
-                    root.update(
-                        output={
-                            "decision": _decision.decision.value,
-                            "risk_level": _decision.risk_level.value,
-                        }
-                    )
-        finally:
-            llm_shell.set_llm_backend(None)  # 恢复默认桩（本后端仅评测期生效）
 
         decision: ReviewDecision | None = final_state.get("decision")
         if decision is None:

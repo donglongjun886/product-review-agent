@@ -11,8 +11,9 @@
 - 截断（``truncated``，finish_reason=length）：内容可能不完整，校验失败时**不重试**
   （同 max_tokens 下大概率再截断），直接降级；截断但内容合法则照常成功。
 
-后端可注入，默认 ``ScriptedLLMBackend``。本壳不做预算/降级检查（在节点入口），LLM
-记账由节点按 ``outcome.attempts`` bump。token 口径 = ``usage.total_tokens``
+后端**由调用方显式注入**（每个节点从图装配处拿到 ``llm=`` 后透传给本壳）—— 本壳不持
+任何进程级默认后端，也不会在缺后端时回落到 scripted 桩。本壳不做预算/降级检查（在节点
+入口），LLM 记账由节点按 ``outcome.attempts`` bump。token 口径 = ``usage.total_tokens``
 （input+output 合计、含 provider 缓存命中）；**schema 校验失败的尝试也全额累计**，
 transport 失败无响应不计。
 """
@@ -77,31 +78,6 @@ class LLMCallOutcome:
     error: Optional[str]  # 最后一次失败原因（供节点写 failure.reason）；成功为 None
     usage: dict | None = None  # 可选 token 拆分：多次尝试**按键累加**（与 tokens 同
                                # 口径）；全部为 None → None。
-
-
-# 模块级注入位点：_backend 非 None = 显式注入的后端；为 None = 用默认桩
-# （惰性实例化 ScriptedLLMBackend，惰性 import 防循环依赖）。
-_backend: Optional[LLMBackend] = None
-_default_backend: Optional[LLMBackend] = None  # 默认桩实例缓存（只建一次）
-
-
-def set_llm_backend(backend: Optional[LLMBackend]) -> None:
-    """注入/替换 LLM 后端；``backend=None`` 恢复默认桩（ScriptedLLMBackend）。"""
-    global _backend
-    _backend = backend
-
-
-def get_llm_backend() -> LLMBackend:
-    """取当前生效后端：显式注入者优先；否则惰性实例化默认 scripted 桩并缓存。"""
-    global _default_backend
-    if _backend is not None:
-        return _backend
-    if _default_backend is None:
-        # 惰性 import 防循环：scripted_llm 会反向 import 本模块的 LLMBackendError
-        from pra.agent.scripted_llm import ScriptedLLMBackend
-
-        _default_backend = ScriptedLLMBackend()
-    return _default_backend
 
 
 # transport 类失败重试的指数退避底数（秒）；保持小底数避免拖慢测试路径。
@@ -192,14 +168,24 @@ async def call_structured_llm(
     OutputModel: Any,
     node: str,
     messages: list[dict],
+    llm: LLMBackend,
 ) -> LLMCallOutcome:
-    """强校验 LLM 调用壳：按失败类分类重试 + 降级返回（永不抛异常）。
+    """强校验 LLM 调用壳：按失败类分类重试 + 降级返回（永不抛 LLM 异常）。
 
     成功时首轮通过 ``attempts=1``，失败后按类处理重试 → ``attempts=2``；两次均失败
     → ``model=None``、``error`` 为最后一次失败文本、``tokens`` 为已累计。不做预算
     检查。失败分类/回喂/退避只出现在失败重试路径，scripted 桩恒返回可校验内容 →
     默认路径决策序列零变化。
+
+    :param llm: 本次调用使用的 ``LLMBackend`` —— **必须显式注入**；``None`` 是装配缺陷，
+        立刻抛 ``TypeError``（不回落任何默认桩、不降级成 HUMAN_REVIEW 掩盖问题）。
     """
+    if llm is None:
+        raise TypeError(
+            f"call_structured_llm（node={node!r}）需要显式注入 LLM 后端（llm=None）—— "
+            "不再回落 scripted 桩；请在装配处把 LLMBackend 注入 build_agent_graph(llm=...)"
+        )
+
     # JSON Schema 只算一次；非 pydantic 模型按不可恢复失败返回
     try:
         json_schema: dict = OutputModel.model_json_schema()
@@ -211,7 +197,7 @@ async def call_structured_llm(
             error=f"OutputModel 不是 pydantic 模型（无 model_json_schema）: {exc}",
         )
 
-    backend = get_llm_backend()
+    backend = llm
     tracer = get_tracer()  # 进程级单例；无凭据 = NullTracer（全 no-op）
     work_messages: list[dict] = list(messages)  # 修正提示追加在工作副本，不污染调用方
     total_tokens = 0
@@ -289,6 +275,4 @@ __all__ = [
     "LLMCallOutcome",
     "LLMResponse",
     "call_structured_llm",
-    "get_llm_backend",
-    "set_llm_backend",
 ]

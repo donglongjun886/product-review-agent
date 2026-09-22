@@ -5,13 +5,13 @@
 failure、attempts 记账）；decide 预算超限不调 LLM（R3 归因）、LLM 失败 → R5 落 overrides
 且返回 degraded=False、degraded 透传短路，以及成功采纳 REJECT 提案。
 
-decide 采用「注入坏后端 + 最小确定性 state」，不 stub overlay。
+decide 采用「注入坏后端 + 最小确定性 state」，不 stub overlay。后端一律经节点关键字参数
+``llm=`` 显式注入（无进程级全局）。
 """
 
 from __future__ import annotations
 
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, STEP_HYPOTHESIZE
-from pra.agent.guardrails.llm_shell import set_llm_backend
 from pra.agent.nodes.decide import decide_node
 from pra.agent.nodes.hypothesize import hypothesize_node
 from pra.agent.nodes.plan import plan_node
@@ -42,10 +42,8 @@ _CONFIG: dict = {}
 
 
 def _raise_backend() -> AlwaysRaiseBackend:
-    """注入恒抛异常的后端并返回它，供断言调用次数。"""
-    b = AlwaysRaiseBackend()
-    set_llm_backend(b)
-    return b
+    """构造恒抛异常的后端替身并返回它，供断言调用次数。"""
+    return AlwaysRaiseBackend()
 
 
 # plan：入口短路
@@ -54,7 +52,7 @@ def _raise_backend() -> AlwaysRaiseBackend:
 async def test_plan_short_circuit_when_degraded():
     """degraded=True → 不调 LLM，恰返回 ``{"pending_tool_calls": []}``。"""
     backend = _raise_backend()
-    out = await plan_node({"degraded": True, "budget": Budget()}, _CONFIG)
+    out = await plan_node({"degraded": True, "budget": Budget()}, _CONFIG, llm=backend)
     assert out == {"pending_tool_calls": []}
     assert backend.calls == 0
 
@@ -62,7 +60,7 @@ async def test_plan_short_circuit_when_degraded():
 async def test_plan_short_circuit_when_budget_exceeded():
     """预算超限 → 不调 LLM，恰返回空 pending（不动 degraded）。"""
     backend = _raise_backend()
-    out = await plan_node({"degraded": False, "budget": Budget(llm_calls=10)}, _CONFIG)
+    out = await plan_node({"degraded": False, "budget": Budget(llm_calls=10)}, _CONFIG, llm=backend)
     assert out == {"pending_tool_calls": []}
     assert backend.calls == 0
 
@@ -77,7 +75,7 @@ def _hyp_state() -> dict:
 async def test_hypothesize_budget_guard_stops_without_llm():
     backend = _raise_backend()
     state = {"case": make_case(), "budget": Budget(llm_calls=10)}
-    out = await hypothesize_node(state, _CONFIG)
+    out = await hypothesize_node(state, _CONFIG, llm=backend)
     assert backend.calls == 0
     assert out["degraded"] is True
     assert out["hypotheses"] == [] and out["investigation_queue"] == []
@@ -91,8 +89,7 @@ async def test_hypothesize_budget_guard_stops_without_llm():
 async def test_hypothesize_success_apply():
     """成功路径：H1..Hn 按序编号、PENDING、posterior=None、queue 补 OPEN。"""
     backend = NodePayloadBackend(payloads={"hypothesize": hypothesize_json()})
-    set_llm_backend(backend)
-    out = await hypothesize_node(_hyp_state(), _CONFIG)
+    out = await hypothesize_node(_hyp_state(), _CONFIG, llm=backend)
     hypos = out["hypotheses"]
     assert backend.calls == ["hypothesize"]
     assert [h.id for h in hypos] == ["H1", "H2"]
@@ -114,8 +111,7 @@ async def test_hypothesize_success_apply():
 
 async def test_hypothesize_llm_failure_degrades():
     backend = SequenceBackend(contents=["not json", "still not json"], tokens=0)
-    set_llm_backend(backend)
-    out = await hypothesize_node(_hyp_state(), _CONFIG)
+    out = await hypothesize_node(_hyp_state(), _CONFIG, llm=backend)
     assert out["degraded"] is True
     assert out["hypotheses"] == [] and out["investigation_queue"] == []
     assert len(backend.calls) == 2
@@ -131,9 +127,9 @@ async def test_hypothesize_llm_failure_degrades():
 
 async def test_reevaluate_short_circuit_returns_empty():
     backend = _raise_backend()
-    assert await reevaluate_node({"degraded": True, "budget": Budget()}, _CONFIG) == {}
+    assert await reevaluate_node({"degraded": True, "budget": Budget()}, _CONFIG, llm=backend) == {}
     assert await reevaluate_node(
-        {"degraded": False, "budget": Budget(llm_calls=10)}, _CONFIG
+        {"degraded": False, "budget": Budget(llm_calls=10)}, _CONFIG, llm=backend
     ) == {}
     assert backend.calls == 0
 
@@ -198,8 +194,7 @@ async def test_reevaluate_node_applies_output_and_bumps_budget():
         "degraded": False,
     }
     backend = NodePayloadBackend(payloads={"reevaluate": reevaluate_json()})
-    set_llm_backend(backend)
-    out = await reevaluate_node(state, _CONFIG)
+    out = await reevaluate_node(state, _CONFIG, llm=backend)
     assert backend.calls == ["reevaluate"]
     hypos = out["hypotheses"]
     assert [h.id for h in hypos] == ["H1", "H2", "H3"]
@@ -218,7 +213,6 @@ async def test_reevaluate_node_applies_output_and_bumps_budget():
 
 async def test_reevaluate_llm_failure_keeps_hypotheses_and_degrades():
     backend = SequenceBackend(contents=["not json", "not json"], tokens=0)
-    set_llm_backend(backend)
     state = {
         "hypotheses": [hp("H1", prior=0.5, statement="s")],
         "investigation_queue": [{"q": "q1", "priority": 1, "status": "OPEN"}],
@@ -227,7 +221,7 @@ async def test_reevaluate_llm_failure_keeps_hypotheses_and_degrades():
         "budget": Budget(),
         "degraded": False,
     }
-    out = await reevaluate_node(state, _CONFIG)
+    out = await reevaluate_node(state, _CONFIG, llm=backend)
     assert out["degraded"] is True
     assert "hypotheses" not in out and "investigation_queue" not in out  # 不动推理字段
     assert state["hypotheses"][0].status == HypothesisStatus.PENDING  # 原对象未变
@@ -243,7 +237,7 @@ async def test_decide_budget_exceeded_does_not_call_llm():
     """预算超限 → 不调 LLM，HUMAN_REVIEW + R3_BUDGET_EXHAUSTED，budget 未记账。"""
     backend = _raise_backend()
     st = budget_exhausted_state()
-    out = await decide_node(st, _CONFIG)
+    out = await decide_node(st, _CONFIG, llm=backend)
     assert backend.calls == 0
     assert out["decision"].decision == Decision.HUMAN_REVIEW
     assert out["decision"].overrides == ["R3_BUDGET_EXHAUSTED"]
@@ -256,7 +250,7 @@ async def test_decide_degraded_short_circuit_no_llm():
     backend = _raise_backend()
     st = dc_anchor_state()
     st["degraded"] = True
-    out = await decide_node(st, _CONFIG)
+    out = await decide_node(st, _CONFIG, llm=backend)
     assert backend.calls == 0
     assert out["decision"].overrides == ["R5_DEGRADED_OR_FAILED_STEP"]
     assert out["decision"].decision == Decision.HUMAN_REVIEW
@@ -271,7 +265,7 @@ async def test_decide_llm_failure_r5_override():
     backend = _raise_backend()
     st = dc_anchor_state()
     st["degraded"] = False
-    out = await decide_node(st, _CONFIG)
+    out = await decide_node(st, _CONFIG, llm=backend)
     assert backend.calls == 2  # 两次尝试都失败
     assert out["decision"].decision == Decision.HUMAN_REVIEW
     assert out["decision"].overrides == ["R5_DEGRADED_OR_FAILED_STEP"]
@@ -287,10 +281,9 @@ async def test_decide_llm_failure_r5_override():
 async def test_decide_success_path_adopts_reject():
     """成功路径：REJECT 提案过 Gate → 采纳（overrides=[]、dc=0.95）、failures=[]。"""
     backend = NodePayloadBackend(payloads={"decide": decide_reject_json()})
-    set_llm_backend(backend)
     st = dc_anchor_state()
     st["degraded"] = False
-    out = await decide_node(st, _CONFIG)
+    out = await decide_node(st, _CONFIG, llm=backend)
     assert backend.calls == ["decide"]
     decision = out["decision"]
     assert decision.decision == Decision.REJECT

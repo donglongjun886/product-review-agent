@@ -10,9 +10,7 @@ run_id 语义：案件身份不进 AgentState，接入层映射为 LangGraph 线
 首次调用才装配生产工具世界：商品与商家读 MySQL、案例与政策读真实 RAG；LLM 后端由
 ``pra.wiring.build_llm_backend`` 读 ``Settings`` 构造并经 ``build_agent_graph(llm=...)`` 显式注入，
 缺 ``DEEPSEEK_API_KEY`` 抛 ``RuntimeError``），图不挂在 FastAPI app 上。单测不连库/不连 Chroma、
-不调真实模型 —— ``tests/conftest.py`` 把生产装配钉回 InMemory 世界与 scripted 桩。
-
-``build_agent_graph(llm=None)`` 不改动进程级当前后端（装配期未注入过时即缺省 scripted 桩）。
+不调真实模型 —— ``tests/conftest.py`` 把生产装配钉回 InMemory 世界与确定性 LLM 桩。
 """
 
 from __future__ import annotations

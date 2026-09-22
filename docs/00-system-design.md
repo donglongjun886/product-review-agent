@@ -268,8 +268,8 @@ Decision（充分 → PASS/REJECT/HUMAN_REVIEW；不足 → 回到 Plan 或转�
 
 统一 `Tool` 接口（协议与工具 schema 以 `src/pra/tools/base.py` 为准，本文不再镜像）：
 
-- 所有 Tool 注册到 `ToolRegistry`，Agent 的 Plan 步骤只输出 `{tool, args}`，由 Controller 调度执行。
-- **MCP 的定位**：v1 的 6 个工具都是**内部服务**，用统一 `Tool` 接口 + 注册表即可，**不需要 MCP**。
+- Agent 的 Plan 步骤只输出 `{tool, args}`，由 Controller 按名调度执行（参数用工具自带的 `args_model` 强校验）。
+- **MCP 的定位**：v1 的 6 个工具都是**内部服务**，用统一 `Tool` 接口即可，**不需要 MCP**。
 - **什么时候才引入 MCP**：当需要接入**外部/第三方/跨语言**的工具（如外部图片检索服务、外部 OCR 厂商、公司其他团队的 Tool）时，MCP 的标准化价值才显现。v1 明确不引入，避免为技术而技术。
 
 ### 5.3 六个 Tool 的实现现状（重要边界）

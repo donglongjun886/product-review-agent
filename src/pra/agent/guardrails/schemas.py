@@ -57,11 +57,10 @@ class HypothesizeOutput(BaseModel):
 class PlannedToolCall(BaseModel):
     """单条待执行工具调用（``pending_tool_calls`` 元素）。
 
-    ``args`` 由 tools_node 经 ``ToolRegistry.parse_args`` 用该工具的 ``args_model``
-    确定性校验。
+    ``args`` 由 tools_node 用该工具的 ``args_model`` 确定性校验（不信任 LLM 参数）。
     """
 
-    tool: str = Field(description="工具名（6 个受控名之一，须与 ToolRegistry 一致）")
+    tool: str = Field(description="工具名（6 个受控名之一，须与实际装配的工具一致）")
     args: dict = Field(default_factory=dict, description="工具入参 dict（args_model 校验/解析）")
     reason: str = Field(default="", description="为什么调（验证哪个假设→要哪条证据）")
     priority: int = Field(default=5, ge=1, le=5, description="1 最优先（同轮按 priority 升序执行）")

@@ -57,7 +57,7 @@ def bge_model_cached(cache_dir: Path, model_name: str = BGE_DEFAULT_MODEL) -> bo
     return any(layout.is_dir() and any(layout.glob("**/*.onnx")) for layout in layouts)
 
 
-# 工具装配辅助：工具列表的**顺序对下游无语义**（``ToolRegistry`` / ``tools_node`` 全程按名调度），
+# 工具装配辅助：工具列表的**顺序对下游无语义**（tools_node 全程按 name 调度），
 # 只被测试断言引用。故测试一律按名取工具，别再写 ``build_tools()[4]`` 这类位置下标 —— 那是脆弱
 # 耦合，装配顺序一变就误伤断言。
 

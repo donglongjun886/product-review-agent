@@ -1,7 +1,8 @@
 """真实 litellm 后端 ``LiteLLMBackend``（real LLM 评测用）。
 
-默认后端是 :class:`pra.agent.scripted_llm.ScriptedLLMBackend`（CI 回归依赖它）；本后端
-实现同一 ``LLMBackend`` Protocol，经 ``set_llm_backend`` 注入即可替换。语义差异：
+本后端实现 ``LLMBackend`` Protocol，由调用方在装配处**显式注入**
+（``build_agent_graph(llm=...)`` / ``AgentScheme(llm=...)``）—— CI 确定性回归用
+:class:`pra.agent.scripted_llm.ScriptedLLMBackend`，二者可互换。语义差异：
 
 - 桩把 ``__STATE__`` 解析后做确定性分支；本后端把同样状态子集渲染成人读中文上下文
   （见 :mod:`pra.agent.llm_prompts`）发给真实模型 —— **输出非确定性**：同

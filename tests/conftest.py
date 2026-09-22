@@ -1,31 +1,15 @@
 """pytest 共享配置：只放跨测试的 autouse fixture。
 
 asyncio 由 pyproject 的 asyncio_mode="auto" 驱动。
-``_reset_llm_backend`` 负责测试隔离：llm_shell 的后端注入位 ``set_llm_backend`` 是
-进程级全局，注入假后端后必须还原，否则后续依赖默认 scripted 桩的测试会被污染；
-惰性默认桩缓存 ``_default_backend`` 一并还原。
 ``_disable_langfuse_tracing`` 保证测试永不联网、观测为 no-op（见下）。
 ``_production_tools_use_inmemory_world`` / ``_production_entry_uses_scripted_llm`` 把生产入口
-的工具与 LLM 装配钉回确定性桩世界（见下）。
+的工具与 LLM 装配钉回确定性桩世界（见下）—— LLM 后端**不再有进程级全局**，注入一律经
+``build_agent_graph(llm=...)``，故测试之间无需还原任何全局状态。
 """
 
 from __future__ import annotations
 
 import pytest
-
-from pra.agent.guardrails import llm_shell
-
-
-@pytest.fixture(autouse=True)
-def _reset_llm_backend():
-    """测试级隔离：注入位点与默认桩缓存前后还原（autouse，无需各文件声明依赖）。"""
-    saved_backend = llm_shell._backend
-    saved_default = llm_shell._default_backend
-    try:
-        yield
-    finally:
-        llm_shell._backend = saved_backend
-        llm_shell._default_backend = saved_default
 
 
 @pytest.fixture(autouse=True)

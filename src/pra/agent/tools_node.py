@@ -10,7 +10,7 @@ trace，不触发转人工 —— 只有 critical 才触发）。预算语义：
 不入 failures；真正执行 call（成功 / 业务失败 / 异常重试后）计 1 次；失败不中断本
 visit。边际探针同样只进 record，不驱动路由。
 
-依赖注入：``make_tools_node(tools)`` 闭包持有私有 ``ToolRegistry``，不建模块级单例；
+依赖注入：``make_tools_node(tools)`` 闭包持有私有 ``{name: tool}`` 映射，不建模块级单例；
 run_id 从节点 config 的 ``configurable.thread_id`` 读取（缺省 ``"unknown-run"``）。
 ``evidence`` / ``metrics`` 的 import 延迟到图构建时刻，故本模块 import 阶段不依赖它们。
 """
@@ -27,7 +27,7 @@ from pra.agent.guardrails.errors import SEV_WARN, STEP_TOOL_CALL, make_failure
 from pra.agent.state import _evidence_key, merge_evidence
 from pra.domain.models import Budget, Evidence
 from pra.observability.tracing import Observation, get_tracer
-from pra.tools.base import Tool, ToolContext, ToolRegistry
+from pra.tools.base import Tool, ToolContext
 
 # 引用/摘要串长度上限：f"{type} {value}" 截到 200 字符
 MAX_REF_LEN = 200
@@ -77,12 +77,14 @@ def _error_record(seq: int, tool: str, args: Any, error: str, latency_ms: int = 
 def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]]:
     """构建 tools 节点（闭包工厂）。
 
-    ``tools``（如 ``pra.tools.build_tools()`` 或测试替身）逐个注册进本闭包私有的
-    ``ToolRegistry``（重名/非 Tool 由 register 防呆抛错）。
+    ``tools``（如 ``pra.tools.build_tools()`` 或测试替身）按 ``tool.name`` 建私有映射
+    （重名 = 装配缺陷，直接抛错，避免按名调度静默失配）。
     """
-    registry = ToolRegistry()
+    tools_by_name: dict[str, Tool] = {}
     for tool in tools:
-        registry.register(tool)
+        if tool.name in tools_by_name:
+            raise ValueError(f"工具重名：{tool.name!r}（装配缺陷，按名调度会静默失配）")
+        tools_by_name[tool.name] = tool
 
     # 延迟 import：evidence/metrics 到"图构建"这一刻才真正需要，
     # 且避免模块导入期就拉起这两处依赖。
@@ -133,22 +135,28 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
                 seq += 1
                 continue
 
-            # ② args 校验：registry 用工具自带 args_model 强校验 plan 给的 dict
+            # ② 取工具 + args 校验：用工具自带 args_model 强校验 plan 给的 dict（不信任 LLM）
+            tool = tools_by_name.get(tool_name)
+            if tool is None:
+                # 未装配的 tool（plan 缺陷）：预执行失败
+                records.append(
+                    _error_record(
+                        seq,
+                        tool_name,
+                        args_raw,
+                        f"tool 不可用: 未装配的 tool {tool_name!r}；"
+                        f"已装配: {sorted(tools_by_name)}",
+                    )
+                )
+                seq += 1
+                continue
             try:
-                parsed = registry.parse_args(tool_name, args_raw)
+                parsed = tool.args_model.model_validate(args_raw)
             except ValidationError as exc:
                 # 校验失败：error record；不入 failures、不 bump 预算
                 records.append(_error_record(seq, tool_name, args_raw, f"args 校验失败: {exc}"))
                 seq += 1
                 continue
-            except KeyError as exc:
-                # 未注册 tool（plan 缺陷，registry.get 内抛）：同属预执行失败
-                detail = exc.args[0] if exc.args else str(exc)
-                records.append(_error_record(seq, tool_name, args_raw, f"tool 不可用: {detail}"))
-                seq += 1
-                continue
-
-            tool = registry.get(tool_name)
 
             # ③ before 边际探针（working 快照；只进审计，不驱动路由）
             snap_before = _snapshot()

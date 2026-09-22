@@ -215,32 +215,15 @@ async def _run_scheme_records_concurrent(
     ctx: EvalContext,
     *,
     concurrency: int,
-    pin_backend: object | None = None,
     progress_prefix: str | None = None,
     latencies_ms: list[float] | None = None,
 ) -> list[EvalRecord]:
     """并发跑同一 scheme（仅 real 臂用；结果按用例原序返回）。
 
     为什么安全：用例之间天然隔离 —— 每案在 ``AgentScheme.run`` 内独立
-    ``build_agent_graph`` + ``compile``（checkpointer=InMemory、thread_id 唯一）、
-    工具也每案新建，不跨案共享可变状态。
-
-    ⚠️ **必须钉住进程级 LLM 后端**：``AgentScheme.run`` 的 finally 会执行
-    ``llm_shell.set_llm_backend(None)``（恢复默认 scripted 桩），而节点是在**调用时**
-    读该模块级全局（``get_llm_backend()``）。串行无害；并发时先完成的案件会重置全局，
-    **仍在飞的案件会静默退回 scripted 桩 → real 结果里混入桩结果**。故并发期间把全局
-    钉在 real 后端上、并让 ``None`` 复位成为 no-op，收尾统一恢复默认桩。
-    仅 ``agent_scheme.run`` 一处会复位（全仓唯一调用点），因此该守卫是充分的。
+    ``build_agent_graph`` + ``compile``（checkpointer=InMemory、thread_id 唯一），
+    工具每案新建，LLM 后端每案经 ``llm=`` 显式注入（图持有自己的后端，不共享可变状态）。
     """
-    pin = getattr(pin_backend, "name", None) is not None or pin_backend is not None
-    origin_set = None
-    if pin:
-        from pra.agent.guardrails import llm_shell as _llm_shell
-
-        origin_set = _llm_shell.set_llm_backend
-        origin_set(pin_backend)  # 钉住 real 后端
-        _llm_shell.set_llm_backend = lambda backend: None if backend is None else origin_set(backend)
-
     sem = asyncio.Semaphore(concurrency)
     total = len(cases)
     done = 0
@@ -262,14 +245,7 @@ async def _run_scheme_records_concurrent(
                 )
             return rec
 
-    try:
-        return list(await asyncio.gather(*[_one(c) for c in cases]))
-    finally:
-        if origin_set is not None:
-            from pra.agent.guardrails import llm_shell as _llm_shell
-
-            _llm_shell.set_llm_backend = origin_set
-            origin_set(None)  # 恢复默认 scripted 桩（与串行路径收尾一致）
+    return list(await asyncio.gather(*[_one(c) for c in cases]))
 
 
 def _compare_rows(
@@ -352,7 +328,6 @@ async def run_comparison(
             cases,
             ctx,
             concurrency=real_concurrency,
-            pin_backend=real_backend,
             progress_prefix="real",
             latencies_ms=real_latencies_ms,
         )
@@ -378,9 +353,6 @@ async def run_comparison(
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "count": len(cases),
         "real_concurrency": real_concurrency,
-        # 静默回退探测：real 臂若某案 token=0，说明该案的 LLM 调用落到了 scripted 桩上
-        # （并发复位竞态 / 后端未生效）—— 该卷不可用，报告会显式标红该计数。
-        "real_zero_token_cases": sum(1 for r in real_records if not (r.cost.get("tokens") or 0)),
         "agree": len(rows) - len(disagree),
         "disagree": disagree,
         "real_records": [r.model_dump() for r in real_records],
@@ -665,14 +637,9 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
     conc = payload.get("real_concurrency") or 1
     add(
         "  · real 臂调度: "
-        + ("并发 " + str(conc) + "（只改调度；用例间天然隔离，进程级 LLM 后端在并发期间被钉住，"
-           "防先完成案件复位全局后端导致在飞案件静默退回 scripted 桩）"
+        + ("并发 " + str(conc) + "（只改调度；用例间天然隔离 —— 每案独立建图，LLM 后端随图"
+           "显式注入，不跨案共享）"
            if conc > 1 else "逐案串行")
-    )
-    zero_tok = payload.get("real_zero_token_cases") or 0
-    add(
-        f"  · 静默回退审计: real 臂 token=0 案 = {zero_tok}"
-        + ("（正常：每案都真实调用了 LLM）" if zero_tok == 0 else "（⚠ 异常：有案件落到 scripted 桩，该卷不可用）")
     )
     add("  · 一致性口径: scripted.decision == real.decision 判为一致（risk/evidence 差异不参与）")
     add("  · 指标口径（DecisionEvaluator）: Accuracy=(TP+TN)/真值总数，预测 HUMAN_REVIEW 计为未命中")
@@ -877,10 +844,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1,
         help=(
             "real 臂并发度（默认 1 = 逐案串行，行为与既有跑法一致）。>1 时并发跑 real 臂："
-            "用例之间天然隔离（每案独立 build+compile 图、thread_id 唯一、工具每案新建），"
-            "只改调度、不改判定/指标/数据；scripted 对照臂恒串行。进程级 LLM 后端在并发期间"
-            "被钉住（否则先完成案件的 finally 复位会让在飞案件静默退回 scripted 桩）。"
-            "报告含 token=0 案审计以证明未发生静默回退"
+            "用例之间天然隔离（每案独立 build+compile 图、thread_id 唯一、工具与 LLM 后端每案"
+            "新建并显式注入），只改调度、不改判定/指标/数据；scripted 对照臂恒串行"
         ),
     )
     return parser.parse_args(argv)

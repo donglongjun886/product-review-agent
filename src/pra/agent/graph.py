@@ -10,8 +10,9 @@
 - 唯一回环是 ``plan → tools → reevaluate → plan``；离开回环只有条件出口。
 - DECIDED 是图唯一终态：``decide → END`` 之后无出边可继续。
 - 路由/预算/收敛全为确定性纯函数（无随机、无 LLM），同 state 必同后继。
-- 本模块只负责装配；``llm`` 经 ``set_llm_backend`` 设进程级全局后端（进程内缺省为 scripted
-  桩；生产入口由组合根 ``pra.wiring`` 显式注入真实后端）；``checkpointer`` 默认 None = 不持久化。
+- 本模块只负责装配：``tools`` 与 ``llm`` 都是**必填的显式依赖**（无缺省值、无进程级全局、
+  不回落任何桩），由组合根 ``pra.wiring``（生产）/ 评测 harness / 测试各自注入；
+  ``checkpointer`` 默认 None = 不持久化。
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from langgraph.graph import END, START, StateGraph
 
 from pra.agent.guardrails.budget import budget_exceeded
 from pra.agent.guardrails.converge import is_converged
-from pra.agent.guardrails.llm_shell import set_llm_backend
 from pra.agent.guardrails.measurements import capabilities_from_tools
 from pra.agent.nodes.decide import decide_node
 from pra.agent.nodes.hypothesize import hypothesize_node
@@ -33,10 +33,11 @@ from pra.agent.nodes.reevaluate import reevaluate_node
 from pra.agent.state import AgentState
 from pra.agent.tools_node import make_tools_node
 from pra.observability.tracing import get_tracer
-from pra.tools import build_tools
 
 if TYPE_CHECKING:  # 仅类型（注解惰性求值，无需运行时）
     from langgraph.graph.state import CompiledStateGraph
+
+    from pra.agent.guardrails.llm_shell import LLMBackend
 
 # 节点名常量 —— 与 add_node 名、条件边 map 的 key/target 一一对应（路由表唯一事实源）
 N_HYPOTHESIZE = "hypothesize"
@@ -90,47 +91,36 @@ def _node_output_summary(update: dict) -> dict:
     return summary
 
 
-def _wrap_node(name: str, action: Callable) -> Callable:
-    """把节点 action 包进 ``node_span(name=...)``（闭包工厂）。
+def _wrap_node(
+    name: str,
+    action: Callable,
+    *,
+    llm: LLMBackend | None = None,
+    state_update: dict | None = None,
+) -> Callable:
+    """把节点 action 包成图节点：node span + **装配期依赖注入**（闭包工厂，图内唯一注入点）。
 
-    契约：只多一层旁路观测，不改节点实现 / 拓扑 / 边 / 路由 / 返回值；
+    - ``llm`` 非 None → 以关键字参数交给 action（LLM 节点签名 ``(state, config, *, llm)``）；
+    - ``state_update`` 非 None → 并入该节点的 state 更新（图入口把测量环境能力写进 state）。
+
+    契约：只多一层旁路观测与装配期常量注入，不改节点实现 / 拓扑 / 边 / 路由判定；
     ``functools.wraps`` 保留原签名（LangGraph 依签名判定是否传 config）。
     """
 
     @functools.wraps(action)
     async def _node_with_span(state: dict, config) -> dict:
         with get_tracer().node_span(name=name, input=_node_input_summary(state)) as span:
-            update = await action(state, config)
+            update = (
+                await action(state, config, llm=llm)
+                if llm is not None
+                else await action(state, config)
+            )
             span.update(output=_node_output_summary(update))
+        if state_update and isinstance(update, dict):
+            return {**update, **state_update}
         return update
 
     return _node_with_span
-
-
-def _with_capabilities(fn: Callable, capabilities: dict[str, bool]) -> Callable:
-    """把装配期声明的**测量环境能力**注入 state 后再调用 ``fn``（闭包工厂）。
-
-    为什么需要：Gate 与收敛判定必须知道"某维度在本环境是否可测"（生产 image 是 Mock 桩
-    ⇒ ``image_appearance`` 不可测），而能力的权威来源是**实际装配的工具集** —— 只有
-    ``build_agent_graph`` 看得到它。注入只发生在传给被包函数的**副本**上，返回值不含该键，
-    故 LangGraph 的 state schema 不受影响。
-    """
-
-    @functools.wraps(fn)
-    async def _call(state: dict, config) -> dict:
-        return await fn({**state, "measurement_capabilities": capabilities}, config)
-
-    return _call
-
-
-def _route_with_capabilities(fn: Callable, capabilities: dict[str, bool]) -> Callable:
-    """条件边（路由）版本：LangGraph 只传 state、且要求**同步**可调用。"""
-
-    @functools.wraps(fn)
-    def _route(state: dict):
-        return fn({**state, "measurement_capabilities": capabilities})
-
-    return _route
 
 
 def route_after_plan(state: AgentState) -> Literal["tools", "decide"]:
@@ -171,40 +161,57 @@ def route_after_reevaluate(state: AgentState) -> Literal["continue", "decide"]:
     return "continue"
 
 
-def build_agent_graph(*, tools: list | None = None, checkpointer=None, llm=None) -> CompiledStateGraph:
+def build_agent_graph(
+    *, tools: list, llm: LLMBackend, checkpointer=None
+) -> CompiledStateGraph:
     """装配并编译复杂风险调查子图。
 
-    :param tools: ``Tool`` 列表；默认 None → ``pra.tools.build_tools()``（6 个 InMemory
-        工具，开箱可测 —— 本缺省是测试/评测/脚本的确定性世界），经 ``make_tools_node(tools)``
-        闭包工厂注入 tools 节点。生产入口（HTTP 路由 / 落库编排）显式传
-        ``pra.tools.build_production_tools()``（商品/商家读真库、案例/政策读真实 RAG），
-        不依赖本缺省。
+    ``tools`` 与 ``llm`` 均为**必填的显式依赖**：没有缺省值、没有进程级全局、不回落任何桩
+    —— 生产（``pra.wiring``）、评测（``pra.evaluation.harness.agent_scheme``）、测试各自
+    注入自己的世界。
+
+    :param tools: ``Tool`` 列表（生产 ``pra.tools.build_production_tools()``；评测/测试显式
+        装配自己的工具世界），经 ``make_tools_node(tools)`` 闭包工厂注入 tools 节点。
+    :param llm: 本次运行使用的 ``LLMBackend``：生产 = ``pra.wiring.build_llm_backend()`` 的
+        真实网关后端；评测 = 审查员桩 / 真实后端；测试 = 替身。经 ``_wrap_node`` 以关键字
+        参数注入 4 个 LLM 节点。
     :param checkpointer: LangGraph checkpointer（demo 用 ``make_memory_checkpointer()``
         的 InMemorySaver）；None = 不持久化，仅调试。
-    :param llm: 可选 ``LLMBackend``；非 None → ``set_llm_backend(llm)``（进程级全局后端，
-        调用方负责适时 ``set_llm_backend(None)`` 恢复默认 scripted 桩）；None = 不改动进程级
-        当前后端（装配期未注入过时即缺省 scripted 桩）；生产入口由
-        ``pra.wiring.get_production_graph`` 显式传入真实后端。
+    :raises TypeError: ``tools`` 或 ``llm`` 为 None —— 装配缺陷显式失败，不静默降级。
 
-    5 个 add_node 一律经 ``_wrap_node`` 包一层 node span（只多一层旁路观测）。
+    5 个 add_node 一律经 ``_wrap_node`` 包一层 node span（只多一层旁路观测）；测量环境能力
+    由入口节点写下（见下方 ``state_update``），其后节点与条件路由直接读 state。
     """
     if tools is None:
-        tools = build_tools()
-    if llm is not None:
-        set_llm_backend(llm)
+        raise TypeError(
+            "build_agent_graph 需要显式注入工具列表（tools=None）—— "
+            "不再回落 InMemory 默认工具世界"
+        )
+    if llm is None:
+        raise TypeError(
+            "build_agent_graph 需要显式注入 LLM 后端（llm=None）—— 不再回落 scripted 桩"
+        )
 
     tools_action = make_tools_node(tools)
 
     builder = StateGraph(AgentState)
     # 测量环境能力：唯一权威来源 = 实际装配的工具集（生产 image 是 Mock 桩 ⇒ 外观维度不可测）。
+    # 由入口节点写入 state（唯一写入点）：plan 的缺口提示、decide 的 Gate、reevaluate 后的
+    # 收敛路由一律直接读 state，不再各自包一层注入闭包。
     capabilities = capabilities_from_tools(tools)
-    builder.add_node(N_HYPOTHESIZE, _wrap_node(N_HYPOTHESIZE, hypothesize_node))
-    builder.add_node(N_PLAN, _wrap_node(N_PLAN, _with_capabilities(plan_node, capabilities)))
-    builder.add_node(N_TOOLS, _wrap_node(N_TOOLS, tools_action))
-    builder.add_node(N_REEVALUATE, _wrap_node(N_REEVALUATE, reevaluate_node))
     builder.add_node(
-        N_DECIDE, _wrap_node(N_DECIDE, _with_capabilities(decide_node, capabilities))
+        N_HYPOTHESIZE,
+        _wrap_node(
+            N_HYPOTHESIZE,
+            hypothesize_node,
+            llm=llm,
+            state_update={"measurement_capabilities": capabilities},
+        ),
     )
+    builder.add_node(N_PLAN, _wrap_node(N_PLAN, plan_node, llm=llm))
+    builder.add_node(N_TOOLS, _wrap_node(N_TOOLS, tools_action))
+    builder.add_node(N_REEVALUATE, _wrap_node(N_REEVALUATE, reevaluate_node, llm=llm))
+    builder.add_node(N_DECIDE, _wrap_node(N_DECIDE, decide_node, llm=llm))
 
     # 静态边：START→hypothesize→plan；tools→reevaluate；decide→END（唯一终态出口）
     builder.add_edge(START, N_HYPOTHESIZE)
@@ -217,9 +224,10 @@ def build_agent_graph(*, tools: list | None = None, checkpointer=None, llm=None)
     )
     builder.add_edge(N_TOOLS, N_REEVALUATE)
     # reevaluate 条件边：收敛/降级/超限 → decide；否则 continue 回 plan
+    # （能力表已由图入口写入 state，路由直接读 state）。
     builder.add_conditional_edges(
         N_REEVALUATE,
-        _route_with_capabilities(route_after_reevaluate, capabilities),
+        route_after_reevaluate,
         {"continue": N_PLAN, N_DECIDE: N_DECIDE},
     )
     builder.add_edge(N_DECIDE, END)

@@ -21,7 +21,7 @@ import json
 
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_HYPOTHESIZE, make_failure
-from pra.agent.guardrails.llm_shell import call_structured_llm
+from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
 from pra.agent.guardrails.schemas import HypothesizeOutput
 from pra.agent.llm_prompts import SYSTEM_PROMPTS
 from pra.domain.models import Hypothesis, HypothesisStatus
@@ -82,8 +82,10 @@ def _apply_queue(out: HypothesizeOutput) -> list[dict]:
     ]
 
 
-async def hypothesize_node(state: dict, config) -> dict:
+async def hypothesize_node(state: dict, config, *, llm: LLMBackend) -> dict:
     """hypothesize 图节点（入口首节点）：生成初始假设集 + 调查队列。
+
+    ``llm`` 由 ``build_agent_graph`` 装配期显式注入（本节点不持有/不查找任何默认后端）。
 
     返回 hypotheses / investigation_queue / degraded / failures / budget（failures 只含
     本次新增）。
@@ -108,6 +110,7 @@ async def hypothesize_node(state: dict, config) -> dict:
         OutputModel=HypothesizeOutput,
         node="hypothesize",
         messages=_build_messages(state),
+        llm=llm,
     )
     # LLM 记账：按实际尝试次数 bump（成功 1 次 / 重试后成功 2 次 / 两次失败仍 2 次）
     budget = bump_llm_usage(

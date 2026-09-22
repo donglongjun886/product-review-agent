@@ -28,7 +28,7 @@ import json
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, key_tool_failure, make_failure
 from pra.agent.guardrails.gate import run_decision_overlay
-from pra.agent.guardrails.llm_shell import call_structured_llm
+from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
 from pra.agent.guardrails.schemas import DecisionProposal
 from pra.agent.llm_prompts import SYSTEM_PROMPTS
 from pra.observability.tracing import get_tracer
@@ -96,9 +96,10 @@ def _gate_output_summary(final) -> dict:
     }
 
 
-async def decide_node(state: dict, config) -> dict:
+async def decide_node(state: dict, config, *, llm: LLMBackend) -> dict:
     """decide 图节点 action（graph.py 按 ``pra.agent.nodes.decide`` import）。
 
+    ``llm`` 由 ``build_agent_graph`` 装配期显式注入（本节点不持有/不查找任何默认后端）；
     ``config`` 为 LangGraph 运行时配置（thread_id 本节点不消费，预留签名）。返回
     {"decision", "degraded": False, "budget", "failures"}（failures 只含本次新增）。
     """
@@ -112,6 +113,7 @@ async def decide_node(state: dict, config) -> dict:
             OutputModel=DecisionProposal,
             node="decide",
             messages=_build_messages(state),
+            llm=llm,
         )
         # 记账：按实际尝试次数（含 schema 重试）bump。
         budget = bump_llm_usage(

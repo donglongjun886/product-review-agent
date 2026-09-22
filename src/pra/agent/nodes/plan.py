@@ -7,7 +7,7 @@
   None → 不调 LLM，返回 ``{"pending_tool_calls": []}``，且**不动 degraded**（后续路由
   转 decide 止损）。
 - 假设/证据/工具选择来自 LLM（``PlanOutput`` 由 llm_shell 强校验：失败重试 1 次仍失败
-  → 降级 + ``degraded=True``）；**是否真的执行**由 tools_node 经 ``ToolRegistry.parse_args``
+  → 降级 + ``degraded=True``）；**是否真的执行**由 tools_node 用该工具的 ``args_model``
   确定性校验（不信任 LLM 参数）。
 - 确定性 apply：``next_action=="conclude"`` 或 ``tools`` 为空 → 计划为空；否则
   ``PlannedToolCall → dict {tool, args, reason, priority}``。
@@ -25,7 +25,7 @@ import json
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.dedup import dedup_pending
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_PLAN, make_failure
-from pra.agent.guardrails.llm_shell import call_structured_llm
+from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
 from pra.agent.guardrails.schemas import PlanOutput
 from pra.agent.llm_prompts import SYSTEM_PROMPTS
 
@@ -141,8 +141,10 @@ def _apply_plan(out: PlanOutput) -> list[dict]:
     return [call.model_dump() for call in out.tools]
 
 
-async def plan_node(state: dict, config) -> dict:
+async def plan_node(state: dict, config, *, llm: LLMBackend) -> dict:
     """plan 图节点：决定本轮取证工具（LLM 语义步）+ 确定性 dedup。
+
+    ``llm`` 由 ``build_agent_graph`` 装配期显式注入（本节点不持有/不查找任何默认后端）。
 
     返回 pending_tool_calls / tool_call_history / degraded / failures / budget；cleaned
     为空 → 路由自动 decide。
@@ -152,7 +154,7 @@ async def plan_node(state: dict, config) -> dict:
         return {"pending_tool_calls": []}
 
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=_build_messages(state)
+        OutputModel=PlanOutput, node="plan", messages=_build_messages(state), llm=llm
     )
     # LLM 记账：按实际尝试次数 bump（成功 1 次 / 重试后成功 2 次 / 两次失败仍 2 次）
     budget = bump_llm_usage(

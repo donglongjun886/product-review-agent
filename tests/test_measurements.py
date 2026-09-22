@@ -298,6 +298,35 @@ def test_production_vision_stub_declares_image_unmeasurable():
     assert caps[DIM_IMAGE_APPEARANCE] is False
 
 
+async def test_graph_writes_tool_derived_capabilities_into_state():
+    """图装配把工具集导出的能力表写进 state（唯一写入点）—— Gate/收敛判定据此分三态。
+
+    反证：若注入丢失（state 里没有能力表或表与工具集不一致），``image_appearance`` 会回落
+    "可测"⇒ 生产视觉桩的"测不出"被误判成"可测却没测"（NOT_MEASURED，可补救），
+    而不是 UNMEASURABLE（环境缺失，重跑无用）。
+    """
+    from pra.agent.graph import build_agent_graph
+    from pra.agent.scripted_llm import ScriptedLLMBackend
+    from pra.agent.state import build_initial_state
+    from pra.tools import build_tools
+
+    async def _final_caps(vision_available: bool) -> dict:
+        tools = build_tools(vision_measurement_available=vision_available)
+        graph = build_agent_graph(
+            tools=tools, llm=ScriptedLLMBackend(), checkpointer=None
+        )
+        state = await graph.ainvoke(
+            build_initial_state(make_case()),
+            {"configurable": {"thread_id": f"caps-{vision_available}"}},
+        )
+        assert state["measurement_capabilities"] == capabilities_from_tools(tools)
+        return state["measurement_capabilities"]
+
+    # 生产口径（视觉桩）→ 外观不可测；默认 InMemory 口径（视觉可测）→ 可测。
+    assert (await _final_caps(False))[DIM_IMAGE_APPEARANCE] is False
+    assert (await _final_caps(True))[DIM_IMAGE_APPEARANCE] is True
+
+
 # ---- 强度（dc 的事实侧输入） ----
 
 

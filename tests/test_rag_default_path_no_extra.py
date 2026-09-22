@@ -59,7 +59,7 @@ def main() -> dict:
     case_rows = load_cases()[0]
     tools_memory = build_tools()           # 默认世界：InMemory 种子
     prod_tools = build_production_tools()  # 生产装配：惰性 RAG，装配期不得 import 后端
-    # 按名取工具（装配顺序对下游无语义：ToolRegistry / tools_node 全程按名调度）
+    # 按名取工具（装配顺序对下游无语义：tools_node 全程按名调度）
     memory_by_name = {t.name: t for t in tools_memory}
     prod_by_name = {t.name: t for t in prod_tools}
 

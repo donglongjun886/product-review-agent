@@ -26,7 +26,7 @@ import re
 
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_REEVALUATE, make_failure
-from pra.agent.guardrails.llm_shell import call_structured_llm
+from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
 from pra.agent.guardrails.schemas import QueueUpdate, ReevaluateOutput
 from pra.agent.llm_prompts import SYSTEM_PROMPTS
 from pra.domain.models import Hypothesis, HypothesisStatus
@@ -142,8 +142,11 @@ def _apply(state: dict, out: ReevaluateOutput) -> dict:
     return {"hypotheses": result, "investigation_queue": queue}
 
 
-async def reevaluate_node(state: dict, config) -> dict:
-    """reevaluate 图节点 action（graph.py 按 ``pra.agent.nodes.reevaluate`` import）。"""
+async def reevaluate_node(state: dict, config, *, llm: LLMBackend) -> dict:
+    """reevaluate 图节点 action（graph.py 按 ``pra.agent.nodes.reevaluate`` import）。
+
+    ``llm`` 由 ``build_agent_graph`` 装配期显式注入（本节点不持有/不查找任何默认后端）。
+    """
     # 入口短路：degraded 或预算超限 → 不调 LLM，返回最小更新 {}（不动推理字段、
     # 不动 degraded —— 路由据此直接进 decide，overlay 兜底）。
     if state.get("degraded") or budget_exceeded(state["budget"]) is not None:
@@ -152,6 +155,7 @@ async def reevaluate_node(state: dict, config) -> dict:
         OutputModel=ReevaluateOutput,
         node="reevaluate",
         messages=_build_messages(state),
+        llm=llm,
     )
     # 记账：按实际尝试次数（含 schema 重试）bump。
     budget = bump_llm_usage(

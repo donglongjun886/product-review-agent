@@ -11,8 +11,7 @@
 
 不烧 key：只 monkeypatch ``litellm.acompletion`` 属性（不 mock 整个模块 import）；每个触发
 complete 的测试都打上「耗尽即 pytest.fail」的哨兵；无 key / 未知 node 在 litellm import 之前
-就抛 ``LLMBackendError``。backend 注入由 conftest.py 的 autouse fixture ``_reset_llm_backend``
-快照还原，本文件另加 try/finally 双保险。
+就抛 ``LLMBackendError``。后端一律经 ``call_structured_llm(llm=...)`` 显式注入。
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from pydantic import BaseModel, Field
 from pra.agent.guardrails.llm_shell import (
     LLMBackendError,
     call_structured_llm,
-    set_llm_backend,
 )
 from pra.agent.guardrails.schemas import PlanOutput
 from pra.agent.litellm_backend import LiteLLMBackend
@@ -371,13 +369,9 @@ async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypat
     """
     fake = _patch_acompletion(monkeypatch, contents=[_SCHEMA_BAD, plan_conclude_json()])
     backend = LiteLLMBackend(api_key="sk-test")
-    set_llm_backend(backend)
-    try:
-        outcome = await call_structured_llm(
-            OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES
-        )
-    finally:
-        set_llm_backend(None)  # 恢复默认桩（conftest autouse 亦有兜底）
+    outcome = await call_structured_llm(
+        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+    )
     assert outcome.model is not None
     assert isinstance(outcome.model, PlanOutput)
     assert outcome.model.next_action == "conclude"
@@ -426,13 +420,9 @@ async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeyp
     fake_acompletion.calls = []
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     backend = LiteLLMBackend(api_key="sk-test")
-    set_llm_backend(backend)
-    try:
-        outcome = await call_structured_llm(
-            OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES
-        )
-    finally:
-        set_llm_backend(None)
+    outcome = await call_structured_llm(
+        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+    )
     assert call_count["n"] == 2  # 失败后重试了 1 次
     assert outcome.model is not None and outcome.model.next_action == "conclude"
     assert outcome.attempts == 2
@@ -477,13 +467,9 @@ async def test_call_structured_llm_truncated_invalid_output_not_retried(monkeypa
         finish_reason="length",
     )
     backend = LiteLLMBackend(api_key="sk-test")
-    set_llm_backend(backend)
-    try:
-        outcome = await call_structured_llm(
-            OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES
-        )
-    finally:
-        set_llm_backend(None)
+    outcome = await call_structured_llm(
+        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+    )
     assert outcome.model is None
     assert outcome.attempts == 1  # 截断按 transport 类：不重试
     assert outcome.error and "截断" in outcome.error
@@ -496,13 +482,9 @@ async def test_call_structured_llm_truncated_but_valid_content_succeeds(monkeypa
         monkeypatch, contents=[plan_conclude_json()], finish_reason="length"
     )
     backend = LiteLLMBackend(api_key="sk-test")
-    set_llm_backend(backend)
-    try:
-        outcome = await call_structured_llm(
-            OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES
-        )
-    finally:
-        set_llm_backend(None)
+    outcome = await call_structured_llm(
+        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+    )
     assert outcome.model is not None and outcome.model.next_action == "conclude"
     assert outcome.attempts == 1
     assert outcome.error is None
@@ -515,13 +497,9 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
         monkeypatch, contents=[_SCHEMA_BAD, _SCHEMA_BAD], tokens=5
     )
     backend = LiteLLMBackend(api_key="sk-test")
-    set_llm_backend(backend)
-    try:
-        outcome = await call_structured_llm(
-            OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES
-        )
-    finally:
-        set_llm_backend(None)
+    outcome = await call_structured_llm(
+        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+    )
     assert outcome.model is None
     assert outcome.attempts == 2
     assert outcome.error  # 最后一次 ValidationError 文本（供节点写 failure.reason）

@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 
-from pra.agent.guardrails import llm_shell
 from pra.evaluation.regression import (
     canonical_digest,
     compare_snapshots,
@@ -62,16 +61,10 @@ def _load_gen_module():
 def v2_current_snapshot() -> dict:
     """三方案全量 v2 快照（确定性 ~3.4 s；模块内共享，避免每个测试重跑 agent 320 案）。
 
-    与 conftest 的 autouse 同款卫生：前后快照/还原 llm_shell 进程级后端状态
-    （AgentScheme.run 的 finally 会 set_llm_backend(None)），保证跨测试无全局污染。
+    LLM 后端由 ``AgentScheme`` 每案显式注入 ``build_agent_graph(llm=...)``（无进程级全局），
+    故跨测试无需还原任何后端状态。
     """
-    saved_backend = llm_shell._backend
-    saved_default = llm_shell._default_backend
-    try:
-        return asyncio.run(compute_current_snapshot(EVAL_V2, schemes=SCHEMES))
-    finally:
-        llm_shell._backend = saved_backend
-        llm_shell._default_backend = saved_default
+    return asyncio.run(compute_current_snapshot(EVAL_V2, schemes=SCHEMES))
 
 
 # --- 1) 入库 v2 基线：结构 + digest 自洽（不跑任何方案，纯文件静态断言）
