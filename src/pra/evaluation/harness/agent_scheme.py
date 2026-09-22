@@ -2,7 +2,8 @@
 
 走 ``build_agent_graph``（hypothesize→plan→tools→reevaluate→decide，预算
 10/15/40000/30000），终态以确定性 overlay 后的 ``ReviewDecision`` 为评测真值。
-不落 DB；每 case 独立 build + compile 一个图、thread_id 唯一 → 天然隔离、可重放。
+不落 DB；每 case 独立 build + compile 一个图，每次 ``ainvoke`` 都从
+``build_initial_state`` 起算 → 天然隔离、可用桩重放。
 **scripted（CI 可跑）**：注入确定性 ``EvalScriptedLLMBackend``，工具用与 eval_data/v1
 同一份 InMemory 种子世界 —— Agent 经工具拿到 Single-call / Rule 看不到的证据。
 **real**：``AgentScheme(llm=<对象>)`` 直接把该对象交给 ``build_agent_graph``；
@@ -38,7 +39,6 @@ from uuid import NAMESPACE_URL, uuid5
 
 from langgraph.graph.state import CompiledStateGraph
 
-from pra.agent.checkpointer import make_memory_checkpointer
 from pra.agent.graph import build_agent_graph
 from pra.agent.guardrails.budget import (  # 预算超限维度常量（P2-16 记录侧复用）
     DIM_LATENCY,
@@ -1155,8 +1155,8 @@ def _root_trace_context(
 class AgentScheme(SchemeRunner):
     """System 3 —— 完整调查 Agent（scripted 模式：eval 世界 + eval 审查员桩）。
 
-    每 case 独立 build + compile 一个图（checkpointer=InMemory、thread_id 唯一），
-    天然隔离、可重放；LLM 后端每案**显式注入** ``build_agent_graph(llm=...)``，
+    每 case 独立 build + compile 一个图（不落 checkpoint），每次 ``ainvoke`` 都由
+    ``build_initial_state`` 起算 → 天然隔离；LLM 后端每案**显式注入** ``build_agent_graph(llm=...)``，
     不碰任何进程级全局、无需收尾复位。
 
     - ``ctx.tool_world`` == "rag"：CaseSearch/PolicySearch 注入真实 RAG 索引（hybrid），
@@ -1201,7 +1201,6 @@ class AgentScheme(SchemeRunner):
             backend = EvalScriptedLLMBackend()
         graph: CompiledStateGraph = build_agent_graph(
             tools=tools,
-            checkpointer=make_memory_checkpointer(),
             llm=backend,
         )
         initial_state = build_initial_state(case.input)
@@ -1213,6 +1212,8 @@ class AgentScheme(SchemeRunner):
             case, ctx, initial_state, backend_name=getattr(backend, "name", "unknown")
         )
         with get_tracer().trace_root(root_ctx) as root:
+            # 不挂 checkpointer：图无恢复/续跑需求，终态由 ainvoke 直接返回。thread_id 仍传 ——
+            # tools_node 从 ``configurable.thread_id`` 读 run_id 落审计。
             final_state = await graph.ainvoke(
                 initial_state,
                 {"configurable": {"thread_id": f"eval-agent-{case.eval_case_id}"}},

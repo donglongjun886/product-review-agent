@@ -6,10 +6,9 @@ SchemeRunner（rule / single_call_llm / agent）跑同一数据集 → 统一 Ev
 abstention 五指标进 EvaluationResult（v1 无 abstain 标签 → abstention 区为空）
 → report.py 打印 Console Report。
 
-确定性约定（可重放断言的基础）：数据集行序即遍历序；三方案**顺序串行**执行
-（不并发，避免共享态/调度抖动）；Agent 每 case 独立 build 图 + 唯一 thread_id；
-进程级 LLM 后端每次运行后恢复默认；EvalRecord 不含墙钟字段 → 同数据重跑产出
-可逐字节比对。
+确定性约定（scripted 路径的可重放断言基础）：数据集行序即遍历序；三方案**顺序串行**执行
+（不并发，避免共享态/调度抖动）；Agent 每 case 独立 build 图；LLM 后端按 case 显式注入、
+无进程级全局；EvalRecord 不含墙钟字段 → 同数据重跑产出可逐字节比对。
 
 不落 DB：全部在内存完成（快，且不污染业务表）。
 """

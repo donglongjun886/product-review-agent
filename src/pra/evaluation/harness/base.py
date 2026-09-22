@@ -7,11 +7,12 @@
   PASS/REJECT/HUMAN_REVIEW（Rule 的 COMPLEX 与 Single-call 的置信不足后处理都映射
   HUMAN_REVIEW）；``evidence`` 为 ``[{type, value, extra?}]`` 摘要；``tool_calls_actual``
   为实际调用工具名（去重保序，rule / single_call 恒 []）；``cost`` =
-  ``{llm_calls, tool_calls, tokens}``，**刻意不含墙钟 latency_ms**（评测要可逐字节
-  重放，墙钟是进程相关量）；``detail`` 只进审计，不参与指标。
+  ``{llm_calls, tool_calls, tokens}``，**刻意不含墙钟 latency_ms**（进程相关量会让
+  scripted 路径的重跑比对漂移）；``detail`` 只进审计，不参与指标。
 
-全链路确定性：无真 LLM / 无网络 / 无随机；EvalRecord 不含进程相关字段 → 同数据
-重跑可逐字节比对。
+**scripted 路径全链路确定性**：无真 LLM / 无网络 / 无随机；EvalRecord 不含进程相关字段 →
+同数据重跑可逐字节比对（Regression 与单测依赖）。**real 路径（``AgentScheme(llm=...)``）
+不在此列** —— 真实模型不要求逐字节可重放。
 """
 
 from __future__ import annotations
