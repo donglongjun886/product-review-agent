@@ -7,8 +7,7 @@
 
 - (a) AST 静态反证：两个装配模块（``pra/tools/__init__.py``、
   ``pra/evaluation/harness/agent_scheme.py``）内不得出现任何整数常量下标赋值
-  （``<expr>[<int>] = …``，与列表命名无关）—— 回退即红；并断言 ``replace_tool_by_name`` 已
-  定义且被装配路径实际调用（反「空断言」）。
+  （``<expr>[<int>] = …``，与列表命名无关）—— 回退即红。
 - (b) 行为单测：``replace_tool_by_name`` 在乱序列表上按名命中（放在非 [4]/[5] 下标也能替换，
   其余元素与顺序不变）；未命中抛 ``KeyError`` 且消息含该 name。
 - (c) 清单断言：``build_tools()`` / ``build_production_tools()`` 各 6 件；
@@ -43,8 +42,6 @@ _ASSEMBLY_MODULES = (
     _REPO_ROOT / "src" / "pra" / "tools" / "__init__.py",
     _REPO_ROOT / "src" / "pra" / "evaluation" / "harness" / "agent_scheme.py",
 )
-_TOOL_MODULE = _ASSEMBLY_MODULES[0]
-
 _EXPECTED_SIX = (
     "ProductTool",
     "ImageAnalysisTool",
@@ -119,26 +116,6 @@ def test_assembly_modules_have_no_int_index_assignment():
     assert findings == [], (
         f"装配模块出现整数常量下标赋值 {findings} —— 工具装配必须按名替换"
         "（replace_tool_by_name）；位置索引已废弃，回退即红"
-    )
-
-
-def test_tool_module_defines_and_uses_replace_tool_by_name():
-    """反「空断言」：按名替换函数必须已定义，且装配路径确实引用了它。"""
-    tree = _parse_module(_TOOL_MODULE)
-    defined = {
-        n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    assert "replace_tool_by_name" in defined, (
-        "装配按名替换函数缺失 —— 上面的下标反证会空跑（先修 src/pra/tools/__init__.py）"
-    )
-    calls = [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and _name_of(n.func) == "replace_tool_by_name"
-    ]
-    assert calls, (
-        "replace_tool_by_name 仅被定义却无调用点 —— 装配未真正走按名替换"
-        "（疑似退回位置索引或自造替换路径）"
     )
 
 

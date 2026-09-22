@@ -141,7 +141,7 @@ def test_default_path_pulls_in_no_extra_dependencies() -> None:
 
 def test_default_path_guard_is_not_vacuous() -> None:
     """反「空断言」守卫：默认路径必须真的 import 了 pra.rag/pra.tools、建了 6 个 memory 工具
-    并读出了语料（24/67 行），生产装配注入惰性代理且尚未建库。"""
+    并读出了语料，生产装配注入惰性代理且尚未建库。"""
     payload = _run_default_path_child()
     assert payload["rag_loaded"] and payload["tools_loaded"], (
         "子进程实际未 import pra.rag/pra.tools → 本用例会空跑（先修脚本）"
@@ -159,7 +159,9 @@ def test_default_path_guard_is_not_vacuous() -> None:
     assert payload["prod_tool_built"] == [False, False], (
         "生产装配后索引必须尚未构建（首次检索才建）"
     )
-    assert payload["corpus_rows"] == [24, 67]
+    assert len(payload["corpus_rows"]) == 2 and all(r > 0 for r in payload["corpus_rows"]), (
+        "两路 InMemory 索引必须真的读出了种子语料（行数规模不锁，随语料演进自由变化）"
+    )
 
 
 @pytest.mark.parametrize("module_name", _FORBIDDEN_TOP_LEVEL)

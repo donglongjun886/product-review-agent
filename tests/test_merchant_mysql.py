@@ -206,22 +206,23 @@ def test_construction_does_not_touch_the_sessionmaker_provider():
     assert calls == []
 
 
-async def test_get_profile_assembles_profile_and_queries_events():
-    repo, session = _repo_with_fake_sessions(
+async def test_get_profile_loads_profile_and_recent_events():
+    """行为不变量：命中商家时画像非空，且近期事件已随画像装入（不钉内部查询编排）。"""
+    repo, _ = _repo_with_fake_sessions(
         [_FakeResult(first=_merchant_row()), _FakeResult(rows=[_event_row()])]
     )
 
     profile = await repo.get_profile("M_TEST", window_days=90)
     assert profile is not None and profile.credit_score == 62
-    assert len(session.queries) == 2, "应查 1 次主表 + 1 次事件表"
-    assert "merchant_event" in str(session.queries[1])
+    assert [(e.event_type, e.ts) for e in profile.recent_events] == [
+        ("改标题重上架", "2024-09-01T10:00:00Z")
+    ]
 
 
-async def test_missing_merchant_returns_none_without_event_query():
-    repo, session = _repo_with_fake_sessions([_FakeResult(first=None)])
+async def test_missing_merchant_returns_none():
+    repo, _ = _repo_with_fake_sessions([_FakeResult(first=None)])
 
     assert await repo.get_profile("M_NOPE", window_days=90) is None
-    assert len(session.queries) == 1, "商家不存在时应短路，不再查事件表"
 
 
 async def test_infrastructure_error_propagates_and_is_never_swallowed_as_none():

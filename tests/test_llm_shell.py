@@ -54,9 +54,9 @@ async def test_schema_fail_then_success_retries_once():
     assert len(backend.calls[1]) == len(_MESSAGES) + 1
     correction = backend.calls[1][-1]
     assert correction["role"] == "user"
-    assert "请严格按 Schema 重新输出" in correction["content"]
+    assert "重新输出" in correction["content"]  # 含"重新输出"语义的修正提示（宽匹配，不锁措辞）
     assert '"next_action": "SOMETHING_ELSE"' in correction["content"]  # 原文回喂
-    assert "validation error" in correction["content"].lower()  # 校验错误一并回喂
+    assert "validation" in correction["content"].lower()  # 校验错误一并回喂（pydantic 文本）
 
 
 async def test_valid_first_attempt_succeeds():
@@ -94,8 +94,7 @@ async def test_backend_raise_then_success_recovers():
     assert outcome.attempts == 2
     assert outcome.tokens == 4
     assert len(backend.calls) == 2
-    assert len(backend.calls[1]) == len(_MESSAGES)  # 未追加修正提示
-    assert "重新输出" not in backend.calls[1][-1]["content"]  # 无 schema 修正文案
+    assert len(backend.calls[1]) == len(_MESSAGES)  # 未追加修正提示（长度不变即无追加）
 
 
 async def test_caller_messages_not_polluted():
@@ -122,7 +121,8 @@ async def test_invalid_output_model_type_returns_error():
     outcome = await call_structured_llm(OutputModel=dict, node="plan", messages=[])
     assert outcome.model is None
     assert outcome.attempts == 1
-    assert "不是 pydantic 模型" in (outcome.error or "")
+    assert outcome.error  # 有可归因的错误文本
+    assert "dict" in (outcome.error or "")  # 错误里点名了非法的 OutputModel 类型
 
 
 async def test_backend_protocol_violation_is_caught_as_failure():

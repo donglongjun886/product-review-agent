@@ -92,13 +92,17 @@ def test_hypothesize_user_prompt_renders_existing_hypotheses():
     text = build_user_prompt(
         node="hypothesize", state=_HYP_WITH_EXISTING, json_schema=_SCHEMA
     )
-    assert "## 四、既有假设清单" in text
-    assert "去重参考" in text
-    assert "- H1 | status=UNRESOLVED：外观与经典小白鞋高度相似，存在视觉仿冒风险" in text
-    assert "- H2 | status=REFUTED：商家历史干净无违规记录" in text
-    assert "- H3 | status=PENDING：运行中新发现的品牌字段核验维度" in text
-    assert "## 三、机审信号" in text  # 原分节顺序不回退
-    assert "## 输出格式要求" in text
+    # 行为级：每条既有假设的 id / status / statement 值都渲染进上下文（供 LLM 去重），
+    # 不锁具体行格式与分节编号（措辞/排版调整不应误伤）。
+    assert "既有假设清单" in text
+    assert "H1" in text and "UNRESOLVED" in text
+    assert "外观与经典小白鞋高度相似，存在视觉仿冒风险" in text
+    assert "H2" in text and "REFUTED" in text
+    assert "商家历史干净无违规记录" in text
+    assert "H3" in text and "PENDING" in text
+    assert "运行中新发现的品牌字段核验维度" in text
+    assert "KEYWORD" in text  # 机审信号照常渲染（不因假设清单回退）
+    assert "输出格式要求" in text  # Schema 要点分节恒在
     assert "__STATE__" not in text  # 不泄漏 __STATE__ 标记
 
 
@@ -107,7 +111,7 @@ def test_hypothesize_user_prompt_omits_section_when_no_existing():
         node="hypothesize", state=_HYP_WITHOUT_EXISTING, json_schema=_SCHEMA
     )
     assert "既有假设清单" not in text
-    assert "## 三、机审信号" in text and "KEYWORD" in text
+    assert "KEYWORD" in text  # 机审信号照常渲染
 
 
 def test_output_schema_contracts_unchanged():
@@ -185,5 +189,5 @@ def test_four_node_prompt_render_smoke_walkthrough():
         assert isinstance(sys_prompt, str) and len(sys_prompt) > 100
         user = build_user_prompt(node=node, state=rich_state, json_schema=_SCHEMA)
         assert isinstance(user, str) and user
-        assert "## 输出格式要求" in user  # Schema 要点分节恒在
+        assert "输出格式要求" in user  # Schema 要点分节恒在
         assert "__STATE__" not in user  # 真实模型上下文不带裸 __STATE__ 标记

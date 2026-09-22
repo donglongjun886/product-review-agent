@@ -17,7 +17,13 @@ from pra.agent.nodes.hypothesize import hypothesize_node
 from pra.agent.nodes.plan import plan_node
 from pra.agent.nodes import reevaluate as reevaluate_mod
 from pra.agent.nodes.reevaluate import reevaluate_node
-from pra.agent.guardrails.schemas import HypothesisProposal, HypothesisUpdate, QueueUpdate, ReevaluateOutput
+from pra.agent.guardrails.schemas import (
+    HypothesizeOutput,
+    HypothesisProposal,
+    HypothesisUpdate,
+    QueueUpdate,
+    ReevaluateOutput,
+)
 from pra.domain.models import Budget, Decision, HypothesisStatus, RiskLevel, RiskType
 from helpers import (
     AlwaysRaiseBackend,
@@ -79,7 +85,7 @@ async def test_hypothesize_budget_guard_stops_without_llm():
     failure = out["failures"][0]
     assert failure["step_type"] == STEP_HYPOTHESIZE
     assert failure["severity"] == SEV_CRITICAL
-    assert "预算已超限" in failure["reason"]
+    assert failure["reason"]  # 失败携带可归因原因（预算语义由"未调 LLM + 未记账"承载）
 
 
 async def test_hypothesize_success_apply():
@@ -90,8 +96,11 @@ async def test_hypothesize_success_apply():
     hypos = out["hypotheses"]
     assert backend.calls == ["hypothesize"]
     assert [h.id for h in hypos] == ["H1", "H2"]
-    assert hypos[0].statement == "刻意规避品牌识别"
-    assert hypos[0].prior == 0.6 and hypos[1].prior == 0.3
+    # 陈述与先验来自后端载荷（LLM 提供的 prior 被原样采纳，而非节点自造缺省值）
+    payload = HypothesizeOutput.model_validate_json(hypothesize_json())
+    assert [(h.statement, h.prior) for h in hypos] == [
+        (p.statement, p.prior) for p in payload.hypotheses
+    ]
     assert all(h.status == HypothesisStatus.PENDING for h in hypos)
     assert all(h.posterior is None for h in hypos)
     assert all(h.evidence_for == [] and h.evidence_against == [] for h in hypos)
@@ -113,7 +122,7 @@ async def test_hypothesize_llm_failure_degrades():
     failure = out["failures"][0]
     assert failure["step_type"] == STEP_HYPOTHESIZE
     assert failure["severity"] == SEV_CRITICAL
-    assert failure["reason"] == "schema 校验重试仍失败"
+    assert "校验" in failure["reason"]  # 语义：schema 校验重试后仍失败（不锁措辞）
     assert out["budget"].llm_calls == 2  # 两次尝试都记账
 
 
@@ -194,9 +203,12 @@ async def test_reevaluate_node_applies_output_and_bumps_budget():
     assert backend.calls == ["reevaluate"]
     hypos = out["hypotheses"]
     assert [h.id for h in hypos] == ["H1", "H2", "H3"]
-    assert hypos[0].posterior == 0.9 and hypos[0].status == HypothesisStatus.SUPPORTED
+    # 更新值来自后端载荷（posterior/prior 原样采纳），不钉桩种子具体数值
+    payload = ReevaluateOutput.model_validate_json(reevaluate_json())
+    assert hypos[0].posterior == payload.hypothesis_updates[0].posterior
+    assert hypos[0].status == HypothesisStatus.SUPPORTED
     assert hypos[2].status == HypothesisStatus.PENDING
-    assert hypos[2].prior == 0.2
+    assert hypos[2].prior == payload.new_hypotheses[0].prior
     assert out["investigation_queue"] == [
         {"q": "外观是否高度相似？", "priority": 1, "status": "DONE"}
     ]
@@ -269,7 +281,7 @@ async def test_decide_llm_failure_r5_override():
     failure = out["failures"][0]
     assert failure["step_type"] == STEP_DECIDE
     assert failure["severity"] == SEV_CRITICAL
-    assert "decide LLM schema 校验重试仍失败" == failure["reason"]
+    assert "校验" in failure["reason"]  # 语义：schema 校验重试后仍失败（不锁措辞）
 
 
 async def test_decide_success_path_adopts_reject():

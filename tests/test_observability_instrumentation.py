@@ -252,10 +252,14 @@ async def test_schema_retry_records_two_generations(fake_tracer) -> None:
     # schema 校验失败不是 transport 失败 → 不该有 record_error
     assert obs_first.errors == [] and obs_second.errors == []
 
-    # 第 2 个 generation 的 input 含修正提示（证明记的是内层每次真实调用）
+    # 第 2 个 generation 的 input 末尾追加了修正提示（证明记的是内层每次真实调用）；
+    # 提示语具体措辞是内部实现，不逐字锁定 —— 只锁"末尾是原 messages 之外的新 user 消息"
     assert len(fake_tracer.generations[0]["input"]) == 2
     assert len(fake_tracer.generations[1]["input"]) == 3
-    assert "请严格按 Schema 重新输出" in fake_tracer.generations[1]["input"][-1]["content"]
+    original_contents = {m["content"] for m in _MESSAGES}
+    repair_msg = fake_tracer.generations[1]["input"][-1]
+    assert repair_msg["role"] == "user"
+    assert repair_msg["content"] not in original_contents
 
 
 async def test_backend_exception_records_error_and_outcome_unchanged(fake_tracer) -> None:
@@ -313,7 +317,9 @@ async def test_tools_node_success_records_one_tool_span(fake_tracer) -> None:
     span = fake_tracer.tool_spans[0]
     assert span["name"] == "EchoTool"
     assert span["input"] == {"query": "x"}  # args_raw
-    assert span["metadata"] == {"seq": 1}
+    # seq 与审计 record 对齐（存在且一致；metadata 其余键属实现细节，不锁全集）
+    assert span["metadata"] is not None
+    assert span["metadata"]["seq"] == record["seq"] == 1
 
     obs = fake_tracer.tool_obs[0]
     assert obs.errors == []

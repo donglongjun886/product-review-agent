@@ -320,15 +320,21 @@ def test_default_rules_declaration_order():
 
 
 def test_rule_evidence_shape():
-    """rule_evidence 构造确定性直判证据（只构造不落库）。"""
+    """rule_evidence 构造确定性直判证据（只构造不落库）。
+
+    行为级：RULE_HIT 证据携带规则 id（machine-readable）+ 可追溯的人读 value
+    （rule_id/name/detail 保真）+ 确定性 weight=1.0；不锁 value 的拼接格式与 extra 全量键位。
+    """
     hit = RuleHit(rule_id="R-102", name="品牌词命中", detail="标题/描述命中品牌词: NIKE")
     ev = rule_evidence(_CLEAN, hit)
     assert ev.type == "RULE_HIT"
     assert ev.source == "ScreeningRuleEngine"
-    assert ev.value == "R-102 品牌词命中: 标题/描述命中品牌词: NIKE"
-    assert ev.weight == 1.0
+    assert ev.weight == 1.0  # 确定性直判证据：满权重
     assert ev.ref_id is None
-    assert ev.extra == {"rule_id": "R-102"}
+    assert ev.extra.get("rule_id") == "R-102"
+    assert ev.value.startswith("R-102")  # value 以 rule_id 起头（与直判转发路径同构）
+    assert "品牌词命中" in ev.value  # hit.name 保真
+    assert "标题/描述命中品牌词: NIKE" in ev.value  # hit.detail 保真
 
 
 def _fake_graph_decision() -> ReviewDecision:

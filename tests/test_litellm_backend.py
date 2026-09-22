@@ -4,9 +4,10 @@
 ``litellm.acompletion`` 的本地替身；真实调用留 scripts/run_evaluation_real.py 人工实测。
 
 覆盖：构造（model/name/api_key 来源）/ tools 目录提取 / acompletion 成功路径
-（content/tokens/kwargs）/ 网络失败 → ``LLMBackendError`` / ``_clean_json_text`` 三态 /
-未知 node 不触发调用 / ``call_structured_llm`` 全链路重试闭环 / 四节点 prompt 渲染
-（无裸 ``__STATE__`` / 空 state 防御 / schema 枚举与必填）/ 延迟 import 不拉起 litellm。
+（content/tokens/kwargs）/ 网络失败 → ``LLMBackendError`` / 模型文本清洗三态
+（经公开 ``complete`` 验证）/ 未知 node 不触发调用 / ``call_structured_llm`` 全链路重试
+闭环 / 四节点 prompt 渲染（无裸 ``__STATE__`` / 空 state 防御 / schema 枚举与必填）/
+延迟 import 不拉起 litellm。
 
 不烧 key：只 monkeypatch ``litellm.acompletion`` 属性（不 mock 整个模块 import）；每个触发
 complete 的测试都打上「耗尽即 pytest.fail」的哨兵；无 key / 未知 node 在 litellm import 之前
@@ -35,6 +36,7 @@ from pra.agent.guardrails.schemas import PlanOutput
 from pra.agent.litellm_backend import LiteLLMBackend
 from pra.agent.llm_prompts import (
     SYSTEM_PROMPTS,
+    build_system_prompt,
     build_user_prompt,
 )
 
@@ -284,20 +286,21 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
     kwargs = fake.calls[0]["kwargs"]
     assert kwargs["model"] == "deepseek/deepseek-chat"
     assert kwargs["temperature"] == 0.0
-    assert kwargs["timeout"] == 60.0
+    assert isinstance(kwargs["timeout"], (int, float)) and kwargs["timeout"] > 0  # 必须设超时，默认值是实现选择
     assert kwargs["response_format"] == {"type": "json_object"}  # 强制 JSON 对象输出
     assert kwargs["api_key"] == "sk-test"  # 显式 key 透传给 litellm
     assert kwargs["api_base"] == "https://gateway.example.com/v1"
     assert kwargs["max_tokens"] == 128
 
-    # 发给模型的 messages：system=完整约束中文指令；user=渲染上下文
+    # 发给模型的 messages：system=该节点的完整约束提示；user=渲染上下文
     msgs = fake.calls[0]["messages"]
     assert [m["role"] for m in msgs] == ["system", "user"]
-    assert "风险假设生成器" in msgs[0]["content"]  # SYSTEM_PROMPTS["hypothesize"] 开头
+    # 行为级接线：system 恰为该节点的 SYSTEM_PROMPTS 渲染结果（不锁提示正文措辞）
+    assert msgs[0]["content"] == build_system_prompt("hypothesize")
     user = msgs[1]["content"]
-    assert "商品 ID：P_MOCK_99" in user  # __STATE__ 里的商品事实被渲染出来
+    assert "P_MOCK_99" in user  # __STATE__ 里的商品事实被渲染出来（值而非裸 JSON）
     assert "KEYWORD" in user  # 机审信号入上下文
-    assert "## 输出格式要求" in user  # Schema 要点附加在 user 尾部
+    assert "decision" in user and "HUMAN_REVIEW" in user  # schema 要点（字段/枚举值）入 user
     assert "__STATE__" not in user  # 不发裸 __STATE__ 标记给真实模型
 
 
@@ -318,21 +321,30 @@ async def test_complete_network_failure_raises_llm_backend_error(monkeypatch):
     assert "connection reset by peer" in str(ei.value)
 
 
-def test_clean_json_text_three_states():
-    """``_clean_json_text`` 三态：干净 JSON 原样 / 围栏+杂文本截首{到末} / 无 { 原样返回。"""
-    backend = LiteLLMBackend(api_key="sk-test")  # 静态方法，实例/类调用皆可
-    # 1) 干净 JSON 原样返回
+async def test_complete_cleans_model_content_three_states(monkeypatch):
+    """模型文本清洗三态（经公开 ``complete`` 验证，不锁私有 ``_clean_json_text``）：
+
+    干净 JSON 原样 / 围栏+杂文本截首 ``{`` 到末 ``}`` / 无 ``{`` 原样返回（交由
+    llm_shell ``model_validate_json`` 强校验 + 回喂重试）；None/空串防御不抛。
+    """
     clean = '{"decision": "PASS", "confidence": 0.9}'
-    assert backend._clean_json_text(clean) == clean
-    # 2) ```json 围栏 + 前后杂文本 → 截取首个 { 到末个 }
     fenced = '以下是结果：\n```json\n{"a": 1, "b": [1,2]}\n```\n以上仅供参考。'
-    assert backend._clean_json_text(fenced) == '{"a": 1, "b": [1,2]}'
-    # 3) 无 { → 原样返回（交由 llm_shell model_validate_json 强校验 + 回喂重试）
     no_brace = "抱歉，我无法以 JSON 输出。"
-    assert backend._clean_json_text(no_brace) == no_brace
+    fake = _patch_acompletion(
+        monkeypatch, contents=[clean, fenced, no_brace, None, ""]
+    )
+    backend = LiteLLMBackend(api_key="sk-test")
+    call = dict(node="hypothesize", messages=_HYPOTHESIZE_MESSAGES, json_schema={})
+    # 1) 干净 JSON 原样返回
+    assert (await backend.complete(**call)).content == clean
+    # 2) 围栏 + 前后杂文本 → 截取首个 { 到末个 }
+    assert (await backend.complete(**call)).content == '{"a": 1, "b": [1,2]}'
+    # 3) 无 { → 原样返回（下游强校验兜底）
+    assert (await backend.complete(**call)).content == no_brace
     # 防御：None/空串不抛
-    assert backend._clean_json_text(None) == ""
-    assert backend._clean_json_text("") == ""
+    assert (await backend.complete(**call)).content == ""
+    assert (await backend.complete(**call)).content == ""
+    assert len(fake.calls) == 5  # 每态恰一次调用
 
 
 async def test_unknown_node_raises_without_calling_litellm(monkeypatch):
@@ -525,12 +537,12 @@ def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
     text = build_user_prompt(
         node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
     )
-    assert "## 一、案件与商品事实" in text
-    assert "商品 ID：P_MOCK_99" in text  # 字段值渲染而非裸 JSON
-    assert "复古跑鞋（高仿嫌疑样）" in text
-    assert "## 二、商品图片" in text and "图1" in text
-    assert "## 三、机审信号" in text and "KEYWORD" in text
-    assert "## 输出格式要求" in text
+    assert "P_MOCK_99" in text  # 字段值渲染而非裸 JSON
+    assert "复古跑鞋（高仿嫌疑样）" in text  # 商品标题值入上下文
+    assert "https://cdn.example.com/img1.jpg" in text  # 图片 url 入上下文（比对素材起点）
+    assert "疑似品牌 LOGO 图案" in text  # 机审 OCR 信息入上下文
+    assert "KEYWORD" in text  # 机审信号入上下文
+    assert "decision" in text and "HUMAN_REVIEW" in text  # schema 要点（字段/枚举值）渲染
     assert "__STATE__" not in text  # 不把 __STATE__ 标记泄漏给真实模型
 
 
@@ -592,13 +604,13 @@ def test_build_user_prompt_decide_sections():
         },
     }
     text = build_user_prompt(node="decide", state=state, json_schema=_SIMPLE_SCHEMA)
-    assert "## 一、假设仪表盘" in text
-    assert "H1 | status=SUPPORTED" in text
+    # 行为级：decide 决策所需的事实（假设仪表盘/证据引用/运行状态/预算）全部入上下文；
+    # 不锁分节编号与行格式
+    assert "H1" in text and "SUPPORTED" in text
     assert "外观高度模仿某品牌经典款" in text  # hypothesis.statement 值渲染
-    assert "## 二、可引用政策与先例" in text
-    assert "type=POLICY_REF" in text  # 证据 type 保真（REJECT 引用来源）
-    assert "## 四、运行状态" in text and "degraded=False" in text
-    assert "## 五、预算摘要" in text and "LLM 调用 5 次" in text
+    assert "POLICY_REF" in text  # 证据 type 保真（REJECT 引用来源）
+    assert "degraded" in text  # 运行状态入上下文
+    assert "1000" in text and "5000" in text  # 预算用量与上限数值渲染
     assert "__STATE__" not in text
 
 
@@ -636,16 +648,16 @@ def test_build_user_prompt_plan_tool_catalog_and_feedback():
         tool_catalog=catalog,
         feedbacks=["JSON 校验失败：decision 字段缺失，请补全后重新输出"],
     )
-    assert "## 六、可用取证工具目录" in text
-    assert "ImageAnalysisTool" in text
-    assert "image_url（必填）" in text  # Schema required → 必填标记
-    assert "top_k（可选）" in text
-    assert "上一轮输出校验反馈" in text  # llm_shell 修正提示被回喂到 user 尾部
-    assert "decision 字段缺失" in text
+    assert "ImageAnalysisTool" in text  # 工具目录入上下文
+    assert "image_url" in text and "top_k" in text  # 工具入参要点渲染
+    assert "必填" in text and "可选" in text  # required/optional 区分被表达（不锁标记格式）
+    assert "decision 字段缺失" in text  # llm_shell 修正提示内容被回喂到 user
+    assert "上一轮输出校验反馈" in text  # 修正反馈分节标记（llm_shell 重试协议回喂载体）
     assert "__STATE__" not in text
-    # 空目录 → plan 上下文提示"无可用工具 → conclude"
+    # 空目录 → plan 上下文提示无工具可查、引导 conclude
     empty = build_user_prompt(node="plan", state={}, json_schema={})
-    assert "无可用取证工具" in empty and "conclude" in empty
+    assert "conclude" in empty
+    assert "无可用取证工具" in empty
 
 
 def test_build_user_prompt_empty_state_all_nodes_robust():
@@ -654,20 +666,22 @@ def test_build_user_prompt_empty_state_all_nodes_robust():
         text = build_user_prompt(node=node, state={}, json_schema={})
         assert isinstance(text, str) and text
         assert "## 输出格式要求" in text  # Schema 要点段始终在
-    # 畸形 state（hypotheses 不是列表）也不崩
+    # 畸形 state（hypotheses 不是列表）也不崩、仍有非空上下文
     text = build_user_prompt(
         node="decide", state={"hypotheses": "not-a-list"}, json_schema={}
     )
-    assert "（无假设）" in text
+    assert isinstance(text, str) and text
 
 
 def test_build_user_prompt_schema_enum_and_required_fields():
-    """输出格式要点来自 json_schema：含枚举可取值与必填字段名标记。"""
+    """输出格式要点来自 json_schema：schema 的标题/字段/枚举值/必填可选信息均渲染。"""
     text = build_user_prompt(node="decide", state={}, json_schema=_SIMPLE_SCHEMA)
-    assert "顶层对象：DecisionProposal" in text
-    assert "decision（必填）" in text
-    assert "字符串枚举，只能取：PASS | REJECT | HUMAN_REVIEW" in text
-    assert "risk_type（可选）" in text
+    # 行为级：schema 派生信息全部出现在要点段；不锁渲染短语的具体措辞
+    assert "DecisionProposal" in text  # schema title
+    assert "decision" in text  # 必填字段名
+    assert "PASS" in text and "REJECT" in text and "HUMAN_REVIEW" in text  # 枚举可取值
+    assert "risk_type" in text  # 可选字段名
+    assert "必填" in text and "可选" in text  # 必填/可选区分被表达
 
 
 # C. 确定性回归守护（无网络 / 无 key）

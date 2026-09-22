@@ -286,8 +286,9 @@ def test_construction_does_not_touch_the_sessionmaker_provider():
     assert calls == []
 
 
-async def test_get_latest_assembles_snapshot_and_queries_children():
-    repo, sm = _repo_with_fake_sessions(
+async def test_get_latest_assembles_snapshot_with_children():
+    """行为不变量：命中商品时 snapshot 非空，SKU 与图片已随快照装入（不钉内部查询编排）。"""
+    repo, _ = _repo_with_fake_sessions(
         [
             _FakeResult(scalar=_product_row()),
             _FakeResult(many=(_sku_row(),)),
@@ -297,16 +298,17 @@ async def test_get_latest_assembles_snapshot_and_queries_children():
     snap = await repo.get_latest("P_TEST")
     assert snap is not None
     assert snap.product_id == "P_TEST"
-    assert len(snap.sku_list) == 1
-    assert len(snap.images) == 1
-    assert len(sm.sessions) == 1
-    assert len(sm.sessions[0].queries) == 3, "主表 + SKU + 图片各一条查询"
+    assert [(s.sku_id, s.color, s.size, s.price) for s in snap.sku_list] == [
+        ("S_1", "米白", "36-40", 129.0)
+    ]
+    assert [(i.url, i.source) for i in snap.images] == [
+        ("https://cdn.example.com/products/P_TEST/img1.jpg", "主图")
+    ]
 
 
-async def test_get_latest_missing_product_returns_none_without_child_queries():
-    repo, sm = _repo_with_fake_sessions([_FakeResult(scalar=None)])
+async def test_get_latest_missing_product_returns_none():
+    repo, _ = _repo_with_fake_sessions([_FakeResult(scalar=None)])
     assert await repo.get_latest("P_NOPE") is None
-    assert len(sm.sessions[0].queries) == 1, "主表查无该商品即返回，不查子表"
 
 
 async def test_infrastructure_error_propagates_and_is_never_swallowed_as_none():

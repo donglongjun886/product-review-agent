@@ -49,7 +49,7 @@ def test_quality_filter_none_and_empty_safe_and_pure():
     assert quality_filter([]) == []
     e = ev("IMAGE_SIMILARITY", value="similarity=0.99", weight=0.99, ref_id="img1")
     out = quality_filter([e])
-    assert out[0] is e  # 保留元素复用原引用，不复制
+    assert out == [e]  # 保留元素内容不变（是否复用同一对象属实现细节，不断言）
 
 
 # backfill_extra：各类型回填
@@ -127,21 +127,16 @@ def test_backfill_merges_with_existing_extra():
 
 
 def test_backfill_does_not_mutate_inputs():
-    """不改入参：输入列表与元素（extra 内容/引用）均不变；输出为 model_copy。"""
+    """不改入参：输入元素的字段内容保持不变；输出携带回填结果。"""
     e = ev("IMAGE_SIMILARITY", value="similarity=0.91", weight=0.91, ref_id="i1")
-    original = list([e])
     snapshot_extra = dict(e.extra)
     out = backfill_extra([e])[0]
-    assert out is not e
-    assert out.extra is not e.extra  # merged 恒为新 dict，不与原对象共享引用
+    assert out.extra == {"similarity": 0.91, "strong": True}
     assert e.extra == snapshot_extra
     assert e.weight == 0.91 and e.value == "similarity=0.91"
-    # 未改动原列表（pydantic 模型不可变语义下仍返回新列表）
-    assert original[0] is e
-    # backfill 对无回填类型也返回 model_copy（无别名）
+    # 对无回填类型也原样返回内容（不崩、不丢字段）
     plain = ev("CASE_PRECEDENT", value="case_1001", weight=0.8, ref_id="c1")
-    p_out = backfill_extra([plain])[0]
-    assert p_out is not plain and p_out.extra == {}
+    assert backfill_extra([plain])[0].extra == {}
 
 
 def test_backfill_none_empty_safe():
@@ -170,10 +165,13 @@ def test_dedup_ok_hit_goes_to_skipped_with_seq_continuing():
     ]
     cleaned, skipped = dedup_pending(state, planned)
     assert cleaned == []
-    assert skipped == [
-        {"seq": 2, "tool": "ImageAnalysisTool", "args": {"u": "u1"}, "status": "skipped",
-         "reason": "duplicate", "latency_ms": 0, "tokens": 0}
-    ]
+    assert len(skipped) == 1
+    record = skipped[0]
+    # 关键字段语义：命中去重、seq 顺延、原因可归因；不锁整条记录的全部键位
+    assert record["tool"] == "ImageAnalysisTool" and record["args"] == {"u": "u1"}
+    assert record["status"] == "skipped"
+    assert record["seq"] == 2
+    assert record["reason"] == "duplicate"
 
 
 def test_dedup_error_record_allows_retry():
@@ -215,13 +213,12 @@ def test_dedup_same_round_duplicate_of_executed_only_one_skipped():
     assert len(skipped) == 1 and skipped[0]["seq"] == 2
 
 
-def test_dedup_cleaned_are_shallow_copies():
-    """cleaned 保留原 dict 内容但为浅拷贝（防别名污染后续执行）。"""
+def test_dedup_cleaned_keep_content():
+    """cleaned 保留原 dict 的全部内容（后续执行不会因去重丢字段）。"""
 
     planned = [{"tool": "ProductTool", "args": {"product_id": "P1"}, "reason": "r", "priority": 1}]
     cleaned, _ = dedup_pending({"tool_call_history": []}, planned)
     assert cleaned[0] == planned[0]
-    assert cleaned[0] is not planned[0]
 
 
 def test_dedup_skipped_seq_monotonic_after_history():

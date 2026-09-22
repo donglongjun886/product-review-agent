@@ -1,38 +1,29 @@
-"""``merge_evidence`` / ``_evidence_key`` 单测：指纹规则、幂等与保序。
+"""``merge_evidence`` 单测：指纹规则、幂等与保序（行为级，经公开 merge API 锁定）。
 
 覆盖 merge 的 None 入参、right 自去重、同 key 丢弃新增、``ref_id`` 为 None 时回退
-``value``（防同源证据互相吞并），以及 ``_evidence_key`` 指纹规则与结果保序。
+``value``（防同源证据互相吞并）、同 ``ref_id`` 下 weight/extra/value 差异不阻止判重，
+以及结果保序。指纹规则（``_evidence_key``）的语义一律通过 merge 行为间接验证，
+不断言私有函数返回的内部元组形状。
 """
 
 from __future__ import annotations
 
-from pra.agent.state import _evidence_key, merge_evidence
+from pra.agent.state import merge_evidence
 from helpers import ev
 
 
-def test_evidence_key_ref_id_priority():
-    e1 = ev("IMAGE_SIMILARITY", source="ImageAnalysisTool", value="similarity=0.91",
-            weight=0.91, ref_id="img1")
-    e2 = ev("IMAGE_SIMILARITY", source="ImageAnalysisTool", value="similarity=0.91, match=x",
-            weight=0.91, ref_id="img1")
-    assert _evidence_key(e1) == _evidence_key(e2)
-    assert _evidence_key(e1) == ("IMAGE_SIMILARITY", "ImageAnalysisTool", "img1")
+def test_merge_same_ref_id_ignores_weight_extra_and_value_diffs():
+    """同 ``ref_id`` 下 weight/extra/value 差异不阻止判重（指纹取 ref_id，保留首条）。
 
-
-def test_evidence_key_none_ref_falls_back_to_value():
-    a = ev("MERCHANT_HISTORY", source="MerchantTool", value="v1", weight=0.85, ref_id=None)
-    b = ev("MERCHANT_HISTORY", source="MerchantTool", value="v2", weight=0.85, ref_id=None)
-    assert _evidence_key(a) == ("MERCHANT_HISTORY", "MerchantTool", "v1")
-    assert _evidence_key(b) == ("MERCHANT_HISTORY", "MerchantTool", "v2")
-    assert _evidence_key(a) != _evidence_key(b)
-
-
-def test_evidence_key_ignores_weight_and_extra():
+    “``ref_id`` 优先于 value、``ref_id`` 为 None 回退 value”两个语义已分别由
+    ``test_merge_same_key_in_right_dropped_idempotent`` 与
+    ``test_merge_ref_none_values_distinct_both_kept`` 以 merge 行为锁定。
+    """
     a = ev("POLICY_REF", source="PolicySearchTool", value="POLICY_3.2 v2 条款：x",
            weight=0.9, ref_id="POLICY_3.2_v2_c1")
     b = ev("POLICY_REF", source="PolicySearchTool", value="完全不同的内容",
            weight=0.5, ref_id="POLICY_3.2_v2_c1", extra={"policy_id": "POLICY_3.2"})
-    assert _evidence_key(a) == _evidence_key(b)
+    assert merge_evidence([a], [b]) == [a]
 
 
 def test_merge_left_none():
