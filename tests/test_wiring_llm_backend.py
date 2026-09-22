@@ -171,10 +171,17 @@ async def test_production_graph_runs_on_injected_backend(monkeypatch):
     nodes: list[str] = []
 
     class _RecordingStub(ScriptedLLMBackend):
-        async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
+        async def complete(
+            self,
+            *,
+            node: str,
+            state: dict,
+            json_schema: dict,
+            feedback: list[str] | None = None,
+        ) -> LLMResponse:
             nodes.append(node)
             return await super().complete(
-                node=node, messages=messages, json_schema=json_schema
+                node=node, state=state, json_schema=json_schema, feedback=feedback
             )
 
     recorder = _RecordingStub()

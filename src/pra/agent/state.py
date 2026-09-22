@@ -1,8 +1,8 @@
 """AgentState 类型定义（TypedDict + reducer）—— 复杂风险调查 Agent 的状态契约。
 
-AgentState 即 LangGraph 的 State：以 TypedDict 承载调查主线的**显式、可序列化、
-可持久化、可恢复**记忆，而不是藏在 LLM 上下文里。线程 Checkpointer（MVP 用
-InMemorySaver）每步保存线程中间状态用于断点续跑 / eval 重放；业务真相
+AgentState 即 LangGraph 的 State：以 TypedDict 承载调查主线的**显式、可序列化**
+记忆，而不是藏在 LLM 上下文里。线程 Checkpointer（MVP 用 InMemorySaver）每步保存
+线程中间状态，供同一线程内续跑与流式执行后读取终态；业务真相
 （review_trace / review_evidence / review_result 等）由 worker 层显式落 MySQL ——
 checkpointer 不写业务表。每次 invoke 一律走 ``build_initial_state``，保证每个
 channel 首读有值、reducer 首写安全。
@@ -59,14 +59,13 @@ def merge_evidence(left: list[Evidence], right: list[Evidence]) -> list[Evidence
 class AgentState(TypedDict, total=False):
     """LangGraph State 的状态契约（字段类型为 domain 模型）。
 
-    值均为可 JSON 序列化的 domain 模型 / 原始 dict，供 Checkpointer 落库与 eval 重放。
+    值均为可 JSON 序列化的 domain 模型 / 原始 dict，供 Checkpointer 持有与流式执行后读终态。
     ``total=False``：所有 channel 可选，首读依赖 ``build_initial_state`` 全量初始化。
     """
 
     case: ProductReviewCase  # 输入商品事实快照（调查起点，不改写）
     hypotheses: list[Hypothesis]  # 风险假设（prior→posterior→status 演变）
     evidence: Annotated[list[Evidence], merge_evidence]  # 已收集证据（自定义去重合并 reducer）
-    investigation_queue: list[dict]  # 待验证问题，如 {"q", "priority", "status"}
     tool_call_history: Annotated[list[dict], add]  # 调用审计（append；含边际增益 4 字段）
     budget: Budget  # 已用 + 限额；条件边路由的确定性检查对象（覆盖写，整对象）
     decision: ReviewDecision | None  # 收敛后的裁决；调查中为 None
@@ -85,13 +84,12 @@ def build_initial_state(case: ProductReviewCase) -> AgentState:
     """每次 invoke 的完整初始输入。
 
     保证所有 channel 有值（首节点读不炸、reducer 首写安全）；``budget`` 取
-    BudgetLimits 默认值 10/15/40000/30000（接线时勿再覆盖回 8/12）。
+    BudgetLimits 默认值 10/15（接线时勿再覆盖回 8/12）。
     """
     return AgentState(
         case=case,
         hypotheses=[],
         evidence=[],
-        investigation_queue=[],
         tool_call_history=[],
         budget=Budget(),
         decision=None,

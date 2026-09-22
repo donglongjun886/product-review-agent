@@ -1,7 +1,7 @@
 """确定性走查桩 —— 无 API key 也能端到端。
 
 ``ScriptedLLMBackend`` 实现 ``LLMBackend`` Protocol：按 ``node`` 分发并返回固定剧本的
-结构化 JSON 文本；同 ``(node, __STATE__)`` → 同输出（无 API key、无网络、无随机、无
+结构化 JSON 文本；同 ``(node, state)`` → 同输出（无 API key、无网络、无随机、无
 实例可变状态），eval 可重放。走查剧本对应复古运动鞋 P_88231 / M_5512 场景，目标
 ``llm_calls==8 / tool_calls==5``：hypothesize → plan(外观) → tools → reevaluate(①) →
 plan(商品+商家) → tools → reevaluate(②) → plan(先例+政策) → tools → reevaluate(③ 收敛)
@@ -24,12 +24,6 @@ _HYPOTHESES_SCRIPT: tuple = (
     ("商家系统性类似上架行为", 0.15),
 )
 
-# hypothesize 固定输出：2 条调查问题 (q, priority)
-_QUEUE_SCRIPT: tuple = (
-    ("外观是否与某知名品牌款高度相似？", 1),
-    ("商家历史是否显示系统性类似行为？", 2),
-)
-
 # decide 固定提案
 _DECIDE_RATIONALE = "证据链充分但涉及仿冒主观判定且政策指引高风险转人工，克制转人工"
 
@@ -43,8 +37,6 @@ _POLICY_REF = "POLICY_REF"
 _STRONG_SIM_WEIGHT = 0.85  # sim_strong：IMAGE_SIMILARITY 强证据阈值
 _CITATION_MAX = 200  # 引用串 value 截断上限（value 已是人读摘要）
 
-_STATE_MARKER = "__STATE__"  # 消息内状态行前缀：__STATE__ {json}
-
 
 def _citation(ev: dict) -> str:
     """证据引用/摘要串：``f"{type} {value}"``，value 截到 200 字符（不参与分支判定）。"""
@@ -54,49 +46,12 @@ def _citation(ev: dict) -> str:
 
 
 def _to_float(value: object) -> float:
-    """把 __STATE__ 里的 weight 等安全转 float；缺失/非法/NaN → 0.0。"""
+    """把 state 里的 weight 等安全转 float；缺失/非法/NaN → 0.0。"""
     try:
         f = float(value)
     except (TypeError, ValueError):
         return 0.0
     return f if f == f else 0.0  # NaN != NaN → 0.0
-
-
-def _extract_state(messages) -> dict:
-    """从 messages 里解析 ``__STATE__ {json}`` 状态行。
-
-    状态约定（``complete`` 无 state 参数，故由节点把 state 子集挂到消息里）——标记后的
-    dict 键：``case``（与 ``pra.domain.models`` 同形状）、``evidence``（元素含
-    ``{"type","weight","value","ref_id","extra"}``）、``hypotheses``（元素含
-    ``{"id","statement","prior","posterior","status"}``）、``queue`` 或
-    ``investigation_queue``（元素含 ``{"q","priority","status"}``）。
-    取首个含 ``__STATE__`` 的 str content 解析；失败 → ``{}``（空事实兜底）；其余内容
-    一律忽略（仅占位审计）。
-    """
-    for msg in messages or []:
-        content = msg.get("content") if isinstance(msg, dict) else None
-        if not isinstance(content, str):
-            continue
-        idx = content.find(_STATE_MARKER)
-        if idx < 0:
-            continue
-        rest = content[idx + len(_STATE_MARKER):].lstrip()
-        if not rest:
-            continue
-        # 优先整段解析；失败则截取首 '{' 到末 '}' 再试（容忍附带叙述文本）。
-        try:
-            obj = json.loads(rest)
-        except (ValueError, TypeError):
-            start, end = rest.find("{"), rest.rfind("}")
-            obj = None
-            if 0 <= start < end:
-                try:
-                    obj = json.loads(rest[start : end + 1])
-                except (ValueError, TypeError):
-                    obj = None
-        if isinstance(obj, dict):
-            return obj
-    return {}
 
 
 def _evidence_list(state: dict) -> list:
@@ -119,16 +74,6 @@ def _first_of_type(evs: list, ev_type: str):
 def _hypothesis_list(state: dict) -> list:
     """state["hypotheses"] 归一化：只保留 dict 元素（保序）。"""
     return [h for h in (state.get("hypotheses") or []) if isinstance(h, dict)]
-
-
-def _queue_list(state: dict) -> list:
-    """调查队列：兼容 ``queue`` / ``investigation_queue`` 两个键名（保序）。"""
-    queue = state.get("queue")
-    if not isinstance(queue, list):
-        queue = state.get("investigation_queue")
-    if not isinstance(queue, list):
-        return []
-    return [item for item in queue if isinstance(item, dict)]
 
 
 def _case_facts(state: dict) -> dict:
@@ -171,20 +116,28 @@ def _risk_filters(category) -> dict:
 
 
 class ScriptedLLMBackend:
-    """确定性走查桩（LLMBackend）：按 node 返回固定剧本 JSON，忽略消息正文。
+    """确定性走查桩（LLMBackend）：按 node 返回固定剧本 JSON，忽略 feedback。
 
-    无实例可变状态（同 (node, __STATE__) 恒同输出，可重放）；未知 node →
+    无实例可变状态（同 ``(node, state)`` 恒同输出，可重放）；未知 node →
     ``LLMBackendError``（供降级路径测试）。
     """
 
     name = "scripted-walkthrough"
 
-    async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
-        """按 node 分发：解析 __STATE__ → 生成剧本 payload → JSON 文本返回。
+    async def complete(
+        self,
+        *,
+        node: str,
+        state: dict,
+        json_schema: dict,
+        feedback: list[str] | None = None,
+    ) -> LLMResponse:
+        """按 node 分发：读结构化 state → 生成剧本 payload → JSON 文本返回。
 
-        ``json_schema`` 为 OutputModel 的 JSON Schema（供真实后端约束；桩忽略）。
+        ``json_schema`` 为 OutputModel 的 JSON Schema（供真实后端约束；桩忽略）；
+        ``feedback`` 是上一轮校验失败的修正提示，桩的剧本固定、不据它改写输出。
         """
-        state: dict = _extract_state(messages)  # 缺省 {} → 各分支空事实兜底
+        state = state if isinstance(state, dict) else {}  # 缺省 {} → 各分支空事实兜底
         if node == "hypothesize":
             payload = self._hypothesize(state)
         elif node == "plan":
@@ -200,21 +153,16 @@ class ScriptedLLMBackend:
             content=json.dumps(payload, ensure_ascii=False), tokens=0, usage=None
         )
 
-    # -- hypothesize：固定 4 假设 + 2 队列，与案件事实无关 ----------------------
+    # -- hypothesize：固定 4 假设，与案件事实无关 -------------------------------
 
     def _hypothesize(self, state: dict) -> dict:
         hypotheses = [
             {"statement": statement, "prior": prior}
             for statement, prior in _HYPOTHESES_SCRIPT
         ]
-        queue = [
-            {"q": question, "priority": priority}
-            for question, priority in _QUEUE_SCRIPT
-        ]
         return {
             "hypotheses": hypotheses,
-            "investigation_queue": queue,
-            "rationale": "依据品牌字段空缺与典型仿冒模式给出初始假设与调查问题。",
+            "rationale": "依据品牌字段空缺与典型仿冒模式给出初始假设。",
         }
 
     # -- plan：按证据 type 集合的四分支（1→2→3→4 顺序） ------------------------
@@ -277,7 +225,7 @@ class ScriptedLLMBackend:
             }
         if "PRODUCT_FACT" not in types or "MERCHANT_HISTORY" not in types:
             # 证据仍缺但 product_id/merchant_id 均缺失（畸形案件事实）→ conclude，
-            # 不穿透到分支 3；真实案件两 id 必填，此处仅防御 __STATE__ 畸形载荷。
+            # 不穿透到分支 3；真实案件两 id 必填，此处仅防御畸形 state 载荷。
             return {
                 "next_action": "conclude",
                 "tools": [],
@@ -388,29 +336,13 @@ class ScriptedLLMBackend:
                 }
             )
 
-        # queue_updates：q 含 "外观" 且 sim_strong → DONE；含 "商家历史" 且 merch → DONE
-        queue_updates = []
-        for item in _queue_list(state):
-            q = item.get("q")
-            if not isinstance(q, str) or not q:
-                continue
-            done = ("外观" in q and sim_strong) or ("商家历史" in q and merch)
-            if not done:
-                continue
-            current_status = item.get("status")
-            current_status = current_status if isinstance(current_status, str) else "OPEN"
-            if current_status == "DONE":  # 幂等：已 DONE 不再重复产出
-                continue
-            queue_updates.append({"q": q, "status": "DONE"})
-
         sufficiency = "SUFFICIENT" if (case_pre and policy) else "INSUFFICIENT"
         return {
             "hypothesis_updates": hypothesis_updates,
-            "queue_updates": queue_updates,
             "new_hypotheses": [],
             "evidence_sufficiency": sufficiency,
             "conflicts": [],
-            "rationale": "按本轮证据批量更新假设状态与调查队列；无新增假设、无矛盾证据。",
+            "rationale": "按本轮证据批量更新假设状态；无新增假设、无矛盾证据。",
         }
 
     # -- decide：固定提案 -------------------------------------------------------

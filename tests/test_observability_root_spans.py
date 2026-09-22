@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ from helpers import make_case
 from pra.api.service import run_review
 from pra.domain.models import Decision
 from pra.evaluation.dataset.loader import load_dataset
-from pra.evaluation.harness.agent_scheme import AgentScheme
+from pra.evaluation.harness.agent_scheme import AgentScheme, EvalScriptedLLMBackend
 from pra.evaluation.harness.base import EvalContext, EvalRecord
 from pra.observability import flush_tracer as pkg_flush_tracer
 from pra.observability import tracing as T
@@ -143,13 +144,13 @@ def _v2_case():
     return cases[0]
 
 
-# 1. HTTP root trace（pra.api.service.run_review）
+# 1. 无 DB 执行入口 root trace（pra.api.service.run_review）
 
 
 async def test_run_review_emits_exactly_one_root_trace_with_run_id_trace_id(fake_tracer) -> None:
     """跑一次 ``run_review`` → **恰好 1 个 root**，trace_id = run_id、metadata/tags 口径正确。"""
     case = make_case()
-    run_id = uuid4().hex  # HTTP 路径原生形态：32-hex（trace_id 原样 = run_id）
+    run_id = uuid4().hex  # 32-hex run_id 形态（trace_id 原样 = run_id）
 
     result = await run_review(case, run_id=run_id)
 
@@ -160,6 +161,9 @@ async def test_run_review_emits_exactly_one_root_trace_with_run_id_trace_id(fake
     assert _HEX32.match(ctx.trace_id)
     # metadata 含 run_id 对齐键（原值，不是 trace_id）；入参轻量：只带 case 标识，不塞整个 case
     assert ctx.metadata["run_id"] == run_id
+    # 本入口无落库、不走 HTTP：source 不得冒充 http（HTTP 路径是 persist_service）
+    assert ctx.metadata["source"] == "local"
+    assert ctx.tags == ["env:local", "source:local"]
     assert ctx.input == {"case_id": case.case_id}
     # root 结束写回终裁摘要
     assert fake_tracer.root_obs[0].last_output() == {
@@ -517,3 +521,32 @@ def test_root_trace_id_is_scoped_by_llm_backend() -> None:
     assert {k: v for k, v in scripted.metadata.items() if k != "llm_backend"} == {
         k: v for k, v in real.metadata.items() if k != "llm_backend"
     }
+
+
+# --------------------------------------------------------------------------------------
+# 3d. 评测审查员桩：结构化 state 直传 + 队列已删（回归守护）
+# --------------------------------------------------------------------------------------
+
+
+async def test_eval_stub_takes_structured_state_and_emits_no_queue() -> None:
+    """桩经 ``state=`` 入参（不再解析 ``__STATE__``），且 payload 不再产调查队列。
+
+    state 直传：``complete`` 只接受 ``state``（``messages`` 已随文本协议删除）；
+    队列删除：hypothesize 无 ``investigation_queue``、reevaluate 无 ``queue_updates``。
+    """
+    stub = EvalScriptedLLMBackend()
+    hyp = json.loads(
+        (
+            await stub.complete(
+                node="hypothesize",
+                state={"case": {"product": {"title": "复古跑鞋", "images": []}}},
+                json_schema={},
+            )
+        ).content
+    )
+    assert "investigation_queue" not in hyp
+
+    reev = json.loads(
+        (await stub.complete(node="reevaluate", state={}, json_schema={})).content
+    )
+    assert "queue_updates" not in reev

@@ -20,6 +20,7 @@ from pra.infra.persist_service import (
     _enum_value,
     _hypothesis_summary,
     _json_cap,
+    _node_input_summary,
     _node_output_summary,
     _token_count,
 )
@@ -77,7 +78,6 @@ def test_node_output_summary_hypothesize():
     hypos = [hp("H1", prior=0.5, status=HypothesisStatus.REFUTED, posterior=0.05)]
     update = {
         "hypotheses": hypos,
-        "investigation_queue": [{"q": "外观问题", "priority": 1, "status": "OPEN"}],
         "degraded": False,
         "budget": Budget(llm_calls=2, tool_calls=0, tokens=30),
     }
@@ -86,9 +86,23 @@ def test_node_output_summary_hypothesize():
     assert s["degraded"] is False
     assert s["hypotheses_count"] == 1
     assert s["hypotheses"][0]["status"] == "REFUTED"
-    assert s["investigation_queue_count"] == 1
-    assert s["investigation_queue"][0] == {"q": "外观问题", "priority": 1, "status": "OPEN"}
     assert s["budget"] == {"llm_calls": 2, "tool_calls": 0, "tokens": 30}
+
+
+def test_trace_summaries_carry_no_investigation_queue_fields():
+    """回归守护：investigation_queue 已删，摘要不再落队列键（即使 update 里混入）。"""
+    update = {
+        "hypotheses": [hp("H1", prior=0.5)],
+        "investigation_queue": [{"q": "外观问题", "priority": 1, "status": "DONE"}],
+        "budget": Budget(),
+    }
+    for node in ("hypothesize", "reevaluate"):
+        s = _node_output_summary(node, update)
+        assert "investigation_queue" not in s, node
+        assert "investigation_queue_count" not in s, node
+        assert "queue_done_count" not in s, node
+    inp = _node_input_summary("reevaluate", update, "CASE_1")
+    assert "investigation_queue_count" not in inp
 
 
 def test_node_output_summary_plan_dedup_skipped():
@@ -117,10 +131,6 @@ def test_node_output_summary_reevaluate_status_counts():
             hp("H2", prior=0.4, status=HypothesisStatus.REFUTED, posterior=0.05),
             hp("H3", prior=0.2),
         ],
-        "investigation_queue": [
-            {"q": "q1", "priority": 1, "status": "DONE"},
-            {"q": "q2", "priority": 2, "status": "OPEN"},
-        ],
         "degraded": False,
         "budget": Budget(),
     }
@@ -128,7 +138,6 @@ def test_node_output_summary_reevaluate_status_counts():
     assert s["node"] == "reevaluate"
     assert s["hypotheses_count"] == 3
     assert s["status_counts"] == {"SUPPORTED": 1, "REFUTED": 1, "PENDING": 1}
-    assert s["queue_done_count"] == 1
     assert s["degraded"] is False
 
 

@@ -1,13 +1,13 @@
 """LLM 壳：节点调 LLM 的唯一入口 —— 强校验、重试 1 次、失败不抛异常。
 
-``call_structured_llm`` 把 messages 交给后端 ``complete``，对返回 JSON 做 OutputModel
-的 ``model_validate_json`` 强校验。失败分类（重试 1 次，两次均失败返回
+``call_structured_llm`` 把节点构造的结构化 ``state`` 直传给后端 ``complete``，对返回 JSON
+做 OutputModel 的 ``model_validate_json`` 强校验。失败分类（重试 1 次，两次均失败返回
 ``LLMCallOutcome(model=None, ...)``，永不抛异常）：
 
-- schema 修正类（后端成功但校验失败）：追加修正提示（含第 1 次非法输出原文 + 校验
-  错误），让第 2 次请求能看到自己上一版输出并修正；
+- schema 修正类（后端成功但校验失败）：把修正提示（含第 1 次非法输出原文 + 校验错误）
+  收集进 ``feedback``，第 2 次请求以 ``feedback=`` 回喂，让模型能看到自己上一版输出并修正；
 - transport 类（``complete`` 抛异常：超时/网络/HTTP/未知 node 等）：没有可修正的
-  输出，**不追加修正文案**，指数退避后按原 messages 重试；
+  输出，**不产生 feedback**，指数退避后按原 state 重试；
 - 截断（``truncated``，finish_reason=length）：内容可能不完整，校验失败时**不重试**
   （同 max_tokens 下大概率再截断），直接降级；截断但内容合法则照常成功。
 
@@ -49,20 +49,26 @@ class LLMResponse:
 
 @runtime_checkable
 class LLMBackend(Protocol):
-    """可注入 LLM 后端接口 —— 真实 litellm 后端后续实现同一 Protocol。
+    """可注入 LLM 后端接口 —— ``ScriptedLLMBackend`` / ``LiteLLMBackend`` 实现同一 Protocol。
 
-    失败须抛 ``LLMBackendError``；消息/状态进出**只经方法参数**。
+    失败须抛 ``LLMBackendError``；状态进出**只经方法参数**。
     """
 
     name: str  # 后端标识（如 "scripted" / "litellm-gpt-4o-mini"），仅审计/展示用
 
     async def complete(
-        self, *, node: str, messages: list[dict], json_schema: dict
+        self,
+        *,
+        node: str,
+        state: dict,
+        json_schema: dict,
+        feedback: list[str] | None = None,
     ) -> LLMResponse:
         """按 node 分发生成结构化输出 JSON 文本。
 
-        ``json_schema`` 为 OutputModel 的 JSON Schema（供真实后端约束输出；
-        scripted 桩可忽略 —— messages 仅审计占位）。
+        :param state: 节点构造并直传的、JSON 可序列化的结构化 state 子集；
+        :param json_schema: OutputModel 的 JSON Schema（供真实后端约束输出；scripted 桩忽略）；
+        :param feedback: 上一轮 schema 校验失败的修正提示文本列表（首次尝试为 None）。
         """
         ...
 
@@ -76,8 +82,6 @@ class LLMCallOutcome:
     tokens: int  # 已累计 token 数（口径同 usage.total_tokens；**schema 校验失败的
                  # 尝试也全额计入**、transport 失败无响应不计；全失败可能为 0）
     error: Optional[str]  # 最后一次失败原因（供节点写 failure.reason）；成功为 None
-    usage: dict | None = None  # 可选 token 拆分：多次尝试**按键累加**（与 tokens 同
-                               # 口径）；全部为 None → None。
 
 
 # transport 类失败重试的指数退避底数（秒）；保持小底数避免拖慢测试路径。
@@ -93,19 +97,16 @@ async def _transport_backoff(failure_index: int = 1) -> None:
     await asyncio.sleep(_TRANSPORT_BACKOFF_BASE_S * (2 ** (failure_index - 1)))
 
 
-def _correction_message(content: str, error: Exception) -> dict:
-    """schema 修正提示：**回喂第 1 次非法输出原文** + 校验错误。
+def _correction_message(content: str, error: Exception) -> str:
+    """schema 修正提示文本：**回喂第 1 次非法输出原文** + 校验错误。
 
-    只用于「后端成功返回但校验失败」；transport 失败不追加本文案。
+    只用于「后端成功返回但校验失败」；transport 失败不产生本文案。
     """
-    return {
-        "role": "user",
-        "content": (
-            "输出不满足 JSON Schema，请严格按 Schema 重新输出。以下是你上一次的"
-            f"输出（供对照修正，不要复述它）：\n```\n{content}\n```\n"
-            f"校验错误如下：\n{error}"
-        ),
-    }
+    return (
+        "输出不满足 JSON Schema，请严格按 Schema 重新输出。以下是你上一次的"
+        f"输出（供对照修正，不要复述它）：\n```\n{content}\n```\n"
+        f"校验错误如下：\n{error}"
+    )
 
 
 # 观测（旁路）：只读、只写观测，绝不改变控制流。
@@ -132,22 +133,6 @@ def _observe_record_error(obs: Observation, exc: BaseException) -> None:
         return
 
 
-def _merge_usage(total: dict | None, usage: dict | None) -> dict | None:
-    """按键累加 token usage（``input``/``output``/``total``）；皆空 → None。
-
-    形状对齐 Langfuse ``usage_details``：取不到的键不放（不填 0 冒充），非 int 值
-    跳过（防御畸形后端）。
-    """
-    if not isinstance(usage, dict):
-        return total
-    merged: dict = dict(total or {})
-    for key, value in usage.items():
-        if isinstance(value, bool) or not isinstance(value, int):
-            continue
-        merged[key] = merged.get(key, 0) + value
-    return merged or None
-
-
 def _generation_update(resp: LLMResponse, *, attempt: int, latency_ms: int) -> dict:
     """一次成功响应的 generation 字段（``usage`` 为 None 时不传 usage_details）。"""
     kwargs: dict = {
@@ -167,7 +152,7 @@ async def call_structured_llm(
     *,
     OutputModel: Any,
     node: str,
-    messages: list[dict],
+    state: dict,
     llm: LLMBackend,
 ) -> LLMCallOutcome:
     """强校验 LLM 调用壳：按失败类分类重试 + 降级返回（永不抛 LLM 异常）。
@@ -177,6 +162,8 @@ async def call_structured_llm(
     检查。失败分类/回喂/退避只出现在失败重试路径，scripted 桩恒返回可校验内容 →
     默认路径决策序列零变化。
 
+    :param state: 节点构造的 JSON 可序列化 state 子集 —— 直传后端，不再经 ``__STATE__``
+        文本协议；同一 state + 空 feedback 渲染出的 prompt 与改造前等价。
     :param llm: 本次调用使用的 ``LLMBackend`` —— **必须显式注入**；``None`` 是装配缺陷，
         立刻抛 ``TypeError``（不回落任何默认桩、不降级成 HUMAN_REVIEW 掩盖问题）。
     """
@@ -199,26 +186,29 @@ async def call_structured_llm(
 
     backend = llm
     tracer = get_tracer()  # 进程级单例；无凭据 = NullTracer（全 no-op）
-    work_messages: list[dict] = list(messages)  # 修正提示追加在工作副本，不污染调用方
+    feedback: list[str] = []  # schema 修正提示（transport 失败不产生）；重试时以 feedback= 回喂
     total_tokens = 0
-    total_usage: dict | None = None  # 按键累加的 usage（全 None → None，不伪造 0）
     last_error: Optional[str] = None
 
     for attempt in (1, 2):
         # 每次真实 backend.complete() 记一条 generation：一次调用最多 2 次真实调用
-        # （schema 修正重试 / transport 重试），必须逐次记录。模型名取后端自报。
+        # （schema 修正重试 / transport 重试），必须逐次记录。模型名取后端自报；
+        # input 记结构化 state（反馈文本不进 input，见 metadata.attempt 区分尝试）。
         t0 = time.perf_counter()
         resp: LLMResponse | None = None
         try:
             with tracer.llm_generation(
                 name=f"llm.{node}",
                 model=getattr(backend, "name", "unknown"),
-                input=work_messages,
+                input=state,
                 metadata={"node": node, "attempt": attempt},
             ) as obs:
                 try:
                     resp = await backend.complete(
-                        node=node, messages=work_messages, json_schema=json_schema
+                        node=node,
+                        state=state,
+                        json_schema=json_schema,
+                        feedback=feedback or None,
                     )
                 except Exception as exc:  # 后端失败（LLMBackendError/网络/任何异常）
                     _observe_record_error(obs, exc)
@@ -231,12 +221,11 @@ async def call_structured_llm(
             if resp is None:
                 last_error = str(exc)
                 if attempt == 1:
-                    # transport 类没有可「修正」的输出 → 不追加修正文案，退避后重试
+                    # transport 类没有可「修正」的输出 → 不产生 feedback，退避后重试
                     await _transport_backoff(failure_index=attempt)
                 continue
             # 响应已拿到 → 异常只来自观测层退出；忽略它，业务按「成功响应」继续
         total_tokens += resp.tokens
-        total_usage = _merge_usage(total_usage, resp.usage)
         try:
             model = OutputModel.model_validate_json(resp.content)
         except Exception as exc:  # 校验失败（pydantic.ValidationError 等）
@@ -249,14 +238,13 @@ async def call_structured_llm(
                         attempts=1,
                         tokens=total_tokens,
                         error=f"模型输出被截断（finish_reason=length）且校验失败: {exc}",
-                        usage=total_usage,
                     )
-                # schema 修正类：回喂第 1 次非法输出原文 + 校验错误
-                work_messages.append(_correction_message(resp.content, exc))
+                # schema 修正类：收集第 1 次非法输出原文 + 校验错误，重试时回喂
+                feedback.append(_correction_message(resp.content, exc))
             continue
         # 成功：attempts=1（首次通过）或 2（重试后通过）
         return LLMCallOutcome(
-            model=model, attempts=attempt, tokens=total_tokens, error=None, usage=total_usage
+            model=model, attempts=attempt, tokens=total_tokens, error=None
         )
 
     # 两次尝试均失败 → 降级返回；节点据此置 degraded / 写 failure
@@ -265,7 +253,6 @@ async def call_structured_llm(
         attempts=2,
         tokens=total_tokens,
         error=last_error or "LLM 调用失败（无错误信息）",
-        usage=total_usage,
     )
 
 

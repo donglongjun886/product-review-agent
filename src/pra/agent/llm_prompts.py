@@ -1,17 +1,16 @@
 """四个 LLM 节点的「完整 prompt」渲染（纯函数、无 IO；供真实后端组装消息）。
 
-节点把 state 子集以 ``__STATE__ {json}`` 挂到首条 user 消息（scripted 桩据此做确定性
-决策）。本模块把这些 JSON 渲染成结构化人读中文上下文（商品事实 / 图片 / 机审信号 /
-假设仪表盘 / 证据链 / 调查队列 / 预算 / 工具目录）+ 输出 Schema 要点：system = 角色 +
-完整约束中文指令（``SYSTEM_PROMPTS``），user = 人读上下文 + Schema 要点；不把裸 JSON
-dump 当 user 正文。scripted 桩与节点本身都不依赖本模块。
+节点把结构化 state 子集以 ``state=`` 传给后端（scripted 桩据此做确定性决策）。本模块把
+这些 state 渲染成结构化人读中文上下文（商品事实 / 图片 / 机审信号 / 假设仪表盘 /
+证据链 / 预算 / 工具目录）+ 输出 Schema 要点：system = 角色 + 完整约束中文指令
+（``SYSTEM_PROMPTS``），user = 人读上下文 + Schema 要点；不把裸 JSON dump 当 user 正文。
+scripted 桩与节点本身都不依赖本模块。
 
 各 node 的 state 键（字段均为 ``model_dump(mode="json")`` 的可序列化形状）：
 - hypothesize: ``{"case": 全量, "screening_signals": [...]}``，续跑场景额外带
   ``hypotheses``（渲染为去重参考）；
-- plan: ``{"hypotheses", "evidence", "case"(案件身份 + product 核心字段 + 图片)}``；
-- reevaluate: ``{"hypotheses", "evidence", "investigation_queue",
-  "pending_tool_calls": [{tool,priority,reason}]}``；
+- plan: ``{"hypotheses", "evidence", "case"（全量）}``；
+- reevaluate: ``{"hypotheses", "evidence", "pending_tool_calls": [{tool,priority,reason}]}``；
 - decide: ``{"hypotheses", "evidence", "degraded", "failures", "budget"(摘要)}``。
 
 schema 强校验在 llm_shell / OutputModel 层，不在此重复实现；本模块不 import pra 内部
@@ -83,7 +82,7 @@ SYSTEM_PROMPTS: dict[str, str] = {
     "hypothesize": (
         "你是电商商品上架审核的「初始风险假设生成器」。本轮输入是一起待审核案件的完整"
         "商品事实（商品快照、商家、事件类型、机审信号）。你的任务：建立**待验证的风险"
-        "假设集**与**初始调查问题队列**，交给后续的调查取证循环（plan → tools → "
+        "假设集**，交给后续的调查取证循环（plan → tools → "
         "reevaluate）逐条验证。\n"
         "关键定位：你只做「初始假设生成」，绝不据此下最终结论（终判由收敛后的 decide "
         "节点完成）。\n"
@@ -98,18 +97,16 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "先验；\n"
         "4. 只依据 user 上下文中给出的商品事实与机审信号，**禁止臆造上下文没有的事实/"
         "数值/来源**；\n"
-        "5. investigation_queue 1~8 条、每条一句话，priority 1~5（1 最优先），只放值得"
-        "调查、可被工具取证的问题；\n"
-        "6. **禁止重复提出假设**：user 上下文若给出「既有假设清单」（含 UNRESOLVED / "
+        "5. **禁止重复提出假设**：user 上下文若给出「既有假设清单」（含 UNRESOLVED / "
         "REFUTED / 此前轮次已新增的假设），只提出清单之外的**新风险维度**；与清单内"
         "既有假设同维度或同表述（语义重复即重复，不要求逐字一致）的假设必须跳过 —— "
         "重复提出既有假设只会空转调查轮次、浪费预算；\n"
-        "7. **假设必须可取证、允许少提**：每条假设都要能被后续调查计划的取证工具检验"
+        "6. **假设必须可取证、允许少提**：每条假设都要能被后续调查计划的取证工具检验"
         "（图片比对 / 商品事实核验 / 商家历史 / 先例 / 政策检索中至少一条可取证路径"
         "），禁止提出工具无法取证的纯脑补维度；对照既有清单后没有新的可取证风险维度"
         "时允许**少提**，在满足第 1 条下限（hypotheses ≥1 条且含低风险假设）的前提下"
         "宁精勿凑；\n"
-        "8. 只输出**单个 JSON 对象**，字段/类型/枚举/必填严格符合 user 上下文末尾的 "
+        "7. 只输出**单个 JSON 对象**，字段/类型/枚举/必填严格符合 user 上下文末尾的 "
         "JSON Schema 要点；除 JSON 外不要输出任何解释文字。"
     ),
     "plan": (
@@ -149,7 +146,7 @@ SYSTEM_PROMPTS: dict[str, str] = {
     "reevaluate": (
         "你是商品审核 Agent 的「证据综合步骤」（reevaluate）。把 user 上下文中**本轮已"
         "给出**的 evidence 综合进各条 hypothesis（更新 posterior/status、标注支持/反驳"
-        "证据引用），并关闭已被解答的调查队列项。\n"
+        "证据引用）。\n"
         "硬性约束：\n"
         "1. **只依据 user 上下文已给出的证据**判断，禁止臆造任何未出现的事实/数值/"
         "来源/条款；\n"
@@ -165,14 +162,13 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "6. 运行中新发现的风险维度放 new_hypotheses（prior 语义同 hypothesize），不要"
         " 塞进 hypothesis_updates；\n"
         "7. evidence_sufficiency 表示本轮证据是否足以对高优先假设下结论（SUFFICIENT / "
-        "INSUFFICIENT，语义参考量）；已被证据解答的队列问题经 queue_updates 置 DONE；\n"
+        "INSUFFICIENT，语义参考量）；\n"
         "8. **外观/视觉类假设的证据门槛**：凡假设落在视觉比对维度（表述含「外观相似」"
         "「高度相似」「同款外观」「视觉仿冒」「复刻外观」「版型一致」「长得像」等）——"
         " 只有在上下文存在**图像类证据**（IMAGE_SIMILARITY 等由图像分析工具产出、基于"
         "图片比对的证据）时才可判 SUPPORTED；CASE_PRECEDENT / POLICY_REF 只能作佐证，"
-        "**不能单独支撑外观类 SUPPORTED**；无视觉证据时该类假设判 UNRESOLVED，并把对应"
-        "的外观查证队列问题保留 OPEN（留给 plan 安排图像取证），**禁止仅凭标题文字或"
-        "先例脑补外观相似结论**；\n"
+        "**不能单独支撑外观类 SUPPORTED**；无视觉证据时该类假设判 UNRESOLVED（留给 plan "
+        "安排图像取证），**禁止仅凭标题文字或先例脑补外观相似结论**；\n"
         "9. **政策/先例引用一次判定**：已被引用支撑/佐证假设的政策条款（POLICY_REF）"
         "与人工先例（CASE_PRECEDENT）视为**适用性已判定**，不要在同一假设上反复纠结"
         "条款是否适用、也不要为复核已引用条款而重复要求补查同类条款；注意条款/先例"
@@ -390,20 +386,6 @@ def _evidence_lines(evidence: Any, *, full_value: bool = True, limit: int = 200)
     return lines or ["（无证据）"]
 
 
-def _queue_lines(items: Any) -> list[str]:
-    """调查队列行（q/priority/status）。"""
-    lines: list[str] = []
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
-        q = item.get("q")
-        if not q:
-            continue
-        status = item.get("status") or "OPEN"
-        lines.append(f"- [priority={_text(item.get('priority'))}] {_text(q)}（status={status}）")
-    return lines or ["（队列为空）"]
-
-
 def _pending_tool_lines(items: Any) -> list[str]:
     """上一轮待执行工具摘要行（tool/priority/reason；args ≤160 字符）。"""
     lines: list[str] = []
@@ -457,10 +439,6 @@ def _budget_lines(budget: Any) -> list[str]:
         caps.append(f"LLM≤{limits.get('max_llm_calls')} 次")
     if limits.get("max_tool_calls") is not None:
         caps.append(f"工具≤{limits.get('max_tool_calls')} 次")
-    if limits.get("max_tokens") is not None:
-        caps.append(f"token≤{limits.get('max_tokens')}")
-    if limits.get("max_latency_ms") is not None:
-        caps.append(f"时长≤{limits.get('max_latency_ms')}ms")
     lines.append("- 限额：" + (" / ".join(caps) if caps else "无"))
     return lines
 
@@ -677,7 +655,7 @@ def build_user_prompt(
 ) -> str:
     """按 node 组装 user 消息正文（结构化人读中文上下文 + 输出 Schema 要点）。
 
-    :param state: 节点 ``__STATE__`` JSON 解析出的 dict（各 node 的键见模块 docstring）；
+    :param state: 节点传给后端的结构化 state dict（各 node 的键见模块 docstring）；
     :param json_schema: OutputModel 的 ``model_json_schema()`` dict；
     :param tool_catalog: 后端构造时提取的工具目录 ``[{name, description, args_schema}]``
         （None → 空目录兜底）；
@@ -695,7 +673,7 @@ def build_user_prompt(
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
         parts.append(_section("二、商品图片（含机审 OCR 结果）", "\n".join(_image_lines(_images_from_state(state)))))
         parts.append(_section("三、机审信号", "\n".join(_signal_lines(state))))
-        # 续跑场景下若 __STATE__ 带了既有假设，渲染成精简清单供去重（无则整节省略）。
+        # 续跑场景下若 state 带了既有假设，渲染成精简清单供去重（无则整节省略）。
         existing = state.get("hypotheses")
         if isinstance(existing, list) and existing:
             parts.append(
@@ -709,21 +687,19 @@ def build_user_prompt(
         parts.append(_section("二、商品图片（取证素材）", "\n".join(_image_lines(_images_from_state(state)))))
         parts.append(_section("三、假设仪表盘", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
         parts.append(_section("四、已收集证据摘要", "\n".join(_evidence_lines(state.get("evidence"), full_value=False, limit=120))))
-        parts.append(_section("五、调查队列", "\n".join(_queue_lines(state.get("investigation_queue")))))
-        parts.append(_section("六、可用取证工具目录", _tool_catalog_text(catalog)))
+        parts.append(_section("五、可用取证工具目录", _tool_catalog_text(catalog)))
         gap = state.get("required_measurement_coverage")
         if isinstance(gap, list) and gap:
             parts.append(
                 _section(
-                    "七、本案必需测量覆盖（Missing = 必须补测；不可测的不要再安排）",
+                    "六、本案必需测量覆盖（Missing = 必须补测；不可测的不要再安排）",
                     "\n".join(str(line) for line in gap),
                 )
             )
     elif node == "reevaluate":
         parts.append(_section("一、假设仪表盘", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
         parts.append(_section("二、本轮已收集证据（全部）", "\n".join(_evidence_lines(state.get("evidence")))))
-        parts.append(_section("三、调查队列", "\n".join(_queue_lines(state.get("investigation_queue")))))
-        parts.append(_section("四、上一轮待执行工具（供参考，本轮不执行）", "\n".join(_pending_tool_lines(state.get("pending_tool_calls")))))
+        parts.append(_section("三、上一轮待执行工具（供参考，本轮不执行）", "\n".join(_pending_tool_lines(state.get("pending_tool_calls")))))
     elif node == "decide":
         parts.append(_section("一、假设仪表盘（含支持/反驳证据引用）", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
         # 可引用政策/先例单独全量列出（REJECT 依据来源）；其余证据单列避免重复推理

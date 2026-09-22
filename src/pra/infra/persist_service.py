@@ -147,17 +147,11 @@ def _node_output_summary(node_name: str, update: dict) -> dict:
 
     if node_name == "hypothesize":
         hypos = list(update.get("hypotheses") or [])
-        queue = list(update.get("investigation_queue") or [])
         return {
             "node": node_name,
             "degraded": bool(update.get("degraded")),
             "hypotheses_count": len(hypos),
             "hypotheses": [_hypothesis_summary(h) for h in hypos],
-            "investigation_queue_count": len(queue),
-            "investigation_queue": [
-                {"q": q.get("q"), "priority": q.get("priority"), "status": q.get("status")}
-                for q in queue
-            ],
             "budget": budget_snap,
         }
     if node_name == "plan":
@@ -180,14 +174,12 @@ def _node_output_summary(node_name: str, update: dict) -> dict:
         for h in hypos:
             st = str(_enum_value(h.status))
             status_counts[st] = status_counts.get(st, 0) + 1
-        queue = list(update.get("investigation_queue") or [])
         return {
             "node": node_name,
             "degraded": bool(update.get("degraded")),
             "hypotheses_count": len(hypos),
             "hypotheses": [_hypothesis_summary(h) for h in hypos],
             "status_counts": status_counts,
-            "queue_done_count": sum(1 for q in queue if q.get("status") == "DONE"),
             "budget": budget_snap,
         }
     if node_name == "decide":
@@ -224,7 +216,6 @@ def _node_input_summary(node_name: str, update: dict, case_id: str) -> dict:
         "node": node_name,
         "case_id": case_id,
         "hypotheses_count": len(list(update.get("hypotheses") or [])),
-        "investigation_queue_count": len(list(update.get("investigation_queue") or [])),
         "pending_tool_calls_count": len(list(update.get("pending_tool_calls") or [])),
         "budget_tokens": _token_count(update.get("budget")),
     }

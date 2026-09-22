@@ -1,7 +1,7 @@
-"""预算护栏（guardrails/budget.py）单测：四维 >= 语义、记账不可变、快照补 latency。
+"""预算护栏（guardrails/budget.py）单测：两维（LLM / Tool）>= 语义、记账不可变、快照补 latency。
 
 阈值语义：**达到上限即视为超限**（>=，Guardrail 上界）；超限返回首个超限维度名，
-未超限返回 None。
+未超限返回 None。tokens / latency_ms 只作观测与审计，不参与超限判定。
 """
 
 from __future__ import annotations
@@ -10,8 +10,6 @@ from datetime import datetime, timedelta, timezone
 
 from pra.agent.guardrails.budget import (
     DIM_LLM_CALLS,
-    DIM_LATENCY,
-    DIM_TOKENS,
     DIM_TOOL_CALLS,
     budget_exceeded,
     bump_llm_usage,
@@ -47,24 +45,15 @@ def test_tool_calls_at_limit_exceeded():
     assert budget_exceeded(b) == DIM_TOOL_CALLS
 
 
-def test_tokens_at_limit_exceeded():
-    b = Budget(tokens=BudgetLimits().max_tokens)
-    assert budget_exceeded(b) == DIM_TOKENS
-
-
-def test_latency_at_limit_exceeded_from_start_time():
-    """elapsed_ms >= max_latency_ms（30000）→ LATENCY（从 start_time 墙钟推算）。"""
-    assert budget_exceeded(_old_budget(start_age_seconds=90)) == DIM_LATENCY
-
-
-def test_latency_naive_start_time_treated_utc():
-    """naive start_time 按 UTC 解释（防御分支）—— 同样按墙钟超限。"""
-    naive_old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=90)
-    assert budget_exceeded(Budget(start_time=naive_old)) == DIM_LATENCY
+def test_tokens_and_latency_never_exceed():
+    """tokens / 墙钟耗时只作观测：即使 token 极大、start_time 极旧也不截胡
+    （判定不依赖机器速度，上限只剩两维）。"""
+    assert budget_exceeded(Budget(tokens=10**9)) is None
+    assert budget_exceeded(_old_budget(start_age_seconds=86_400)) is None
 
 
 def test_first_exceeded_dimension_wins():
-    """多维同时超限 → 返回首个（固定顺序 LLM→TOOL→TOKENS→LATENCY）。"""
+    """两维同时超限 → 返回首个（固定顺序 LLM→TOOL）。"""
     b = Budget(llm_calls=12, tool_calls=20, tokens=999999)
     assert budget_exceeded(b) == DIM_LLM_CALLS
 
@@ -112,11 +101,11 @@ def test_node_retry_can_push_counter_to_cap_plus_one():
 
 
 def test_snapshot_budget_fills_latency_ms_without_mutating():
-    """快照 = 补 latency_ms 的副本；运行期对象不变（latency_ms 仍为初始 0）。"""
+    """快照 = 补 latency_ms 的副本（观测/审计字段）；运行期对象不变（latency_ms 仍为初始 0）。"""
     b = _old_budget(start_age_seconds=90)  # latency_ms 字段默认 0
     snap = snapshot_budget(b)
     assert snap is not b
-    assert snap.latency_ms >= b.limits.max_latency_ms  # 已按墙钟推算填入
+    assert snap.latency_ms >= 89_000  # 已按墙钟推算填入
     assert snap.llm_calls == b.llm_calls and snap.tool_calls == b.tool_calls
     assert b.latency_ms == 0  # 原对象未被写入 latency
     assert snap.limits is b.limits  # 限额引用共享（同一配置对象）

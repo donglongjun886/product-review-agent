@@ -4,9 +4,9 @@
 （``build_agent_graph(llm=...)`` / ``AgentScheme(llm=...)``）—— CI 确定性回归用
 :class:`pra.agent.scripted_llm.ScriptedLLMBackend`，二者可互换。语义差异：
 
-- 桩把 ``__STATE__`` 解析后做确定性分支；本后端把同样状态子集渲染成人读中文上下文
+- 桩据结构化 ``state`` 做确定性分支；本后端把同一 state 子集渲染成人读中文上下文
   （见 :mod:`pra.agent.llm_prompts`）发给真实模型 —— **输出非确定性**：同
-  (node, __STATE__) 不保证同结果、不可重放，与桩的"逐字节一致"口径不可混用。schema
+  (node, state) 不保证同结果、不可重放，与桩的"逐字节一致"口径不可混用。schema
   强校验 / 重试 1 次仍在 llm_shell（``model_validate_json``），后端不做内容校验。
 
 配置：``model`` 默认 ``"deepseek/deepseek-chat"``；``api_key`` 构造传入或读
@@ -35,9 +35,6 @@ from pra.agent.llm_prompts import (
     build_system_prompt,
     build_user_prompt,
 )
-from pra.agent.scripted_llm import (  # __STATE__ 解析（本项目惯例）
-    _extract_state,
-)
 
 __all__ = ["LiteLLMBackend"]
 
@@ -56,7 +53,7 @@ def _int_or_none(value: Any) -> int | None:
 
 
 class LiteLLMBackend(LLMBackend):
-    """真实 litellm 后端：解析 __STATE__ → 渲染完整 prompt → 调 API（见模块 docstring）。"""
+    """真实 litellm 后端：渲染结构化 state → 完整 prompt → 调 API（见模块 docstring）。"""
 
     name: str = "litellm"  # Protocol 属性；__init__ 覆写为 f"litellm-{model}"
 
@@ -123,17 +120,6 @@ class LiteLLMBackend(LLMBackend):
             )
         return catalog
 
-    # -- state 解析 --------------------------------------------------------------
-
-    @staticmethod
-    def _parse_state(messages: list) -> dict:
-        """解析 ``__STATE__ {json}`` 状态行；失败/找不到 → 空 dict（再包一层 try 双保险）。"""
-        try:
-            state = _extract_state(messages)
-        except Exception:
-            state = {}
-        return state if isinstance(state, dict) else {}
-
     # -- 渲染（system=角色+约束；user=结构化人读上下文 + Schema 要点） -----------
 
     def _render(
@@ -142,7 +128,7 @@ class LiteLLMBackend(LLMBackend):
         node: str,
         state: dict,
         json_schema: dict,
-        messages: list | None = None,
+        feedback: list[str] | None = None,
     ) -> tuple[str, str]:
         """组装发给真实 LLM 的 (system, user) 完整消息（本类唯一渲染入口）。
 
@@ -150,37 +136,24 @@ class LiteLLMBackend(LLMBackend):
         Schema 要点，并追加第 2 次尝试带回的修正提示（避免重试退化成同 prompt 空转）。
         """
         system = build_system_prompt(node)
-        feedbacks = self._collect_feedbacks(messages)
         user = build_user_prompt(
             node=node,
             state=state,
             json_schema=json_schema,
             tool_catalog=self._tool_catalog,
-            feedbacks=feedbacks,
+            feedbacks=feedback,
         )
         return system, user
-
-    @staticmethod
-    def _collect_feedbacks(messages: list | None) -> list[str]:
-        """收集修正提示（role=user 且 content 非 ``__STATE__`` 行），即上一轮校验错误。"""
-        feedbacks: list[str] = []
-        for msg in messages or []:
-            if not isinstance(msg, dict):
-                continue
-            if msg.get("role") != "user":
-                continue  # 只回喂 user 角色；system 不参与
-            content = msg.get("content")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            if "__STATE__" in content:
-                continue  # 状态行本身不是修正提示
-            feedbacks.append(content.strip())
-        return feedbacks
 
     # -- LLMBackend.complete ------------------------------------------------------
 
     async def complete(
-        self, *, node: str, messages: list, json_schema: dict
+        self,
+        *,
+        node: str,
+        state: dict,
+        json_schema: dict,
+        feedback: list[str] | None = None,
     ) -> LLMResponse:
         """按 node 渲染完整 prompt 并调用 litellm，返回 content 原样文本 + token 数。
 
@@ -194,19 +167,17 @@ class LiteLLMBackend(LLMBackend):
             raise LLMBackendError(
                 f"未知 node: {node!r}，应为 {sorted(SYSTEM_PROMPTS)}"
             )
-        # 2) 解析 __STATE__（失败 → 空 state 兜底，渲染层自防御）
-        state = self._parse_state(messages)
-        # 3) 无 key 检查（构造后到真正调用前才抛）
+        # 2) 无 key 检查（构造后到真正调用前才抛）
         if not self._api_key:
             raise LLMBackendError(
                 f"未配置 DeepSeek API key：请在构造 LiteLLMBackend(api_key=...) 时传入，"
                 f"或设置环境变量 {_API_KEY_ENV} 后重试（当前 model={self.model}）。"
             )
-        # 4) 渲染完整消息
+        # 3) 渲染完整消息（state 直传；feedback 为上一轮 schema 修正提示）
         system, user = self._render(
-            node=node, state=state, json_schema=json_schema, messages=messages
+            node=node, state=state, json_schema=json_schema, feedback=feedback
         )
-        # 5) litellm 调用（延迟 import：模块 import 期零 litellm 依赖）
+        # 4) litellm 调用（延迟 import：模块 import 期零 litellm 依赖）
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -235,7 +206,7 @@ class LiteLLMBackend(LLMBackend):
             raise LLMBackendError(
                 f"litellm 调用失败（node={node}, model={self.model}）：{exc}"
             ) from exc
-        # 6) 取 content + 截断标记（choices 异常 → 空串，交上层校验）
+        # 5) 取 content + 截断标记（choices 异常 → 空串，交上层校验）
         content = ""
         truncated = False
         try:
@@ -247,7 +218,7 @@ class LiteLLMBackend(LLMBackend):
             truncated = str(getattr(choice, "finish_reason", "") or "") == "length"
         except Exception:
             content = ""
-        # 7) token 记账：tokens = usage.total_tokens（input+output 合计、含缓存命中；
+        # 6) token 记账：tokens = usage.total_tokens（input+output 合计、含缓存命中；
         #    无 usage → 0）；另透出拆分 usage（input/output/total，对齐 Langfuse
         #    usage_details），取不到的键不放（不填 0 冒充），整体拿不到 → None。
         tokens = 0

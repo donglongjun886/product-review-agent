@@ -279,7 +279,6 @@ def hypothesize_json() -> str:
                 {"statement": "刻意规避品牌识别", "prior": 0.6, "evidence_hint": []},
                 {"statement": "普通设计非品牌款", "prior": 0.3, "evidence_hint": []},
             ],
-            "investigation_queue": [{"q": "外观是否高度相似？", "priority": 1}],
             "rationale": "test",
         }
     )
@@ -297,7 +296,6 @@ def reevaluate_json() -> str:
                     "evidence_against": [],
                 }
             ],
-            "queue_updates": [{"q": "外观是否高度相似？", "status": "DONE"}],
             "new_hypotheses": [{"statement": "商家系统性上架", "prior": 0.2}],
             "evidence_sufficiency": "SUFFICIENT",
             "conflicts": [],
@@ -321,16 +319,18 @@ def decide_reject_json() -> str:
 
 
 class SequenceBackend:
-    # contents 元素为 JSON 字符串（返回该串）或 None（该次抛后端异常）；calls 记录每次 messages 副本
+    # contents 元素为 JSON 字符串（返回该串）或 None（该次抛后端异常）；calls 记录每次收到的 state
     name = "test-sequence"
 
     def __init__(self, contents: list, tokens: int = 7) -> None:
         self._contents = list(contents)
         self._tokens = tokens
-        self.calls: list[list] = []  # 每次 complete 收到的 messages（浅拷贝列表）
+        self.calls: list[dict] = []  # 每次 complete 收到的 state
 
-    async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
-        self.calls.append(list(messages))
+    async def complete(
+        self, *, node: str, state: dict, json_schema: dict, feedback: list[str] | None = None
+    ) -> LLMResponse:
+        self.calls.append(state)
         if not self._contents:
             raise LLMBackendError("stub 内容耗尽")
         content = self._contents.pop(0)
@@ -345,7 +345,9 @@ class AlwaysRaiseBackend:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
+    async def complete(
+        self, *, node: str, state: dict, json_schema: dict, feedback: list[str] | None = None
+    ) -> LLMResponse:
         self.calls += 1
         raise LLMBackendError("injected backend failure")
 
@@ -357,7 +359,9 @@ class NodePayloadBackend:
         self._payloads = dict(payloads or {})
         self.calls: list[str] = []
 
-    async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
+    async def complete(
+        self, *, node: str, state: dict, json_schema: dict, feedback: list[str] | None = None
+    ) -> LLMResponse:
         self.calls.append(node)
         if node not in self._payloads:
             raise LLMBackendError(f"test backend unknown node: {node}")

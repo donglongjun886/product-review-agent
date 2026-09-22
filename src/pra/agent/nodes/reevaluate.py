@@ -1,34 +1,32 @@
 """reevaluate 节点：把本轮新证据综合进假设状态（"LLM 提案 + 确定性 apply"两层）。
 
-1. 依据 ``__STATE__`` 中**已给的 evidence**（全量字段）更新各条 hypothesis 的
-   posterior/status/evidence_for/evidence_against，并把已解答的 investigation_queue 项
-   置 DONE。status 只允许 SUPPORTED / REFUTED / UNRESOLVED —— **证据不足置 UNRESOLVED**
-   （"查了没结论" ≠ "证伪"；PENDING 只留给新假设）；禁止臆造未出现的事实/数值/来源。
+1. 依据 ``state=`` 中**已给的 evidence**（全量字段）更新各条 hypothesis 的
+   posterior/status/evidence_for/evidence_against。status 只允许 SUPPORTED / REFUTED /
+   UNRESOLVED —— **证据不足置 UNRESOLVED**（"查了没结论" ≠ "证伪"；PENDING 只留给新假设）；
+   禁止臆造未出现的事实/数值/来源。
 2. **新发现的风险维度**走 ``new_hypotheses``（hypothesize 不重跑），apply 追加为
    status=PENDING、posterior=None 的新假设，id 从现用最大 H 序号 +1 续号。
 3. ``conflicts`` / ``evidence_sufficiency`` **仅供审计/参考**：AgentState 无对应 channel。
 
 契约要点：
-- hypotheses / investigation_queue 为**覆盖写** → 成功路径返回**全集**；evidence 走
+- hypotheses 为**覆盖写** → 成功路径返回**全集**；evidence 走
   merge reducer、tool_call_history/failures 走 append —— 本节点不动它们。
 - 入口短路：``state["degraded"]`` 或 ``budget_exceeded(state["budget"])`` 非 None →
   **不调 LLM**，返回 ``{}``（不动推理字段、不动 degraded）。
 - LLM 记账：成功/失败均按 ``outcome.attempts`` 次数 bump。
 - LLM 失败（outcome.model=None）→ 返回 degraded=True + 一条 critical failure（reason 取
   固定字面值 ``_DEGRADE_REASON``，不拼 outcome.error）+ bump 后 budget，**不动
-  hypotheses / queue**（degraded=True 后路由直接进 decide，overlay 按降级归因转人工）。
+  hypotheses**（degraded=True 后路由直接进 decide，overlay 按降级归因转人工）。
 """
 
 from __future__ import annotations
 
-import json
 import re
 
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_REEVALUATE, make_failure
 from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
-from pra.agent.guardrails.schemas import QueueUpdate, ReevaluateOutput
-from pra.agent.llm_prompts import SYSTEM_PROMPTS
+from pra.agent.guardrails.schemas import ReevaluateOutput
 from pra.domain.models import Hypothesis, HypothesisStatus
 
 __all__ = ["reevaluate_node"]
@@ -36,43 +34,25 @@ __all__ = ["reevaluate_node"]
 # 假设 id 序号匹配：H1..Hn（hypothesize 生成 / reevaluate.new_hypotheses 续号共用）。
 _H_ID_RE = re.compile(r"^H(\d+)$")
 
-# 系统指令单一来源：``pra.agent.llm_prompts.SYSTEM_PROMPTS``（真实后端与节点共用同一份）。
-_SYSTEM_PROMPT = SYSTEM_PROMPTS["reevaluate"]
-
 # LLM 步降级 failure 文案：与 hypothesize/plan 对齐（固定字面值、不拼 outcome.error）。
 _DEGRADE_REASON = "schema 校验重试仍失败"
 
 
-def _build_messages(state: dict) -> list[dict]:
-    """构造 LLM 消息：首条 user 消息 = ``"__STATE__ " + json``，携带 hypotheses /
-    evidence / investigation_queue 全量 + 上一轮 pending_tool_calls 摘要。"""
-    hypotheses = [h.model_dump(mode="json") for h in state.get("hypotheses") or []]
-    evidence = [e.model_dump(mode="json") for e in state.get("evidence") or []]
-    pending = state.get("pending_tool_calls") or []
-    queue = [dict(item) for item in (state.get("investigation_queue") or [])]
-    state_json = json.dumps(
-        {
-            "hypotheses": hypotheses,
-            "evidence": evidence,
-            # investigation_queue 全量：scripted 桩据此产 queue_updates 置 DONE
-            # （漏注入会导致队列项永不 DONE）。
-            "investigation_queue": queue,
-            # 上一轮 pending_tool_calls 只取 tool/priority/reason，不带 args 全量。
-            "pending_tool_calls": [
-                {
-                    "tool": c.get("tool"),
-                    "priority": c.get("priority"),
-                    "reason": c.get("reason"),
-                }
-                for c in pending
-            ],
-        },
-        ensure_ascii=False,
-    )
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": "__STATE__ " + state_json},
-    ]
+def _state_payload(state: dict) -> dict:
+    """LLM 入参 state 子集：hypotheses / evidence 全量 + 上一轮 pending_tool_calls 摘要。"""
+    return {
+        "hypotheses": [h.model_dump(mode="json") for h in state.get("hypotheses") or []],
+        "evidence": [e.model_dump(mode="json") for e in state.get("evidence") or []],
+        # 上一轮 pending_tool_calls 只取 tool/priority/reason，不带 args 全量。
+        "pending_tool_calls": [
+            {
+                "tool": c.get("tool"),
+                "priority": c.get("priority"),
+                "reason": c.get("reason"),
+            }
+            for c in (state.get("pending_tool_calls") or [])
+        ],
+    }
 
 
 def _max_h_seq(hypotheses: list[Hypothesis]) -> int:
@@ -85,26 +65,8 @@ def _max_h_seq(hypotheses: list[Hypothesis]) -> int:
     return seq
 
 
-def _apply_queue(queue: list[dict], queue_updates: list[QueueUpdate]) -> list[dict]:
-    """队列项按 ``q`` 原文匹配 QueueUpdate 改 status（未命中保持原状）。
-
-    返回新列表、不就地修改入参（纯函数）。
-    """
-    wanted = {qu.q: qu.status for qu in queue_updates}
-    if not wanted:
-        return [dict(item) for item in queue]
-    result: list[dict] = []
-    for item in queue:
-        q = item.get("q")
-        if q in wanted:
-            result.append({**item, "status": wanted[q]})
-        else:
-            result.append(dict(item))
-    return result
-
-
 def _apply(state: dict, out: ReevaluateOutput) -> dict:
-    """确定性应用 ReevaluateOutput → hypotheses / investigation_queue **全集**（覆盖写）。"""
+    """确定性应用 ReevaluateOutput → hypotheses **全集**（覆盖写）。"""
     hypotheses = list(state.get("hypotheses") or [])
     by_id = {h.id: h for h in hypotheses}
     updated: dict[str, Hypothesis] = {}
@@ -138,8 +100,7 @@ def _apply(state: dict, out: ReevaluateOutput) -> dict:
                 evidence_against=[],
             )
         )
-    queue = _apply_queue(state.get("investigation_queue") or [], out.queue_updates)
-    return {"hypotheses": result, "investigation_queue": queue}
+    return {"hypotheses": result}
 
 
 async def reevaluate_node(state: dict, config, *, llm: LLMBackend) -> dict:
@@ -154,7 +115,7 @@ async def reevaluate_node(state: dict, config, *, llm: LLMBackend) -> dict:
     outcome = await call_structured_llm(
         OutputModel=ReevaluateOutput,
         node="reevaluate",
-        messages=_build_messages(state),
+        state=_state_payload(state),
         llm=llm,
     )
     # 记账：按实际尝试次数（含 schema 重试）bump。
@@ -162,8 +123,8 @@ async def reevaluate_node(state: dict, config, *, llm: LLMBackend) -> dict:
         state["budget"], llm_calls=outcome.attempts, tokens=outcome.tokens
     )
     if outcome.model is None:
-        # 降级：不动 hypotheses / investigation_queue（保留现有证据/假设，由路由进
-        # decide 兜底）；failures 只 append 本次新增。
+        # 降级：不动 hypotheses（保留现有证据/假设，由路由进 decide 兜底）；
+        # failures 只 append 本次新增。
         return {
             "degraded": True,
             "failures": [

@@ -21,8 +21,7 @@ __all__ = ["ReviewRunResult"]
 class ReviewRunResult(BaseModel):
     """HTTP 响应包装 —— 一次调查执行的最小结果信封。
 
-    MVP 为同步执行（请求内 await 完整调查后返回），无异步 job 语义；未来 worker
-    消费 MQ 后本信封演进为受理回执 + 异步查询/回调地址。
+    同步执行（请求内 await 完整调查后返回），无异步 job 语义。
     """
 
     model_config = ConfigDict(extra="forbid")

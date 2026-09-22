@@ -6,7 +6,7 @@
 覆盖：构造（model/name/api_key 来源）/ tools 目录提取 / acompletion 成功路径
 （content/tokens/kwargs）/ 网络失败 → ``LLMBackendError`` / 模型文本清洗三态
 （经公开 ``complete`` 验证）/ 未知 node 不触发调用 / ``call_structured_llm`` 全链路重试
-闭环 / 四节点 prompt 渲染（无裸 ``__STATE__`` / 空 state 防御 / schema 枚举与必填）/
+闭环 / 四节点 prompt 渲染（state 直传、空 state 防御 / schema 枚举与必填）/
 延迟 import 不拉起 litellm。
 
 不烧 key：只 monkeypatch ``litellm.acompletion`` 属性（不 mock 整个模块 import）；每个触发
@@ -16,7 +16,6 @@ complete 的测试都打上「耗尽即 pytest.fail」的哨兵；无 key / 未�
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -42,8 +41,8 @@ from pra.agent.llm_prompts import (
 # 全程离线 —— 本文件首个 import litellm 发生在测试函数内（延迟 import，同 src 惯例）。
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 # ---------------------------------------------------------------------------
-# 测试数据（手写 dict state —— 与 nodes/*.py _build_messages 的 __STATE__ JSON 同构，
-# 但不用 domain 对象：LiteLLMBackend 只解析 __STATE__ JSON，喂 dict 即可）
+# 测试数据（手写 dict state —— JSON 可序列化的结构化 state 子集，与节点直接构造的
+# state 同构；不用 domain 对象：LiteLLMBackend 只消费 dict state）
 # ---------------------------------------------------------------------------
 
 _PRODUCT_STATE = {
@@ -76,14 +75,6 @@ _PRODUCT_STATE = {
     ],
 }
 
-_HYPOTHESIZE_MESSAGES = [
-    {"role": "system", "content": "（节点 system，LiteLLMBackend 渲染时会被替换）"},
-    {
-        "role": "user",
-        "content": "__STATE__ " + json.dumps(_PRODUCT_STATE, ensure_ascii=False),
-    },
-]
-
 # plan 最小 state：无假设/无证据 → plan 渲染走"无可用取证工具 → conclude"兜底分支。
 _PLAN_STATE = {
     "hypotheses": [],
@@ -104,11 +95,6 @@ _PLAN_STATE = {
         },
     },
 }
-
-_PLAN_MESSAGES = [
-    {"role": "system", "content": "plan sys"},
-    {"role": "user", "content": "__STATE__ " + json.dumps(_PLAN_STATE, ensure_ascii=False)},
-]
 
 # 合法 JSON 但不符合 PlanOutput schema（next_action 超词表）→ pydantic ValidationError。
 _SCHEMA_BAD = '{"next_action": "SOMETHING_ELSE", "tools": [], "rationale": "x"}'
@@ -216,7 +202,7 @@ async def test_no_api_key_constructor_ok_first_complete_raises(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     backend = LiteLLMBackend()  # 无 key 构造不抛（便于无 key 环境 import/渲染调试）
     with pytest.raises(LLMBackendError) as ei:
-        await backend.complete(node="hypothesize", messages=[], json_schema={})
+        await backend.complete(node="hypothesize", state={}, json_schema={})
     message = str(ei.value)
     assert "DEEPSEEK_API_KEY" in message  # 提示告诉用户该设哪个环境变量
     assert "未配置" in message
@@ -265,7 +251,7 @@ def test_tool_catalog_extracted_from_tool_objects():
 
 async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
     """mock acompletion 成功路径：content/tokens 正确；kwargs 含 model/temperature/
-    response_format/api_key/api_base/max_tokens；user 是渲染后的中文上下文（无 __STATE__）。"""
+    response_format/api_key/api_base/max_tokens；user 是渲染后的中文上下文。"""
     fake = _patch_acompletion(monkeypatch, contents=['{"foo": 1}'], tokens=23)
     backend = LiteLLMBackend(
         api_key="sk-test",
@@ -274,7 +260,7 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
         temperature=0.0,
     )
     resp = await backend.complete(
-        node="hypothesize", messages=_HYPOTHESIZE_MESSAGES, json_schema=_SIMPLE_SCHEMA
+        node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
     )
     # content == 模型返回的干净 JSON 文本；tokens == usage.total_tokens
     assert resp.content == '{"foo": 1}'
@@ -296,10 +282,9 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
     # 行为级接线：system 恰为该节点的 SYSTEM_PROMPTS 渲染结果（不锁提示正文措辞）
     assert msgs[0]["content"] == build_system_prompt("hypothesize")
     user = msgs[1]["content"]
-    assert "P_MOCK_99" in user  # __STATE__ 里的商品事实被渲染出来（值而非裸 JSON）
+    assert "P_MOCK_99" in user  # state 里的商品事实被渲染出来（值而非裸 JSON）
     assert "KEYWORD" in user  # 机审信号入上下文
     assert "decision" in user and "HUMAN_REVIEW" in user  # schema 要点（字段/枚举值）入 user
-    assert "__STATE__" not in user  # 不发裸 __STATE__ 标记给真实模型
 
 
 async def test_complete_network_failure_raises_llm_backend_error(monkeypatch):
@@ -313,7 +298,7 @@ async def test_complete_network_failure_raises_llm_backend_error(monkeypatch):
     backend = LiteLLMBackend(api_key="sk-test")
     with pytest.raises(LLMBackendError) as ei:
         await backend.complete(
-            node="hypothesize", messages=_HYPOTHESIZE_MESSAGES, json_schema={}
+            node="hypothesize", state=_PRODUCT_STATE, json_schema={}
         )
     assert "调用失败" in str(ei.value)
     assert "connection reset by peer" in str(ei.value)
@@ -332,7 +317,7 @@ async def test_complete_cleans_model_content_three_states(monkeypatch):
         monkeypatch, contents=[clean, fenced, no_brace, None, ""]
     )
     backend = LiteLLMBackend(api_key="sk-test")
-    call = dict(node="hypothesize", messages=_HYPOTHESIZE_MESSAGES, json_schema={})
+    call = dict(node="hypothesize", state=_PRODUCT_STATE, json_schema={})
     # 1) 干净 JSON 原样返回
     assert (await backend.complete(**call)).content == clean
     # 2) 围栏 + 前后杂文本 → 截取首个 { 到末个 }
@@ -356,7 +341,7 @@ async def test_unknown_node_raises_without_calling_litellm(monkeypatch):
     monkeypatch.setattr(litellm, "acompletion", should_not_be_called)
     backend = LiteLLMBackend(api_key="sk-test")  # 有 key，确保失败源于未知 node
     with pytest.raises(LLMBackendError) as ei:
-        await backend.complete(node="bogus", messages=[], json_schema={})
+        await backend.complete(node="bogus", state={}, json_schema={})
     assert "未知 node" in str(ei.value)
     assert "hypothesize" in str(ei.value)  # 提示里带合法 node 词表
 
@@ -370,7 +355,7 @@ async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypat
     fake = _patch_acompletion(monkeypatch, contents=[_SCHEMA_BAD, plan_conclude_json()])
     backend = LiteLLMBackend(api_key="sk-test")
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+        OutputModel=PlanOutput, node="plan", state=_PLAN_STATE, llm=backend
     )
     assert outcome.model is not None
     assert isinstance(outcome.model, PlanOutput)
@@ -421,7 +406,7 @@ async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeyp
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     backend = LiteLLMBackend(api_key="sk-test")
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+        OutputModel=PlanOutput, node="plan", state=_PLAN_STATE, llm=backend
     )
     assert call_count["n"] == 2  # 失败后重试了 1 次
     assert outcome.model is not None and outcome.model.next_action == "conclude"
@@ -442,14 +427,14 @@ async def test_backend_complete_marks_truncated_on_finish_reason_length(monkeypa
     fake = _patch_acompletion(monkeypatch, contents=['{"partial": "json'], finish_reason="length")
     backend = LiteLLMBackend(api_key="sk-test")
     resp = await backend.complete(
-        node="hypothesize", messages=_HYPOTHESIZE_MESSAGES, json_schema={}
+        node="hypothesize", state=_PRODUCT_STATE, json_schema={}
     )
     assert resp.truncated is True
     assert len(fake.calls) == 1
     # 对照：finish_reason="stop"（默认）→ truncated=False
     fake2 = _patch_acompletion(monkeypatch, contents=['{"ok": 1}'], finish_reason="stop")
     resp2 = await backend.complete(
-        node="hypothesize", messages=_HYPOTHESIZE_MESSAGES, json_schema={}
+        node="hypothesize", state=_PRODUCT_STATE, json_schema={}
     )
     assert resp2.truncated is False
     assert len(fake2.calls) == 1
@@ -468,7 +453,7 @@ async def test_call_structured_llm_truncated_invalid_output_not_retried(monkeypa
     )
     backend = LiteLLMBackend(api_key="sk-test")
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+        OutputModel=PlanOutput, node="plan", state=_PLAN_STATE, llm=backend
     )
     assert outcome.model is None
     assert outcome.attempts == 1  # 截断按 transport 类：不重试
@@ -483,7 +468,7 @@ async def test_call_structured_llm_truncated_but_valid_content_succeeds(monkeypa
     )
     backend = LiteLLMBackend(api_key="sk-test")
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+        OutputModel=PlanOutput, node="plan", state=_PLAN_STATE, llm=backend
     )
     assert outcome.model is not None and outcome.model.next_action == "conclude"
     assert outcome.attempts == 1
@@ -498,7 +483,7 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
     )
     backend = LiteLLMBackend(api_key="sk-test")
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=_PLAN_MESSAGES, llm=backend
+        OutputModel=PlanOutput, node="plan", state=_PLAN_STATE, llm=backend
     )
     assert outcome.model is None
     assert outcome.attempts == 2
@@ -511,7 +496,7 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
 # B. llm_prompts 渲染纯测
 
 def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
-    """hypothesize user prompt：分节中文上下文含商品事实/图片/信号值；无裸 __STATE__。"""
+    """hypothesize user prompt：分节中文上下文含商品事实/图片/信号值。"""
     text = build_user_prompt(
         node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
     )
@@ -521,7 +506,6 @@ def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
     assert "疑似品牌 LOGO 图案" in text  # 机审 OCR 信息入上下文
     assert "KEYWORD" in text  # 机审信号入上下文
     assert "decision" in text and "HUMAN_REVIEW" in text  # schema 要点（字段/枚举值）渲染
-    assert "__STATE__" not in text  # 不把 __STATE__ 标记泄漏给真实模型
 
 
 def test_build_user_prompt_decide_sections():
@@ -576,8 +560,6 @@ def test_build_user_prompt_decide_sections():
             "limits": {
                 "max_llm_calls": 10,
                 "max_tool_calls": 20,
-                "max_tokens": 5000,
-                "max_latency_ms": 60000,
             },
         },
     }
@@ -588,8 +570,9 @@ def test_build_user_prompt_decide_sections():
     assert "外观高度模仿某品牌经典款" in text  # hypothesis.statement 值渲染
     assert "POLICY_REF" in text  # 证据 type 保真（REJECT 引用来源）
     assert "degraded" in text  # 运行状态入上下文
-    assert "1000" in text and "5000" in text  # 预算用量与上限数值渲染
-    assert "__STATE__" not in text
+    # 预算入上下文：已用 token 观测值 + 两维上限（LLM 调用 / Tool 调用）数值
+    assert "1000" in text
+    assert "LLM≤10" in text and "工具≤20" in text
 
 
 def test_build_user_prompt_plan_tool_catalog_and_feedback():
@@ -614,7 +597,6 @@ def test_build_user_prompt_plan_tool_catalog_and_feedback():
                 "extra": {"a": 1},
             }
         ],
-        "investigation_queue": [{"q": "是否仿牌？", "priority": 1, "status": "OPEN"}],
     }
     catalog = [
         {"name": "ImageAnalysisTool", "description": "图片外观相似度比对", "args_schema": args_schema}
@@ -631,7 +613,6 @@ def test_build_user_prompt_plan_tool_catalog_and_feedback():
     assert "必填" in text and "可选" in text  # required/optional 区分被表达（不锁标记格式）
     assert "decision 字段缺失" in text  # llm_shell 修正提示内容被回喂到 user
     assert "上一轮输出校验反馈" in text  # 修正反馈分节标记（llm_shell 重试协议回喂载体）
-    assert "__STATE__" not in text
     # 空目录 → plan 上下文提示无工具可查、引导 conclude
     empty = build_user_prompt(node="plan", state={}, json_schema={})
     assert "conclude" in empty

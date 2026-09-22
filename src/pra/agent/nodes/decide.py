@@ -17,33 +17,25 @@ decision 落 DB（本节点不落库、不写额外状态字段）。
 4. **decide 恒返回 degraded=False**：降级/失败被消费进 decision / overrides / failures
    审计，不再透传。
 
-``_build_messages`` 首条 user 消息固定 ``"__STATE__ {json}"``：hypotheses/evidence 全量
+``_state_payload`` 以结构化 dict 注入 state 子集：hypotheses/evidence 全量
 + degraded + failures + budget 摘要（``model_dump(mode="json")``）。
 """
 
 from __future__ import annotations
-
-import json
 
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, make_failure
 from pra.agent.guardrails.gate import run_decision_overlay
 from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
 from pra.agent.guardrails.schemas import DecisionProposal
-from pra.agent.llm_prompts import SYSTEM_PROMPTS
 from pra.observability.tracing import get_tracer
 
 __all__ = ["decide_node"]
 
-# 系统指令单一来源：``pra.agent.llm_prompts.SYSTEM_PROMPTS``（真实后端与节点共用同一份）。
-_SYSTEM_PROMPT = SYSTEM_PROMPTS["decide"]
 
-
-def _build_messages(state: dict) -> list[dict]:
-    """构造 LLM 消息：首条 user 消息 = ``"__STATE__ " + json``，携带 hypotheses /
-    evidence 全量（``model_dump(mode="json")``）+ degraded + failures + budget 摘要。"""
-    hypotheses = [h.model_dump(mode="json") for h in state.get("hypotheses") or []]
-    evidence = [e.model_dump(mode="json") for e in state.get("evidence") or []]
+def _state_payload(state: dict) -> dict:
+    """LLM 入参 state 子集：hypotheses / evidence 全量（``model_dump(mode="json")``）
+    + degraded + failures + budget 摘要（llm_calls/tool_calls/tokens + 两维限额）。"""
     budget = state.get("budget")
     if budget is not None:
         budget_summary = {
@@ -53,23 +45,19 @@ def _build_messages(state: dict) -> list[dict]:
             "limits": {
                 "max_llm_calls": budget.limits.max_llm_calls,
                 "max_tool_calls": budget.limits.max_tool_calls,
-                "max_tokens": budget.limits.max_tokens,
-                "max_latency_ms": budget.limits.max_latency_ms,
             },
         }
     else:
         budget_summary = None
-    payload = {
-        "hypotheses": hypotheses,
-        "evidence": evidence,
+    return {
+        "hypotheses": [
+            h.model_dump(mode="json") for h in state.get("hypotheses") or []
+        ],
+        "evidence": [e.model_dump(mode="json") for e in state.get("evidence") or []],
         "degraded": bool(state.get("degraded")),
         "failures": state.get("failures") or [],
         "budget": budget_summary,
     }
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": "__STATE__ " + json.dumps(payload, ensure_ascii=False)},
-    ]
 
 
 def _gate_input_summary(proposal: DecisionProposal | None) -> dict:
@@ -111,7 +99,7 @@ async def decide_node(state: dict, config, *, llm: LLMBackend) -> dict:
         outcome = await call_structured_llm(
             OutputModel=DecisionProposal,
             node="decide",
-            messages=_build_messages(state),
+            state=_state_payload(state),
             llm=llm,
         )
         # 记账：按实际尝试次数（含 schema 重试）bump。

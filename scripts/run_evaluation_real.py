@@ -12,9 +12,9 @@ CLI：``--limit N`` / ``--ids "EC_V2_0007,EC_V2_0101"`` 定向取案子集；``-
 检索，hybrid）；``--model`` / ``--api-key`` / ``--base-url`` 配 LLM；``--out`` 写结果 JSON
 （父目录需已存在）。
 
-**两臂同预算**：real 与 scripted 都跑**生产默认 Guardrail 档**（10/15/40000/30000），评测不
-覆盖预算 —— 真实 LLM 每案 ~9 次串行调用天然 >30s，会按生产语义被 LATENCY 护栏截胡转人工；
-这正是"预算是否够用"的观测结果，报告以 R3 截胡维度呈现，不做评测侧放宽。
+**两臂同预算**：real 与 scripted 都跑**生产默认 Guardrail 档**（LLM_CALLS=10 /
+TOOL_CALLS=15），评测不覆盖预算 —— 预算是否够用本身就是被测行为；超限按生产语义转
+HUMAN_REVIEW，报告以 R3 截胡维度呈现，不做评测侧放宽。
 
 成本与结论边界：
 
@@ -445,7 +445,7 @@ def _overrides_summary(records: list[EvalRecord]) -> dict:
         cases_with_any += 1
         counts.update(ovs)
         if R3_BUDGET_EXHAUSTED in ovs:
-            # 真实跑分里 token 与 llm_calls 都可能是截胡源，必须拆开看（见 budget.py 口径）
+            # 截胡维度只可能是 llm_calls / tool_calls，拆分便于归因（见 budget.py 口径）
             hit_dims[str(detail.get("budget_hit_dim") or "UNKNOWN")] += 1
         if R3_BUDGET_EXHAUSTED in ovs and R5_DEGRADED_OR_FAILED_STEP in ovs:
             r3_r5_mixed += 1
@@ -645,8 +645,9 @@ def render_report(payload: dict, extra: dict, *, out_path: str | None = None) ->
     add("  · HRR=转人工率 / auto=自动化率；EvalRecord 不含墙钟 latency（real 墙钟仅进程内进度打印）")
     add(
         "  · cost.tokens 口径（P2-16）= usage.total_tokens：input+output 合计、含 provider"
-        " 缓存命中 token；schema 校验失败的尝试也全额累计 —— R3 按 tokens 维度归因时"
-        "按此口径解读（EvalRecord.detail.budget_hit_dim 记录哪一维先撞限）"
+        " 缓存命中 token；schema 校验失败的尝试也全额累计。tokens 为观测字段，**不参与**"
+        " R3 预算截胡判定（R3 只看 llm_calls / tool_calls）；EvalRecord.detail.budget_hit_dim"
+        " 记录哪一维先撞限"
     )
     if extra["truth_human"]:
         add(
@@ -875,7 +876,7 @@ async def _main(argv: list[str] | None = None) -> int:
         f"建议先 --limit 10 冒烟 —— 本次跑 {len(cases)} 条"
     )
     print(
-        "[NOTE] 两臂预算恒为生产默认档（10/15/40000/30000，评测不覆盖 Guardrail）："
+        "[NOTE] 两臂预算恒为生产默认档（LLM_CALLS=10 / TOOL_CALLS=15，评测不覆盖 Guardrail）："
         "real 臂超限 → HUMAN_REVIEW 是生产语义，归因见 R3 截胡维度"
     )
 

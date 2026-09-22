@@ -1,11 +1,8 @@
-"""Checkpointer 工厂：LangGraph 线程状态持久化，MVP 是 InMemorySaver。
+"""Checkpointer 工厂：LangGraph 线程状态快照，MVP 是进程内 InMemorySaver。
 
-线程 checkpoint 只存 ``AgentState`` 每步快照，服务于断点续跑 / eval 重放 / super-step
+线程 checkpoint 只存 ``AgentState`` 每步快照，服务于同一线程内续跑与 super-step
 恢复；业务真相（review_trace / review_evidence / review_result 等）由 worker 层显式落
 MySQL，不是本模块职责 —— 本模块不写业务表，只提供状态 (de)serialize 与介质工厂。
-
-未实现、需求到时再开的持久化位：``SqliteSaver``（单机落盘）、``PostgresSaver``（多副本
-共享）、自研 MySQL Checkpointer（与业务表同库、按 thread_id(=run_id) 续跑 + Redis 去重）。
 """
 
 from __future__ import annotations

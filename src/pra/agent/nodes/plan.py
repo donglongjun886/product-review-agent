@@ -14,57 +14,29 @@
 - **确定性 dedup**（guardrails/dedup）：同轮自去重 + 过滤已执行成功调用（曾 error 的
   同 tool+args 允许重试）；被过滤的调用进 ``skipped`` 审计（带 seq 的 tool_call_history
   记录，append reducer）。清洗后 pending 为空 → 路由自动 decide。
-- ``_build_messages`` 首条 user 消息以 ``__STATE__ {json}`` 注入 state 子集
-  （hypotheses 仪表盘 + evidence 摘要 + case 子集）。
+- ``_state_payload`` 以结构化 dict 注入 state 子集（hypotheses 仪表盘 + evidence 摘要 +
+  case 全量），后端按 ``state=`` 接收。
 """
 
 from __future__ import annotations
-
-import json
 
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.dedup import dedup_pending
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_PLAN, make_failure
 from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
 from pra.agent.guardrails.schemas import PlanOutput
-from pra.agent.llm_prompts import SYSTEM_PROMPTS
 
 __all__ = ["plan_node"]
 
 # LLM 步降级 failure 文案：与 hypothesize 一致，取固定字面值、不拼 outcome.error。
 _DEGRADE_REASON = "schema 校验重试仍失败"
 
-# system 指令单一来源：``pra.agent.llm_prompts.SYSTEM_PROMPTS``（真实后端与节点共用同一份）。
-_SYSTEM_PROMPT = SYSTEM_PROMPTS["plan"]
-
-
-def _case_subset(case) -> dict:
-    """plan 视角的 case 子集：案件身份 + 商品核心字段 + 图片（保持原字段名）。"""
-    product = case.product
-    return {
-        "case_id": case.case_id,
-        "merchant_id": case.merchant_id,
-        "event_type": case.event_type,
-        "product": {
-            "product_id": product.product_id,
-            "title": product.title,
-            "description": product.description,
-            "category": product.category,
-            "brand": product.brand,
-            "version": product.version,
-            "attributes": dict(product.attributes),
-            "sku_list": [s.model_dump(mode="json") for s in product.sku_list],
-            "images": [i.model_dump(mode="json") for i in product.images],
-            "listing_time": product.listing_time.isoformat(),
-        },
-    }
-
 
 def _coverage_gap_lines(state: dict) -> list[str]:
     """本案必需测量的覆盖清单（人读行，注入 plan 上下文）。
 
     在**节点侧**用真实 state 计算（case 是 domain 对象、能力表齐备），渲染层只负责打印 ——
-    避免渲染层拿 ``__STATE__`` 里的 case 子集去反序列化（缺字段会炸）。
+    避免渲染层拿 state 里的 case 去反序列化（缺字段会炸）。
 
     除 PASS 必需的四维外，**有阳性证据时额外列出 ``policy_citation`` 缺口**：
     它不是 PASS 的必要条件（放行不需要引用依据），却是自动 REJECT 的必要条件。
@@ -104,30 +76,25 @@ def _coverage_gap_lines(state: dict) -> list[str]:
     return lines
 
 
-def _build_messages(state: dict) -> list[dict]:
-    """组装 LLM 消息：system=规划指令；首条 user 以 "__STATE__ " 携带 state 子集
-    （hypotheses 仪表盘 + evidence 摘要 + case 子集 + 环境测量能力 + 必需测量缺口，
-    供 scripted 桩做确定性分支）。
+def _state_payload(state: dict) -> dict:
+    """LLM 入参 state 子集：hypotheses 仪表盘 + evidence 摘要 + case 全量 + 环境测量能力
+    + 必需测量缺口（供 scripted 桩做确定性分支）。
+
+    ``case`` 传 ``model_dump(mode="json")`` 全量：渲染层 ``_case_lines`` / ``_product_lines``
+    本就只读身份与商品核心字段且做防御式格式化，节点侧不再重复裁剪。
 
     ``measurement_capabilities`` 与覆盖缺口一并注入：让 plan 优先安排能补齐缺口的工具，
     并区分"没测"（可补）与"本环境不可测"（补不了，别空转）。
     """
-    payload = {
+    return {
         "hypotheses": [
             h.model_dump(mode="json") for h in (state.get("hypotheses") or [])
         ],
         "evidence": [e.model_dump(mode="json") for e in (state.get("evidence") or [])],
-        "case": _case_subset(state["case"]),
+        "case": state["case"].model_dump(mode="json"),
         "measurement_capabilities": dict(state.get("measurement_capabilities") or {}),
         "required_measurement_coverage": _coverage_gap_lines(state),
     }
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": "__STATE__ " + json.dumps(payload, ensure_ascii=False),
-        },
-    ]
 
 
 def _apply_plan(out: PlanOutput) -> list[dict]:
@@ -154,7 +121,7 @@ async def plan_node(state: dict, config, *, llm: LLMBackend) -> dict:
         return {"pending_tool_calls": []}
 
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=_build_messages(state), llm=llm
+        OutputModel=PlanOutput, node="plan", state=_state_payload(state), llm=llm
     )
     # LLM 记账：按实际尝试次数 bump（成功 1 次 / 重试后成功 2 次 / 两次失败仍 2 次）
     budget = bump_llm_usage(

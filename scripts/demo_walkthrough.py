@@ -83,8 +83,7 @@ def build_demo_case() -> ProductReviewCase:
 def _print_hypothesize(update: dict) -> list:
     """hypothesize 步：假设数与 prior 摘要。返回本次假设列表（供 reevaluate 比对）。"""
     hypos = list(update.get("hypotheses") or [])
-    queue = list(update.get("investigation_queue") or [])
-    print(f"[hypothesize] 生成 {len(hypos)} 条假设、{len(queue)} 个调查问题")
+    print(f"[hypothesize] 生成 {len(hypos)} 条假设")
     for h in hypos:
         prior = "-" if h.prior is None else f"{h.prior:.2f}"
         print(f"    {h.id} [{h.status.value}, prior={prior}] {h.statement}")
@@ -158,10 +157,6 @@ def _print_reevaluate(update: dict, snapshot: list) -> list:
         print("\n".join(lines))
     else:
         print("[reevaluate] 假设状态无变化")
-    queue = list(update.get("investigation_queue") or [])
-    if queue:
-        done = [q for q in queue if q.get("status") == "DONE"]
-        print(f"    调查队列: {len(done)}/{len(queue)} DONE")
     return hypos
 
 
@@ -268,8 +263,8 @@ def _assert_all(final_state: dict, node_seq: list) -> None:
     print(
         f"    llm_calls={budget.llm_calls}/{limits.max_llm_calls} | "
         f"tool_calls={budget.tool_calls}/{limits.max_tool_calls} | "
-        f"tokens={budget.tokens}/{limits.max_tokens} | "
-        f"latency_ms={budget.latency_ms}/{limits.max_latency_ms}"
+        f"tokens={budget.tokens} | "
+        f"latency_ms={budget.latency_ms}"
     )
     _check(
         budget.llm_calls == _EXPECTED_LLM_CALLS and budget.tool_calls == _EXPECTED_TOOL_CALLS,

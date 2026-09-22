@@ -1,7 +1,7 @@
 """System 3：完整调查 Agent（走真实图 + eval 世界 + 确定性审查员桩）。
 
 走 ``build_agent_graph``（hypothesize→plan→tools→reevaluate→decide，预算
-10/15/40000/30000），终态以确定性 overlay 后的 ``ReviewDecision`` 为评测真值。
+LLM_CALLS=10 / TOOL_CALLS=15），终态以确定性 overlay 后的 ``ReviewDecision`` 为评测真值。
 不落 DB；每 case 独立 build + compile 一个图，每次 ``ainvoke`` 都从
 ``build_initial_state`` 起算 → 天然隔离、可用桩重放。
 **scripted（CI 可跑）**：注入确定性 ``EvalScriptedLLMBackend``，工具用与 eval_data/v2
@@ -27,7 +27,7 @@
   用"假设是否成立"而非"先验"。Gate / abstention overlay 仍做最终收口。
 
 确定性约束：纯函数 + 异步包装；不读 expected、不读外部配置；阈值常量取单一来源
-pra.domain.measurement；同 (node, __STATE__) → 同 payload。
+pra.domain.measurement；同 (node, state) → 同 payload。
 """
 
 from __future__ import annotations
@@ -40,17 +40,11 @@ from uuid import NAMESPACE_URL, uuid5
 from langgraph.graph.state import CompiledStateGraph
 
 from pra.agent.graph import build_agent_graph
-from pra.agent.guardrails.budget import (  # 预算超限维度常量（P2-16 记录侧复用）
-    DIM_LATENCY,
-    DIM_LLM_CALLS,
-    DIM_TOKENS,
-    DIM_TOOL_CALLS,
+from pra.agent.guardrails.budget import (
+    budget_exceeded,  # 预算超限维度判定（P2-16 记录侧复用，单一实现）
 )
 from pra.agent.guardrails.llm_shell import LLMResponse
-from pra.agent.scripted_llm import (  # __STATE__ 解析/引用串格式
-    _citation,
-    _extract_state,
-)
+from pra.agent.scripted_llm import _citation  # 证据引用串格式
 from pra.agent.state import build_initial_state
 
 # 相似度下限 / 强相似分界 / 商家系统性阈值：单一来源 pra.domain.measurement。
@@ -608,19 +602,26 @@ def _dim_of(statement: str) -> str:
 
 
 class EvalScriptedLLMBackend:
-    """确定性审查员模型：同 (node, __STATE__) → 同输出（tokens=0，可重放）。
+    """确定性审查员模型：同 (node, state) → 同输出（tokens=0，可重放）。
 
-    要点：reevaluate / decide 的 __STATE__ 只含 hypotheses + evidence（节点契约不带
+    要点：reevaluate / decide 的 state 只含 hypotheses + evidence（节点契约不带
     case）→ 本层不自造事实，只消费假设标记与证据；hypothesize 阶段已把表面信号固化
-    进假设 prior/statement。
+    进假设 prior/statement。``feedback`` 为壳侧 schema 修正提示，桩恒产出可校验内容，
+    故忽略。
     """
 
     name = "eval-scripted-reviewer"
 
-    async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
+    async def complete(
+        self,
+        *,
+        node: str,
+        state: dict,
+        json_schema: dict,
+        feedback: list[str] | None = None,
+    ) -> LLMResponse:
         from pra.agent.guardrails.llm_shell import LLMBackendError
 
-        state: dict = _extract_state(messages)  # __STATE__ {json}（缺省 {} → 兜底）
         if node == "hypothesize":
             payload = self._hypothesize(state)
         elif node == "plan":
@@ -639,7 +640,6 @@ class EvalScriptedLLMBackend:
         case = state.get("case")
         surface = _case_surface(case if isinstance(case, dict) else {})
         hyps: list[dict] = []
-        queue: list[dict] = []
 
         # ① 外观模仿（有图才建；有风格词嫌疑才高先验 —— 避免对干净商品无谓高怀疑）
         if surface["image_urls"]:
@@ -658,7 +658,6 @@ class EvalScriptedLLMBackend:
                     "evidence_hint": ["IMAGE_SIMILARITY", "IMAGE_LOGO"],
                 }
             )
-            queue.append({"q": "外观是否与某知名品牌款高度相似？", "priority": 1})
 
         # ② 品牌核验（案件 brand 空缺 → 高先验 + statement 标记「案件品牌空缺」）
         if surface["brand_missing"]:
@@ -668,7 +667,6 @@ class EvalScriptedLLMBackend:
             stmt_brand = "商品品牌真实性与在库一致性核验（品牌规避风险）"
             p_brand = 0.2
         hyps.append({"statement": stmt_brand, "prior": p_brand, "evidence_hint": ["PRODUCT_FACT"]})
-        queue.append({"q": "商品品牌是否真实可核验？", "priority": 2})
 
         # ③ 商家行为（恒建；0.35 默认先验）
         hyps.append(
@@ -678,7 +676,6 @@ class EvalScriptedLLMBackend:
                 "evidence_hint": ["MERCHANT_HISTORY"],
             }
         )
-        queue.append({"q": "商家历史是否显示系统性类似上架行为？", "priority": 3})
 
         # ④ 文本明示仿冒（标题/描述/OCR 命中才建）
         if surface["text_evasion"] or surface["ocr_evasion"]:
@@ -689,11 +686,9 @@ class EvalScriptedLLMBackend:
                     "evidence_hint": [],
                 }
             )
-            queue.append({"q": "仿冒词是否与在库/商家事实印证？", "priority": 4})
 
         return {
             "hypotheses": hyps,
-            "investigation_queue": queue,
             "rationale": "按案件表面信号（品牌空缺/文本词/图片存在性）确定性生成待验证假设。",
         }
 
@@ -864,7 +859,6 @@ class EvalScriptedLLMBackend:
 
         return {
             "hypothesis_updates": updates,
-            "queue_updates": [],
             "new_hypotheses": [],
             "evidence_sufficiency": "SUFFICIENT" if has_citable else "INSUFFICIENT",
             "conflicts": [],
@@ -983,29 +977,6 @@ class EvalScriptedLLMBackend:
 # SchemeRunner：走真实图（build_agent_graph + eval 世界 + eval 审查员后端）
 
 
-def _budget_hit_dim_from_snapshot(budget) -> str | None:
-    """从决策预算快照重算“首个撞限维度”（不改 overrides 码）。
-
-    与 ``pra.agent.guardrails.budget.budget_exceeded`` 同阈值、同判定顺序
-    （LLM_CALLS→TOOL_CALLS→TOKENS→LATENCY），但 latency 用**快照已冻结的
-    ``latency_ms``** 而非实时墙钟 —— EvalRecord 保持不含进程相关量、可逐字节重放。
-    只写进 EvalRecord.detail 供审计归因（区分真实跑分时 token / llm_calls / latency
-    哪维先撞限）；``R3_BUDGET_EXHAUSTED`` 码字面与语义不变。
-    """
-    if budget is None:
-        return None
-    limits = budget.limits
-    if budget.llm_calls >= limits.max_llm_calls:
-        return DIM_LLM_CALLS
-    if budget.tool_calls >= limits.max_tool_calls:
-        return DIM_TOOL_CALLS
-    if budget.tokens >= limits.max_tokens:
-        return DIM_TOKENS
-    if budget.latency_ms >= limits.max_latency_ms:
-        return DIM_LATENCY
-    return None
-
-
 def _root_trace_context(
     case: EvalCase, ctx: EvalContext, initial_state: dict, *, backend_name: str = "unknown"
 ) -> TraceContext:
@@ -1070,11 +1041,11 @@ class AgentScheme(SchemeRunner):
     - ``llm``：**real 模式注入** —— 非 None 时 ``run()`` 直接把它当 LLMBackend 交给
       ``build_agent_graph``（跳过确定性桩）；须实现
       ``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol（``name`` 属性 +
-      ``async complete(*, node, messages, json_schema)``）。real 非确定性 / 不可重放 /
-      需 API key。
+      ``async complete(*, node, state, json_schema, feedback=None)``）。real 非确定性 /
+      不可重放 / 需 API key。
 
-    预算恒为**生产默认**（10/15/40000/30000）—— 评测不覆盖 Guardrail 档位：预算是否够用
-    本身就是被测行为，超限 → HUMAN_REVIEW 由生产 Gate 收口。
+    预算恒为**生产默认**（LLM_CALLS=10 / TOOL_CALLS=15）—— 评测不覆盖 Guardrail 档位：
+    预算是否够用本身就是被测行为，超限 → HUMAN_REVIEW 由生产 Gate 收口。
     """
 
     name = "agent"
@@ -1187,13 +1158,10 @@ class AgentScheme(SchemeRunner):
             },
             detail={
                 "overrides": list(decision.overrides),
-                # P2-16：R3 命中时附"哪一维先撞限"（LLM_CALLS/TOOL_CALLS/TOKENS/
-                # LATENCY）供真实跑分归因 —— 用快照冻结值重算（确定性），不改
-                # R3_BUDGET_EXHAUSTED 码字面/语义。真实跑分 tokens 口径 =
-                # usage.total_tokens（input+output、含缓存命中、失败重试全额累计），
-                # 故 TOKENS 是真实第二截胡源，需与 llm_calls 维度区分（见
-                # llm_shell/litellm_backend docstring 口径注记）。
-                "budget_hit_dim": _budget_hit_dim_from_snapshot(budget),
+                # P2-16：R3 命中时附"哪一维先撞限"（LLM_CALLS/TOOL_CALLS）供真实跑分
+                # 归因 —— 直接复用 ``budget_exceeded``（同阈值同顺序的单一实现），
+                # 不改 R3_BUDGET_EXHAUSTED 码字面/语义。
+                "budget_hit_dim": budget_exceeded(budget),
                 "hypothesis_trace": trace,
                 "tool_history_count": len(history),
                 # 边际增益审计字段透传（tools_node 的记录原样带出，指标层只读）：

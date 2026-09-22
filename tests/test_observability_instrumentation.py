@@ -5,7 +5,7 @@ schema 校验失败重试 → 2 个 generation（**最关键**：埋点在内层
 外层，而非 ``call_structured_llm`` 外壳）；后端异常 → ``record_error`` 且
 ``LLMCallOutcome`` 语义不变（attempts=2 / tokens=0）；``tools_node`` 成功与异常各记
 1 个 tool span，latency 复用审计 record 的值；无 tracer 注入 → ``NullTracer`` 行为不变；
-usage 透出（多次尝试按键累加、litellm 提取三键、scripted 桩不伪造）。
+usage 透出（每次 generation 记**本次** ``usage_details``、litellm 提取三键、scripted 桩不伪造）。
 
 隔离：用到 tracer 的测试经 ``_fake_tracer`` 注入并在结束时 ``set_tracer(None)``
 复原；LLM 后端一律经 ``call_structured_llm(llm=...)`` 显式注入（无进程级全局）。全程不联网。
@@ -37,7 +37,8 @@ from pra.tools.base import ToolArgs, ToolResult
 # litellm 1.100.0 被 import 时会尝试拉远程 model cost map（联网）—— 关掉它保证离线。
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
-_MESSAGES = [{"role": "system", "content": "sys"}, {"role": "user", "content": "__STATE__ {}"}]
+# 结构化 state（直传后端；``SequenceBackend`` 逐次回放固定 content 并记录收到的 state）
+_STATE = {"case": {"case_id": "CASE_OBS_01"}}
 # 合法 JSON 但 schema 不满足（next_action 超词表）→ pydantic ValidationError
 _SCHEMA_BAD = '{"next_action": "SOMETHING_ELSE", "tools": []}'
 
@@ -87,8 +88,8 @@ class _FakeTracer:
         model_parameters: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> _FakeCM:
-        # input 快照：``work_messages`` 是同一个 list（重试会追加修正提示），存创建时刻的内容。
-        snapshot = list(input) if isinstance(input, list) else input
+        # input 记结构化 state（同一 dict 对象在两次尝试间复用，修正是 feedback 通道的事）
+        snapshot = dict(input) if isinstance(input, dict) else input
         self.generations.append(
             {
                 "name": name,
@@ -193,7 +194,7 @@ async def test_success_records_one_generation_with_model_input_output_latency(fa
     """一次成功调用 → 1 个 generation：name=llm.{node}、model=后端自报、input/output/latency。"""
     backend = SequenceBackend(contents=[plan_conclude_json()], tokens=5)
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        OutputModel=PlanOutput, node="plan", state=dict(_STATE),
         llm=backend,
     )
 
@@ -202,8 +203,8 @@ async def test_success_records_one_generation_with_model_input_output_latency(fa
     gen = fake_tracer.generations[0]
     assert gen["name"] == "llm.plan"
     assert gen["model"] == "test-sequence"  # backend.name —— 不伪造模型名
-    assert gen["input"] == backend.calls[0]  # 本次实际发给后端的 work_messages
-    assert gen["input"] == _MESSAGES
+    assert gen["input"] == backend.calls[0]  # 本次实际发给后端的结构化 state
+    assert gen["input"] == _STATE
 
     obs = fake_tracer.generation_obs[0]
     assert len(obs.updates) == 1 and obs.errors == []
@@ -213,19 +214,20 @@ async def test_success_records_one_generation_with_model_input_output_latency(fa
     assert update["metadata"]["truncated"] is False
     assert isinstance(update["metadata"]["latency_ms"], int)
     assert update["metadata"]["latency_ms"] >= 0
-    # SequenceBackend 不带 usage → 不传 usage_details 键（不伪造 0）
+    # 替身不带 usage → 不传 usage_details 键（不伪造 0）
     assert "usage_details" not in update
 
 
 async def test_schema_retry_records_two_generations(fake_tracer) -> None:
     """**核心断言**：schema 校验失败重试 → 2 个 generation（埋点在内层真实调用外层）。
 
-    第 1 次返回非法 JSON（后端成功、校验失败）→ llm_shell 追加修正提示 → 第 2 次成功。
-    Langfuse 必须看到**两次真实 ``backend.complete()``**，而不是只记外壳的 1 次。
+    第 1 次返回非法 JSON（后端成功、校验失败）→ llm_shell 收集修正提示并以 feedback=
+    回喂 → 第 2 次成功。Langfuse 必须看到**两次真实 ``backend.complete()``**，而不是只记
+    外壳的 1 次。
     """
     backend = SequenceBackend(contents=[_SCHEMA_BAD, plan_conclude_json()], tokens=5)
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        OutputModel=PlanOutput, node="plan", state=dict(_STATE),
         llm=backend,
     )
 
@@ -249,21 +251,18 @@ async def test_schema_retry_records_two_generations(fake_tracer) -> None:
     # schema 校验失败不是 transport 失败 → 不该有 record_error
     assert obs_first.errors == [] and obs_second.errors == []
 
-    # 第 2 个 generation 的 input 末尾追加了修正提示（证明记的是内层每次真实调用）；
-    # 提示语具体措辞是内部实现，不逐字锁定 —— 只锁"末尾是原 messages 之外的新 user 消息"
-    assert len(fake_tracer.generations[0]["input"]) == 2
-    assert len(fake_tracer.generations[1]["input"]) == 3
-    original_contents = {m["content"] for m in _MESSAGES}
-    repair_msg = fake_tracer.generations[1]["input"][-1]
-    assert repair_msg["role"] == "user"
-    assert repair_msg["content"] not in original_contents
+    # 两次 generation 的 input 都是同一结构化 state（证明记的是内层每次真实调用）
+    assert fake_tracer.generations[0]["input"] == _STATE
+    assert fake_tracer.generations[1]["input"] == _STATE
+    assert backend.calls == [_STATE, _STATE]  # 后端两次都收到同一 state
+    # （修正提示经 feedback= 回喂，不在 input；feedback 传递由 test_llm_shell 直接守护）
 
 
 async def test_backend_exception_records_error_and_outcome_unchanged(fake_tracer) -> None:
     """后端抛异常 → 每次尝试的 generation 收到 record_error；既有失败语义不变。"""
     backend = AlwaysRaiseBackend()
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        OutputModel=PlanOutput, node="plan", state=dict(_STATE),
         llm=backend,
     )
 
@@ -285,7 +284,7 @@ async def test_transport_retry_then_success_records_two_generations(fake_tracer)
     """transport 类失败重试（第 1 次抛、第 2 次成功）→ 同样 2 个 generation。"""
     backend = SequenceBackend(contents=[None, plan_conclude_json()], tokens=7)
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        OutputModel=PlanOutput, node="plan", state=dict(_STATE),
         llm=backend,
     )
 
@@ -393,7 +392,7 @@ async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) 
 
         backend = SequenceBackend(contents=[plan_conclude_json()], tokens=3)
         outcome = await call_structured_llm(
-            OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+            OutputModel=PlanOutput, node="plan", state=dict(_STATE),
             llm=backend,
         )
         assert outcome.model is not None and outcome.attempts == 1
@@ -420,15 +419,17 @@ class _UsageBackend:
         self._responses = list(responses)
         self.calls = 0
 
-    async def complete(self, *, node: str, messages: list, json_schema: dict) -> LLMResponse:
+    async def complete(
+        self, *, node: str, state: dict, json_schema: dict, feedback: list[str] | None = None
+    ) -> LLMResponse:
         self.calls += 1
         content, usage = self._responses.pop(0)
         tokens = (usage or {}).get("total", 0)
         return LLMResponse(content=content, tokens=tokens, usage=usage)
 
 
-async def test_outcome_usage_accumulated_across_attempts(fake_tracer) -> None:
-    """多次尝试的 usage **按键累加**；generation 记每次的原始 usage。"""
+async def test_generation_usage_details_recorded_per_attempt(fake_tracer) -> None:
+    """每条 generation 记的是**本次** ``LLMResponse.usage``（不跨尝试累加）；tokens 仍累计。"""
     backend = _UsageBackend(
         [
             (_SCHEMA_BAD, {"input": 1, "output": 2, "total": 3}),
@@ -436,14 +437,13 @@ async def test_outcome_usage_accumulated_across_attempts(fake_tracer) -> None:
         ]
     )
     outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
+        OutputModel=PlanOutput, node="plan", state=dict(_STATE),
         llm=backend,
     )
 
     assert outcome.attempts == 2
-    assert outcome.tokens == 12
-    assert outcome.usage == {"input": 5, "output": 7, "total": 12}
-    # 观测：每条 generation 记的是**本次** usage（不累加）
+    assert outcome.tokens == 12  # 跨尝试累计只保留 tokens 口径
+    assert not hasattr(outcome, "usage")  # usage 拆分只进观测，不进 outcome
     assert fake_tracer.generation_obs[0].updates[0]["usage_details"] == {
         "input": 1,
         "output": 2,
@@ -456,29 +456,6 @@ async def test_outcome_usage_accumulated_across_attempts(fake_tracer) -> None:
     }
 
 
-async def test_outcome_usage_none_when_all_responses_lack_usage() -> None:
-    """全部响应无 usage → outcome.usage 保持 None（不伪造 0）。"""
-    outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
-        llm=_UsageBackend([(plan_conclude_json(), None)]),
-    )
-
-    assert outcome.model is not None
-    assert outcome.usage is None
-    assert outcome.tokens == 0
-
-
-async def test_outcome_usage_partial_when_only_one_attempt_has_usage() -> None:
-    """仅某次尝试有 usage → 累加该次（缺失的不补 0）。"""
-    outcome = await call_structured_llm(
-        OutputModel=PlanOutput, node="plan", messages=[dict(m) for m in _MESSAGES],
-        llm=_UsageBackend([(_SCHEMA_BAD, None), (plan_conclude_json(), {"total": 8})]),
-    )
-
-    assert outcome.model is not None and outcome.attempts == 2
-    assert outcome.usage == {"total": 8}  # 缺失的第 1 次不补 0
-
-
 def test_litellm_backend_extracts_usage_details(monkeypatch) -> None:
     """litellm 后端从假 ``resp.usage`` 提取三键（不联网）；缺键不放、无 usage → None。"""
     import litellm
@@ -486,7 +463,6 @@ def test_litellm_backend_extracts_usage_details(monkeypatch) -> None:
     from pra.agent.litellm_backend import LiteLLMBackend
 
     backend = LiteLLMBackend(api_key="sk-test")
-    messages = [{"role": "user", "content": "__STATE__ {}"}]
 
     def _fake_acompletion(usage: Any):
         async def fake(**kwargs):
@@ -525,7 +501,7 @@ def test_litellm_backend_extracts_usage_details(monkeypatch) -> None:
     for usage_obj, expected_usage, expected_tokens in cases:
         monkeypatch.setattr(litellm, "acompletion", _fake_acompletion(usage_obj))
         resp = asyncio.run(
-            backend.complete(node="hypothesize", messages=messages, json_schema={})
+            backend.complete(node="hypothesize", state={}, json_schema={})
         )
         assert resp.usage == expected_usage, (usage_obj, resp.usage)
         assert resp.tokens == expected_tokens
@@ -534,7 +510,7 @@ def test_litellm_backend_extracts_usage_details(monkeypatch) -> None:
 async def test_scripted_backend_never_fabricates_usage() -> None:
     """确定性桩无真实 token：tokens=0、usage=None（绝不伪造）。"""
     resp = await ScriptedLLMBackend().complete(
-        node="hypothesize", messages=list(_MESSAGES), json_schema={}
+        node="hypothesize", state={}, json_schema={}
     )
     assert resp.tokens == 0
     assert resp.usage is None

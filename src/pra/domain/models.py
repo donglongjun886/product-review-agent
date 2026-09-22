@@ -165,15 +165,13 @@ class Hypothesis(_StrictModel):
 class BudgetLimits(_StrictModel):
     """预算限额（Guardrail 上限）。
 
-    默认 10 次 LLM / 15 次 Tool / 40000 token / 30s。语义是上界而非目标：正常案件实际调用
-    明显低于上限（主链路常态 8 次 LLM / 5 次 Tool），余量用于 schema 校验失败重试、工具失败
-    恢复与防无限循环；运行时可由配置覆盖。超限语义为「带部分证据转人工止损」而非失败。
+    默认 10 次 LLM / 15 次 Tool。语义是上界而非目标：正常案件实际调用明显低于上限
+    （主链路常态 8 次 LLM / 5 次 Tool），余量用于 schema 校验失败重试、工具失败恢复与
+    防无限循环；运行时可由配置覆盖。超限语义为「带部分证据转人工止损」而非失败。
     """
 
     max_llm_calls: int = Field(default=10, gt=0, description="最大 LLM 调用次数（Guardrail 上界，可配置覆盖）")
     max_tool_calls: int = Field(default=15, gt=0, description="最大 Tool 调用次数（Guardrail 上界，可配置覆盖）")
-    max_tokens: int = Field(default=40000, gt=0, description="最大 Token 用量")
-    max_latency_ms: int = Field(default=30000, gt=0, description="最大执行时长（毫秒）")
 
 
 class Budget(_StrictModel):

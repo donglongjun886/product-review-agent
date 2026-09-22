@@ -30,24 +30,16 @@ class HypothesisProposal(BaseModel):
     evidence_hint: list[str] = Field(default_factory=list, description="想用什么证据验证（供 plan 参考，可选）")
 
 
-class QueueProposal(BaseModel):
-    """初始调查问题项（``investigation_queue`` 元素）。"""
-
-    q: str = Field(description="待验证问题")
-    priority: int = Field(ge=1, le=5, description="1 最优先")
-
-
 # hypothesize
 
 
 class HypothesizeOutput(BaseModel):
-    """hypothesize 节点输出：初始风险假设集 + 调查问题队列。
+    """hypothesize 节点输出：初始风险假设集。
 
-    schema 只保证 ``hypotheses`` 非空；超上限（5 / 8）由节点 apply 按 prior 截断。
+    schema 只保证 ``hypotheses`` 非空；超上限 5 由节点 apply 按 prior 截断。
     """
 
     hypotheses: list[HypothesisProposal] = Field(min_length=1, max_length=5)
-    investigation_queue: list[QueueProposal] = Field(default_factory=list, max_length=8)
     rationale: str = Field(default="", description="一句话说明假设来源（进审计）")
 
 
@@ -90,13 +82,6 @@ class HypothesisUpdate(BaseModel):
     evidence_against: list[str] = Field(default_factory=list, description="反驳本假设的证据引用/摘要")
 
 
-class QueueUpdate(BaseModel):
-    """调查队列项状态变更（命中已有问题原文）。"""
-
-    q: str
-    status: Literal["OPEN", "DONE"]
-
-
 class ConflictNote(BaseModel):
     """矛盾证据对说明（供 HUMAN_REVIEW 参考，权威判定在 ``contradiction_detect``）。"""
 
@@ -112,7 +97,6 @@ class ReevaluateOutput(BaseModel):
     """
 
     hypothesis_updates: list[HypothesisUpdate] = Field(default_factory=list)
-    queue_updates: list[QueueUpdate] = Field(default_factory=list)
     new_hypotheses: list[HypothesisProposal] = Field(default_factory=list)
     evidence_sufficiency: Literal["SUFFICIENT", "INSUFFICIENT"] = "INSUFFICIENT"
     conflicts: list[ConflictNote] = Field(default_factory=list)
@@ -147,8 +131,6 @@ __all__ = [
     "HypothesizeOutput",
     "PlanOutput",
     "PlannedToolCall",
-    "QueueProposal",
-    "QueueUpdate",
     "ReevaluateOutput",
     # 复导出（供节点 apply / gate 使用）
     "Decision",

@@ -37,7 +37,7 @@ _SCHEMA = {
     "required": ["decision"],
 }
 
-# 带既有假设清单的 hypothesize state：case + screening_signals 与节点 __STATE__ 同构，
+# 带既有假设清单的 hypothesize state：case + screening_signals 与节点 state 同构，
 # 另带 hypotheses（UNRESOLVED / REFUTED / 已新增并存）验证去重清单渲染。
 _HYP_WITH_EXISTING = {
     "case": {
@@ -115,17 +115,43 @@ def test_hypothesize_user_prompt_omits_section_when_no_existing():
 
 
 def test_output_schema_contracts_unchanged():
-    """输出 schema 契约守护：``hypotheses`` 仍必填 1..5；``new_hypotheses`` 仍可选无上限。"""
+    """输出 schema 契约守护：``hypotheses`` 仍必填 1..5；``new_hypotheses`` 仍可选无上限；
+    调查队列字段已删（零消费者）。"""
     hypo_schema = HypothesizeOutput.model_json_schema()
     assert hypo_schema["properties"]["hypotheses"]["minItems"] == 1
     assert hypo_schema["properties"]["hypotheses"]["maxItems"] == 5
+    assert "investigation_queue" not in hypo_schema["properties"]
     reeval_schema = ReevaluateOutput.model_json_schema()
     assert "new_hypotheses" in reeval_schema["properties"]
+    assert "queue_updates" not in reeval_schema["properties"]
     assert ReevaluateOutput.model_fields["new_hypotheses"].is_required() is False
 
 
+def test_decide_prompt_budget_caps_two_dims_only():
+    """预算上限文案只剩 LLM / 工具两维：即便 state 仍带旧上限键也不渲染 token/时长维度。"""
+    text = build_user_prompt(
+        node="decide",
+        state={
+            "budget": {
+                "llm_calls": 3,
+                "tool_calls": 2,
+                "tokens": 900,
+                "limits": {
+                    "max_llm_calls": 10,
+                    "max_tool_calls": 15,
+                    "max_tokens": 40000,
+                    "max_latency_ms": 30000,
+                },
+            }
+        },
+        json_schema=_SCHEMA,
+    )
+    assert "LLM≤10 次" in text and "工具≤15 次" in text
+    assert "token≤" not in text and "时长≤" not in text
+
+
 def test_four_node_prompt_render_smoke_walkthrough():
-    # 一个尽量贴近真实 __STATE__ 的富 state（decide 视角字段齐全）
+    # 一个尽量贴近真实节点 state 的富 state（decide 视角字段齐全）
     rich_state = {
         "case": {
             "case_id": "CASE_EC_0101",
@@ -170,17 +196,17 @@ def test_four_node_prompt_render_smoke_walkthrough():
                 "extra": {},
             },
         ],
-        "investigation_queue": [{"q": "是否仿牌？", "priority": 1, "status": "OPEN"}],
         "pending_tool_calls": [
             {"tool": "ImageAnalysisTool", "priority": 1, "reason": "补视觉证据"}
         ],
+        "required_measurement_coverage": ["- 必需测量覆盖：1/4"],
         "degraded": False,
         "failures": [],
         "budget": {
             "llm_calls": 3,
             "tool_calls": 2,
             "tokens": 900,
-            "limits": {"max_llm_calls": 10, "max_tool_calls": 15, "max_tokens": 40000},
+            "limits": {"max_llm_calls": 10, "max_tool_calls": 15},
         },
     }
     assert set(SYSTEM_PROMPTS) == {"hypothesize", "plan", "reevaluate", "decide"}
