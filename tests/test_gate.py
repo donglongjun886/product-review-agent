@@ -22,7 +22,7 @@ from helpers import (
     make_case,
 )
 
-from pra.agent.guardrails import gate, hard_rules
+from pra.agent.guardrails import gate
 from pra.agent.guardrails.errors import make_failure
 from pra.agent.guardrails.gate import (
     R1_HARD_RULE,
@@ -41,6 +41,7 @@ from pra.agent.guardrails.gate import (
     reject_gate,
     run_decision_overlay,
 )
+from pra.agent.guardrails.hard_rules import hard_rule_hit
 from pra.agent.guardrails.schemas import DecisionProposal
 from pra.domain.measurement import (
     DIM_IMAGE_APPEARANCE,
@@ -48,6 +49,8 @@ from pra.domain.measurement import (
     DIM_MERCHANT_PROFILE,
 )
 from pra.domain.models import Budget, Decision, HypothesisStatus, RiskLevel
+from pra.screening.engine import triage
+from pra.screening.rule_engine import terms
 
 
 def _pass_ready_state(**overrides) -> dict:
@@ -317,15 +320,25 @@ def test_overlay_reject_gate_fail_on_weak_sim_gets_r2_and_positive_insufficient(
     assert final.overrides == [R2_REJECT_GATE_FAIL, R3_POSITIVE_INSUFFICIENT]
 
 
-def test_overlay_r1_hard_rule_forces_reject(monkeypatch):
-    monkeypatch.setattr(hard_rules, "BLACKLISTED_BRANDS", frozenset({"山寨"}))
+def test_overlay_r1_hard_rule_forces_reject():
     st = _pass_ready_state()
-    st["case"].product.brand = "山寨"
+    st["case"].product.brand = "山寨"  # 内置 demo 黑名单值
     final = run_decision_overlay(st, _proposal(decision="PASS"))
     assert final.decision is Decision.REJECT
     assert final.overrides == [R1_HARD_RULE]
     assert final.decision_confidence == 1.0
     assert final.risk_level is RiskLevel.HIGH
+
+
+def test_r1_and_r101_share_one_blacklist_source():
+    """R1 硬规则与 R-101 必须消费同一份内置黑名单：同一 brand 两者同时命中。
+
+    守护「词表单一来源」：任一侧改回 import 值绑定 / 另建词表，本用例即红。
+    """
+    brand = "山寨"
+    assert brand in terms.BLACKLISTED_BRANDS
+    assert hard_rule_hit({"case": make_case(brand=brand), "evidence": []}) is not None
+    assert [h.rule_id for h in triage(make_case(brand=brand)).hits] == ["R-101"]
 
 
 def test_overlay_budget_exhausted_r3():

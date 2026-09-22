@@ -231,7 +231,6 @@ docs/              系统设计与评测口径 · migrations/ DDL · scripts/ �
 - **RAG 语料与模型扩展**：扩大语料与模型对比范围、补充检索指令，并配套独立评测口径。
 - **异步化接入**：MQ 异步 worker + 人工审核队列，配套 MySQL Checkpointer 续跑与 Redis 幂等。
 - **可观测性**：在 Langfuse 之上补充 OpenTelemetry 跨服务链路 trace、采样与容量治理。
-- **策略库化**：把品牌黑名单等规则词表沉淀为可维护的策略库，支撑归因观测与词表调优。
 
 ## 许可证
 

@@ -11,9 +11,11 @@ SHOULD_ABSTAIN）时决策指标行取二值真值（PASS+REJECT）分母，abst
 不渲染。Accuracy：pred HUMAN_REVIEW 记为判错（入分母不入 (TP+TN) 分子）；
 Precision/Recall/FPR/FNR 只在自动判出子集上计算。
 
-v1 词表现状：``BLACKLISTED_BRANDS`` 为空 → Rule baseline 无自动 REJECT（品牌词/规避词/
-空缺一律 COMPLEX），如实呈现，非缺陷。结论边界块含「标注-审查员同口径耦合」声明与 real
-实测对照（同口径耦合高估一致性、工具覆盖有限低估真实上限）。
+词表现状：``BLACKLISTED_BRANDS`` 是内置固定 demo 词表（``{"某违禁品牌", "山寨"}``）—— v2 的
+``blackbrand_field`` 家族 brand 即取自其中 → Rule 经 R-101 直判 REJECT（v1 无黑名单品牌）；品牌词
+（R-102）/规避词（R-302）/空缺（R-301）仍 COMPLEX→HUMAN，如实呈现，非缺陷。Single-call 为表面
+字段口径、**不拥有**确定性黑名单输入（§3.3）→ 黑名单案仍 PASS，属方案设计差异。结论边界块含
+「标注-审查员同口径耦合」声明与 real 实测对照（同口径耦合高估一致性、工具覆盖有限低估真实上限）。
 """
 
 from __future__ import annotations
@@ -131,7 +133,8 @@ def render_report(result: EvaluationResult) -> str:
     add("    Precision/Recall/FPR/FNR 只在自动判出(pred∈{PASS,REJECT})子集上计算")
     add("  · REJECT 为正类: Recall=TP/(TP+FN) 违规召回 / FPR=FP/(FP+TN) 误杀红线 / FNR=FN/(TP+FN) 漏放")
     add("  · HRR=转人工率 / auto=自动化率；reject_unhandled=该 REJECT 却转人工占比（保守度观测）")
-    add("  · screening BLACKLISTED_BRANDS 为空 → Rule 无自动 REJECT（品牌词/规避词/空缺一律 COMPLEX→HUMAN）")
+    add("  · screening R-101 黑名单直判 REJECT：brand ∈ BLACKLISTED_BRANDS（内置 demo 词表）即自动 REJECT；品牌词/规避词/空缺一律 COMPLEX→HUMAN")
+    add("  · Single-call 为表面字段口径（§3.3：不拥有 BLACKLISTED_BRANDS 等确定性规则输入）→ 黑名单案仍 PASS，属方案设计差异，非缺陷")
     if not result.has_should_abstain:
         add("  · abstention: v1 无 abstain 标签 → Phase 1 兼容口径（全案等价 AUTO_DECIDABLE，"
             "五指标区不渲染；如需五指标请用 v2 数据集）")

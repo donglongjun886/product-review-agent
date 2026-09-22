@@ -5,7 +5,7 @@
 （进 Agent 调查）；``match(case)`` 为纯函数，命中返回人读 detail（进 RULE_HIT 证据 value），
 未命中返回 None。判定原则：**能确定才直判，不能确定一律 COMPLEX**，不搞软规则打分猜测。
 
-v1 默认规则集：R-101 REJECT（brand 明确且 ∈ BLACKLISTED_BRANDS，v1 空集）；R-102 COMPLEX
+v1 默认规则集：R-101 REJECT（brand 明确且 ∈ ``terms.BLACKLISTED_BRANDS`` 内置 demo 黑名单）；R-102 COMPLEX
 （title/description 含 BRAND_TERMS）—— 命中**不**直接 REJECT，因为会误杀合法场景（NIKE 官方
 店 / 适配 NIKE 鞋带 / 授权产品），且 brand 与标题一致也不能证明真品（brand=NIKE + "高仿/复刻"
 仍违规），一律交 Agent 上下文调查；R-301 COMPLEX（brand 或 category 空缺，None 与空串统一
@@ -34,9 +34,8 @@ RuleKind = Literal["REJECT", "COMPLEX"]
 class Rule:
     """一条声明式筛选规则。
 
-    ``match`` 为纯函数（只读 case 快照，无 IO/无副作用）。规则引用 terms 词表常量走**模块属性
-    动态读取**（``terms.BLACKLISTED_BRANDS`` 而非 import 绑定），使词表注入（monkeypatch/二期
-    策略库替换模块常量）对已构造规则即刻生效。
+    ``match`` 为纯函数（只读 case 快照，无 IO/无副作用）。规则引用 ``terms`` 的**内置固定**词表
+    常量（单一来源）；无运行时注入 / 替换机制。
     """
 
     rule_id: str

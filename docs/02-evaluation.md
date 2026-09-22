@@ -269,8 +269,8 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > Accuracy 分母 = 全部二值真值案，**预测 HUMAN_REVIEW 计为错**——这是比"auto 子集口径"更严的
 > 工程口径：保守转人工与决策错误同罚，迫使"自动化 + abstention 指标并读"（§4.4 核心口径），
 > 否则"大量转人工"的方案会在 Accuracy 上显得准。对照参考（auto 子集口径，即分母排除 HUMAN 预测、
-> 只算 decision∈{PASS,REJECT} 的案）：v2 rule 0.825 / single 0.866 / agent 1.000 —— 两口径的
-> 差别就是 abstain 惩罚量（code 口径 rule 0.380 / single_call_llm 0.518 / agent 0.964；v2 320 案，
+> 只算 decision∈{PASS,REJECT} 的案）：v2 rule 0.921 / single 0.866 / agent 1.000 —— 两口径的
+> 差别就是 abstain 惩罚量（code 口径 rule 0.423 / single_call_llm 0.518 / agent 0.964；v2 320 案，
 > 二值真值 274，出处 `scripts/run_evaluation.py --data eval_data/v2/cases_v2.jsonl`），报告已并排披露（abstention 区
 > abstention_rate + wrong_auto_decision_rate 量化该惩罚）。Precision/Recall/FPR/FNR 分母只含
 > 对应真值类、HUMAN 预测不计入（保持 §4.4 "HUMAN 不当第三真值类"语义）。abstention 质量评估
@@ -389,11 +389,11 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ## 7. 与 screening 修正集 / RAG 现状的关系
 
-### 7.1 Rule baseline 依赖 screening（修正集进行中）
+### 7.1 Rule baseline 依赖 screening（行为以运行时为准）
 
-- Rule baseline 选项 (a) 复用 `pra.screening`，其行为随**并行修正集**变动（空规则集不得静默 PASS、brand 空缺不得直判 PASS、品牌词加词边界、品牌词命中 REJECT→COMPLEX 等）。
+- Rule baseline 选项 (a) 复用 `pra.screening`：三值裁决直接取自运行时规则层，规则语义一变，本 baseline 数字随之变动。
 - **本文档刻意不与具体规则对齐**：harness 不做规则动作断言，只按"运行时当前行为"取数；报告必须记录 **screening 行为快照**（git commit / 规则语义版本）。
-- 修正集未完成前 Rule baseline 结论会失真（漏放/误杀 → "Agent 比 Rule 强"可能是假象）：Phase 1 的三方案可比跑分照常执行，但把该失真列入**结论边界**（§3.4）；**正式基线结论在修正集合入后重跑并纳入 Regression**（§8 Phase 2）。
+- 因此 Rule baseline 的数字**只在声明的行为快照下成立**：词表或规则动作变更后必须重跑并纳入 Regression（§11/§8）；两次快照之间的差异属**结论边界**（§3.4），不得与旧数字混读。
 - Fix 5（品牌词命中 REJECT vs COMPLEX→Agent 上下文终裁）本身是评测实验点：评测集需含"品牌词命中但可能合法"样本，报告给出两种规则动作下的对比行；其与评测口径 "COMPLEX→人工"（§3.2/§4.5）的差异须一并注明。
 
 ### 7.2 Agent 工具数据源的结论边界（评测世界 InMemory vs 生产真链路）
@@ -473,23 +473,25 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ---
 
-## 11. 封板结果表（v2 320 案；2026-09-11 重放）
+## 11. 封板结果表（v2 320 案；2026-09-22 重放）
 
-> **本节是 v2 三方案结果的唯一权威快照**，全部数字由当前 `main` 代码**重放**产生，非历史引用：
-> 代码 `3e21516`（`src/` `tests/` `eval_data/` 无未提交改动）+ 数据集 `eval_data/v2/cases_v2.jsonl`（320 案）。
+> **本节是 v2 三方案结果的唯一权威快照**，全部数字由当前工作区代码**重放**产生，非历史引用：
+> 代码 `237f03b` + 工作区未提交改动（`src/` `tests/` `eval_data/`）+ 数据集
+> `eval_data/v2/cases_v2.jsonl`（320 案；2026-09-22 重生成：`blackbrand_field` 家族 brand 改用
+> `terms.BLACKLISTED_BRANDS` 成员，使 R-101 黑名单直判 REJECT 名副其实）。
 > 重放命令：`uv run python scripts/run_evaluation.py --data eval_data/v2/cases_v2.jsonl`（§11.1/11.2/11.5）、
 > `uv run python scripts/run_error_analysis.py --data eval_data/v2/cases_v2.jsonl`（§11.3/11.4）、
 > `uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl` → **REGRESSION PASS**
-> （决策序列与 `eval_data/v2/regression_baseline.json` 一致，digest `387a345c…`）。
+> （决策序列与 `eval_data/v2/regression_baseline.json` 一致，digest `93f3e988…`）。
 > 指标**口径定义**见 §4.1/§4.2/§4.4；本节只承载该口径下的最终数值，两者冲突时以 §4 定口径、以本节记数。
 
 ### 11.1 主结果（业务分母 = 二值真值 274：PASS 134 / REJECT 140）
 
 | Strategy | Accuracy | Precision | Recall | FPR | FNR | 漏放 | 误杀 | LLM 调用/案 | Tool 调用/案 | tokens/案 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Rule baseline | 0.380 | –（无 REJECT） | 0.000 | 0.000 | 1.000 | 22 | 0 | 0.000 | 0.000 | 0.000 |
+| Rule baseline | 0.423 | 1.000 | 0.545 | 0.000 | 0.455 | 10 | 0 | 0.000 | 0.000 | 0.000 |
 | Single-call LLM | 0.518 | 1.000 | 0.633 | 0.000 | 0.367 | 22 | 0 | 1.000 | 0.000 | 0.000 |
-| **Agent** | **0.964** | **1.000** | **1.000** | **0.000** | **0.000** | **0** | **0** | 6.790 | 5.090 | 0.000 |
+| **Agent** | **0.964** | **1.000** | **1.000** | **0.000** | **0.000** | **0** | **0** | 5.450 | 4.190 | 0.000 |
 
 > 口径：Accuracy 分母 = 274，**预测 HUMAN_REVIEW 计为错**；Precision/Recall/FPR/FNR 只在自动判出
 > （pred ∈ {PASS,REJECT}）子集上计算——预测 HUMAN 不入其分母（HUMAN 不当第三真值类，§4.1 口径注）。
@@ -500,7 +502,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 | Strategy | human_review_rate | automation_coverage | abstention_rate | abstention_recall | wrong_auto_decision_rate |
 |---|---:|---:|---:|---:|---:|
-| Rule | 0.606 | 0.394 | 0.540 | 1.000 | 0.175 |
+| Rule | 0.606 | 0.394 | 0.540 | 1.000 | 0.079 |
 | Single-call LLM | 0.487 | 0.512 | 0.401 | 1.000 | 0.134 |
 | **Agent** | **0.175** | **0.825** | **0.036** | **1.000** | **0.000** |
 
@@ -511,8 +513,8 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 | Rule | PASS | REJECT | HUMAN |
 |---|---:|---:|---:|
-| PASS | 104 | 22 | 0 |
-| REJECT | 0 | 0 | 0 |
+| PASS | 104 | 10 | 0 |
+| REJECT | 0 | 12 | 0 |
 | HUMAN_REVIEW | 30 | 118 | 46 |
 
 | Single-call LLM | PASS | REJECT | HUMAN |
@@ -527,14 +529,14 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | REJECT | 0 | **140** | 0 |
 | HUMAN_REVIEW | 10 | 0 | **46** |
 
-> 对角线命中 rule 150/320、single_call_llm 188/320、agent 310/320。**该全量三分类口径不参与方案排名**
+> 对角线命中 rule 162/320、single_call_llm 188/320、agent 310/320。**该全量三分类口径不参与方案排名**
 > ——它会把"多转人工"算成命中，读排名只看 §11.1（§4.1 口径注）。
 
 ### 11.4 决策迁移与 Agent 剩余失败（仅二值真值 274 案）
 
 | baseline → Agent | 修好 | 其中从转人工修回 | 其中从判反修回 | 退步 | 同错 | 同对 |
 |---|---:|---:|---:|---:|---:|---:|
-| Rule → Agent | **170** | 148 | 22 | 10 | 0 | 94 |
+| Rule → Agent | **158** | 148 | 10 | 10 | 0 | 106 |
 | Single-call → Agent | **132** | 110 | 22 | 10 | 0 | 132 |
 
 > **Agent 剩余失败合计 10/320**，全部为 `scene=boundary`、`truth=PASS`、`pred=HUMAN_REVIEW`（过度保守）：
@@ -547,26 +549,30 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | 指标 | 值 | 计数 |
 |---|---|---|
 | Tool Selection Accuracy（覆盖口径 `expected_tools ⊆ actual_tools`） | 0.870 | 188/216 案 |
-| redundant_tool_rate（有期望外调用的案占比） | 0.222 | 期望外调用案 48 |
+| redundant_tool_rate（有期望外调用的案占比） | 0.176 | 期望外调用案 38 |
 | Evidence Type Coverage（micro） | 1.000 | 345/345 期望类型 |
 | REJECT 依据前置（可引用依据近似） | 1.000 | 140/140 预测 REJECT 案 |
-| risk_type_coverage | 1.000 | 140/140 案 |
+| risk_type_coverage | 0.914 | 128/140 案 |
 | risk_level_agreement | 0.775 | 248/320 案 |
-| evidence_gain_rate（带来新增证据的调用占比） | 0.910 | 1380/1516 调用 |
-| decision_changed_rate（触发 Gate 判定翻转） | 0.100 | 152/1516 调用 |
+| evidence_gain_rate（带来新增证据的调用占比） | 1.000 | 1228/1228 调用 |
+| decision_changed_rate（触发 Gate 判定翻转） | 0.332 | 408/1228 调用 |
 
-> 成本分布（均值/P50/P95）：LLM 调用 6.790/7.000/10.000；Tool 调用 5.090/5.000/6.000；tokens 0.000/0.000/0.000
+> 成本分布（均值/P50/P95）：LLM 调用 5.450/6.000/10.000；Tool 调用 4.190/5.000/6.000；tokens 0.000/0.000/0.000
 > （脚本路径恒 0 为真实值）。延迟仅 real 臂进程内墙钟，scripted 无此项。
+> **risk_type_coverage 与 decision_changed_rate 的本次变化由 2026-09-22 数据集重生成引入**：
+> `blackbrand_field` 12 案改为 R-101 直判后，scripted Agent 不再对这 12 案输出 `EVASION_PATTERN`
+> → risk_type_coverage 1.000→0.914、翻转调用 432→408。两者均为**只读审计字段**，三方案决策与成本零变化。
 > 未实现的 Agent 级口径（Budget Utilization、按 scene 分层分布、单案成本折算）见 §4.2 实现状态注。
 > 未映射期望标签 98 个实例、仅含未映射标签被剔除的案 10（缺口显式化，不硬猜映射）。
 
 ### 11.6 封板结论与对外表述边界
 
-- **Agent 的增益集中在复杂案型**：`violation` recall 0.000（Rule）→ 0.594（Single-call）→ **1.000**；
-  `multi-signal` / `evasion` 上 Rule 与 Single-call 均 0.000 → Agent **1.000**；`boundary` 0.571 → **0.857**；
-  `normal` 三方案均已 1.000（Agent 的收益不来自简单案）。
-- **代价与收益同框**：Agent 6.790 LLM + 5.090 Tool 调用/案，换得转人工率 0.606 → **0.175**、
-  自动化覆盖率 0.394 → **0.825**、`wrong_auto_decision_rate` 0.175/0.134 → **0.000**。
+- **Agent 的增益集中在复杂案型**：`violation` 上 Rule 只自动裁决 12/64 案（R-101 黑名单直判，
+  acc 0.188、hrr 0.812）→ Single-call acc 0.594 → Agent **1.000**；`multi-signal` / `evasion` 上
+  Rule 与 Single-call acc 均 0.000 → Agent **1.000**；`boundary` 0.571 → **0.857**；`normal` 三方案
+  均已 1.000（Agent 的收益不来自简单案）。
+- **代价与收益同框**：Agent 5.450 LLM + 4.190 Tool 调用/案，换得转人工率 0.606 → **0.175**、
+  自动化覆盖率 0.394 → **0.825**、`wrong_auto_decision_rate` 0.079/0.134 → **0.000**。
 - **结论边界（必须同框引用）**：本表为 **scripted 桩 + InMemory 种子世界**（衡量实现一致性与工作流，
   §3.4/§7.2）；real LLM 仅 v1 35 案**单次抽样**（acc 0.200 / human_review_rate 0.771，§8 Phase 3 注），
   未跑 v2、未重复采样；真值由**单一标注者**按与审查员同源规则构造，SHOULD_ABSTAIN 无对抗负例
@@ -582,6 +588,11 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 > ⚠ **本节是 Gate 语义重构（§13）之前的历史基线，已被 §14 取代**：本节 real 数字由重构前的
 > 假设状态侧 Gate 产出；引用 real 320 数字时**以 §14 为准**，本节仅作"重构前 vs 重构后"的对照证据。
+
+> ⚠ **数据集范围注记（2026-09-22）**：本节（及 §14）real 臂跑的是 **2026-09-22 重生成之前**的
+> `cases_v2.jsonl`；该次重生成仅改 `blackbrand_field` 12 案的 brand（→ R-101 直判 REJECT）。
+> real 数字**未重跑**（不可重放、单次约 15 分钟 / 5.17M token），故本节 real 列仍是旧数据集观测；
+> 与 §11（新数据集）对照时只可用于**方向性**结论，不得逐项相减。
 
 > **本节记录 v2 在真实 LLM 下的单次运行结果**，与 §11 的 scripted 封板表**并列但不可混算**：
 > §11 是确定性桩 + 同源标注世界（衡量实现一致性、可逐字节重放）；本节是真实 LLM（非确定性、不可重放、
@@ -819,6 +830,11 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > 并列、与 §12（**重构前** real 历史基线）构成对照。运行期间**未改任何规则 / 架构 / 数据集 / 指标口径**，
 > 唯一变量是 LLM（scripted ↔ real）。
 >
+> ⚠ **数据集范围注记（2026-09-22）**：本节 real 臂与 §14.5 的 scripted 配对列均取自 **2026-09-22
+> 数据集重生成之前**的 `cases_v2.jsonl`（该次重生成仅影响 `blackbrand_field` 12 案的 brand → R-101
+> 直判 REJECT）。real 未重跑（不可重放、单次 5.17M token）—— 与 §11（新数据集）比较只可用于
+> **方向性**结论，逐项差异见 §14.5 注。
+>
 > - 命令：`uv run python scripts/run_evaluation_real.py --data eval_data/v2 --concurrency 8 --out .cache/real_v2_gate.json`
 > - 代码：`ba97fda`（三态测量 + 事实侧 Gate）· world=eval（与 §11/§12 同一 InMemory 种子世界）
 > - 模型：配置串 `deepseek/deepseek-chat` → 网关实服 **DeepSeek-V4.1-Flash**（与 §12 同模型）
@@ -828,9 +844,9 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > - 产物（gitignored）：`.cache/real_v2_gate.json`（real 全量记录 + 两臂指标）、`.cache/real_v2_gate_console.txt`
 >   （Console 报告，含 51 条差异明细）、`.cache/real_v2_gate_diff.tsv`（320 行逐案 truth/scripted/real/归因）、
 >   `.cache/real_v2_gate_analysis.txt`（事后复算：abstention 五指标 / 安全面 / 分场景 / 归因汇总）
-> - **交叉验证**：同一次运行的 scripted 臂与 §11 主结果**逐项一致**（0.964 / 1.000 / 1.000 / hrr 0.036 /
->   140-0-124-0）；且其**逐案决策与重构前 scripted 比对为 0/320 变化** ⇒ 两臂同 harness、同世界，
->   LLM 是唯一变量，本次改动无 scripted 侧回归。
+> - **交叉验证**：同一次运行的 scripted 臂与 §11 **Agent 主结果逐项一致**（0.964 / 1.000 / 1.000 /
+>   hrr 0.036 / 140-0-124-0；仅审计字段有两处差异，见 §14.5 注）；且其**逐案决策与重构前 scripted
+>   比对为 0/320 变化** ⇒ 两臂同 harness、同世界，LLM 是唯一变量，本次改动无 scripted 侧回归。
 
 ### 14.1 主结果（业务分母 = 二值真值 274，口径同 §4.1）
 
@@ -889,9 +905,12 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | evidence_gain_rate | 1.000 | 0.999 | 0.817 |
 | decision_changed_rate | 0.352 | 0.377 | 0.040 |
 
-> **scripted 臂的 Agent 级指标与 §11.5 不再逐项相等**（redundant 0.222→0.176、gain 0.910→1.000、
-> changed 0.100→0.352）：工具层新增 `MEASUREMENT` 证据（阴性也算"新增证据"）且 Gate 探测点随语义变化。
-> 这些是**只读审计字段**，主结果（决策）零变化——见 §13.4 的逐案 0/320。
+> **本表 scripted 列是 §14 那次实跑的配对臂（旧数据集），与 2026-09-22 刷新后的 §11.5 有两行差异**：
+> risk_type_coverage 1.000→0.914、decision_changed_rate 0.352→0.332 —— 由 2026-09-22 数据集重生成
+> （`blackbrand_field` 12 案改由 R-101 直判）引入，均为**只读审计字段**，主结果（决策）零变化。
+> 其余行（redundant 0.176 / gain 1.000 / tool_sel 0.870 等）与 §11.5 一致 —— §11.5 此前停在更早值
+> （redundant 0.222、gain 0.910、changed 0.100），根因是工具层新增 `MEASUREMENT` 证据（阴性也算
+> "新增证据"）且 Gate 探测点随语义变化；见 §13.4 的逐案 0/320。
 > **real 侧工具选择准确率下降（0.486→0.296）但证据链指标全满**：真实 LLM 会多调"期望外"的工具去补
 > 判断，属行为差异而非判定缺陷（覆盖口径见 §4.2）。
 

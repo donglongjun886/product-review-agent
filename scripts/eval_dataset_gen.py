@@ -49,6 +49,15 @@ from pathlib import Path
 
 from pra.evaluation.dataset.loader import abstain_stats, scene_stats
 
+# 品牌词表单一来源：blackbrand_field 家族的 brand 字段必须取真实黑名单成员（命中 R-101 直判
+# REJECT），且生成器的干净文本守卫必须取同一份品牌词/规避词（命中 R-102 → COMPLEX），均不得
+# 手抄第二份 —— 否则词表语义漂移且逐字节锁抓不到语义错误。
+from pra.screening.rule_engine.terms import (
+    BLACKLISTED_BRANDS,
+    BRAND_TERMS,
+    EVASION_TERMS,
+)
+
 # 世界事实单一来源：与 B 面 agent_scheme（Agent 评测世界）同一份 EVAL_* 种子。
 # import 失败 → 生成器显式失败，拒绝「手抄世界」漂移。
 from pra.evaluation.harness.agent_scheme import (
@@ -135,8 +144,10 @@ _POLICY_BY_CAT = {row["category"]: row["policy_id"] for row in EVAL_POLICY_CLAUS
 # ---------------------------------------------------------------------------
 # 受控词表（与 screening terms / agent 表面信号同语义；此处只管生成文本不出界）
 # ---------------------------------------------------------------------------
-_BRAND_WORDS = frozenset({"NIKE", "ADIDAS", "GUCCI", "LV", "LOUIS VUITTON"})
-_EVASION_WORDS = frozenset({"同款", "复刻", "高仿", "1:1", "原单"})
+# 干净文本守卫用的品牌词/规避词直接绑定 terms 单一来源（本地名保留以兼容既有用法）：在
+# terms 里新增一个词即自动进入守卫，不会出现「生成器仍按旧词表放行」的静默失配。
+_BRAND_WORDS: frozenset[str] = BRAND_TERMS
+_EVASION_WORDS: frozenset[str] = EVASION_TERMS
 _STYLE_WORDS = frozenset({"复古", "经典", "潮流", "ins风", "韩版"})
 # 干净标题核心词（不得含风格词/品牌词/规避词 —— 干净案的表面必须真的干净）
 _TITLE_CORES = {
@@ -176,11 +187,11 @@ _GEN_DESC = {
     "服装/卫衣": "重磅面料，宽松版型，日常休闲穿着。",
 }
 _OCR_BRAND_WORDS = ["GUCCI", "NIKE", "LOUIS VUITTON", "ADIDAS"]
-_BLACK_BRAND_BY_CAT = {
-    "女鞋/运动鞋": ["NIKE", "ADIDAS"],
-    "箱包/女包": ["GUCCI", "LV"],
-    "服装/卫衣": ["GUCCI", "NIKE"],
-}
+# blackbrand_field 家族的 brand 字段候选 = **terms.BLACKLISTED_BRANDS 成员**（命中 R-101 直判
+# REJECT 的黑名单语义）；与 BRAND_TERMS（命中 R-102 → COMPLEX 交 Agent 调查）严格区分，两者
+# 不得混用。sorted 固定顺序 —— set 迭代序不稳定，直接迭代会破坏「同 (count, seed) 逐字节一致」。
+_BLACK_BRANDS_ORDERED = sorted(BLACKLISTED_BRANDS)
+_BLACK_BRAND_BY_CAT = {cat: _BLACK_BRANDS_ORDERED for cat in EVAL_CATEGORIES}
 
 # 溯源种子：v1 老案按（family, cat）映射；无直接 v1 模板的用 SEED_V2_ 语义种子标记。
 _V1_SEED: dict[str, dict[str, list[str]]] = {
@@ -419,11 +430,12 @@ def v_blackbrand_field(rng: random.Random, seq: int, scene: str) -> dict:
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=brand,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
         event="NEW_LISTING", scene="violation", family="blackbrand_field",
-        decision="REJECT", abstain="AUTO_DECIDABLE", src="SYNTHETIC", hard=True,
-        reason=["rule_cannot_judge"],
-        note=(f"product.brand={brand}（黑名单 R-101 语义）+ 脏商家 + 强相似图；文本干净 "
-              "→ 当前 Rule（BLACKLISTED_BRANDS=∅）直漏 PASS、Single 漏放 PASS（缺陷观测）；"
-              "Agent 图×商家 REJECT；黑名单词表注入后 Rule 应 R-101 直判 REJECT。"),
+        decision="REJECT", abstain="AUTO_DECIDABLE", src="SYNTHETIC", hard=False,
+        reason=[],
+        note=(f"product.brand={brand} ∈ terms.BLACKLISTED_BRANDS（黑名单字段语义）→ "
+              "Rule R-101 直判 REJECT（硬规则命中 = 确定性终裁）；脏商家 + 强相似图仅为同向"
+              "对照信号。Rule/Agent 均 REJECT；Single 无确定性黑名单输入（§3.3 表面字段口径）"
+              "仍 PASS。硬规则可直接裁决 → 不满足 00 §13.1 Hard 三选一，未入选 Hard。"),
         risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
         evidence=[_merchant_evidence(a["mid"]), "image_similarity>=0.85"],
         tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT[cat]],
@@ -540,7 +552,7 @@ def b_adapter_brandword(rng: random.Random, seq: int, scene: str) -> dict:
     a = _anchor(rng, cat, _CLEAN_OWN_ANCHORS[cat])
     title = _pick(rng, _ADAPTER_TITLES[cat])
     img = _pick(rng, _IMG_CLEAN[cat])
-    word = next(w for w in _BRAND_WORDS if w in title)
+    word = min(w for w in _BRAND_WORDS if w in title)
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=a["brand"],
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),

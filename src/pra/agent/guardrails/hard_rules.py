@@ -6,9 +6,8 @@
 2. 调查新证据 ``IMAGE_LOGO`` 识别到的品牌在黑名单内；
 3. 机审信号带硬违禁语义（``name`` 前缀 ``HARD_`` 且 ``result != PASS``，防御性保留）。
 
-默认黑名单为空集，故走查场景恒不命中 —— 本模块保证 overlay 的 R1 分支存在且可测
-（单测注入黑名单即可覆盖）。词表单一来源：``pra.screening.rule_engine.terms`` 的
-``BLACKLISTED_BRANDS``，与 Screening 规则层共享，不要在本文件另建词表。
+品牌黑名单取 ``pra.screening.rule_engine.terms.BLACKLISTED_BRANDS``（内置固定 demo 词表），与
+Screening 规则层共享同一份；本文件不另建词表，也没有运行时替换机制。
 """
 
 from __future__ import annotations
@@ -17,10 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pra.domain.models import RiskType
-from pra.screening.rule_engine.terms import BLACKLISTED_BRANDS
+from pra.screening.rule_engine import terms
 
-# 品牌黑名单：引用 terms 侧的 BLACKLISTED_BRANDS，与 Screening 规则层共享同一份，
-# 不要在本文件另建词表。单测/策略库接入时替换 terms 侧常量（或 monkeypatch 本名）。
+# 品牌黑名单：经 ``terms`` 模块属性读取，与 Screening 规则层同一份（本文件不另建词表）。
 
 # 机审信号中带"硬违禁"语义的 name 前缀（防御性兜底）。
 _HARD_SIGNAL_PREFIX = "HARD_"
@@ -44,16 +42,15 @@ def hard_rule_hit(state: dict[str, Any]) -> HardRuleHit | None:
 
     # ① 商品 brand 黑名单
     brand = getattr(getattr(case, "product", None), "brand", None)
-    if brand and brand in BLACKLISTED_BRANDS:
+    if brand and brand in terms.BLACKLISTED_BRANDS:
         return HardRuleHit(risk_types=[RiskType.POTENTIAL_IP_RISK])
 
-    # ② 调查新证据：IMAGE_LOGO 命中黑名单品牌（黑名单非空才扫）
-    if BLACKLISTED_BRANDS:
-        for e in state.get("evidence") or []:
-            if e.type == "IMAGE_LOGO":
-                logo_brand = (e.extra or {}).get("brand") or _extract_logo_brand(e.value)
-                if logo_brand in BLACKLISTED_BRANDS:
-                    return HardRuleHit(risk_types=[RiskType.POTENTIAL_IP_RISK])
+    # ② 调查新证据：IMAGE_LOGO 命中黑名单品牌
+    for e in state.get("evidence") or []:
+        if e.type == "IMAGE_LOGO":
+            logo_brand = _extract_logo_brand(e.value)
+            if logo_brand in terms.BLACKLISTED_BRANDS:
+                return HardRuleHit(risk_types=[RiskType.POTENTIAL_IP_RISK])
 
     # ③ 机审硬违禁信号
     for sig in getattr(case, "screening_signals", None) or []:

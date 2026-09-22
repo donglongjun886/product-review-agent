@@ -94,7 +94,10 @@ async def test_v2_full_run_abstention_matches_docs() -> None:
     assert result.overall["single_call_llm"].human_rate == pytest.approx(110 / 274)
     assert result.overall["agent"].human_rate == pytest.approx(10 / 274)
     assert result.overall["agent"].accuracy == pytest.approx(264 / 274)  # 显示值 0.964（3 位四舍五入）
-    assert result.overall["rule"].accuracy == pytest.approx(104 / 274)  # 显示值 0.380
+    assert result.overall["rule"].accuracy == pytest.approx(116 / 274)  # 显示值 0.423
+    # Rule 唯一的自动 REJECT 路径 = R-101 黑名单（v2 blackbrand_field 12 案）；prec 1.0 = 零误杀
+    assert result.overall["rule"].precision == pytest.approx(1.0)
+    assert result.overall["rule"].tp == 12
     for scheme in ALL_SCHEMES:
         a = result.abstention[scheme]
         assert a.total == 320
@@ -106,7 +109,7 @@ async def test_v2_full_run_abstention_matches_docs() -> None:
     assert rule_a.automation_coverage == pytest.approx(126 / 320)
     assert rule_a.abstention_rate == pytest.approx(148 / 274)
     assert rule_a.abstention_recall == pytest.approx(1.0)
-    assert rule_a.wrong_auto_decision_rate == pytest.approx(22 / 126)
+    assert rule_a.wrong_auto_decision_rate == pytest.approx(10 / 126)  # 漏放 22→10（R-101 直判 12 案）
     agent_a = result.abstention["agent"]
     assert agent_a.human_review_rate == pytest.approx(56 / 320)
     assert agent_a.automation_coverage == pytest.approx(264 / 320)
@@ -161,7 +164,7 @@ async def test_render_report_v1_numeric_rows_unchanged() -> None:
         assert m.human_rate + m.automation == pytest.approx(1.0), scheme
         # 渲染行仍含该方案的 accuracy 数值（3 位小数格式存在即可，不锁对齐）
         assert f"{m.accuracy:.3f}" in text, scheme
-    # 口径细节基线：rule 无自动 REJECT → precision 未定义、recall 0 / FNR 1；
+    # v1 口径细节基线：rule 无自动 REJECT（v1 无黑名单品牌案）→ precision 未定义、recall 0 / FNR 1；
     # single_call_llm 精确 1.0、召回 6/7；agent 全对（fpr/fnr 0）
     assert result.overall["rule"].precision is None
     assert result.overall["rule"].recall == pytest.approx(0.0)

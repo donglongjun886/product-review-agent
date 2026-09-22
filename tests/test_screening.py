@@ -1,11 +1,11 @@
 """Screening 三分流（``pra/screening/**`` + ``persist_service.process_review``）单测 —— 不连真库。
 
-覆盖：``triage`` 纯函数（PASS / COMPLEX / REJECT 与命中收集顺序、空 rules 抛
-ValueError）；``rule_evidence`` 证据形状；``process_review`` 分支（COMPLEX →
-``run_and_persist`` 且携带 RULE_HIT evidence，PASS/REJECT → ``run_screening_direct``）。
+覆盖：``triage`` 纯函数（PASS / COMPLEX / REJECT 与命中收集顺序）；``rule_evidence``
+证据形状；``process_review`` 分支（COMPLEX → ``run_and_persist`` 且携带 RULE_HIT
+evidence，PASS/REJECT → ``run_screening_direct``）。
 
-三分流口径：brand/类目空缺、规避词、品牌词命中一律 COMPLEX 交 Agent 调查；只有注入
-黑名单命中才确定性 REJECT，且 REJECT 优先于 COMPLEX。
+三分流口径：brand/类目空缺、规避词、品牌词命中一律 COMPLEX 交 Agent 调查；只有内置
+demo 黑名单（``terms.BLACKLISTED_BRANDS``）命中才确定性 REJECT，且 REJECT 优先于 COMPLEX。
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from pra.domain.models import (
 )
 from pra.screening.engine import RuleHit, rule_evidence, triage
 from pra.screening.rule_engine import terms
-from pra.screening.rule_engine.rules import DEFAULT_RULES, Rule
+from pra.screening.rule_engine.rules import DEFAULT_RULES
 
 
 def _case(
@@ -91,9 +91,9 @@ _LOWERCASE_BRANDTERM = _case(  # 大小写不敏感：小写 nike 也命中 R-10
     description="舒适运动。",
     category="女鞋/运动鞋",
 )
-_REJECT_BLACKLIST = _case(  # brand ∈ 黑名单（测试注入）+ 标题无品牌词 → 只命中 R-101
+_REJECT_BLACKLIST = _case(  # brand ∈ 内置 demo 黑名单 + 标题无品牌词 → 只命中 R-101
     case_id="CASE_REJECT_BLACKLIST",
-    brand="NIKE",  # 标题无品牌词，只命中 R-101
+    brand="某违禁品牌",  # 内置 demo 黑名单值；标题无品牌词 → 只命中 R-101
     title="复古运动鞋 轻便透气",
     description="舒适运动。",
     category="女鞋/运动鞋",
@@ -165,9 +165,9 @@ def test_triage_complex_evasion_terms():
     assert "同款" in t.hits[0].detail and "复刻" in t.hits[0].detail
 
 
-def test_triage_reject_blacklisted_brand(monkeypatch):
-    """注入黑名单：brand ∈ BLACKLISTED_BRANDS → REJECT（R-101，唯一确定性 REJECT）。"""
-    monkeypatch.setattr(terms, "BLACKLISTED_BRANDS", frozenset({"NIKE"}))
+def test_triage_reject_blacklisted_brand():
+    """内置 demo 黑名单：brand ∈ terms.BLACKLISTED_BRANDS → REJECT（R-101，唯一确定性 REJECT）。"""
+    assert "某违禁品牌" in terms.BLACKLISTED_BRANDS  # 样本确在词表内（数据变更即失败）
     t = triage(_REJECT_BLACKLIST)
     assert t.verdict == "REJECT"
     assert [h.rule_id for h in t.hits] == ["R-101"]
@@ -236,13 +236,12 @@ def test_triage_r102_lv_adjacent_to_chinese_still_hits_complex():
     assert "LV" in t.hits[0].detail
 
 
-def test_triage_reject_priority_over_complex(monkeypatch):
+def test_triage_reject_priority_over_complex():
     """REJECT 优先于 COMPLEX：R-101（黑名单 REJECT）+ R-102（品牌词 COMPLEX）同轮
     → 终裁 REJECT（R-102 只下调为 COMPLEX，R-101 黑名单仍确定性终裁，不被稀释）。"""
-    monkeypatch.setattr(terms, "BLACKLISTED_BRANDS", frozenset({"NIKE"}))
     case = _case(
         case_id="CASE_REJECT_PRIORITY",
-        brand="NIKE",  # R-101 黑名单 REJECT
+        brand="某违禁品牌",  # R-101 黑名单 REJECT
         title="NIKE 新款复古跑鞋",  # R-102 品牌词 → COMPLEX
         description="舒适运动。",
         category="女鞋/运动鞋",
@@ -262,17 +261,9 @@ def test_triage_hits_collected_in_rule_order():
         category="女鞋/运动鞋",  # R-301
     )
     t = triage(case)
-    assert t.verdict == "COMPLEX"  # 无 REJECT 命中（默认黑名单空）→ COMPLEX
+    assert t.verdict == "COMPLEX"  # 无 REJECT 命中（brand 不在内置黑名单）→ COMPLEX
     assert [h.rule_id for h in t.hits] == ["R-102", "R-301", "R-302"]
     assert "同款" in t.hits[2].detail and "复刻" in t.hits[2].detail
-
-
-def test_triage_empty_rules_raises():
-    """rules=[]（配置加载失败/策略库为空）→ 抛 ValueError，不得静默全量 PASS。"""
-    with pytest.raises(ValueError, match="规则集为空"):
-        triage(_COMPLEX_BRANDTERM, rules=[])
-    with pytest.raises(ValueError, match="规则集为空"):
-        triage(_COMPLEX_BRANDTERM, rules=())
 
 
 def test_triage_brand_empty_string_is_complex_not_pass():
@@ -299,17 +290,10 @@ def test_triage_category_missing_is_complex():
     assert "类目空缺" in t.hits[0].detail
 
 
-def test_triage_injected_rules_custom():
-    """注入自定义规则集：COMPLEX 规则命中 → COMPLEX；再注入 REJECT 规则 → REJECT 优先。"""
-    complex_rule = Rule("R-900", "强制COMPLEX", "COMPLEX", lambda case: "always complex")
-    t = triage(_CLEAN, rules=[complex_rule])
-    assert t.verdict == "COMPLEX"
-    assert [h.rule_id for h in t.hits] == ["R-900"]
-
-    reject_rule = Rule("R-901", "强制REJECT", "REJECT", lambda case: "always reject")
-    t2 = triage(_CLEAN, rules=[complex_rule, reject_rule])
-    assert t2.verdict == "REJECT"  # REJECT 规则优先
-    assert [h.rule_id for h in t2.hits] == ["R-900", "R-901"]  # 按规则序全收集
+def test_blacklist_disjoint_from_brand_terms():
+    """黑名单与 BRAND_TERMS 不得相交：同一词同时进两者会让 R-101 抢先自动 REJECT，
+    使 R-102「品牌词 → COMPLEX 交 Agent 调查」的语义失效（官方店/适配词被误杀）。"""
+    assert terms.BLACKLISTED_BRANDS.isdisjoint(terms.BRAND_TERMS)
 
 
 def test_default_rules_declaration_order():
@@ -429,8 +413,6 @@ async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
 async def test_process_review_direct_branches(monkeypatch, case, expect_verdict):
     """verdict=PASS/REJECT → 调 run_screening_direct（直判），不走 Agent。"""
     calls: dict = {}
-    if case is _REJECT_BLACKLIST:  # 确定性 REJECT 只来自黑名单 R-101（注入词表）
-        monkeypatch.setattr(terms, "BLACKLISTED_BRANDS", frozenset({"NIKE"}))
 
     async def fake_direct(c, triage_result, *, run_id=None):
         calls["direct"] = {"run_id": run_id, "verdict": triage_result.verdict}
@@ -463,8 +445,6 @@ async def test_process_review_direct_branches(monkeypatch, case, expect_verdict)
 
 async def test_process_review_direct_decision_evidence(monkeypatch):
     """REJECT 直判的返回 decision.evidence 携带 RULE_HIT（R-101），PASS 无命中为空。"""
-    monkeypatch.setattr(terms, "BLACKLISTED_BRANDS", frozenset({"NIKE"}))
-
     async def fake_direct(c, triage_result, *, run_id=None):
         return {"case_id": c.case_id, "run_id": "RUN_DIRECT",
                 "verdict": triage_result.verdict,

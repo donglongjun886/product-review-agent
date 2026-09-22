@@ -17,7 +17,6 @@ from helpers import (
     dc_anchor_state,
     make_case,
 )
-from pra.agent.guardrails import hard_rules
 
 
 def _clean_pass_state() -> dict:
@@ -75,10 +74,9 @@ def test_gate_probe_degraded_human():
     assert gate_probe(st) == "HUMAN"
 
 
-def test_gate_probe_r1_hard_rule_reject(monkeypatch):
-    monkeypatch.setattr(hard_rules, "BLACKLISTED_BRANDS", frozenset({"某违禁品牌"}))
+def test_gate_probe_r1_hard_rule_reject():
     st = {
-        "case": make_case(brand="某违禁品牌"),
+        "case": make_case(brand="某违禁品牌"),  # 内置 demo 黑名单值
         "hypotheses": [],
         "evidence": [],
         "budget": Budget(),

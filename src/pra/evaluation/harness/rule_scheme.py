@@ -12,9 +12,10 @@ PASS → PASS；REJECT → REJECT（R-101 黑名单直判）；**COMPLEX → HUM
 成本恒零（不耗 LLM/工具）；``decision_confidence`` 恒 None —— 确定性规则是
 命中即满权重终裁，没有"自动判安全把握"的置信概念。
 
-v1 词表现状（报告口径，非缺陷）：``terms.BLACKLISTED_BRANDS`` 为空 → R-101 不命中，
-而 R-102（品牌词）/ R-301（brand/类目空缺）/ R-302（规避词）均为 COMPLEX →
-v1 Rule baseline 只输出 PASS 或 HUMAN_REVIEW，REJECT 直判率恒 0。
+词表现状（报告口径，非缺陷）：``terms.BLACKLISTED_BRANDS`` 是内置固定 demo 词表
+（``{"某违禁品牌", "山寨"}``）。v2 的 ``blackbrand_field`` 家族 brand 取自其中 → R-101 命中直判
+REJECT（Rule 唯一的自动 REJECT 路径）；v1 无黑名单品牌案。R-102（品牌词）/ R-301（brand/类目
+空缺）/ R-302（规避词）均为 COMPLEX → 其余案只输出 PASS 或 HUMAN_REVIEW。
 """
 
 from __future__ import annotations

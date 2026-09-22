@@ -1,16 +1,16 @@
 """Screening 规则词表 —— **单一来源**（供 screening 规则层与 agent guardrails.hard_rules 共同引用）。
 
-只声明词表/常量，**不含匹配逻辑**（逻辑在 ``rules.py`` / ``hard_rules.py``）。两层共同引用
-此处词表，杜绝手抄漂移；v1 是最小集合，真实品牌黑名单经规则层注入（monkeypatch/构建期替换
-模块常量）或二期策略库接入，不在本模块内置。
+只声明词表/常量，**不含匹配逻辑**（逻辑在 ``rules.py`` / ``hard_rules.py``）。全部为项目内置的
+**固定数据**：不接外部数据源 / 配置中心 / 动态加载，也没有运行时替换机制 —— 改词表即改本文件。
+两层共同引用此处常量，杜绝手抄漂移。
 """
 
 from __future__ import annotations
 
-# 品牌黑名单（v1 默认**空集**）。测试注入黑名单时 monkeypatch 本常量
-# （如 ``monkeypatch.setattr(terms, "BLACKLISTED_BRANDS", frozenset({...}))``），不要改写
-# hard_rules 侧的引用（那会破坏两层的单一来源同步）。
-BLACKLISTED_BRANDS: frozenset[str] = frozenset()
+# 品牌黑名单：内置固定 demo/test 数据（**不是真实业务黑名单**）。
+# 不变量：必须与 ``BRAND_TERMS`` 不相交 —— 命中 BRAND_TERMS 的词走 R-102（COMPLEX，交 Agent
+# 上下文调查，防官方店/适配词被误杀）；同一词若同时进黑名单，R-101 会抢先自动 REJECT。
+BLACKLISTED_BRANDS: frozenset[str] = frozenset({"某违禁品牌", "山寨"})
 
 # 明确品牌词/商标词：标题/描述命中即 R-102 依据（大小写不敏感）。R-102 为 COMPLEX —— 品牌词
 # 命中交 Agent 上下文调查后终裁，不再直接 REJECT，防官方店/适配词/授权产品被误杀；黑名单

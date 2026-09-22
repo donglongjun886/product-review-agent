@@ -1,4 +1,4 @@
-"""Screening 三分流 Triage 引擎 —— 纯函数层（无 IO，可注入 rules 测试）。
+"""Screening 三分流 Triage 引擎 —— 纯函数层（无 IO）。
 
 三分流语义：**PASS / REJECT = 确定性直接终裁**（不再进 Agent；落库走
 ``persist_service.run_screening_direct``，trigger_type="SCREENING_DIRECT"）；
@@ -7,8 +7,7 @@
 
 收敛顺序：任一 REJECT 命中即 REJECT（优先于 COMPLEX）；无 REJECT 但任一 COMPLEX 命中 →
 COMPLEX；都无命中 → PASS（brand/类目空缺已由 R-301 兜成 COMPLEX，故零命中 PASS 即确定性
-放行）。同轮多命中**都收集**（hits 按传入规则序）。**规则集为空时抛 ValueError**：无规则 =
-什么都不能确定，绝不静默全量 PASS（配置加载失败/策略库为空的最危险失败模式）。
+放行）。同轮多命中**都收集**（hits 按 ``DEFAULT_RULES`` 声明序）。
 
 ``rule_evidence`` 只**构造** Evidence（type=RULE_HIT / source=ScreeningRuleEngine /
 weight=1.0 / extra={"rule_id"}），落库由 persist 层做（review_evidence.run_id NOT NULL ——
@@ -21,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from pra.domain.models import Evidence, ProductReviewCase
-from pra.screening.rule_engine.rules import DEFAULT_RULES, Rule
+from pra.screening.rule_engine.rules import DEFAULT_RULES
 
 Verdict = Literal["PASS", "REJECT", "COMPLEX"]
 
@@ -48,28 +47,15 @@ class TriageResult:
     hits: list[RuleHit] = field(default_factory=list)
 
 
-def triage(
-    case: ProductReviewCase,
-    *,
-    rules: list[Rule] | tuple[Rule, ...] | None = None,
-) -> TriageResult:
-    """对 case 快照做三分流 —— **纯函数**（只读 case，无 IO，可注入 rules 测）。
+def triage(case: ProductReviewCase) -> TriageResult:
+    """对 case 快照做三分流 —— **纯函数**（只读 case，无 IO）。
 
     :param case: 审核案件（只读 ``product.brand/title/description/category`` 等）。
-    :param rules: 规则集；None → ``rules.DEFAULT_RULES``（R-101/102/301/302）。
-        **空规则集（[]/()）抛 ValueError** —— 无规则 = 什么都无法确定，绝不静默全量 PASS。
-    :return: TriageResult{verdict, hits}；hits 按规则序全收集。
+    :return: TriageResult{verdict, hits}；hits 按 ``DEFAULT_RULES`` 声明序全收集。
     """
-    active: tuple[Rule, ...] = tuple(rules) if rules is not None else DEFAULT_RULES
-    if not active:
-        raise ValueError(
-            "规则集为空：三分流无法确定任何裁决（什么都不能确定），拒绝静默全量放行"
-            "—— 请检查策略库/规则配置加载"
-        )
-
     hits: list[RuleHit] = []
     has_reject = False
-    for rule in active:
+    for rule in DEFAULT_RULES:
         detail = rule.match(case)
         if detail is None:
             continue
