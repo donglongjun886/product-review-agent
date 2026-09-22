@@ -2,10 +2,11 @@
 
 ``ScriptedLLMBackend`` 实现 ``LLMBackend`` Protocol：按 ``node`` 分发并返回固定剧本的
 结构化 JSON 文本；同 ``(node, state)`` → 同输出（无 API key、无网络、无随机、无
-实例可变状态），eval 可重放。走查剧本对应复古运动鞋 P_88231 / M_5512 场景，目标
-``llm_calls==8 / tool_calls==5``：hypothesize → plan(外观) → tools → reevaluate(①) →
-plan(商品+商家) → tools → reevaluate(②) → plan(先例+政策) → tools → reevaluate(③ 收敛)
-→ decide（plan 恰 3 次、LLM 总 8 次；三轮工具 1+2+2=5 次）。
+实例可变状态），eval 可重放。走查剧本对应复古运动鞋 P_88231 / M_5512 场景，只调度 4 工具
+世界（ProductTool / MerchantTool / CaseSearchTool / PolicySearchTool），目标
+``llm_calls==6 / tool_calls==4``：hypothesize → plan(商品事实+商家行为) → tools(2) →
+reevaluate(①) → plan(先例+政策) → tools(2) → reevaluate(② 收敛) → decide
+（plan 恰 2 次、LLM 总 6 次；两轮工具 2+2=4 次）。
 """
 
 from __future__ import annotations
@@ -13,28 +14,27 @@ from __future__ import annotations
 import json
 
 from pra.agent.guardrails.llm_shell import LLMBackendError, LLMResponse
+from pra.domain.measurement import MERCHANT_DIRTY_MIN
 
 # 剧本常量（只读，进程内不变）
 
 # hypothesize 固定输出：4 条假设 (statement, prior)
 _HYPOTHESES_SCRIPT: tuple = (
-    ("普通复古设计，非品牌款", 0.5),
-    ("参考知名品牌经典复古跑鞋设计", 0.4),
-    ("刻意规避品牌识别（品牌字段空缺）", 0.2),
-    ("商家系统性类似上架行为", 0.15),
+    ("商品在库事实与案件快照一致，无字段冲突", 0.5),
+    ("商家历史行为干净，不构成系统性规避", 0.4),
+    ("存在同类违规先例可供参照", 0.2),
+    ("存在生效政策条款可支撑处置", 0.15),
 )
 
 # decide 固定提案
-_DECIDE_RATIONALE = "证据链充分但涉及仿冒主观判定且政策指引高风险转人工，克制转人工"
+_DECIDE_RATIONALE = "商家画像与同类先例、政策条款成立，但本 listing 缺文本确证，克制转人工"
 
 # 证据类型常量（与 domain/models.py Evidence.type / tools 输出对齐）
-_IMAGE_SIMILARITY = "IMAGE_SIMILARITY"
 _PRODUCT_FACT = "PRODUCT_FACT"
 _MERCHANT_HISTORY = "MERCHANT_HISTORY"
 _CASE_PRECEDENT = "CASE_PRECEDENT"
 _POLICY_REF = "POLICY_REF"
 
-_STRONG_SIM_WEIGHT = 0.85  # sim_strong：IMAGE_SIMILARITY 强证据阈值
 _CITATION_MAX = 200  # 引用串 value 截断上限（value 已是人读摘要）
 
 
@@ -71,6 +71,29 @@ def _first_of_type(evs: list, ev_type: str):
     return None
 
 
+def _merchant_dirty(ev: dict) -> bool:
+    """MERCHANT_HISTORY 是否达「系统性规避」阈值（removals/title >= MERCHANT_DIRTY_MIN）。"""
+    extra = ev.get("extra")
+    extra = extra if isinstance(extra, dict) else {}
+    return (
+        _to_float(extra.get("removals")) >= MERCHANT_DIRTY_MIN
+        or _to_float(extra.get("title")) >= MERCHANT_DIRTY_MIN
+    )
+
+
+def _policy_ids(evs: list) -> list[str]:
+    """POLICY_REF 证据 ``extra.policy_id`` 去重列表（保序；缺失/非串跳过）。"""
+    ids: list[str] = []
+    for ev in evs:
+        if ev["type"] != _POLICY_REF:
+            continue
+        extra = ev.get("extra")
+        pid = extra.get("policy_id") if isinstance(extra, dict) else None
+        if isinstance(pid, str) and pid and pid not in ids:
+            ids.append(pid)
+    return ids
+
+
 def _hypothesis_list(state: dict) -> list:
     """state["hypotheses"] 归一化：只保留 dict 元素（保序）。"""
     return [h for h in (state.get("hypotheses") or []) if isinstance(h, dict)]
@@ -82,32 +105,20 @@ def _case_facts(state: dict) -> dict:
     case = case if isinstance(case, dict) else {}
     product = case.get("product")
     product = product if isinstance(product, dict) else {}
-    images = product.get("images")
-    images = images if isinstance(images, list) else []
-    image_urls = [
-        img["url"]
-        for img in images
-        if isinstance(img, dict)
-        and isinstance(img.get("url"), str)
-        and img["url"]  # 空串/缺失不入列，保证 ImageAnalysisTool 的 min_length=1 不炸
-    ]
     product_id = product.get("product_id")
     merchant_id = case.get("merchant_id")
     category = product.get("category")
     return {
-        "case": case,
-        "product": product,
         "product_id": product_id if isinstance(product_id, str) and product_id else None,
         "merchant_id": (
             merchant_id if isinstance(merchant_id, str) and merchant_id else None
         ),
         "category": category if isinstance(category, str) else None,
-        "image_urls": image_urls,
     }
 
 
 def _risk_filters(category) -> dict:
-    """plan 分支 3 的 filters：category（有则带）+ risk_type 词表。"""
+    """plan 分支 2 的 filters：category（有则带）+ risk_type 词表。"""
     filters = {}
     if category:
         filters["category"] = category
@@ -162,88 +173,63 @@ class ScriptedLLMBackend:
         ]
         return {
             "hypotheses": hypotheses,
-            "rationale": "依据品牌字段空缺与典型仿冒模式给出初始假设。",
+            "rationale": "依据品牌字段空缺、商家行为与可引用依据需求给出初始假设。",
         }
 
-    # -- plan：按证据 type 集合的四分支（1→2→3→4 顺序） ------------------------
+    # -- plan：按证据 type 集合的三分支（1→2→3 顺序） --------------------------
 
     def _plan(self, state: dict) -> dict:
         facts = _case_facts(state)
         evs = _evidence_list(state)
         types = {ev["type"] for ev in evs}
-        has_sim = _IMAGE_SIMILARITY in types
-        urls = facts["image_urls"]
 
-        # 分支 1：无 IMAGE_SIMILARITY → 先做外观比对（无图 → conclude 兜底）
-        if not has_sim:
-            if not urls:
-                return {
-                    "next_action": "conclude",
-                    "tools": [],
-                    "rationale": "无外观证据且案件无图片可查，本轮无调查动作。",
-                }
-            return {
-                "next_action": "call_tools",
-                "tools": [
-                    {
-                        "tool": "ImageAnalysisTool",
-                        "args": {"image_urls": urls},
-                        "reason": "验证外观是否对应知名品牌款",
-                        "priority": 1,
-                    }
-                ],
-                "rationale": "先做外观比对，验证是否对应知名品牌款。",
-            }
-
+        # 分支 1：本 listing 事实与商家行为证据缺失 → 补齐（本轮 ≤2 条工具调用）
         tools = []
-        # 分支 2：有 IMAGE_SIMILARITY 但缺 PRODUCT_FACT / MERCHANT_HISTORY → 补齐
-        if "PRODUCT_FACT" not in types:
-            if facts["product_id"] is not None:
-                tools.append(
-                    {
-                        "tool": "ProductTool",
-                        "args": {"product_id": facts["product_id"]},
-                        "reason": "核对商品在库事实（品牌空缺/版本漂移）",
-                        "priority": 1,
-                    }
-                )
-        if "MERCHANT_HISTORY" not in types:
-            if facts["merchant_id"] is not None:
-                tools.append(
-                    {
-                        "tool": "MerchantTool",
-                        "args": {"merchant_id": facts["merchant_id"], "window_days": 90},
-                        "reason": "核查商家系统性上架/下架历史",
-                        "priority": 2,
-                    }
-                )
+        if "PRODUCT_FACT" not in types and facts["product_id"] is not None:
+            tools.append(
+                {
+                    "tool": "ProductTool",
+                    "args": {"product_id": facts["product_id"]},
+                    "reason": "核对商品在库事实（品牌空缺/版本漂移）",
+                    "priority": 1,
+                }
+            )
+        if "MERCHANT_HISTORY" not in types and facts["merchant_id"] is not None:
+            tools.append(
+                {
+                    "tool": "MerchantTool",
+                    "args": {"merchant_id": facts["merchant_id"], "window_days": 90},
+                    "reason": "核查商家系统性上架/下架历史",
+                    "priority": 2,
+                }
+            )
         if tools:
             return {
                 "next_action": "call_tools",
                 "tools": tools,
-                "rationale": "补齐商品事实与商家历史，验证规避品牌与系统性上架假设。",
+                "rationale": "补齐商品在库事实与商家行为画像，验证字段一致性与规避模式。",
             }
         if "PRODUCT_FACT" not in types or "MERCHANT_HISTORY" not in types:
             # 证据仍缺但 product_id/merchant_id 均缺失（畸形案件事实）→ conclude，
-            # 不穿透到分支 3；真实案件两 id 必填，此处仅防御畸形 state 载荷。
+            # 不穿透到分支 2；真实案件两 id 必填，此处仅防御畸形 state 载荷。
             return {
                 "next_action": "conclude",
                 "tools": [],
                 "rationale": "商品/商家标识缺失，无法继续补齐事实证据，本轮收尾。",
             }
-        # 证据齐（有 PRODUCT_FACT 且 MERCHANT_HISTORY）→ 正常落到分支 3。
+        # 证据齐（有 PRODUCT_FACT 且 MERCHANT_HISTORY）→ 正常落到分支 2。
 
-        # 分支 3：有 PRODUCT_FACT + MERCHANT_HISTORY 但缺 CASE_PRECEDENT / POLICY_REF
+        # 分支 2：事实齐备但缺可引用依据（同类先例 / 政策条款）
         if "CASE_PRECEDENT" not in types:
             tools.append(
                 {
                     "tool": "CaseSearchTool",
                     "args": {
-                        "query": "无品牌标识+外观高度模仿+商家多次重上架",
+                        "query": "无品牌标识+商家多次重上架+品牌规避",
                         "filters": _risk_filters(facts["category"]),
                         "top_k": 5,
                     },
-                    "reason": "检索无品牌标识+外观高度模仿+多次重上架的同类先例",
+                    "reason": "检索无品牌标识+商家多次重上架的同类先例",
                     "priority": 1,
                 }
             )
@@ -252,12 +238,12 @@ class ScriptedLLMBackend:
                 {
                     "tool": "PolicySearchTool",
                     "args": {
-                        "query": "外观高度模仿品牌设计",
+                        "query": "品牌规避与商家系统性重上架",
                         "filters": _risk_filters(facts["category"]),
                         "top_k": 5,
                         "effective_only": True,
                     },
-                    "reason": "检索外观高度模仿品牌设计的政策条款",
+                    "reason": "检索品牌规避/系统性重上架的政策条款",
                     "priority": 2,
                 }
             )
@@ -265,64 +251,59 @@ class ScriptedLLMBackend:
             return {
                 "next_action": "call_tools",
                 "tools": tools,
-                "rationale": "补齐同类先例与政策依据，评估仿冒风险定级。",
+                "rationale": "补齐同类先例与政策依据，评估规避风险定级。",
             }
 
-        # 分支 4：五类关键证据齐备 → conclude（再查无益）
+        # 分支 3：事实 + 可引用依据齐备 → conclude（再查无益）
         return {
             "next_action": "conclude",
             "tools": [],
-            "rationale": "外观/商品/商家/先例/政策证据已齐备，无需继续调查。",
+            "rationale": "商品/商家/先例/政策证据已齐备，无需继续调查。",
         }
 
     # -- reevaluate：按假设 id + 证据 flags 更新（幂等） ------------------------
 
     def _reevaluate(self, state: dict) -> dict:
         evs = _evidence_list(state)
-        sim_evs = [ev for ev in evs if ev["type"] == _IMAGE_SIMILARITY]
-        sim_max = (
-            max(_to_float(ev.get("weight")) for ev in sim_evs) if sim_evs else 0.0
-        )
-        strong = [ev for ev in sim_evs if _to_float(ev.get("weight")) >= _STRONG_SIM_WEIGHT]
-        sim_strong = bool(strong)
-        # 强证据取 weight 最大者（并列取首现 —— max 保序，确定性）
-        strong_ev = max(strong, key=lambda ev: _to_float(ev.get("weight"))) if strong else None
-        strong_ref = _citation(strong_ev) if strong_ev is not None else ""
-
         prod_ev = _first_of_type(evs, _PRODUCT_FACT)
         merch_ev = _first_of_type(evs, _MERCHANT_HISTORY)
-        prod = prod_ev is not None
-        merch = merch_ev is not None
-        case_pre = _first_of_type(evs, _CASE_PRECEDENT) is not None
-        policy = _first_of_type(evs, _POLICY_REF) is not None
+        case_pre_ev = _first_of_type(evs, _CASE_PRECEDENT)
+        policy_ev = _first_of_type(evs, _POLICY_REF)
+        merch_dirty = merch_ev is not None and _merchant_dirty(merch_ev)
 
-        # flags 速查：sim_strong / sim_max / prod / merch / case_pre / policy
+        # flags 速查：prod / merch / merch_dirty / case_pre / policy
         hypothesis_updates = []
         for h in _hypothesis_list(state):
             hid = h.get("id")
             status = h.get("status")
             status = status if isinstance(status, str) else "PENDING"
             posterior = h.get("posterior")  # 可为 None（尚未评估）
-            if hid == "H1" and sim_strong and status != "REFUTED":
-                target_status, target_posterior, fields = "REFUTED", 0.05, {
-                    "evidence_against": [strong_ref]
+            if hid == "H1" and prod_ev is not None:
+                target_status, target_posterior, fields = "SUPPORTED", 0.9, {
+                    "evidence_for": [_citation(prod_ev)]
                 }
-            elif hid == "H2" and sim_strong:
-                target_status, target_posterior = "SUPPORTED", round(sim_max, 2)
-                fields = {"evidence_for": [strong_ref]}
-            elif hid == "H3" and sim_strong and prod and merch:
-                target_status, target_posterior = "SUPPORTED", 0.88
-                fields = {
-                    "evidence_for": [_citation(prod_ev), _citation(merch_ev)]
+            elif hid == "H2" and merch_ev is not None:
+                if merch_dirty:
+                    target_status, target_posterior, fields = "REFUTED", 0.1, {
+                        "evidence_against": [_citation(merch_ev)]
+                    }
+                else:
+                    target_status, target_posterior, fields = "SUPPORTED", 0.9, {
+                        "evidence_for": [_citation(merch_ev)]
+                    }
+            elif hid == "H3" and case_pre_ev is not None:
+                target_status, target_posterior, fields = "SUPPORTED", 0.8, {
+                    "evidence_for": [_citation(case_pre_ev)]
                 }
-            elif hid == "H4" and merch:
-                target_status, target_posterior = "SUPPORTED", 0.85
-                fields = {"evidence_for": [_citation(merch_ev)]}
+            elif hid == "H4" and policy_ev is not None:
+                target_status, target_posterior, fields = "SUPPORTED", 0.85, {
+                    "evidence_for": [_citation(policy_ev)]
+                }
             else:
                 # 未知 id / 条件不满足 → 跳过
                 continue
             # 幂等：目标 status/posterior 与当前相同 → 不列入（同一证据集重复调用
-            # 输出稳定，不会来回翻；H3/H4 在首轮证据未齐前保持 PENDING 不误更新）
+            # 输出稳定，不会来回翻；H3/H4 在证据未齐前保持 PENDING 不误更新）
             if status == target_status and posterior == target_posterior:
                 continue
             hypothesis_updates.append(
@@ -336,7 +317,11 @@ class ScriptedLLMBackend:
                 }
             )
 
-        sufficiency = "SUFFICIENT" if (case_pre and policy) else "INSUFFICIENT"
+        sufficiency = (
+            "SUFFICIENT"
+            if all(ev is not None for ev in (prod_ev, merch_ev, case_pre_ev, policy_ev))
+            else "INSUFFICIENT"
+        )
         return {
             "hypothesis_updates": hypothesis_updates,
             "new_hypotheses": [],
@@ -355,7 +340,7 @@ class ScriptedLLMBackend:
             "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
             "confidence": 0.91,
             "evidence_ids": [_citation(ev) for ev in evs],
-            "policy": ["POLICY_3.2"],
+            "policy": _policy_ids(evs),
             "rationale": _DECIDE_RATIONALE,
         }
 

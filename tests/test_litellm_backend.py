@@ -1,7 +1,7 @@
 """real LLM 路径的 mock 单测 —— LiteLLMBackend + llm_prompts 渲染层。
 
 无网络、无 API key、不依赖 .env：所有 litellm 调用都被 monkeypatch 到
-``litellm.acompletion`` 的本地替身；真实调用留 scripts/run_evaluation_real.py 人工实测。
+``litellm.acompletion`` 的本地替身；真实调用留 scripts/run_evaluation.py 人工实测。
 
 覆盖：构造（model/name/api_key 来源）/ tools 目录提取 / acompletion 成功路径
 （content/tokens/kwargs）/ 网络失败 → ``LLMBackendError`` / 模型文本清洗三态
@@ -207,17 +207,17 @@ async def test_no_api_key_constructor_ok_first_complete_raises(monkeypatch):
 
 def test_tool_catalog_extracted_from_tool_objects():
     """tools 目录提取：name/description/args_schema；无 name 的坏工具被跳过。"""
-    class _ImgArgs(BaseModel):
-        image_url: str = Field(description="待比对的图片 URL")
-        top_k: int = Field(default=3, description="返回前 k 张相似图")
+    class _SearchArgs(BaseModel):
+        query: str = Field(description="检索描述")
+        top_k: int = Field(default=3, description="返回前 k 条")
 
     class _MerchantArgs(BaseModel):
         merchant_id: str = Field(description="商家 ID")
 
-    class _FakeImageTool:  # 协议只需 name/description/args_model（结构类型）
-        name = "ImageAnalysisTool"
-        description = "图片外观相似度比对取证工具"
-        args_model = _ImgArgs
+    class _FakeSearchTool:  # 协议只需 name/description/args_model（结构类型）
+        name = "PolicySearchTool"
+        description = "政策条款检索取证工具"
+        args_model = _SearchArgs
 
     class _FakeMerchantTool:
         name = "MerchantTool"
@@ -231,16 +231,16 @@ def test_tool_catalog_extracted_from_tool_objects():
 
     backend = LiteLLMBackend(
         api_key="sk-test",
-        tools=[_FakeImageTool(), _FakeMerchantTool(), _BrokenTool()],
+        tools=[_FakeSearchTool(), _FakeMerchantTool(), _BrokenTool()],
     )
     catalog = backend._tool_catalog
-    assert [t["name"] for t in catalog] == ["ImageAnalysisTool", "MerchantTool"]
-    img = catalog[0]
-    assert img["description"] == "图片外观相似度比对取证工具"
+    assert [t["name"] for t in catalog] == ["PolicySearchTool", "MerchantTool"]
+    search = catalog[0]
+    assert search["description"] == "政策条款检索取证工具"
     # args_schema 由 pydantic model_json_schema() 生成：含入参字段名与必填信息
-    assert "image_url" in img["args_schema"]["properties"]
-    assert "top_k" in img["args_schema"]["properties"]
-    assert img["args_schema"]["required"] == ["image_url"]
+    assert "query" in search["args_schema"]["properties"]
+    assert "top_k" in search["args_schema"]["properties"]
+    assert search["args_schema"]["required"] == ["query"]
     # None/空 tools → 空目录（plan 渲染走"无可用工具"分支）
     assert LiteLLMBackend(api_key="sk-test", tools=None)._tool_catalog == []
     assert LiteLLMBackend(api_key="sk-test", tools=[])._tool_catalog == []
@@ -514,14 +514,12 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
 # B. llm_prompts 渲染纯测
 
 def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
-    """hypothesize user prompt：分节中文上下文含商品事实/图片/OCR 文本。"""
+    """hypothesize user prompt：分节中文上下文含商品事实。"""
     text = build_user_prompt(
         node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
     )
     assert "P_MOCK_99" in text  # 字段值渲染而非裸 JSON
     assert "复古跑鞋（高仿嫌疑样）" in text  # 商品标题值入上下文
-    assert "https://cdn.example.com/img1.jpg" in text  # 图片 url 入上下文（比对素材起点）
-    assert "疑似品牌 LOGO 图案" in text  # 机审 OCR 信息入上下文
     assert "decision" in text and "HUMAN_REVIEW" in text  # schema 要点（字段/枚举值）渲染
 
 
@@ -531,11 +529,11 @@ def test_build_user_prompt_decide_sections():
         "hypotheses": [
             {
                 "id": "H1",
-                "statement": "外观高度模仿某品牌经典款",
+                "statement": "商家存在系统性规避行为",
                 "status": "SUPPORTED",
                 "prior": 0.8,
                 "posterior": 0.91,
-                "evidence_for": ["IMAGE_SIMILARITY sim=0.91, match=某品牌"],
+                "evidence_for": ["MERCHANT_HISTORY 5 removals / 3 title-relisting"],
                 "evidence_against": [],
             },
             {
@@ -550,12 +548,12 @@ def test_build_user_prompt_decide_sections():
         ],
         "evidence": [
             {
-                "type": "IMAGE_SIMILARITY",
-                "weight": 0.91,
-                "source": "ImageAnalysisTool",
-                "ref_id": "https://cdn/img1.jpg",
-                "value": "sim=0.91, match=某品牌经典款",
-                "extra": {},
+                "type": "MERCHANT_HISTORY",
+                "weight": 0.85,
+                "source": "MerchantTool",
+                "ref_id": "M_5512",
+                "value": "5 removals / 3 title-relisting, credit=38",
+                "extra": {"removals": 5, "title": 3},
             },
             {
                 "type": "POLICY_REF",
@@ -584,7 +582,7 @@ def test_build_user_prompt_decide_sections():
     # 行为级：decide 决策所需的事实（假设仪表盘/证据引用/运行状态/预算）全部入上下文；
     # 不锁分节编号与行格式
     assert "H1" in text and "SUPPORTED" in text
-    assert "外观高度模仿某品牌经典款" in text  # hypothesis.statement 值渲染
+    assert "商家存在系统性规避行为" in text  # hypothesis.statement 值渲染
     assert "POLICY_REF" in text  # 证据 type 保真（REJECT 引用来源）
     assert "degraded" in text  # 运行状态入上下文
     # 预算入上下文：已用 token 观测值 + 两维上限（LLM 调用 / Tool 调用）数值
@@ -597,10 +595,10 @@ def test_build_user_prompt_plan_tool_catalog_and_feedback():
     args_schema = {
         "type": "object",
         "properties": {
-            "image_url": {"type": "string", "description": "图片 URL"},
+            "query": {"type": "string", "description": "检索描述"},
             "top_k": {"type": "integer", "description": "返回条数"},
         },
-        "required": ["image_url"],
+        "required": ["query"],
     }
     state = {
         "hypotheses": [],
@@ -616,7 +614,7 @@ def test_build_user_prompt_plan_tool_catalog_and_feedback():
         ],
     }
     catalog = [
-        {"name": "ImageAnalysisTool", "description": "图片外观相似度比对", "args_schema": args_schema}
+        {"name": "PolicySearchTool", "description": "政策条款检索", "args_schema": args_schema}
     ]
     text = build_user_prompt(
         node="plan",
@@ -625,8 +623,8 @@ def test_build_user_prompt_plan_tool_catalog_and_feedback():
         tool_catalog=catalog,
         feedbacks=["JSON 校验失败：decision 字段缺失，请补全后重新输出"],
     )
-    assert "ImageAnalysisTool" in text  # 工具目录入上下文
-    assert "image_url" in text and "top_k" in text  # 工具入参要点渲染
+    assert "PolicySearchTool" in text  # 工具目录入上下文
+    assert "query" in text and "top_k" in text  # 工具入参要点渲染
     assert "必填" in text and "可选" in text  # required/optional 区分被表达（不锁标记格式）
     assert "decision 字段缺失" in text  # llm_shell 修正提示内容被回喂到 user
     assert "上一轮输出校验反馈" in text  # 修正反馈分节标记（llm_shell 重试协议回喂载体）

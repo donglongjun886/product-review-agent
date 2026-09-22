@@ -4,7 +4,7 @@
 - corpus loader / schema 校验：Policy/Case KB 规模与唯一性、≥2 条 EXPIRED、meta 隔离声明；
 - **隔离红线**：Case KB 的 case_id 与 eval_data v2 全部 case 标识（含 InMemory 种子先例）无交集，
   防评测作弊；
-- ``build_tools()`` 默认世界仍是 6 个 InMemory 工具。
+- ``build_tools()`` 默认世界仍是 4 个 InMemory 工具。
 
 **chroma 真实检索的离线验收用例已整体移除**：它们靠一个测试自持的假编码器（词面 sha256 特征）
 离线跑，验的是管道而非检索质量；假编码器及其用例一并删除后，chroma 检索只剩
@@ -21,9 +21,9 @@ from pathlib import Path
 
 from helpers import tool_by_name
 
-from pra.evaluation.harness.agent_scheme import EVAL_PRECEDENTS
 from pra.rag.corpus import load_cases, load_policies
 from pra.tools import build_tools
+from pra.tools.case_search.tool import _DEFAULT_PRECEDENTS
 from pra.tools.policy_search.tool import InMemoryPolicyIndex
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,8 +44,8 @@ def _eval_case_ids() -> set[str]:
             lineage = obj.get("lineage") or {}
             if lineage.get("seed_case_id"):
                 ids.add(lineage["seed_case_id"])
-    # 追加 InMemory eval 世界种子先例（agent_scheme.EVAL_PRECEDENTS / CASE_1832 等）
-    for row in EVAL_PRECEDENTS:
+    # 追加 InMemory 种子先例（case_search.tool._DEFAULT_PRECEDENTS / CASE_1832 等）
+    for row in _DEFAULT_PRECEDENTS:
         ids.add(row["case_id"])
     return ids
 
@@ -77,14 +77,12 @@ def test_case_kb_isolated_from_eval_gt() -> None:
 
     overlap = kb_ids & eval_ids
     assert not overlap, f"Case KB 与 eval GT case_id 有交集（红线违反）: {sorted(overlap)[:10]}"
-    # InMemory 种子先例 id 亦不得混入（CASE_1832/0911/2033/2120 等）
-    assert kb_ids.isdisjoint({r["case_id"] for r in EVAL_PRECEDENTS})
+    # InMemory 种子先例 id 亦不得混入（CASE_1832/0911 等）
+    assert kb_ids.isdisjoint({r["case_id"] for r in _DEFAULT_PRECEDENTS})
 
 
 _EXPECTED_TOOLS = [
     "ProductTool",
-    "ImageAnalysisTool",
-    "OCRTool",
     "MerchantTool",
     "CaseSearchTool",
     "PolicySearchTool",

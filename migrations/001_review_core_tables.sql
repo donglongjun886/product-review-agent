@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS review_trace (
 CREATE TABLE IF NOT EXISTS review_evidence (
   evidence_id BIGINT       NOT NULL AUTO_INCREMENT COMMENT 'E_nn 序号（01 §5.8：DTO 无 id，DB 主键承载）',
   run_id      VARCHAR(64)  NOT NULL COMMENT '收集该证据的 run（跨 run 隔离；不直接挂 case）',
-  type        VARCHAR(32)  NOT NULL COMMENT '证据类型（IMAGE_SIMILARITY/PRODUCT_FACT/... 开放词表，与 DTO 一致）',
+  type        VARCHAR(32)  NOT NULL COMMENT '证据类型（PRODUCT_FACT/MERCHANT_HISTORY/... 开放词表，与 DTO 一致）',
   source_tool VARCHAR(64)  NOT NULL COMMENT '产出工具（证据归属审计）',
   value       TEXT         NOT NULL COMMENT '人读摘要（Evidence.value）',
   weight      DOUBLE       NOT NULL COMMENT '证据强度 0~1',

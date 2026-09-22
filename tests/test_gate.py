@@ -1,12 +1,12 @@
 """确定性决策 Gate / overlay（``guardrails/gate.py``）单测：锁住事实侧判定与归因码。
 
-本次语义重构后的核心不变量（本文件的主要目的）：
+核心不变量（本文件的主要目的）：
 
 1. **终裁不读任何 LLM 生成量** —— 篡改 ``prior`` / ``posterior`` / ``status`` /
    ``evidence_for`` 后 ``pass_gate`` / ``reject_gate`` 结果必须逐字不变；
-2. PASS = 无阳性 ∧ 无规则阳性 ∧ required 全覆盖 ∧ 无关键失败 ∧ 无冲突；
-3. REJECT = 维度匹配的**硬阳性** ∨ R-302 规避词 ∧ 可引用依据 ∧ 无冲突（弱相似单独不成立）；
-4. HUMAN 归因区分：关键测量未取（可补救） / 维度不可测（环境缺失） / 阳性不足 / 证据冲突。
+2. PASS = 无阳性 ∧ 无规则阳性 ∧ required 全覆盖；
+3. REJECT = R-302 规避词命中 ∧ 可引用依据；
+4. HUMAN 归因区分：关键测量未取（可补救） / 维度不可测（环境缺失） / 阳性不足。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from helpers import (
     all_measureable_caps,
     budget_exhausted_state,
     covered_evidence,
-    ev,
+    evasion_case,
     hp,
     make_case,
     risk_anchor_state,
@@ -29,12 +29,10 @@ from pra.agent.guardrails.gate import (
     R2_REJECT_GATE_FAIL,
     R3_BUDGET_EXHAUSTED,
     R3_DIMENSION_UNMEASURABLE,
-    R3_EVIDENCE_CONFLICT,
     R3_MEASUREMENT_MISSING,
     R3_POSITIVE_INSUFFICIENT,
     R4_PASS_GATE_FAIL,
     R5_DEGRADED_OR_FAILED_STEP,
-    contradiction_detect,
     pass_gate,
     reject_gate,
     run_decision_overlay,
@@ -42,7 +40,6 @@ from pra.agent.guardrails.gate import (
 from pra.agent.guardrails.hard_rules import hard_rule_hit
 from pra.agent.guardrails.schemas import DecisionProposal
 from pra.domain.measurement import (
-    DIM_IMAGE_APPEARANCE,
     DIM_LISTING_REGISTRY,
     DIM_MERCHANT_PROFILE,
 )
@@ -85,18 +82,6 @@ def _proposal(
     )
 
 
-# ---- 谓词：证据冲突 / 高优先展示 ----
-
-
-def test_contradiction_requires_strong_sim_and_clean_merchant():
-    strong = ev("IMAGE_SIMILARITY", weight=0.91, ref_id="img")
-    clean = ev("MERCHANT_HISTORY", value="x", ref_id="M_1", extra={"removals": 0, "title": 0})
-    dirty = ev("MERCHANT_HISTORY", value="x", ref_id="M_2", extra={"removals": 5, "title": 3})
-    assert contradiction_detect({"evidence": [strong, clean]}) is True
-    assert contradiction_detect({"evidence": [strong, dirty]}) is False
-    assert contradiction_detect({"evidence": [ev("IMAGE_SIMILARITY", weight=0.72), clean]}) is False
-
-
 # ---- PASS Gate ----
 
 
@@ -123,7 +108,7 @@ def test_pass_gate_true_even_with_high_prior_normal_hypotheses():
 
 def test_pass_gate_false_on_any_positive_evidence():
     st = _pass_ready_state()
-    st["evidence"] = [*st["evidence"], ev("IMAGE_LOGO", weight=0.7, ref_id="img")]
+    st["evidence"] = covered_evidence(merchant_removals=5)
     assert pass_gate(st) is False
 
 
@@ -147,59 +132,26 @@ def test_pass_gate_false_when_no_case():
     assert pass_gate({"evidence": [], "failures": []}) is False
 
 
-def test_pass_gate_false_on_conflict():
-    st = _pass_ready_state()
-    st["evidence"] = [
-        *covered_evidence(merchant_removals=0),
-        ev("IMAGE_SIMILARITY", weight=0.93,
-           ref_id="https://cdn.example.com/products/P_TEST/img1.jpg"),
-    ]
-    assert pass_gate(st) is False
-
-
 # ---- REJECT Gate ----
 
 
-def test_reject_gate_true_with_hard_positive_and_citation():
+def test_reject_gate_true_with_evasion_word_and_citation():
     st = risk_anchor_state()
     assert reject_gate(st) is True
 
 
-def test_reject_gate_false_on_weak_similarity_only():
-    """弱相似 0.70~0.85 **不是**硬阳性 ⇒ 不得授权自动拒绝（真实跑的 2 例误杀即此）。"""
-    st = _pass_ready_state()
-    st["evidence"] = [
-        *covered_evidence(similarity=0.73),
-        ev("POLICY_REF", value="POLICY_3.2 v2 条款：x", weight=0.9, ref_id="POLICY_3.2_v2_c1",
-           extra={"policy_id": "POLICY_3.2"}),
-    ]
-    assert gate.weak_similarity(st["evidence"]) is True
-    assert not gate.coverage_of(st).positive
-    assert reject_gate(st) is False
-
-
 def test_reject_gate_false_without_citable():
+    """R-302 命中但无可引用依据 ⇒ 不授权自动拒绝（阳性不足）。"""
     st = _pass_ready_state()
-    st["evidence"] = [
-        e for e in st["evidence"] if e.type not in {"POLICY_REF", "CASE_PRECEDENT"}
-    ]
-    st["evidence"] = [*st["evidence"], ev("IMAGE_SIMILARITY", weight=0.93, ref_id="img")]
+    st["case"] = evasion_case()
+    st["evidence"] = covered_evidence(merchant_removals=5)
     assert reject_gate(st) is False
 
 
 def test_reject_gate_false_without_case():
-    """空 state 防御：无 case 时即便有硬阳性 + 可引用依据，也不得自动拒绝。"""
+    """空 state 防御：无 case 时即便命中规避词 + 有可引用依据，也不得自动拒绝。"""
     st = risk_anchor_state()
     st["case"] = None
-    assert reject_gate(st) is False
-
-
-def test_reject_gate_false_on_conflict():
-    st = _pass_ready_state()
-    st["evidence"] = [
-        *covered_evidence(merchant_removals=0, similarity=0.93),
-        ev("POLICY_REF", value="p", weight=0.9, ref_id="c1", extra={"policy_id": "POLICY_3.2"}),
-    ]
     assert reject_gate(st) is False
 
 
@@ -216,7 +168,7 @@ def test_reject_gate_false_on_conflict():
         {"status": HypothesisStatus.SUPPORTED},
         {"status": HypothesisStatus.REFUTED},
         {"status": HypothesisStatus.UNRESOLVED},
-        {"evidence_for": ["IMAGE_SIMILARITY similarity=0.99, match=某品牌"]},
+        {"evidence_for": ["MERCHANT_HISTORY 5 removals, match=某商家"]},
         {"evidence_against": []},
     ],
 )
@@ -265,12 +217,11 @@ def test_overlay_pass_gate_fail_gets_r4():
     assert final.overrides == [R4_PASS_GATE_FAIL]
 
 
-def test_overlay_reject_gate_fail_on_weak_sim_gets_r2_and_positive_insufficient():
+def test_overlay_reject_gate_fail_without_citation_gets_r2_and_positive_insufficient():
+    """R-302 命中但无可引用依据 ⇒ R2 + 阳性不足（模型提案不足以自动拒绝）。"""
     st = _pass_ready_state()
-    st["evidence"] = [
-        *covered_evidence(similarity=0.72),
-        ev("POLICY_REF", value="p", weight=0.9, ref_id="c1", extra={"policy_id": "POLICY_3.2"}),
-    ]
+    st["case"] = evasion_case()
+    st["evidence"] = covered_evidence(merchant_removals=5)
     final = run_decision_overlay(
         st, _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"])
     )
@@ -325,25 +276,14 @@ def test_overlay_unmeasurable_dimension_gets_dedicated_code():
     """UNMEASURABLE：环境缺失 → 与"没测"分开归因。"""
     st = _pass_ready_state()
     caps = all_measureable_caps()
-    caps[DIM_IMAGE_APPEARANCE] = False
+    caps[DIM_MERCHANT_PROFILE] = False
     st["measurement_capabilities"] = caps
     st["evidence"] = [
         e for e in st["evidence"]
-        if not (e.type == "MEASUREMENT" and e.ref_id.startswith(DIM_IMAGE_APPEARANCE))
+        if not (e.type == "MEASUREMENT" and e.ref_id.startswith(DIM_MERCHANT_PROFILE))
     ]
     final = run_decision_overlay(st, _proposal(decision="PASS"))
     assert final.overrides == [R3_DIMENSION_UNMEASURABLE]
-
-
-def test_overlay_evidence_conflict_code():
-    st = _pass_ready_state()
-    st["evidence"] = [
-        *covered_evidence(merchant_removals=0),
-        ev("IMAGE_SIMILARITY", weight=0.93,
-           ref_id="https://cdn.example.com/products/P_TEST/img1.jpg"),
-    ]
-    final = run_decision_overlay(st, _proposal(decision="PASS"))
-    assert final.overrides == [R3_EVIDENCE_CONFLICT]
 
 
 def test_overlay_warn_failure_does_not_trigger():

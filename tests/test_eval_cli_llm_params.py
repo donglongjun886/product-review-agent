@@ -13,12 +13,12 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "scripts" / "run_evaluation_real.py"
+SCRIPT = REPO_ROOT / "scripts" / "run_evaluation.py"
 
 
 def _load_script():
     """按路径加载跑分脚本（它不是包，且 import 期不拉起 litellm）。"""
-    spec = importlib.util.spec_from_file_location("run_evaluation_real_mod", SCRIPT)
+    spec = importlib.util.spec_from_file_location("run_evaluation_mod", SCRIPT)
     assert spec and spec.loader, f"无法定位脚本: {SCRIPT}"
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -27,7 +27,7 @@ def _load_script():
 
 def _backend(mod, **cfg):
     return mod._make_real_backend(
-        model=mod.DEFAULT_MODEL, api_key="sk-test", base_url=None, **cfg
+        model=mod.DEFAULT_MODEL, api_key="sk-test", base_url=None, tools=[], **cfg
     )
 
 

@@ -21,7 +21,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, Field
 
-from pra.evaluation.harness.base import EvalRecord
+from pra.evaluation.record import EvalRecord
 
 __all__ = [
     "AgentMetricsBundle",
@@ -154,8 +154,8 @@ class ReasoningCorrectnessEvaluator:
 class MarginalEvidenceGainMetrics(BaseModel):
     """逐次工具调用的边际增益（**计数与比率，无加权合成**）。
 
-    数据来自 ``EvalRecord.detail["tool_history"]``（Agent 审计字段的透传，见
-    ``harness/agent_scheme``）：每次调用的 ``evidence_added``（新增证据引用）与
+    数据来自 ``EvalRecord.detail["tool_history"]``（agent 臂的审计透传，见
+    ``scripts/run_evaluation.py``）：每次调用的 ``evidence_added``（新增证据引用）与
     ``decision_changed``（本轮 Gate 判定是否翻转）。增益统计只算 ``status=="ok"`` 的调用 ——
     失败/跳过的调用不可能带来证据，混进分母会稀释信号。``no_gain_calls`` 即"调了但没带来
     新证据"的直接计数（回答'为调查而调查'）。

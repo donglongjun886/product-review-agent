@@ -2,8 +2,6 @@
   "schema_version": 2,
   "dataset_version": "v2",
   "file": "cases_v2.jsonl",
-  "generator": "scripts/eval_dataset_gen.py",
-  "generator_command": "uv run python scripts/eval_dataset_gen.py --out eval_data/v2 --count 320 --seed 42",
   "seed": 42,
   "total": 320
 }

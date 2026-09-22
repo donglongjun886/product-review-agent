@@ -1,10 +1,10 @@
 """统一 Tool 契约（抽象层）。
 
-6 个调查工具各回答审核员的一个「为什么需要这个信息」：``ProductTool`` = 事实锚点、
-``ImageAnalysisTool`` = 多模态外观、``OCRTool`` = 图文交叉验证、``MerchantTool`` = 商家行为
-模式、``CaseSearchTool`` = 人工先例、``PolicySearchTool`` = 政策依据。**本模块不承载任何具体
-工具的查询实现**（那些在 tools/ 各子包），只固定调用契约：plan 节点输出 ``{tool, args}`` →
-ToolNode 按名调度，只依赖接口而非实现（依赖倒置，便于 mock 与替换）。
+4 个调查工具各回答审核员的一个「为什么需要这个信息」：``ProductTool`` = 事实锚点、
+``MerchantTool`` = 商家行为模式、``CaseSearchTool`` = 人工先例、``PolicySearchTool`` = 政策依据。
+**本模块不承载任何具体工具的查询实现**（那些在 tools/ 各子包），只固定调用契约：
+plan 节点输出 ``{tool, args}`` → ToolNode 按名调度，只依赖接口而非实现（依赖倒置，便于 mock
+与替换）。
 
 - ``ToolArgs`` / ``ToolResult``：入参契约与出参信封基类，子类声明的字段/负载即暴露给 LLM 的
   schema；错误语义收敛在信封上（原始堆栈不直通 LLM）。
@@ -59,7 +59,7 @@ class ToolContext(BaseModel):
 class Tool(Protocol):
     """统一 Tool 接口（结构性协议）。
 
-    - ``name``：工具唯一名，Plan 输出与按名调度的 key（如 ``"ImageAnalysisTool"``）；
+    - ``name``：工具唯一名，Plan 输出与按名调度的 key（如 ``"ProductTool"``）；
     - ``description``：给 LLM 的工具说明（何时该调、输入输出是什么）；
     - ``args_model``：本工具入参 Pydantic 模型 —— 声明式暴露给 LLM 的 args JSON Schema，
       也是 tools_node 校验/解析 plan 给的 dict 的入口；

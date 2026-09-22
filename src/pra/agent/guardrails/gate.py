@@ -6,18 +6,16 @@
 ``evidence_for`` / 提案里的 ``confidence``。``proposal`` 只决定"要走哪道 Gate"
 （PASS 提案走 PASS Gate、REJECT 提案走 REJECT Gate）以及非判定性的展示字段。
 
-顺序：① 硬规则命中 → REJECT/HIGH，LLM 不可覆盖；② 弃权清单（预算/冲突/**关键测量缺口**/
+顺序：① 硬规则命中 → REJECT/HIGH，LLM 不可覆盖；② 弃权清单（预算/**关键测量缺口**/
 不可测维度/降级）任一命中 → HUMAN_REVIEW + 归因码；③ 无提案且无码 → 补 ``R5``；
 ④ 提案 PASS 不过 PASS Gate → ``+R4``、提案 REJECT 不过 REJECT Gate → ``+R2``；
 ⑤ 采纳：decision 用提案、overrides=[]。
 
 PASS Gate（全满足才放行）：无维度匹配的**阳性证据** ∧ 无**规则侧阳性**（R-102/R-302 命中）
-∧ 本案 required 维度**全部覆盖**（无 NOT_MEASURED、无 UNMEASURABLE）∧ 无证据冲突。
+∧ 本案 required 维度**全部覆盖**（无 NOT_MEASURED、无 UNMEASURABLE）。
 
-REJECT Gate（全满足才自动拒绝）：∃ **真实证据链中、与风险维度匹配的硬阳性**（强相似 ≥0.85 /
-Logo / 商家达阈值 / 显式 ``MEASUREMENT=POSITIVE``）**或** R-302 规避词命中 ∧ ∃ 带 ``ref_id``
-的可引用依据 ∧ 无证据冲突。**弱相似 0.70~0.85 不是硬阳性** —— 它要靠"商品事实"维度交叉，
-不能单独撑起自动拒绝。
+REJECT Gate（全满足才自动拒绝）：R-302 规避词命中 ∧ ∃ 带 ``ref_id`` 的可引用依据。
+若无 R-302 证据，即便有商家行为画像也不自动拒绝 —— 单一来源的商家历史不得单独定案。
 
 不变量：``risk_level`` / ``risk_type`` 不参与判定（仅供人工队列排序）；``policy`` 只从
 ``POLICY_REF`` 证据的 ``extra["policy_id"]`` 读，不采信提案。本模块**不含任何读 ``prior``
@@ -37,11 +35,8 @@ from pra.agent.guardrails.measurements import (
 )
 from pra.domain.measurement import (
     CITABLE_TYPES,
-    DIM_IMAGE_APPEARANCE,
     DIM_MERCHANT_PROFILE,
     DIM_TEXT_COMPLIANCE,
-    EVIDENCE_MIN_SIM,
-    EVIDENCE_STRONG,
 )
 from pra.domain.models import (
     Budget,
@@ -58,7 +53,6 @@ DECISION_CONFIDENCE = 1.0
 R1_HARD_RULE = "R1_HARD_RULE"
 R2_REJECT_GATE_FAIL = "R2_REJECT_GATE_FAIL"
 R3_BUDGET_EXHAUSTED = "R3_BUDGET_EXHAUSTED"
-R3_EVIDENCE_CONFLICT = "R3_EVIDENCE_CONFLICT"
 R3_MEASUREMENT_MISSING = "R3_MEASUREMENT_MISSING"
 R3_DIMENSION_UNMEASURABLE = "R3_DIMENSION_UNMEASURABLE"
 R3_POSITIVE_INSUFFICIENT = "R3_POSITIVE_INSUFFICIENT"
@@ -71,40 +65,7 @@ def _has_citable(evidence) -> bool:
     return any(e.type in CITABLE_TYPES and e.ref_id for e in evidence)
 
 
-def _strong_similarity(evidence) -> bool:
-    """是否存在强相似 IMAGE_SIMILARITY（``weight >= 0.85``）。"""
-    return any(e.type == "IMAGE_SIMILARITY" and (e.weight or 0.0) >= EVIDENCE_STRONG for e in evidence)
-
-
-def weak_similarity(evidence) -> bool:
-    """是否存在**弱相似**（0.70 <= weight < 0.85）—— 需与商品事实交叉，不能单独撑起 REJECT。"""
-    return any(
-        e.type == "IMAGE_SIMILARITY" and EVIDENCE_MIN_SIM <= (e.weight or 0.0) < EVIDENCE_STRONG
-        for e in evidence
-    )
-
-
 # 谓词（全部纯函数、确定性、可单测；空/缺失安全）
-
-
-def contradiction_detect(state) -> bool:
-    """证据冲突：「相似度极高但商家历史干净」。
-
-    True = ∃ 强相似 IMAGE_SIMILARITY（``weight >= 0.85``）∧ ∃ MERCHANT_HISTORY 且
-    ``removals == 0 且 title == 0``。extra 缺失/未回填的按「不干净」处理。
-
-    这是"证据互相矛盾"的特定形态，归入弃权与 REJECT 拦截；**不再兼作弱相似的安全阀**
-    （弱相似的应然处置见 ``weak_similarity`` 与 measurements 的 required set）。
-    """
-    evs = state.get("evidence") or []
-    has_strong_sim = _strong_similarity(evs)
-    has_clean_merchant = any(
-        e.type == "MERCHANT_HISTORY"
-        and (e.extra or {}).get("removals") == 0
-        and (e.extra or {}).get("title") == 0
-        for e in evs
-    )
-    return bool(has_strong_sim and has_clean_merchant)
 
 
 def coverage_of(state) -> CoverageReport:
@@ -132,10 +93,10 @@ def _rule_positive_dims(case) -> frozenset[str]:
 
 
 def pass_gate(state) -> bool:
-    """PASS Gate：四项全满足才放行（全部读事实通道）。
+    """PASS Gate：三项全满足才放行（全部读事实通道）。
 
     ① 无维度匹配的阳性证据；② 无规则侧阳性（R-102/R-302）；③ required 维度全部覆盖
-    （无 NOT_MEASURED / UNMEASURABLE）；④ 无证据冲突。
+    （无 NOT_MEASURED / UNMEASURABLE）。
 
     空 state 防御：``case`` 缺失时 required 为空、其余条件也空 —— 若不放行这道守卫会
     **vacuous PASS**（什么都还没查就放行），故显式返回 False。
@@ -147,33 +108,25 @@ def pass_gate(state) -> bool:
         return False
     if _rule_positive_dims(state.get("case")):
         return False
-    if cov.missing or cov.unmeasurable:
-        return False
-    return not contradiction_detect(state)
+    return not (cov.missing or cov.unmeasurable)
 
 
 def reject_gate(state) -> bool:
-    """REJECT Gate：四项全满足才自动拒绝。
+    """REJECT Gate：两项全满足才自动拒绝。
 
-    ① ∃ **足以授权自动拒绝的阳性**：证据链中与本 listing 直接相关的硬阳性
-    （``cov.reject_positive``：强相似/Logo；商家行为维度还需本 listing 外观信号佐证），
-    **或**平台规则层命中规避词（R-302，文本自证）；
-    ② ∃ 带 ``ref_id`` 的可引用依据；③ 无证据冲突。
+    ① 平台规则层命中规避词（R-302，文本自证）；② ∃ 带 ``ref_id`` 的可引用依据。
     **不读 LLM 的 ``SUPPORTED`` / ``evidence_for`` / ``posterior``。**
 
     刻意**不**把"仅商家历史脏"当作授权：商家行为是**针对该商家**的画像，不能单独作为
-    本 listing 违规的确证（reviewer 语义：疑似规避但图/文本无确证 → 克制转人工）。
+    本 listing 违规的确证（reviewer 语义：疑似规避但文本无确证 → 克制转人工）。
 
     空 state 防御：``case`` 缺失 ⇒ 不得产出任何自动裁决（与 ``pass_gate`` 对称）。
     """
     if state.get("case") is None:
         return False
-    cov = coverage_of(state)
-    if not (cov.reject_positive or RULE_EVASION_WORD in rule_hit_ids(state.get("case"))):
+    if RULE_EVASION_WORD not in rule_hit_ids(state.get("case")):
         return False
-    if not _has_citable(state.get("evidence") or []):
-        return False
-    return not contradiction_detect(state)
+    return _has_citable(state.get("evidence") or [])
 
 
 def _finalize_risk_level(state, proposal) -> RiskLevel:
@@ -200,15 +153,13 @@ def _finalize_risk_level(state, proposal) -> RiskLevel:
 def _finalize_risk_type(state, proposal) -> list:
     """风险类型：**仅供展示与人工队列排序**，不参与 Gate。
 
-    提案有非空 ``risk_type`` → 用之；否则按阳性证据所在维度派生：外观 → POTENTIAL_IP_RISK、
-    商家行为 → EVASION_PATTERN、文本合规 → FALSE_CLAIM。顺序固定，无命中 → ``[]``。
+    提案有非空 ``risk_type`` → 用之；否则按阳性证据所在维度派生：商家行为 →
+    EVASION_PATTERN、文本合规 → FALSE_CLAIM。顺序固定，无命中 → ``[]``。
     """
     if proposal is not None and proposal.risk_type:
         return list(proposal.risk_type)
     positive_dims = set(coverage_of(state).positive)
     risk: list = []
-    if DIM_IMAGE_APPEARANCE in positive_dims:
-        risk.append(RiskType.POTENTIAL_IP_RISK)
     if DIM_MERCHANT_PROFILE in positive_dims:
         risk.append(RiskType.EVASION_PATTERN)
     if DIM_TEXT_COMPLIANCE in positive_dims:
@@ -259,15 +210,13 @@ def _build_decision(
 def abstention_codes(state, cov: CoverageReport) -> list:
     """HUMAN_REVIEW 弃权清单：顺序固定，命中码全量收集（只读事实通道）。
 
-    只认预算超限 / 证据冲突 / 测量缺口 / 不可测维度 / ``state["degraded"]``；
+    只认预算超限 / 测量缺口 / 不可测维度 / ``state["degraded"]``；
     ``severity="warn"`` 的失败只进审计、不触发。
     """
     codes: list = []
     budget = state.get("budget")
     if budget is not None and budget_exceeded(budget) is not None:
         codes.append(R3_BUDGET_EXHAUSTED)
-    if contradiction_detect(state):
-        codes.append(R3_EVIDENCE_CONFLICT)
     if cov.missing:
         codes.append(R3_MEASUREMENT_MISSING)
     if cov.unmeasurable:
@@ -320,8 +269,8 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
         return _human_review(state, proposal, [R4_PASS_GATE_FAIL])
     if proposal.decision == "REJECT" and not reject_gate(state):
         codes = [R2_REJECT_GATE_FAIL]
-        # 阳性信号存在但不足以自动拒绝（仅商家画像 / 弱相似 / 无可引用依据）→ 显式归因
-        if weak_similarity(state.get("evidence") or []) or cov.positive:
+        # 阳性信号存在但不足以自动拒绝（无可引用依据 / 未命中规避词）→ 显式归因
+        if cov.positive:
             codes.append(R3_POSITIVE_INSUFFICIENT)
         return _human_review(state, proposal, codes)
 
@@ -341,16 +290,13 @@ __all__ = [
     "R2_REJECT_GATE_FAIL",
     "R3_BUDGET_EXHAUSTED",
     "R3_DIMENSION_UNMEASURABLE",
-    "R3_EVIDENCE_CONFLICT",
     "R3_MEASUREMENT_MISSING",
     "R3_POSITIVE_INSUFFICIENT",
     "R4_PASS_GATE_FAIL",
     "R5_DEGRADED_OR_FAILED_STEP",
     "abstention_codes",
-    "contradiction_detect",
     "coverage_of",
     "pass_gate",
     "reject_gate",
     "run_decision_overlay",
-    "weak_similarity",
 ]

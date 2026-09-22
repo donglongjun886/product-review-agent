@@ -136,15 +136,14 @@ def test_default_path_pulls_in_no_extra_dependencies() -> None:
 
 
 def test_default_path_guard_is_not_vacuous() -> None:
-    """反「空断言」守卫：默认路径必须真的 import 了 pra.rag/pra.tools、建了 6 个 memory 工具
+    """反「空断言」守卫：默认路径必须真的 import 了 pra.rag/pra.tools、建了 4 个 memory 工具
     并读出了语料，生产装配注入惰性代理且尚未建库。"""
     payload = _run_default_path_child()
     assert payload["rag_loaded"] and payload["tools_loaded"], (
         "子进程实际未 import pra.rag/pra.tools → 本用例会空跑（先修脚本）"
     )
     assert payload["tool_names"] == [
-        "ProductTool", "ImageAnalysisTool", "OCRTool", "MerchantTool",
-        "CaseSearchTool", "PolicySearchTool",
+        "ProductTool", "MerchantTool", "CaseSearchTool", "PolicySearchTool",
     ]
     assert payload["memory_index_types"] == ["InMemoryCaseIndex", "InMemoryPolicyIndex"], (
         "build_tools() 默认（memory）仍须注入 InMemory 索引"

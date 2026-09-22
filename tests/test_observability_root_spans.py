@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -28,6 +29,16 @@ from pra.observability import flush_tracer as pkg_flush_tracer
 from pra.observability import tracing as T
 
 DATA_PATH_V2 = Path(__file__).resolve().parents[1] / "eval_data" / "v2" / "cases_v2.jsonl"
+_EVAL_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_evaluation.py"
+
+
+def _load_eval_script():
+    """按路径加载跑分脚本（它不是包）—— 取其中的评测 root trace 组装。"""
+    spec = importlib.util.spec_from_file_location("run_evaluation_mod", _EVAL_SCRIPT)
+    assert spec and spec.loader, f"无法定位脚本: {_EVAL_SCRIPT}"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 _HEX32 = re.compile(r"\A[0-9a-f]{32}\Z")
 _NODE_NAMES = ("hypothesize", "plan", "tools", "reevaluate", "decide")
@@ -450,15 +461,17 @@ def test_root_trace_id_is_scoped_by_llm_backend(monkeypatch) -> None:
     generation 交织，按 trace 汇总 token 会混入另一臂的 generation）。
     """
     monkeypatch.delenv("PRA_LANGFUSE_EXPERIMENT", raising=False)
-    from pra.agent.state import build_initial_state
-    from pra.evaluation.harness.agent_scheme import _root_trace_context
+    mod = _load_eval_script()
 
     case = _v2_case()
-    state = build_initial_state(case.input)
     experiment = T.experiment_name()
 
-    scripted = _root_trace_context(case, state, backend_name="eval-scripted-reviewer")
-    real = _root_trace_context(case, state, backend_name="litellm-deepseek/deepseek-chat")
+    scripted = mod._root_trace_context(
+        case, scheme="agent", backend_name="eval-scripted-reviewer"
+    )
+    real = mod._root_trace_context(
+        case, scheme="agent", backend_name="litellm-deepseek/deepseek-chat"
+    )
 
     assert scripted.trace_id != real.trace_id  # 两臂不混
     for backend, ctx in (
@@ -467,7 +480,7 @@ def test_root_trace_id_is_scoped_by_llm_backend(monkeypatch) -> None:
     ):
         assert ctx.trace_id == uuid5(
             NAMESPACE_URL, f"{experiment}:{case.eval_case_id}:agent:{backend}"
-        ).hex, "trace_id 须由 uuid5(experiment:case:agent:后端名) 确定"
+        ).hex, "trace_id 须由 uuid5(experiment:case:scheme:后端名) 确定"
         assert ctx.metadata["llm_backend"] == backend
     # 除 trace_id / llm_backend 外，其余关联信息一致（同一批 case 可横向对比）
     assert {k: v for k, v in scripted.metadata.items() if k != "llm_backend"} == {

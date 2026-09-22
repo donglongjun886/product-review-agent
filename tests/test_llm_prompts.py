@@ -9,10 +9,11 @@
   重复采集的调用不阻止收尾；
 - decide：证据链充分且无矛盾/缺口时本轮直接裁决，人工只留给真正的证据不足/矛盾/政策模糊/
   取证失败；
-- reevaluate：外观/视觉类假设判 SUPPORTED 必须引用图像类证据（``IMAGE_SIMILARITY``），
+- reevaluate：每条假设判 SUPPORTED/REFUTED 必须引用上下文真实存在的证据；
   ``CASE_PRECEDENT`` / ``POLICY_REF`` 只能佐证；``new_hypotheses`` 禁重复、允许为空。
 
-另含输出 schema 契约守护与四节点渲染走查。不联网 / 无 API key / 不调真实 LLM。
+另含输出 schema 契约守护与各节点渲染走查，以及评测用单次调用基线 ``single_call``。
+不联网 / 无 API key / 不调真实 LLM。
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ _HYP_WITH_EXISTING = {
     "hypotheses": [
         {
             "id": "H1",
-            "statement": "外观与经典小白鞋高度相似，存在视觉仿冒风险",
+            "statement": "商家存在系统性改标题重上架行为",
             "status": "UNRESOLVED",
             "prior": 0.7,
             "posterior": None,
@@ -95,7 +96,7 @@ def test_hypothesize_user_prompt_renders_existing_hypotheses():
     # 不锁具体行格式与分节编号（措辞/排版调整不应误伤）。
     assert "既有假设清单" in text
     assert "H1" in text and "UNRESOLVED" in text
-    assert "外观与经典小白鞋高度相似，存在视觉仿冒风险" in text
+    assert "商家存在系统性改标题重上架行为" in text
     assert "H2" in text and "REFUTED" in text
     assert "商家历史干净无违规记录" in text
     assert "H3" in text and "PENDING" in text
@@ -148,7 +149,7 @@ def test_decide_prompt_budget_caps_two_dims_only():
     assert "token≤" not in text and "时长≤" not in text
 
 
-def test_four_node_prompt_render_smoke_walkthrough():
+def test_prompt_render_smoke_walkthrough():
     # 一个尽量贴近真实节点 state 的富 state（decide 视角字段齐全）
     rich_state = {
         "case": {
@@ -167,22 +168,22 @@ def test_four_node_prompt_render_smoke_walkthrough():
         "hypotheses": [
             {
                 "id": "H1",
-                "statement": "外观与经典板鞋高度相似",
+                "statement": "商家存在系统性规避行为",
                 "status": "SUPPORTED",
                 "prior": 0.8,
                 "posterior": 0.93,
-                "evidence_for": ["IMAGE_SIMILARITY sim=0.93"],
+                "evidence_for": ["MERCHANT_HISTORY removals=5"],
                 "evidence_against": [],
             }
         ],
         "evidence": [
             {
-                "type": "IMAGE_SIMILARITY",
-                "weight": 0.93,
-                "source": "ImageAnalysisTool",
-                "ref_id": "https://cdn/img1.jpg",
-                "value": "sim=0.93, match=经典板鞋",
-                "extra": {},
+                "type": "MERCHANT_HISTORY",
+                "weight": 0.85,
+                "source": "MerchantTool",
+                "ref_id": "M_5512",
+                "value": "5 removals / 3 title-relisting, credit=38",
+                "extra": {"removals": 5, "title": 3},
             },
             {
                 "type": "POLICY_REF",
@@ -194,9 +195,9 @@ def test_four_node_prompt_render_smoke_walkthrough():
             },
         ],
         "pending_tool_calls": [
-            {"tool": "ImageAnalysisTool", "priority": 1, "reason": "补视觉证据"}
+            {"tool": "CaseSearchTool", "priority": 1, "reason": "补同类先例"}
         ],
-        "required_measurement_coverage": ["- 必需测量覆盖：1/4"],
+        "required_measurement_coverage": ["- 必需测量覆盖：2/3"],
         "degraded": False,
         "failures": [],
         "budget": {
@@ -206,7 +207,9 @@ def test_four_node_prompt_render_smoke_walkthrough():
             "limits": {"max_llm_calls": 10, "max_tool_calls": 15},
         },
     }
-    assert set(SYSTEM_PROMPTS) == {"hypothesize", "plan", "reevaluate", "decide"}
+    assert set(SYSTEM_PROMPTS) == {
+        "hypothesize", "plan", "reevaluate", "decide", "single_call",
+    }
     for node in SYSTEM_PROMPTS:
         sys_prompt = build_system_prompt(node)
         assert isinstance(sys_prompt, str) and len(sys_prompt) > 100

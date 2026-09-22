@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from pra.evaluation.harness.base import EvalRecord
 from pra.evaluation.metrics.business import DecisionEvaluator
+from pra.evaluation.record import EvalRecord
 
 _AUTO = "AUTO_DECIDABLE"
 _SHOULD = "SHOULD_ABSTAIN"

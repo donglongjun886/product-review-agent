@@ -61,8 +61,8 @@ _DEFAULT_CLAUSES: list[dict[str, Any]] = [
         "policy_id": "POLICY_3.2",
         "version": 2,
         "clause_id": "POLICY_3.2_v2_c1",
-        "title": "外观高度模仿知名品牌",
-        "text": "商品外观高度模仿知名品牌设计且无品牌授权，判定为高风险，转人工审核处理",
+        "title": "标题/描述使用仿冒规避用语",
+        "text": "商品标题或描述使用高仿、复刻、1:1 等仿冒规避用语且无品牌授权，判定为高风险，转人工审核处理",
         "category": "女鞋/运动鞋",
         "risk_type": ["POTENTIAL_IP_RISK"],
         "status": "EFFECTIVE",
@@ -116,7 +116,7 @@ class InMemoryPolicyIndex:
 
 class PolicySearchArgs(ToolArgs):
 
-    query: str = Field(description="政策检索描述，如 '外观高度模仿品牌设计'")
+    query: str = Field(description="政策检索描述，如 '标题使用仿冒规避用语'")
     filters: PolicySearchFilters = Field(default_factory=PolicySearchFilters)
     top_k: int = Field(default=5, ge=1, le=10)
     effective_only: bool = Field(default=True, description="只查当前生效版本（默认 true）")

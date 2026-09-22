@@ -28,7 +28,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, Field
 
-from pra.evaluation.harness.base import EvalRecord
+from pra.evaluation.record import EvalRecord
 
 __all__ = ["DecisionEvaluator", "DecisionMetrics"]
 

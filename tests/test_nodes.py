@@ -59,8 +59,8 @@ def _payload_state() -> dict:
         "case": make_case(brand=None),
         "hypotheses": [hp("H1", prior=0.5)],
         "evidence": [],
-        "pending_tool_calls": [{"tool": "ImageAnalysisTool", "priority": 1, "reason": "r"}],
-        "measurement_capabilities": {"image_appearance": True},
+        "pending_tool_calls": [{"tool": "ProductTool", "priority": 1, "reason": "r"}],
+        "measurement_capabilities": {"merchant_profile": True},
         "budget": Budget(llm_calls=2, tool_calls=1, tokens=100),
         "degraded": False,
         "failures": [],
@@ -198,7 +198,7 @@ async def test_reevaluate_apply_by_id_model_copy_and_new_hypotheses():
     out = ReevaluateOutput(
         hypothesis_updates=[
             HypothesisUpdate(id="H1", posterior=0.9, status="SUPPORTED",
-                             evidence_for=["IMAGE_SIMILARITY similarity=0.91"]),
+                             evidence_for=["MERCHANT_HISTORY 5 removals"]),
             HypothesisUpdate(id="H99", posterior=0.5, status="REFUTED"),  # 失效 id → 跳过
         ],
         new_hypotheses=[HypothesisProposal(statement="商家系统性上架", prior=0.2)],
@@ -206,7 +206,7 @@ async def test_reevaluate_apply_by_id_model_copy_and_new_hypotheses():
     result = reevaluate_mod._apply(state, out)
     updated_h1 = result["hypotheses"][0]
     assert updated_h1.posterior == 0.9 and updated_h1.status == HypothesisStatus.SUPPORTED
-    assert updated_h1.evidence_for == ["IMAGE_SIMILARITY similarity=0.91"]
+    assert updated_h1.evidence_for == ["MERCHANT_HISTORY 5 removals"]
     assert updated_h1 is not original[0]  # model_copy，非原对象
     assert original[0].posterior is None and original[0].status == HypothesisStatus.PENDING
     assert result["hypotheses"][1] is original[1]  # 未更新的保持原引用
@@ -310,7 +310,7 @@ async def test_decide_llm_failure_r5_override():
     assert backend.calls == 2  # 两次尝试都失败
     assert out["decision"].decision == Decision.HUMAN_REVIEW
     assert out["decision"].overrides == ["R5_DEGRADED_OR_FAILED_STEP"]
-    assert out["decision"].risk_level == RiskLevel.HIGH  # 派生自 SUPPORTED 后验
+    assert out["decision"].risk_level == RiskLevel.HIGH  # 派生自阳性证据权重（商家 removals）
     assert out["degraded"] is False
     assert out["budget"].llm_calls == 2  # attempts=2 记账
     failure = out["failures"][0]

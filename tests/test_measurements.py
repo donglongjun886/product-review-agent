@@ -1,13 +1,13 @@
 """测量维度 × 三态建模（``guardrails/measurements.py`` + ``domain/measurement.py``）单测。
 
-锁住本次语义重构的事实侧契约：
+锁住事实侧契约：
 
 - **三态**：``COVERED``（含阴/阳） / ``NOT_MEASURED``（本环境可测却没测） /
   ``UNMEASURABLE``（本环境测不了）—— 三者**不可互相冒充**；
-- 阴性测量是有效事实（商家画像全 0 ≠ 商家查无）；干净图产出 ``NEGATIVE`` 而不是零证据；
-- 弱相似 0.70~0.85 **不是**阳性；强相似 / Logo / 达阈值商家行为 / 显式 POSITIVE 才是；
+- 阴性测量是有效事实（商家画像全 0 ≠ 商家查无）；
+- 达阈值商家行为才是阳性；
 - ``required`` 只由案件可观测事实导出，**不读真值**（AST 守卫）；
-- ``capabilities_from_tools`` 是环境能力的唯一权威来源（生产视觉桩 → UNMEASURABLE）。
+- ``capabilities_from_tools`` 是环境能力的唯一权威来源。
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
 from helpers import all_measureable_caps, covered_evidence, ev, make_case, measurement
 
 from pra.agent.guardrails.measurements import (
@@ -24,15 +23,12 @@ from pra.agent.guardrails.measurements import (
     RULE_EVASION_WORD,
     capabilities_from_tools,
     coverage_report,
-    listing_signal_present,
     positive_dimensions,
-    reject_positive_dims,
     required_dimensions,
     rule_hit_ids,
 )
 from pra.domain.measurement import (
     ALL_DIMENSIONS,
-    DIM_IMAGE_APPEARANCE,
     DIM_LISTING_REGISTRY,
     DIM_MERCHANT_PROFILE,
     DIM_POLICY_CITATION,
@@ -44,11 +40,6 @@ from pra.domain.measurement import (
     measurement_dimension,
     measurement_ref_id,
     measurement_verdict,
-)
-from pra.tools.image_analysis.tool import (
-    EVIDENCE_STRONG,
-    ImageAnalysisTool,
-    MockImageAnalysisProvider,
 )
 from pra.tools.merchant.tool import MerchantTool
 from pra.tools.product.tool import ProductTool
@@ -72,13 +63,13 @@ _FORBIDDEN_IDENTIFIERS = {
 
 
 def test_measurement_roundtrip_and_ref_id_embeds_dimension():
-    m = measurement(DIM_IMAGE_APPEARANCE, source_ref="https://x/img1.jpg")
+    m = measurement(DIM_MERCHANT_PROFILE, source_ref="M_1")
     assert is_measurement(m) and m.type == MEASUREMENT_TYPE
-    assert measurement_dimension(m) == DIM_IMAGE_APPEARANCE
+    assert measurement_dimension(m) == DIM_MERCHANT_PROFILE
     assert measurement_verdict(m) == VERDICT_NEGATIVE
     # ref_id 必须含维度：否则同一源对象在不同维度上的测量会互相吞并（去重指纹口径）
-    assert m.ref_id == measurement_ref_id(DIM_IMAGE_APPEARANCE, "https://x/img1.jpg")
-    assert m.ref_id.startswith(f"{DIM_IMAGE_APPEARANCE}:")
+    assert m.ref_id == measurement_ref_id(DIM_MERCHANT_PROFILE, "M_1")
+    assert m.ref_id.startswith(f"{DIM_MERCHANT_PROFILE}:")
 
 
 def test_measurement_readers_are_safe_on_non_measurement_and_bad_verdict():
@@ -91,25 +82,16 @@ def test_measurement_readers_are_safe_on_non_measurement_and_bad_verdict():
 
 def test_measurement_dedup_key_keeps_positive_apart_from_negative():
     """阳性走各自类型、阴性走 MEASUREMENT ⇒ 两者 key 不同，阳性不会被阴性覆盖。"""
-    negative = measurement(DIM_IMAGE_APPEARANCE, source_ref="https://x/img1.jpg")
-    positive = ev("IMAGE_SIMILARITY", weight=0.93, ref_id="https://x/img1.jpg")
+    negative = measurement(DIM_MERCHANT_PROFILE, source_ref="M_1")
+    positive = ev("MERCHANT_HISTORY", weight=0.85, ref_id="M_1",
+                  extra={"removals": 5, "title": 0})
     assert (negative.type, negative.ref_id) != (positive.type, positive.ref_id)
 
 
 # ---- 阳性判定 ----
 
 
-@pytest.mark.parametrize(
-    "weight,expected",
-    [(0.93, True), (EVIDENCE_STRONG, True), (0.84, False), (0.72, False), (0.69, False)],
-)
-def test_strong_similarity_is_positive_weak_is_not(weight, expected):
-    evs = [ev("IMAGE_SIMILARITY", weight=weight, ref_id="img")]
-    assert bool(positive_dimensions(evs).get(DIM_IMAGE_APPEARANCE)) is expected
-
-
-def test_logo_and_dirty_merchant_are_positive():
-    assert positive_dimensions([ev("IMAGE_LOGO", weight=0.7, ref_id="img")])[DIM_IMAGE_APPEARANCE]
+def test_dirty_merchant_is_positive():
     assert positive_dimensions(
         [ev("MERCHANT_HISTORY", value="1 similar / 3 removals / 0 title-relisting, credit=60",
             ref_id="M_1", extra={"removals": 3, "title": 0})]
@@ -119,43 +101,6 @@ def test_logo_and_dirty_merchant_are_positive():
 def test_positive_measurement_declares_dimension_positive():
     m = measurement(DIM_MERCHANT_PROFILE, verdict=VERDICT_POSITIVE)
     assert DIM_MERCHANT_PROFILE in positive_dimensions([m])
-
-
-# ---- 授权自动 REJECT 的阳性（比"阻塞 PASS 的阳性"更严）----
-
-
-def test_merchant_dirty_alone_blocks_pass_but_does_not_authorize_reject():
-    """仅"商家历史脏"（本 listing 图/文本无确证）：阻塞 PASS，但**不足以**自动拒绝。
-
-    reviewer 语义：疑似规避但无确证 → 克制转人工（GT 家族 ``dirty_brand_missing_cleanimg``）。
-    """
-    evs = covered_evidence(merchant_removals=5)  # 干净图（无 IMAGE_SIMILARITY）
-    assert DIM_MERCHANT_PROFILE in positive_dimensions(evs)  # 阻塞 PASS
-    assert reject_positive_dims(evs) == frozenset()  # 不授权 REJECT
-    assert listing_signal_present(evs) is False
-
-
-def test_merchant_dirty_with_listing_signal_authorizes_reject():
-    """商家脏 + 本 listing 外观信号 → 成立（GT 家族 ``wsim_dirty``：弱相似亦足够）。"""
-    weak = covered_evidence(merchant_removals=5, similarity=0.72)
-    assert reject_positive_dims(weak) == frozenset({DIM_MERCHANT_PROFILE})
-    assert listing_signal_present(weak) is True
-
-    strong = covered_evidence(merchant_removals=5, similarity=0.93)
-    assert reject_positive_dims(strong) == frozenset(
-        {DIM_MERCHANT_PROFILE, DIM_IMAGE_APPEARANCE}
-    )
-
-
-def test_listing_level_strong_positive_authorizes_reject_without_merchant():
-    evs = covered_evidence(merchant_removals=0, similarity=0.93)
-    assert reject_positive_dims(evs) == frozenset({DIM_IMAGE_APPEARANCE})
-
-
-def test_logo_alone_is_a_listing_signal():
-    evs = [ev("IMAGE_LOGO", weight=0.7, ref_id="img")]
-    assert listing_signal_present(evs) is True
-    assert DIM_IMAGE_APPEARANCE in reject_positive_dims(evs)
 
 
 def test_text_rules_split_by_platform_severity():
@@ -184,7 +129,7 @@ def test_all_required_covered_negative_is_complete_and_has_no_missing():
     case = make_case()
     cov = coverage_report(case, covered_evidence(), all_measureable_caps())
     assert set(cov.required) == {
-        DIM_LISTING_REGISTRY, DIM_MERCHANT_PROFILE, DIM_TEXT_COMPLIANCE, DIM_IMAGE_APPEARANCE,
+        DIM_LISTING_REGISTRY, DIM_MERCHANT_PROFILE, DIM_TEXT_COMPLIANCE,
     }
     assert cov.missing == () and cov.unmeasurable == ()
     assert not cov.positive
@@ -207,36 +152,20 @@ def test_merchant_not_found_is_not_measured_not_negative():
     assert DIM_MERCHANT_PROFILE in cov.missing and DIM_MERCHANT_PROFILE not in cov.covered
 
 
-def test_image_dimension_missing_when_tool_never_ran():
-    """N1：外观维度零测量（工具没跑）→ NOT_MEASURED，不得被当成"测过且阴性"。"""
-    evs = [e for e in covered_evidence()
-           if not (is_measurement(e) and measurement_dimension(e) == DIM_IMAGE_APPEARANCE)]
-    cov = coverage_report(make_case(), evs, all_measureable_caps())
-    assert DIM_IMAGE_APPEARANCE in cov.missing
-
-
 def test_unmeasurable_when_capability_declares_not_available():
     """环境测不了 ⇒ UNMEASURABLE（与"没测"分开归因：重跑无用）。"""
     caps = all_measureable_caps()
-    caps[DIM_IMAGE_APPEARANCE] = False
+    caps[DIM_MERCHANT_PROFILE] = False
     evs = [e for e in covered_evidence()
-           if not (is_measurement(e) and measurement_dimension(e) == DIM_IMAGE_APPEARANCE)]
+           if not (is_measurement(e) and measurement_dimension(e) == DIM_MERCHANT_PROFILE)]
     cov = coverage_report(make_case(), evs, caps)
-    assert cov.unmeasurable == (DIM_IMAGE_APPEARANCE,)
+    assert cov.unmeasurable == (DIM_MERCHANT_PROFILE,)
     assert cov.missing == ()
 
 
 def test_capability_defaults_to_measurable_so_missing_is_not_hidden():
     cov = coverage_report(make_case(), [], None)
     assert cov.missing and not cov.unmeasurable
-
-
-def test_required_dimensions_follow_observable_facts():
-    assert DIM_IMAGE_APPEARANCE in required_dimensions(make_case())  # 带图
-    no_image = make_case()
-    no_image.product.images = []
-    assert DIM_IMAGE_APPEARANCE not in required_dimensions(no_image)
-    assert DIM_LISTING_REGISTRY in required_dimensions(no_image)  # 恒必需
 
 
 def test_policy_citation_is_not_pass_required():
@@ -282,47 +211,33 @@ def test_brand_missing_alone_is_not_text_positive():
 
 
 def test_capabilities_from_tools_reads_declared_dimensions():
-    caps = capabilities_from_tools([ProductTool(), MerchantTool(), ImageAnalysisTool()])
+    caps = capabilities_from_tools([ProductTool(), MerchantTool()])
     assert caps[DIM_LISTING_REGISTRY] and caps[DIM_MERCHANT_PROFILE]
-    assert caps[DIM_IMAGE_APPEARANCE] is True
     assert caps[DIM_TEXT_COMPLIANCE] is True  # 纯函数维度恒可测
     assert caps[DIM_POLICY_CITATION] is False  # 没有检索工具
-
-
-def test_production_vision_stub_declares_image_unmeasurable():
-    """生产装配：视觉是 Mock 桩 ⇒ 外观维度必须声明为不可测。"""
-    stub = ImageAnalysisTool(provider=MockImageAnalysisProvider(), measurement_available=False)
-    caps = capabilities_from_tools([stub, MerchantTool()])
-    assert caps[DIM_IMAGE_APPEARANCE] is False
 
 
 async def test_graph_writes_tool_derived_capabilities_into_state():
     """图装配把工具集导出的能力表写进 state（唯一写入点）—— Gate/收敛判定据此分三态。
 
-    反证：若注入丢失（state 里没有能力表或表与工具集不一致），``image_appearance`` 会回落
-    "可测"⇒ 生产视觉桩的"测不出"被误判成"可测却没测"（NOT_MEASURED，可补救），
-    而不是 UNMEASURABLE（环境缺失，重跑无用）。
+    反证：若注入丢失（state 里没有能力表或表与工具集不一致），缺测维度会回落"可测"
+    ⇒ 生产环境的"测不出"被误判成"可测却没测"（NOT_MEASURED，可补救），而不是
+    UNMEASURABLE（环境缺失，重跑无用）。
     """
     from pra.agent.graph import build_agent_graph
     from pra.agent.scripted_llm import ScriptedLLMBackend
     from pra.agent.state import build_initial_state
     from pra.tools import build_tools
 
-    async def _final_caps(vision_available: bool) -> dict:
-        tools = build_tools(vision_measurement_available=vision_available)
-        graph = build_agent_graph(
-            tools=tools, llm=ScriptedLLMBackend(), checkpointer=None
-        )
-        state = await graph.ainvoke(
-            build_initial_state(make_case()),
-            {"configurable": {"thread_id": f"caps-{vision_available}"}},
-        )
-        assert state["measurement_capabilities"] == capabilities_from_tools(tools)
-        return state["measurement_capabilities"]
-
-    # 生产口径（视觉桩）→ 外观不可测；默认 InMemory 口径（视觉可测）→ 可测。
-    assert (await _final_caps(False))[DIM_IMAGE_APPEARANCE] is False
-    assert (await _final_caps(True))[DIM_IMAGE_APPEARANCE] is True
+    tools = build_tools()
+    graph = build_agent_graph(tools=tools, llm=ScriptedLLMBackend(), checkpointer=None)
+    state = await graph.ainvoke(
+        build_initial_state(make_case()),
+        {"configurable": {"thread_id": "caps-tool-derived"}},
+    )
+    assert state["measurement_capabilities"] == capabilities_from_tools(tools)
+    assert state["measurement_capabilities"][DIM_LISTING_REGISTRY] is True
+    assert state["measurement_capabilities"][DIM_MERCHANT_PROFILE] is True
 
 
 # ---- 来源守卫：required set 不得读真值 ----

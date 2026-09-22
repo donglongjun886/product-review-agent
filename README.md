@@ -4,17 +4,18 @@
 [![python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-机器审核能挡掉大部分明显违规，但总有一批案子说不准：标题干净、图片可疑、商家还有前科。
-这个项目处理的就是这批案子 —— 它自己决定去查什么，查完给出三种结论：**通过、拒绝，或者交给人**。
+机器审核能挡掉大部分明显违规，但总有一批案子说不准：文本合规没有硬命中、商品在库事实对不上、
+商家有违规前科，案例与政策里又没有能直接套用的先例。这个项目处理的就是这批案子 ——
+它自己决定去查什么，查完给出三种结论：**通过、拒绝，或者交给人**。
 
 ## 它怎么工作
 
 先看平台已有的规则和机审结果：明显正常的直接放行，明显违规的直接拒绝，**剩下拿不准的才进入调查**。
 
 调查是一个循环：**提风险假设 → 定查证计划 → 调工具取证 → 复核假设**。没查清就再来一轮，
-直到有把握，或者到达调查次数上限。
+直到有把握，或者到达调查次数上限。取证沿四条线走：**文本合规、商品在库事实、商家行为、案例与政策**。
 
-最后一步不交给模型。结论由固定规则和证据决定：证据够不够、有没有硬命中、有没有互相打架。
+最后一步不交给模型。结论由固定规则和证据决定：证据够不够、有没有硬命中、有没有可引用的依据。
 模型只提建议。查不完也不会硬判，而是把已经查到的东西交给人。
 
 ```text
@@ -62,23 +63,24 @@ curl http://127.0.0.1:8000/api/v1/health   # {"status":"ok"}
 ## 评测
 
 ```bash
-uv run python scripts/run_evaluation_real.py --limit 10 --out /tmp/real.json  # 用真实模型跑：要 API key、有费用
-uv run python scripts/run_error_analysis.py --from /tmp/real.json             # 对该产物做归因：只读 JSON，不调模型
+uv run python scripts/run_evaluation.py --limit 10 --out /tmp/eval.json   # 三臂：single / agent 要 API key，有费用
 ```
 
-评测只跑真实模型（规则 baseline 与 Agent 共用同一份数据）：需要 `DEEPSEEK_API_KEY`，会产生费用，
-结果不确定、不可重放，不进 CI。归因脚本只读那一次跑分的产物 JSON，不重跑 Agent、不需要 key。
-评测怎么做、最近一次结果是什么，见 [docs/02-evaluation.md](docs/02-evaluation.md)。
+评测只有一个脚本，跑三条臂：`rule`（确定性初筛，零模型零工具）、`single`（一次模型直判，只喂案件
+快照）、`agent`（完整调查，允许调工具）。事实来源是**生产装配**：商品与商家读真 MySQL，案例与政策
+走真 RAG。只有 `agent` 用工具，`rule` 与 `single` 只看案件快照。真实调用有费用、结果不确定、不可
+重放，不进 CI。案源是 `eval_data/v2/cases_v2.jsonl`，它的真值仍是旧口径标的，**待按规则书重标**。
+评测口径见 [docs/02-evaluation.md](docs/02-evaluation.md)。
 
 ## 目录
 
 ```text
 src/pra/
   agent/        调查流程：状态、图、节点、护栏、检查点
-  tools/        六个取证工具：商品 / 商家 / 图片 / OCR / 案例 / 政策
+  tools/        四个取证工具：商品 / 商家 / 案例 / 政策
   screening/    规则初筛与三分流
   rag/          政策库与案例库检索
-  evaluation/   评测：数据集、真实评测、指标
+  evaluation/   评测：数据集、指标、记录
   api/  infra/  domain/  observability/
 docs/  migrations/  scripts/  tests/  deploy/
 ```
@@ -88,7 +90,7 @@ docs/  migrations/  scripts/  tests/  deploy/
 ## 文档
 
 - [docs/00-system-design.md](docs/00-system-design.md) —— 系统设计与判定规则
-- [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测怎么做与最近结果
+- [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测口径：三臂、事实来源与真值路线
 
 ## 许可证
 

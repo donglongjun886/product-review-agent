@@ -58,8 +58,8 @@ _DEFAULT_PRECEDENTS: list[dict[str, Any]] = [
         "decision": "REJECT",
         "risk_level": "HIGH",
         "risk_type": ["POTENTIAL_IP_RISK"],
-        "summary": "无品牌标识 + 外观高度模仿知名品牌复古跑鞋 + 商家多次改标题重上架",
-        "key_evidence": ["image_similarity>=0.85", "merchant_history>=5_removals"],
+        "summary": "无品牌标识 + 标题含高仿/复刻规避用语 + 商家多次改标题重上架",
+        "key_evidence": ["text_evasion_word", "merchant_history>=5_removals"],
         "policy_refs": ["POLICY_3.2"],
         "category": "女鞋/运动鞋",
     },
@@ -69,7 +69,7 @@ _DEFAULT_PRECEDENTS: list[dict[str, Any]] = [
         "decision": "PASS",
         "risk_level": "NONE",
         "risk_type": [],
-        "summary": "普通休闲鞋，无品牌标识且无相似外观",
+        "summary": "普通休闲鞋，无品牌标识且无规避用语",
         "key_evidence": [],
         "policy_refs": [],
         "category": "女鞋/运动鞋",
@@ -105,7 +105,7 @@ class InMemoryCaseIndex:
 
 class CaseSearchArgs(ToolArgs):
 
-    query: str = Field(description="自然语言或结构化检索描述，如 '无品牌标识+外观高度模仿+商家多次重上架'")
+    query: str = Field(description="自然语言或结构化检索描述，如 '无品牌标识+标题含高仿用语+商家多次重上架'")
     filters: CaseSearchFilters = Field(default_factory=CaseSearchFilters)
     top_k: int = Field(default=5, ge=1, le=10)
 

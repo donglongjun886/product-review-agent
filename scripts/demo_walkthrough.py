@@ -4,7 +4,7 @@
 流结束后读终态、跑全量断言，末尾打印决策摘要块。
 
 要点：
-- 直接可执行：``uv run python scripts/demo_walkthrough.py``（默认 6 tools + scripted
+- 直接可执行：``uv run python scripts/demo_walkthrough.py``（默认 4 工具世界 + scripted
   LLM 桩，无 API key）。
 - ``build_agent_graph(tools=build_tools(), llm=ScriptedLLMBackend(),
   checkpointer=make_memory_checkpointer())``（工具与 LLM 均显式注入，无进程级缺省）；
@@ -13,8 +13,8 @@
   langgraph 1.2.11，其 ``StateSnapshot`` 是 **NamedTuple**（``snap["values"]`` 抛
   TypeError），故先按字面写法、失败后回退 ``snapshot.values`` 属性。
 - 期望结局：HUMAN_REVIEW / HIGH / [POTENTIAL_IP_RISK, EVASION_PATTERN] / dc>=0.7；
-  evidence 覆盖 IMAGE_SIMILARITY(similarity=0.91) + MERCHANT_HISTORY + CASE_PRECEDENT
-  + POLICY_REF；llm_calls=8、tool_calls=5（限值 10/15）；overrides=[]；decide 是唯一出口。
+  evidence 覆盖 PRODUCT_FACT + MERCHANT_HISTORY + CASE_PRECEDENT + POLICY_REF；
+  llm_calls=6、tool_calls=4（限值 10/15）；overrides=[]；decide 是唯一出口。
 - ``pra.agent.graph`` 延迟到 ``_build_app()`` 内 import，未落盘时给出明确报错。
 """
 
@@ -39,17 +39,17 @@ from pra.domain.models import (
 # 断言清单里的受控常量（与 pra.domain.models / 工具证据类型对齐）
 _IMG_URL = "https://cdn.example.com/products/P_88231/img1.jpg"
 _REQUIRED_EVIDENCE_TYPES = frozenset(
-    {"IMAGE_SIMILARITY", "MERCHANT_HISTORY", "CASE_PRECEDENT", "POLICY_REF"}
+    {"PRODUCT_FACT", "MERCHANT_HISTORY", "CASE_PRECEDENT", "POLICY_REF"}
 )
-_EXPECTED_LLM_CALLS = 8
-_EXPECTED_TOOL_CALLS = 5
+_EXPECTED_LLM_CALLS = 6
+_EXPECTED_TOOL_CALLS = 4
 
 
 # case 构造（P_88231 / M_5512 / NEW_LISTING）
 
 
 def build_demo_case() -> ProductReviewCase:
-    """构造走查输入 case（brand=None、无品牌词、img1、version=3）。"""
+    """构造走查输入 case（brand=None、无品牌词、version=3）。"""
     product = ProductInfo(
         product_id="P_88231",
         title="新款厚底复古跑鞋 女士百搭运动鞋",
@@ -224,21 +224,12 @@ def _assert_all(final_state: dict, node_seq: list) -> None:
         decision.decision_confidence >= 0.7,
         f"断言4 失败: decision_confidence={decision.decision_confidence} < 0.7",
     )
-    # 5) evidence 覆盖 + IMAGE_SIMILARITY similarity≈0.91
+    # 5) evidence 覆盖（4 工具世界：事实 + 商家 + 先例 + 政策）
     got_types = {e.type for e in decision.evidence}
     missing = _REQUIRED_EVIDENCE_TYPES - got_types
     _check(
         not missing,
         f"断言5 失败: evidence 类型 {sorted(got_types)} 缺少 {sorted(missing)}",
-    )
-    sims = [
-        float(e.extra["similarity"])
-        for e in decision.evidence
-        if e.type == "IMAGE_SIMILARITY" and "similarity" in e.extra
-    ]
-    _check(
-        any(abs(v - 0.91) < 1e-6 or v >= 0.9 for v in sims),
-        f"断言5 失败: 无 IMAGE_SIMILARITY extra.similarity≈0.91 的证据（实际 {sims}）",
     )
     # 6) overlay 未改判
     _check(
@@ -353,10 +344,7 @@ async def main() -> None:
         f"  标题: {case.product.title} | 类目: {case.product.category} "
         f"| brand={case.product.brand} | version={case.product.version}"
     )
-    print(
-        f"  图片: {[i.url for i in case.product.images]} "
-        f"| sku: {[s.sku_id for s in case.product.sku_list]}"
-    )
+    print(f"  sku: {[s.sku_id for s in case.product.sku_list]}")
     print("=" * 76)
 
     app = _build_app()

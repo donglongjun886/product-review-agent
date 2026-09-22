@@ -1,10 +1,10 @@
 -- ============================================================================
 -- product-review-agent · 商家行为画像 DDL + 开发/评测种子（迁移 004）
 -- ============================================================================
--- 背景：MerchantTool 此前只读进程内种子（工具默认 _DEFAULT_MERCHANTS、评测世界
--- EVAL_MERCHANTS）。本迁移把「商家行为画像」落到真库，供
--- pra/tools/merchant/mysql_repo.py 的 MySQLMerchantRepository 读取。默认装配路径
--- （MerchantTool() / build_tools() / 评测世界）**仍是 InMemory**，真库是显式 opt-in。
+-- 背景：MerchantTool 此前只读进程内种子（工具默认 _DEFAULT_MERCHANTS）。本迁移把
+-- 「商家行为画像」落到真库，供 pra/tools/merchant/mysql_repo.py 的
+-- MySQLMerchantRepository 读取。默认装配路径（MerchantTool() / build_tools()）**仍是
+-- InMemory**；生产与评测入口经 build_production_tools() 显式读本库。
 --
 -- 字段口径：只建 MerchantProfile / 决策链真正消费的列（merchant_id /
 -- similar_product_count / removals / title_relisting_count / credit_score）；
@@ -15,9 +15,9 @@
 -- window_days 只作调用方语义声明 —— 见 MerchantRepository 的 docstring。
 --
 -- 幂等：CREATE TABLE IF NOT EXISTS + INSERT ... AS new ON DUPLICATE KEY UPDATE
--- （MySQL 8.0.19+ 行别名语法，不用已废弃的 VALUES()）。种子与
--- pra.evaluation.harness.agent_scheme.EVAL_MERCHANTS 同一份事实；本文件是静态 SQL，
--- 改一处须同步另一处。重复执行不新增行、不改行数。
+-- （MySQL 8.0.19+ 行别名语法，不用已废弃的 VALUES()）。种子 = 开发与评测共用的一套
+-- 商家行为画像（M_5512 即工具默认种子）；本文件是静态 SQL，改一处须同步另一处。
+-- 重复执行不新增行、不改行数。
 --
 -- 执行：docker exec -i mysql-dev mysql -uroot -proot product_review \
 --         < migrations/004_merchant_tables.sql
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS merchant (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商家行为画像（预计算固定窗口快照；不按 window_days 重算）';
 
 -- ============================================================================
--- 开发/评测种子（5 商家 = EVAL_MERCHANTS 全量；M_5512 即工具默认种子）
+-- 开发/评测种子（5 商家；M_5512 即工具默认种子）
 -- 幂等：重复执行只覆盖为同一份事实，行数不变。
 -- ============================================================================
 

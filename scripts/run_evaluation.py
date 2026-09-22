@@ -1,0 +1,852 @@
+"""Evaluation 正式跑分（单脚本 · 三臂）：rule（确定性初筛）/ single（单次 LLM 直判）/ agent
+（完整调查 Agent，生产装配：真 MySQL + 真 RAG）。
+
+三臂材料边界（**钉死**，差异只归因于「模型看到了什么材料」）：
+
+- ``rule``：只对 ``case.input`` 跑 ``pra.screening.engine.triage``，零 LLM 零工具；
+  ``PASS→PASS`` / ``REJECT→REJECT`` / ``COMPLEX→HUMAN_REVIEW``。
+- ``single``：只喂 case 快照（``{"case": ...}``），一次 LLM 调用；不调工具、不过 Gate。
+- ``agent``：生产工具装配（``build_production_tools()``）+ 完整调查图，从终态
+  ``ReviewDecision`` 转录记录。
+
+三臂预算恒为**生产默认档**（评测不覆盖 Guardrail 档位）：预算是否够用本身就是被测行为，
+超限由生产 Gate 收口转 HUMAN_REVIEW。
+
+CLI：``--data`` JSONL 或目录（eval_data/v2 → cases_v2.jsonl）；``--model`` / ``--api-key`` /
+``--base-url`` 配 LLM；``--thinking enabled|disabled`` / ``--reasoning-effort none|low|high|max``
+覆盖网关思考配置（默认都不传 = 网关默认 enabled + high）；``--limit N`` /
+``--ids "EC_V2_0007,EC_V2_0101"`` 定向取案子集；``--concurrency N`` 并发跑；``--out PATH``
+写结果 JSON（父目录需已存在）。
+
+思考配置是**口径**而非调优旋钮：非默认档（尤其 ``disabled`` 会让 ``temperature`` 生效）会改变
+判定分布与单案墙钟/成本，其产物不得与默认档结果混读 —— ``--out`` 的 payload 带
+``real_llm_config`` 记录本次档位。
+
+成本与结论边界：真实 API 有费用、非确定性（同案重跑输出可能不同，不可重放）。API key 读取
+顺序：``--api-key`` > 环境变量 ``DEEPSEEK_API_KEY`` > 仓库根 ``.env``（setdefault 语义）；
+base-url 同理。API key 必填 —— 缺 key 预检即报错，避免整卷降级后静默产出假结果。
+``EvalRecord`` 不含墙钟 latency（进程相关量会让跨 run 比对漂移），墙钟只进进程内进度打印与
+报告。观测：agent / single 臂每案一条 root trace，整轮结束 ``flush_tracer()``
+（``pra.observability.tracing``；无凭据 = NullTracer 全 no-op）。
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from uuid import NAMESPACE_URL, uuid5
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from pra import tools as tools_pkg
+from pra.agent.graph import build_agent_graph
+from pra.agent.guardrails.budget import budget_exceeded
+from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
+from pra.agent.state import build_initial_state
+from pra.domain import Decision, ReviewDecision, RiskLevel, RiskType
+from pra.evaluation.dataset.loader import load_dataset
+from pra.evaluation.dataset.schema import EvalCase
+from pra.evaluation.metrics.agent import AgentMetricsBundle
+from pra.evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
+from pra.evaluation.metrics.engineering import (
+    DistributionMetrics,
+    EngineeringEvaluator,
+    EngineeringMetrics,
+)
+from pra.evaluation.record import EvalRecord
+from pra.observability.tracing import (
+    TraceContext,
+    experiment_name,
+    flush_tracer,
+    get_tracer,
+    session_id,
+)
+from pra.screening.engine import Verdict, triage
+
+DEFAULT_DATA = "eval_data/v2"
+DEFAULT_MODEL = "deepseek/deepseek-flash"
+ENV_API_KEY = "DEEPSEEK_API_KEY"
+ENV_BASE_URL = "DEEPSEEK_BASE_URL"
+ARMS: tuple[str, ...] = ("rule", "single", "agent")
+NOTE = "单次运行产物：真实 LLM 非确定性、不可重放（同数据重跑结果可不同），数字只代表本次抽样"
+
+__all__ = [
+    "DEFAULT_DATA",
+    "DEFAULT_MODEL",
+    "NOTE",
+    "SingleCallOutput",
+    "main",
+]
+
+
+# ---------------------------------------------------------------------------
+# 数据集 / 凭据 / 后端装配
+# ---------------------------------------------------------------------------
+
+
+def _resolve_data_path(raw: str) -> Path:
+    """把 ``--data`` 解析为评测 JSONL 路径（直接 JSONL，或按目录名拼
+    ``cases_<目录名>.jsonl``：eval_data/v2 → cases_v2.jsonl）。"""
+    p = Path(raw)
+    if p.is_file():
+        return p
+    if p.is_dir():
+        if re.fullmatch(r"v\d+", p.name) is not None:
+            cand = p / f"cases_{p.name}.jsonl"
+            if cand.is_file():
+                return cand
+        raise ValueError(
+            f"评测数据目录 {p} 无法定位 cases JSONL：目录名按 v<数字> → "
+            f"cases_<目录名>.jsonl（{p.name} 不是 v<数字> 目录名或该文件缺失）"
+        )
+    raise ValueError(f"评测数据路径不存在: {p}（支持 JSONL 文件，或 eval_data/v2 目录）")
+
+
+def _load_dotenv() -> None:
+    """把仓库根 ``.env`` 的 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL 注入进程环境。
+
+    以 setdefault 语义注入（真实环境变量优先，不覆盖 CLI/既有 env），key 值不入日志/
+    报告/JSON。定位方式同 ``pra.infra.db._repo_root_env_file``：从本文件上溯到含
+    pyproject.toml 的仓库根；找不到 .env 或键缺失 → 静默跳过。
+    """
+    here = Path(__file__).resolve()
+    env_file: Path | None = None
+    for parent in here.parents:
+        if (parent / "pyproject.toml").is_file():
+            env_file = parent / ".env"
+            break
+    if env_file is None or not env_file.is_file():
+        return
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key in (ENV_API_KEY, ENV_BASE_URL) and value:
+            os.environ.setdefault(key, value)  # setdefault：真实 env / CLI 优先
+
+
+def _resolve_api_key(cli_value: str | None) -> str | None:
+    """API key 解析：``--api-key`` 优先，否则读环境变量 ``DEEPSEEK_API_KEY``。"""
+    if cli_value:
+        return cli_value
+    env_value = os.environ.get(ENV_API_KEY, "")
+    return env_value.strip() or None
+
+
+def _make_real_backend(
+    *,
+    model: str,
+    api_key: str,
+    base_url: str | None,
+    tools: list,
+    thinking: str | None = None,
+    reasoning_effort: str | None = None,
+) -> LLMBackend:
+    """构造真实 LLM 后端（延迟 import ``pra.agent.litellm_backend``）。
+
+    :param tools: 生产工具列表 —— 后端据此提取 function schema / 工具提示（plan 渲染用）；
+    :param thinking: None → 不下发，用网关默认（enabled）；``reasoning_effort`` 同理（默认 high）。
+    """
+    try:
+        from pra.agent.litellm_backend import LiteLLMBackend
+    except ImportError as exc:  # litellm 依赖缺失 → 明确报错而非半路 ImportError
+        raise RuntimeError(
+            "real 模式需要 pra.agent.litellm_backend（含 litellm 依赖，见 pyproject）："
+            "`uv sync` 后重试"
+        ) from exc
+    return LiteLLMBackend(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        tools=tools,
+        thinking=thinking,  # type: ignore[arg-type]
+        reasoning_effort=reasoning_effort,  # type: ignore[arg-type]
+    )
+
+
+def _expected_index(cases: list[EvalCase]) -> dict[str, dict]:
+    """由数据集构造指标层共用的真值索引 ``{eval_case_id: {decision, abstain_label, ...}}``。
+
+    含业务指标（decision / abstain_label）与 Agent 级指标（expected_tools / risk_type /
+    risk_level）两类真值字段。
+    """
+    return {
+        c.eval_case_id: {
+            "decision": c.expected.decision,
+            "abstain_label": c.expected.abstain_label,
+            "expected_tools": list(c.expected.expected_tools),
+            "risk_type": list(c.expected.risk_type),
+            "risk_level": c.expected.risk_level,
+        }
+        for c in cases
+    }
+
+
+# ---------------------------------------------------------------------------
+# 三臂：各自只吃允许的材料
+# ---------------------------------------------------------------------------
+
+# rule 三分流 verdict → EvalRecord 三分类（COMPLEX 的评测语义 = 转人工）
+VERDICT_TO_DECISION: dict[Verdict, str] = {
+    "PASS": "PASS",
+    "REJECT": "REJECT",
+    "COMPLEX": "HUMAN_REVIEW",
+}
+
+
+async def _run_rule(case: EvalCase) -> EvalRecord:
+    """rule 臂：``triage(case.input)`` 三分流映射；零 LLM、零工具、成本恒零。"""
+    result = triage(case.input)  # DEFAULT_RULES；空规则集会抛 ValueError
+    hits = [{"rule_id": hit.rule_id, "name": hit.name, "detail": hit.detail} for hit in result.hits]
+    evidence = [
+        {
+            "type": "RULE_HIT",
+            "value": f"{hit.rule_id} {hit.name}: {hit.detail}",
+            "extra": {"rule_id": hit.rule_id},
+        }
+        for hit in result.hits
+    ]
+    decision = VERDICT_TO_DECISION[result.verdict]
+    return EvalRecord(
+        eval_case_id=case.eval_case_id,
+        scheme="rule",
+        decision=decision,
+        risk_level="NONE" if decision == "PASS" else None,
+        risk_type=[],
+        decision_confidence=None,  # 确定性规则直判无置信概念
+        evidence=evidence,
+        policy=[],
+        tool_calls_actual=[],
+        cost={"llm_calls": 0, "tool_calls": 0, "tokens": 0},
+        detail={"verdict": result.verdict, "hits": hits},
+    )
+
+
+class SingleCallOutput(BaseModel):
+    """single 臂的一次 LLM 输出（直判，无证据链 / 无政策引用）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Decision = Field(description="三分类裁决：PASS / REJECT / HUMAN_REVIEW")
+    risk_level: RiskLevel = Field(description="风险等级（PASS 为 NONE）")
+    risk_type: list[RiskType] = Field(default_factory=list, description="风险类型受控词表（PASS 为 []）")
+    decision_confidence: float = Field(ge=0.0, le=1.0, description="直判自评把握（0..1，观测字段）")
+
+
+async def _run_single(case: EvalCase, *, llm: LLMBackend) -> EvalRecord:
+    """single 臂：只喂 case 快照的一次 LLM 直判；不调工具、不过 Gate。
+
+    调用失败（schema 校验两次失败 / 传输失败）**不静默**：记为 HUMAN_REVIEW，``detail``
+    带 ``error`` 与 ``attempts``。
+    """
+    root_ctx = _root_trace_context(
+        case, scheme="single", backend_name=getattr(llm, "name", "unknown")
+    )
+    with get_tracer().trace_root(root_ctx) as root:
+        outcome = await call_structured_llm(
+            OutputModel=SingleCallOutput,
+            node="single_call",
+            state={"case": case.input.model_dump(mode="json")},
+            llm=llm,
+        )
+        root.update(
+            output=(
+                {"decision": outcome.model.decision.value}
+                if outcome.model is not None
+                else {"decision": "HUMAN_REVIEW", "error": outcome.error}
+            )
+        )
+    cost = {"llm_calls": outcome.attempts, "tool_calls": 0, "tokens": outcome.tokens}
+    if outcome.model is None:
+        return EvalRecord(
+            eval_case_id=case.eval_case_id,
+            scheme="single",
+            decision="HUMAN_REVIEW",
+            risk_level=None,
+            risk_type=[],
+            decision_confidence=None,
+            evidence=[],
+            policy=[],
+            tool_calls_actual=[],
+            cost=cost,
+            detail={"error": outcome.error, "attempts": outcome.attempts},
+        )
+    model = outcome.model
+    return EvalRecord(
+        eval_case_id=case.eval_case_id,
+        scheme="single",
+        decision=model.decision.value,
+        risk_level=model.risk_level.value,
+        risk_type=[t.value for t in model.risk_type],
+        decision_confidence=model.decision_confidence,
+        evidence=[],
+        policy=[],
+        tool_calls_actual=[],
+        cost=cost,
+        detail={"attempts": outcome.attempts, "error": None},
+    )
+
+
+def _root_trace_context(
+    case: EvalCase,
+    *,
+    scheme: str,
+    backend_name: str,
+    tool_world: str | None = None,
+    budget_limits: dict | None = None,
+) -> TraceContext:
+    """按确定性规则包装一案的 root trace（每案一条）。
+
+    ``trace_id = uuid5(NAMESPACE_URL, f"{experiment}:{eval_case_id}:{scheme}:{backend_name}")``
+    —— 同 experiment + 同案 + 同臂 + 同后端重跑落同一条 trace；后端名进 trace_id 使不同 LLM
+    后端各自成 trace，按 trace 汇总 token 时不互相混入。只读：不写 state、不参与任何判定。
+    """
+    experiment = experiment_name()
+    metadata: dict[str, Any] = {
+        "case_id": case.input.case_id,
+        "eval_case_id": case.eval_case_id,
+        "scene": case.scene,
+        "scheme": scheme,
+        "experiment": experiment,
+        "llm_backend": backend_name,
+        "source": "evaluation",
+    }
+    if tool_world is not None:
+        metadata["tool_world"] = tool_world
+    if budget_limits is not None:
+        metadata["budget_limits"] = budget_limits
+    tags = [
+        "env:local",
+        f"scheme:{scheme}",
+        f"experiment:{experiment}",
+        "source:evaluation",
+    ]
+    if tool_world is not None:
+        tags.append(f"tool_world:{tool_world}")
+    return TraceContext(
+        trace_id=uuid5(
+            NAMESPACE_URL, f"{experiment}:{case.eval_case_id}:{scheme}:{backend_name}"
+        ).hex,
+        name="review",
+        session_id=session_id(),
+        version=experiment,
+        metadata=metadata,
+        tags=tags,
+        input={"case_id": case.input.case_id, "eval_case_id": case.eval_case_id},
+    )
+
+
+def _transcribe_agent(case: EvalCase, final_state: dict, decision: ReviewDecision) -> EvalRecord:
+    """agent 臂终态 → EvalRecord（只读 ReviewDecision / state 摘要）。"""
+    history = final_state.get("tool_call_history") or []
+    ok_calls = [r for r in history if isinstance(r, dict) and r.get("status") == "ok"]
+    tool_names = list(dict.fromkeys(str(r.get("tool")) for r in ok_calls))  # 去重保序
+    evidence = [
+        {
+            "type": e.type,
+            "source": e.source,
+            "value": e.value,
+            "weight": e.weight,
+            "ref_id": e.ref_id,
+            "extra": dict(e.extra or {}),
+        }
+        for e in decision.evidence
+    ]
+    trace = [
+        {
+            "id": h.id,
+            "status": h.status.value,
+            "prior": h.prior,
+            "posterior": h.posterior,
+            "statement": h.statement,
+        }
+        for h in decision.hypothesis_trace
+    ]
+    budget = decision.budget_used
+    return EvalRecord(
+        eval_case_id=case.eval_case_id,
+        scheme="agent",
+        decision=decision.decision.value,
+        risk_level=decision.risk_level.value,
+        risk_type=[t.value for t in decision.risk_type],
+        decision_confidence=decision.decision_confidence,
+        evidence=evidence,
+        policy=list(decision.policy),
+        tool_calls_actual=tool_names,
+        cost={
+            "llm_calls": budget.llm_calls,
+            "tool_calls": budget.tool_calls,
+            "tokens": budget.tokens,
+        },
+        detail={
+            "overrides": list(decision.overrides),
+            # R3 命中时附「哪一维先撞限」（LLM_CALLS / TOOL_CALLS）供归因 —— 复用
+            # ``budget_exceeded``（同阈值同顺序的单一实现）。
+            "budget_hit_dim": budget_exceeded(budget),
+            "hypothesis_trace": trace,
+            # 边际增益审计字段透传（tools_node 的记录原样带出，指标层只读）：只保留统计
+            # 需要的四项，避免把整段 args/result 复制进 record。
+            "tool_history": [
+                {
+                    "tool": h.get("tool"),
+                    "status": h.get("status"),
+                    "evidence_added": list(h.get("evidence_added") or []),
+                    "decision_changed": bool(h.get("decision_changed")),
+                }
+                for h in history
+                if isinstance(h, dict)
+            ],
+        },
+    )
+
+
+async def _run_agent(
+    case: EvalCase, *, graph: Any, llm: LLMBackend
+) -> EvalRecord:
+    """agent 臂：完整调查图跑一案，终态 ``ReviewDecision`` 转录 EvalRecord。
+
+    终态缺 ``decision`` 直接抛错（不静默兜底）。每案一条 root trace；不 per-case flush，
+    由入口整轮结束后 ``flush_tracer()`` 统一刷出。
+    """
+    initial_state = build_initial_state(case.input)
+    limits = getattr(initial_state.get("budget"), "limits", None)
+    root_ctx = _root_trace_context(
+        case,
+        scheme="agent",
+        backend_name=getattr(llm, "name", "unknown"),
+        tool_world="production",
+        budget_limits=limits.model_dump() if hasattr(limits, "model_dump") else None,
+    )
+    with get_tracer().trace_root(root_ctx) as root:
+        final_state = await graph.ainvoke(
+            initial_state,
+            {"configurable": {"thread_id": f"eval-agent-{case.eval_case_id}"}},
+        )
+        decision: ReviewDecision | None = final_state.get("decision")
+        if decision is not None:
+            root.update(
+                output={
+                    "decision": decision.decision.value,
+                    "risk_level": decision.risk_level.value,
+                }
+            )
+    if decision is None:
+        raise RuntimeError(
+            f"Agent 图执行完成但终态缺少 decision（eval_case_id={case.eval_case_id}）"
+        )
+    return _transcribe_agent(case, final_state, decision)
+
+
+# ---------------------------------------------------------------------------
+# 调度（并发只改调度，不改判定 / 指标 / 数据）
+# ---------------------------------------------------------------------------
+
+
+async def _run_arm(
+    cases: list[EvalCase],
+    run_one: Callable[[EvalCase], Awaitable[EvalRecord]],
+    *,
+    concurrency: int,
+    progress: bool,
+) -> list[tuple[EvalRecord, float]]:
+    """并发跑一臂，返回按用例原序的 ``(record, 进程内墙钟毫秒)`` 列表。
+
+    用例之间天然隔离：每案由 ``build_initial_state`` 起算、thread_id 唯一，图无
+    checkpointer、无跨案可变状态。墙钟**只回报告**，不写进 EvalRecord。
+    """
+    sem = asyncio.Semaphore(max(1, concurrency))
+    total = len(cases)
+    done = 0
+
+    async def _one(case: EvalCase) -> tuple[EvalRecord, float]:
+        nonlocal done
+        async with sem:
+            t0 = time.monotonic()
+            rec = await run_one(case)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            done += 1
+            if progress:
+                print(
+                    f"  [{done}/{total}] {case.eval_case_id:<12} → {rec.decision:<12} "
+                    f"({elapsed_ms / 1000:.1f}s)",
+                    flush=True,
+                )
+            return rec, elapsed_ms
+
+    return list(await asyncio.gather(*[_one(c) for c in cases]))
+
+
+# ---------------------------------------------------------------------------
+# 报告渲染（三臂并排指标表；比率带分子/分母）
+# ---------------------------------------------------------------------------
+
+
+def _num(v: float | None) -> str:
+    """分布单元格：None → ``-``，否则紧凑数值。"""
+    return "-" if v is None else f"{v:g}"
+
+
+def _ratio_cell(value: float | None, numer: int, denom: int) -> str:
+    """比率单元格 ``0.850(233/274)``；分母为 0（value 为 None）→ ``-``（不硬造 0/∞）。"""
+    if value is None:
+        return "-"
+    return f"{value:.3f}({numer}/{denom})"
+
+
+def _metrics_row(arm: str, m: DecisionMetrics, eng: EngineeringMetrics) -> list[str]:
+    """三臂并排表的一行：业务比率（带分子/分母）+ 混淆计数 + 成本均值。"""
+    return [
+        arm,
+        _ratio_cell(m.accuracy, m.tp + m.tn, m.auto_decidable_total),
+        _ratio_cell(m.precision, m.tp, m.tp + m.fp),
+        _ratio_cell(m.recall, m.tp, m.reject_truth),
+        _ratio_cell(m.wrong_auto_decision_rate, m.fp + m.fn, m.tp + m.fp + m.tn + m.fn),
+        _ratio_cell(m.reject_unhandled, m.reject_human, m.reject_truth),
+        _ratio_cell(m.human_review_rate, m.human_pred_total, m.total),
+        _ratio_cell(m.automation_coverage, m.total - m.human_pred_total, m.total),
+        f"{m.tp}/{m.fp}/{m.tn}/{m.fn}",
+        f"llm={_num(eng.llm_calls.mean)} tool={_num(eng.tool_calls.mean)} tok={_num(eng.tokens.mean)}",
+    ]
+
+
+_METRIC_HEADERS = [
+    "arm",
+    "accuracy",
+    "precision",
+    "recall",
+    "wrong_auto_decision_rate",
+    "reject_unhandled",
+    "human_review_rate",
+    "automation_coverage",
+    "TP/FP/TN/FN",
+    "成本均值(llm/tool/tok)",
+]
+
+
+def _table(headers: list[str], rows: list[list[str]]) -> str:
+    """渲染左对齐文本表：列宽 = 该列最大单元格宽度，按传入顺序输出表头与数据行。"""
+    widths = [max([len(head), *(len(row[i]) for row in rows)]) for i, head in enumerate(headers)]
+    lines = ["  ".join(head.ljust(w) for head, w in zip(headers, widths))]
+    lines.extend("  ".join(cell.ljust(w) for cell, w in zip(row, widths)) for row in rows)
+    return "\n".join(lines)
+
+
+def _latency_cell(d: DistributionMetrics | None) -> str:
+    """进程内墙钟三元组 ``mean/p50/p95``（毫秒；None → ``-``）。"""
+    if d is None:
+        return "-"
+    return f"{_num(d.mean)}/{_num(d.p50)}/{_num(d.p95)}"
+
+
+def _render_report(
+    *,
+    data_path: str,
+    model: str,
+    cases: list[EvalCase],
+    metrics: dict[str, DecisionMetrics],
+    engineering: dict[str, EngineeringMetrics],
+    llm_config: dict,
+    out_path: str | None,
+) -> str:
+    """渲染 Console 报告：结论边界 + 三臂并排指标表 + 分母/墙钟注记。"""
+    out: list[str] = []
+    add = out.append
+    m0 = metrics["rule"]
+    add("=" * 100)
+    add("商品审核 Agent · Evaluation 跑分：rule（确定性初筛）/ single（单次 LLM 直判）/ agent（完整调查）")
+    add("=" * 100)
+    add(f"数据集: {data_path}（{len(cases)} 条）| 模型: {model}")
+    add("工具世界: 生产装配（真 MySQL + 真 RAG）—— rule / single 臂不使用工具")
+    if any(llm_config.values()):
+        add(
+            "思考配置: "
+            f"thinking={llm_config.get('thinking') or '默认'} / "
+            f"reasoning_effort={llm_config.get('reasoning_effort') or '默认'}"
+            "（非网关默认档，判定分布与成本/墙钟可能不同，勿与默认档结果混读）"
+        )
+    else:
+        add("思考配置: 网关默认（thinking=enabled / reasoning_effort=high，本次未覆盖）")
+    add("-" * 100)
+    add("指标口径: accuracy/precision/wrong_auto_decision_rate 与 TP/FP/TN/FN 只在 AUTO_DECIDABLE 案；")
+    add("  recall/reject_unhandled 分母 = 真值 REJECT 案；human_review_rate/automation_coverage 分母 = 全量")
+    add("  比率形如 值(分子/分母)；分母为 0 → '-'（不硬造 0/∞）")
+    add("-" * 100)
+    rows = [_metrics_row(arm, metrics[arm], engineering[arm]) for arm in ARMS]
+    add(_table(_METRIC_HEADERS, rows))
+    add(
+        f"  分母注记: AUTO_DECIDABLE 案 {m0.auto_decidable_total} / 真值 REJECT 案 {m0.reject_truth} / "
+        f"全量 {m0.total} —— 三组分母不同，勿混读"
+    )
+    add("-" * 100)
+    add("工程指标（进程内墙钟：均值/P50/P95 毫秒 —— 不写进 record，跨 run 比对会漂移）:")
+    for arm in ARMS:
+        eng = engineering[arm]
+        add(
+            f"  {arm:<7} llm_calls={_latency_cell(eng.llm_calls)} "
+            f"tool_calls={_latency_cell(eng.tool_calls)} tokens={_latency_cell(eng.tokens)} "
+            f"latency_ms={_latency_cell(eng.latency_ms)}"
+        )
+    add("-" * 100)
+    out_note = f" | JSON 已写入: {out_path}" if out_path else " | 未写文件（--out 可落盘）"
+    add(f"[NOTE] {NOTE}{out_note}")
+    add("=" * 100)
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# CLI 入口
+# ---------------------------------------------------------------------------
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Evaluation 跑分：rule / single / agent 三臂同一数据集；agent 走生产装配"
+            "（真 MySQL + 真 RAG），single / agent 需 API key 且非确定性（建议先 --limit 冒烟）"
+        )
+    )
+    parser.add_argument(
+        "--data",
+        default=DEFAULT_DATA,
+        help=f"评测集：JSONL 路径或目录（默认 {DEFAULT_DATA} → cases_v2.jsonl）",
+    )
+    parser.add_argument(
+        "--model", default=DEFAULT_MODEL, help=f"LLM 模型（默认 {DEFAULT_MODEL}）"
+    )
+    parser.add_argument(
+        "--thinking",
+        choices=("enabled", "disabled"),
+        default=None,
+        help=(
+            "思考模式开关（默认 None = 不下发，用网关默认 enabled）。disabled = 非思考模式："
+            "输出与墙钟大幅下降，但 temperature 才生效、判定分布可能变 —— 结果不得与默认口径混读"
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "high", "max"),
+        default=None,
+        help=(
+            "思考强度（默认 None = 不下发，用网关默认 high）。none = 等价关闭思考模式；"
+            "low 比 high 想得少（更快更省）"
+        ),
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help=f"API key（默认 None → 读环境变量 {ENV_API_KEY}）",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="API base URL 覆盖（默认 None → 用后端默认端点）",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="只跑数据集前 N 条（文件行序稳定；默认 None = 全量）",
+    )
+    parser.add_argument(
+        "--ids",
+        default=None,
+        help=(
+            '只跑指定 eval_case_id（逗号分隔，如 "EC_V2_0007,EC_V2_0101"；默认 None = 不过滤）。'
+            "加载后按 eval_case_id 过滤，可与 --limit 叠加（先 --ids 过滤、再 --limit 截断）；"
+            "id 不在数据集中会报错提示"
+        ),
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="结果 JSON 写出路径（目录需已存在；默认不写文件只打印）",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help=(
+            "并发度（默认 1 = 逐案串行）。>1 时三臂并发跑：用例之间天然隔离（每案独立初始"
+            "state、thread_id 唯一，图无 checkpointer、无跨案可变状态），只改调度、不改判定/"
+            "指标/数据"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def _write_payload(path: Path, payload: dict) -> None:
+    """把结果 JSON 写入 ``path``（父目录须已存在，缺失即报错）。"""
+    if not path.parent.exists():
+        raise ValueError(f"--out 父目录不存在: {path.parent}（请先创建目录）")
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+
+
+def _select_cases(cases: list[EvalCase], *, ids: str | None, limit: int | None) -> list[EvalCase]:
+    """按 ``--ids`` 过滤、按 ``--limit`` 截断（先过滤后截断）；结果为空即报错。"""
+    if ids:
+        wanted = {s.strip() for s in ids.split(",") if s.strip()}
+        if not wanted:
+            raise ValueError('--ids 为空：请用逗号分隔的 eval_case_id，如 --ids "EC_V2_0007,EC_V2_0101"')
+        missing = wanted - {c.eval_case_id for c in cases}
+        if missing:
+            raise ValueError(f"--ids 有 {len(missing)} 个不在当前数据集中: {sorted(missing)}")
+        cases = [c for c in cases if c.eval_case_id in wanted]
+    if limit is not None and limit > 0:
+        cases = cases[:limit]
+    if not cases:
+        raise ValueError("评测运行无有效 case（数据集为空或 --limit/--ids 截成空）")
+    return cases
+
+
+async def _main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    _load_dotenv()  # 仓库根 .env 的 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL 注入（setdefault）
+    data_path = _resolve_data_path(args.data)
+    cases = _select_cases(load_dataset(data_path), ids=args.ids, limit=args.limit)
+
+    api_key = _resolve_api_key(args.api_key)
+    base_url = args.base_url or os.environ.get(ENV_BASE_URL, "") or None
+    # LLM 后端强制要求 api_key：缺 key 预检即报错（否则会整卷降级 HUMAN、exit 0，静默产出假结果）。
+    if api_key is None:
+        raise ValueError(
+            f"未检测到 API key（--api-key 或环境变量 {ENV_API_KEY} / 仓库根 .env）。"
+            "single / agent 臂必须配置 API key：无 key 本地网关（仅 --base-url）当前不支持"
+            "（LiteLLMBackend 强制 api_key）——请配置真实 key 后重跑"
+        )
+
+    # 生产工具装配整轮一次：真 RAG 索引惰性构建后跨案复用（每案重建 = 每案重编码整个语料）。
+    tools = tools_pkg.build_production_tools()
+    backend = _make_real_backend(
+        model=args.model,
+        api_key=api_key,
+        base_url=base_url,
+        tools=tools,
+        thinking=args.thinking,
+        reasoning_effort=args.reasoning_effort,
+    )
+    graph = build_agent_graph(tools=tools, llm=backend)
+    llm_config = {"thinking": args.thinking, "reasoning_effort": args.reasoning_effort}
+
+    print("=" * 100)
+    print("商品审核 Agent · Evaluation 跑分（rule / single / agent 三臂）")
+    print("=" * 100)
+    print(f"数据集: {data_path}（{len(cases)} 条）| 模型: {args.model}")
+    print("工具世界: 生产装配（真 MySQL + 真 RAG；rule / single 臂不使用工具）")
+    print(
+        "思考配置: "
+        + (
+            f"thinking={args.thinking or '默认'} / reasoning_effort={args.reasoning_effort or '默认'}"
+            + ("（非网关默认档，判定分布可能与默认档不同）" if any(llm_config.values()) else "")
+        )
+    )
+    print("API key: 已配置（--api-key / 环境变量 / .env）（值不入日志/报告/JSON）")
+    print(
+        "[NOTE] single / agent 臂真实调用 LLM（有费用、非确定性、不可重放）；"
+        f"建议先 --limit 10 冒烟 —— 本次跑 {len(cases)} 条"
+    )
+    print(
+        "[NOTE] 三臂预算恒为生产默认档（评测不覆盖 Guardrail）：agent 臂超限 → HUMAN_REVIEW "
+        "是生产语义，归因见 R3 截胡维度"
+    )
+    print("-" * 100)
+
+    exp = _expected_index(cases)
+    results: dict[str, list[tuple[EvalRecord, float]]] = {}
+    try:
+        print("① rule（pra.screening 确定性初筛 · 零 LLM 零工具）")
+        results["rule"] = await _run_arm(
+            cases, _run_rule, concurrency=args.concurrency, progress=False
+        )
+        print(f"  → {len(results['rule'])} 案完成")
+        print("-" * 100)
+        print(f"② single（{args.model} · 一次调用 · 只喂 case 快照 · 不调工具）")
+        results["single"] = await _run_arm(
+            cases,
+            lambda case: _run_single(case, llm=backend),
+            concurrency=args.concurrency,
+            progress=True,
+        )
+        print("-" * 100)
+        print(f"③ agent（{args.model} · 完整调查图 · 生产装配：真 MySQL + 真 RAG）")
+        results["agent"] = await _run_arm(
+            cases,
+            lambda case: _run_agent(case, graph=graph, llm=backend),
+            concurrency=args.concurrency,
+            progress=True,
+        )
+    finally:
+        flush_tracer()  # 整轮结束统一刷出（不 per-case flush）
+
+    records = {arm: [rec for rec, _ in results[arm]] for arm in ARMS}
+    latencies = {arm: [ms for _, ms in results[arm]] for arm in ARMS}
+    metrics = {arm: DecisionEvaluator.evaluate(records[arm], exp) for arm in ARMS}
+    engineering = {
+        arm: EngineeringEvaluator.evaluate(records[arm], latency_ms=latencies[arm]) for arm in ARMS
+    }
+    agent_level = AgentMetricsBundle.evaluate(records["agent"], exp)
+
+    payload = {
+        "data": str(data_path),
+        "model": args.model,
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "count": len(cases),
+        # 本次 LLM 口径（None = 网关默认 enabled + high）：产物自带口径，防跨口径混读
+        "real_llm_config": llm_config,
+        "records": {arm: [rec.model_dump() for rec in records[arm]] for arm in ARMS},
+        "metrics": {
+            arm: {
+                "decision": metrics[arm].model_dump(),
+                "engineering": engineering[arm].model_dump(),
+                # Agent 级指标只对 agent 臂有意义（工具选择 / 推理正确性 / 边际证据增益）
+                **({"agent_level": agent_level.model_dump()} if arm == "agent" else {}),
+            }
+            for arm in ARMS
+        },
+        "note": NOTE,
+    }
+
+    out_path: str | None = None
+    if args.out:
+        out_path = str(args.out)
+        _write_payload(Path(out_path), payload)
+    print()
+    print(
+        _render_report(
+            data_path=str(data_path),
+            model=args.model,
+            cases=cases,
+            metrics=metrics,
+            engineering=engineering,
+            llm_config=llm_config,
+            out_path=out_path,
+        )
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        return asyncio.run(_main(argv))
+    except Exception as exc:  # 任何失败 → 非零退出（CI 可捕获）
+        print(f"[FAIL] 跑分失败: {exc!r}", file=sys.stderr)
+        raise
+
+
+if __name__ == "__main__":
+    sys.exit(main())

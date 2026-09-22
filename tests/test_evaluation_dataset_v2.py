@@ -1,4 +1,4 @@
-"""v2 数据集（320 案）数据契约：只锁数据 / schema / 生成器契约，不跑评估器。
+"""v2 数据集（320 案）数据契约：只锁数据 / schema 契约，不跑评估器。
 
 1. 规模 ≥300、五类 scene 分布容差 ±5pp；manifest 只校验最小契约
    （``schema_version`` / ``total`` / ``file``）；
@@ -6,38 +6,28 @@
    boundary/evasion/multi-signal（按 ``expected.abstain_label`` 就地统计）；
 3. 每条 input 经 ProductReviewCase 强解析、``schema_version=2``、
    ``lineage.seed_case_id`` 为合法种子、REJECT 案 ``risk_level=HIGH``、图片 url 中性无类别语义；
-4. 同 seed 生成两遍逐字节一致；
-5. 老格式 JSONL（无 abstain_label / 无 lineage）照常读入且 None 等价 AUTO_DECIDABLE。
+4. 老格式 JSONL（无 abstain_label / 无 lineage）照常读入且 None 等价 AUTO_DECIDABLE。
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
+from collections import Counter
 from pathlib import Path
 
 from pra.domain.models import ProductReviewCase
-from pra.evaluation.dataset.loader import load_dataset, scene_stats
+from pra.evaluation.dataset.loader import load_dataset
 from pra.evaluation.dataset.schema import EvalCase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V2_PATH = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
 V2_MANIFEST = REPO_ROOT / "eval_data" / "v2" / "manifest.json"
-GEN_SCRIPT = REPO_ROOT / "scripts" / "eval_dataset_gen.py"
 
 _SCENE_PCT = {"normal": 0.20, "violation": 0.20, "boundary": 0.30,
               "multi-signal": 0.20, "evasion": 0.10}
 _ABSTAIN_FOCUS_SCENES = {"boundary", "evasion", "multi-signal"}
 # abstention 三桶：两个标签 + 未标注（v1 老数据 / v2 缺字段）
 _ABSTAIN_BUCKETS = ("AUTO_DECIDABLE", "SHOULD_ABSTAIN", "UNLABELED")
-
-
-def _load_gen_module():
-    spec = importlib.util.spec_from_file_location("eval_dataset_gen_mod", GEN_SCRIPT)
-    assert spec and spec.loader, f"无法定位生成器脚本: {GEN_SCRIPT}"
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _abstain_buckets(cases: list[EvalCase]) -> dict:
@@ -67,9 +57,9 @@ def test_v2_dataset_scale_and_scene_distribution() -> None:
     cases = load_dataset(V2_PATH)
     assert len(cases) >= 300, "Phase 2 正式集至少 300 条"
     total = len(cases)
-    ss = scene_stats(cases)
+    by_scene = Counter(c.scene for c in cases)
     for scene, pct in _SCENE_PCT.items():
-        n = ss["by_scene"][scene]["total"]
+        n = by_scene[scene]
         expect_n = pct * total
         # 容差 ±5 个百分点
         assert abs(n - expect_n) <= 0.05 * total, (
@@ -154,34 +144,7 @@ def test_eval_image_urls_carry_no_class_semantics() -> None:
                 )
 
 
-# --- 4) 生成器确定性（同 seed 两遍 → 逐字节一致）
-
-
-def test_v2_generator_determinism(tmp_path: Path) -> None:
-    gen = _load_gen_module()
-    rows_a = gen.generate(count=60, seed=7)
-    rows_b = gen.generate(count=60, seed=7)
-    assert rows_a == rows_b, "同 seed 生成两遍必须逐字节一致（确定性可重放）"
-    for row in rows_a:
-        EvalCase.model_validate(row)
-    out_a = tmp_path / "a.jsonl"
-    out_b = tmp_path / "b.jsonl"
-    out_a.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows_a), encoding="utf-8")
-    out_b.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows_b), encoding="utf-8")
-    assert out_a.read_bytes() == out_b.read_bytes()
-
-
-def test_v2_generator_quota_matches_schedule(tmp_path: Path) -> None:
-    gen = _load_gen_module()
-    rows = gen.generate(count=320, seed=42)
-    assert len(rows) == 320
-    from collections import Counter
-    scenes = Counter(r["scene"] for r in rows)
-    assert scenes == {"normal": 64, "violation": 64, "boundary": 96,
-                      "multi-signal": 64, "evasion": 32}
-
-
-# --- 5) 老格式（无 abstain_label / 无 lineage）向后兼容
+# --- 4) 老格式（无 abstain_label / 无 lineage）向后兼容
 
 
 def test_legacy_rows_without_abstain_label(tmp_path: Path) -> None:

@@ -26,7 +26,7 @@ def test_make_failure_default_shape():
 
 def test_make_failure_with_tool_and_seq():
     f = make_failure(step_type=STEP_TOOL_CALL, severity=SEV_CRITICAL,
-                     reason="boom", tool="ImageAnalysisTool", seq=3)
-    assert f["tool"] == "ImageAnalysisTool"
+                     reason="boom", tool="ProductTool", seq=3)
+    assert f["tool"] == "ProductTool"
     assert f["seq"] == 3
     assert f["severity"] == SEV_CRITICAL

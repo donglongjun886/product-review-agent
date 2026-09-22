@@ -10,6 +10,7 @@ from helpers import (
     all_measureable_caps,
     budget_exhausted_state,
     covered_evidence,
+    evasion_case,
     make_case,
     risk_anchor_state,
 )
@@ -33,14 +34,11 @@ def _clean_pass_state() -> dict:
 
 
 def _risk_no_policy_state() -> dict:
-    """风险案：证据链有硬阳性但**无可引用依据**（政策/先例缺失）。
-
-    商家取"脏"（removals>=3）以避免落入"强相似 ∧ 商家干净"的证据冲突形态。
-    """
+    """风险案：命中 R-302 + 商家脏（阳性）但**无可引用依据**（政策/先例缺失）。"""
     return {
-        "case": make_case(),
+        "case": evasion_case(),
         "hypotheses": [],
-        "evidence": covered_evidence(merchant_removals=5, similarity=0.93),
+        "evidence": covered_evidence(merchant_removals=5),
         "budget": Budget(),
         "failures": [],
         "tool_call_history": [],

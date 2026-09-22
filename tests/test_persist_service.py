@@ -93,7 +93,7 @@ def test_trace_summaries_carry_no_investigation_queue_fields():
     """回归守护：investigation_queue 已删，摘要不再落队列键（即使 update 里混入）。"""
     update = {
         "hypotheses": [hp("H1", prior=0.5)],
-        "investigation_queue": [{"q": "外观问题", "priority": 1, "status": "DONE"}],
+        "investigation_queue": [{"q": "文本合规问题", "priority": 1, "status": "DONE"}],
         "budget": Budget(),
     }
     for node in ("hypothesize", "reevaluate"):

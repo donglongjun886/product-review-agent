@@ -8,7 +8,7 @@
 - (b) 命名空间：两个入口模块不再自带 ``get_graph`` / ``_get_graph`` / ``_graph`` /
   ``_compiled_graph`` / ``build_agent_graph``。
 - (c) 结构：AST 扫 ``src/pra/**/*.py`` 的 ``build_agent_graph(...)`` 调用点，生产装配调用点
-  集合必须恰为 ``{src/pra/wiring.py}``。
+  集合必须恰为 ``{src/pra/wiring.py}``（评测跑分脚本在 ``scripts/`` 下，不属于 ``src/pra``）。
 
 任一回退（删 ``pra/wiring.py`` 或某入口重新自建单例/装配）→ 对应断言立刻变红。
 """
@@ -23,13 +23,6 @@ import pytest
 from pra import wiring
 from pra.api import service as api_service
 from pra.infra import persist_service as ps
-
-# 允许 ``build_agent_graph(...)`` 存在的非生产调用点白名单（逐条写明判定理由）。
-_EVAL_ONLY_ASSEMBLY_SITES = {
-    # 评测世界专用：按 ``ctx.tool_world`` 装配 eval/rag 工具并注入 ``llm=`` 审查员后端
-    # （real/scripted 对照臂），是评测入口而非生产入口，故不受「生产装配唯一处」约束。
-    "src/pra/evaluation/harness/agent_scheme.py",
-}
 
 # 生产装配调用点 —— 有且仅有组合根一处。
 _PRODUCTION_ASSEMBLY_SITES = {"src/pra/wiring.py"}
@@ -86,14 +79,10 @@ def _build_agent_graph_call_sites() -> set[str]:
 
 
 def test_production_assembly_has_exactly_one_call_site():
-    """(c) 结构契约：去掉评测世界白名单后，``build_agent_graph`` 调用点恰为 ``{pra/wiring.py}``。"""
+    """(c) 结构契约：``src/pra`` 内 ``build_agent_graph`` 调用点恰为 ``{pra/wiring.py}``。"""
     sites = _build_agent_graph_call_sites()
 
-    assert _EVAL_ONLY_ASSEMBLY_SITES <= sites, (
-        f"评测世界装配点消失：{sorted(_EVAL_ONLY_ASSEMBLY_SITES - sites)} —— 白名单需同步更新"
-    )
-    production = sites - _EVAL_ONLY_ASSEMBLY_SITES
-    assert production == _PRODUCTION_ASSEMBLY_SITES, (
-        f"生产装配调用点应恰为 {sorted(_PRODUCTION_ASSEMBLY_SITES)}，实为 {sorted(production)}"
+    assert sites == _PRODUCTION_ASSEMBLY_SITES, (
+        f"生产装配调用点应恰为 {sorted(_PRODUCTION_ASSEMBLY_SITES)}，实为 {sorted(sites)}"
         " —— 装配被复制到别处（回退到「双图单例」）"
     )

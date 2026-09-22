@@ -8,16 +8,14 @@
 
 - **dimension**：平台风险面的**受控词表**（封闭枚举），不是 LLM 自由文本；
 - **verdict**：一次**已完成测量**的结论 —— ``POSITIVE``（发现达处置阈值的风险）/
-  ``NEGATIVE``（未发现）。注意 verdict 是相对**硬阈值**而言的：外观维度上弱相似
-  （0.70~0.85）算 ``NEGATIVE``（未达处置阈值），它仍作为 ``IMAGE_SIMILARITY`` 证据留在
-  证据链里供 LLM 参考，但不构成"风险阳性"。
+  ``NEGATIVE``（未发现）。
 - **coverage**（``COVERED`` / ``NOT_MEASURED`` / ``UNMEASURABLE``）：**不是证据**，
   是"测量是否发生"的状态，由 gate 层用 ``required × 证据存在性 × 环境能力`` 推导 ——
   绝不能为"没测"造一个证据对象（那会把"缺席"变成"事实"，
   正是"查不到 ≠ 证明无"被破坏的根源）。
 
 ``MEASUREMENT`` 是承载「已测」的**唯一**证据类型；风险**阳性**仍由各工具既有的证据类型
-承载（``IMAGE_SIMILARITY`` / ``IMAGE_LOGO`` / 商家脏 …），本模块不为阳性另造表示，
+承载（商家脏 / 规则命中 …），本模块不为阳性另造表示，
 避免同一事实两处表示而漂移。
 """
 
@@ -29,13 +27,10 @@ __all__ = [
     "ALL_DIMENSIONS",
     "CITABLE_TYPES",
     "DEFAULT_EVIDENCE_WEIGHT",
-    "DIM_IMAGE_APPEARANCE",
     "DIM_LISTING_REGISTRY",
     "DIM_MERCHANT_PROFILE",
     "DIM_POLICY_CITATION",
     "DIM_TEXT_COMPLIANCE",
-    "EVIDENCE_MIN_SIM",
-    "EVIDENCE_STRONG",
     "MEASUREMENT_TYPE",
     "MERCHANT_DIRTY_MIN",
     "VERDICTS",
@@ -53,14 +48,12 @@ __all__ = [
 DIM_LISTING_REGISTRY = "listing_registry"  # 商品在库可核验（品牌/类目/版本事实）
 DIM_MERCHANT_PROFILE = "merchant_profile"  # 商家行为模式（removals / title-relisting）
 DIM_TEXT_COMPLIANCE = "text_compliance"  # 标题/描述合规（品牌词、规避词、绝对化用语）
-DIM_IMAGE_APPEARANCE = "image_appearance"  # 外观/IP（相似度、Logo 检出）
 DIM_POLICY_CITATION = "policy_citation"  # 可引用依据（政策条款 / 人工先例）
 
 ALL_DIMENSIONS: tuple[str, ...] = (
     DIM_LISTING_REGISTRY,
     DIM_MERCHANT_PROFILE,
     DIM_TEXT_COMPLIANCE,
-    DIM_IMAGE_APPEARANCE,
     DIM_POLICY_CITATION,
 )
 
@@ -76,11 +69,7 @@ MEASUREMENT_TYPE = "MEASUREMENT"
 
 # ---- 证据确定性阈值（单一来源；tools / guardrails / evaluation 统一从此取值）----
 
-# 产 IMAGE_SIMILARITY 证据的相似度下限 / 「高相似」处置分界。
-EVIDENCE_MIN_SIM = 0.70
-EVIDENCE_STRONG = 0.85
-
-# 无风险量纲证据类型的默认权重（PRODUCT_FACT / OCR_TEXT / POLICY_REF）；不被任何决策读取。
+# 无风险量纲证据类型的默认权重（PRODUCT_FACT / POLICY_REF）；不被任何决策读取。
 # RULE_HIT 是确定性规则命中，按满强度 1.0 单独定义在 pra.screening.engine。
 DEFAULT_EVIDENCE_WEIGHT = 0.5
 
@@ -116,10 +105,10 @@ def make_measurement(
 
     :param dimension: ``ALL_DIMENSIONS`` 之一；
     :param source: 产出该测量的工具名；
-    :param source_ref: 被测量的源对象稳定标识（图 URL / 商品 ID / 商家 ID …）；
+    :param source_ref: 被测量的源对象稳定标识（商品 ID / 商家 ID / 条款 ID …）；
     :param verdict: ``POSITIVE`` / ``NEGATIVE``（相对**处置硬阈值**的结论）；
     :param weight: 测量本身的**可信度**（不是风险强度；``NEGATIVE`` 同样给高值）；
-    :param value: 人读摘要（如"外观比对完成：无 Logo 命中，最高相似度 0.12"）。
+    :param value: 人读摘要（如"商家行为核验完成：历史无移除记录"）。
     """
     merged = dict(extra or {})
     merged["dimension"] = dimension

@@ -52,7 +52,7 @@ class PlannedToolCall(BaseModel):
     ``args`` 由 tools_node 用该工具的 ``args_model`` 确定性校验（不信任 LLM 参数）。
     """
 
-    tool: str = Field(description="工具名（6 个受控名之一，须与实际装配的工具一致）")
+    tool: str = Field(description="工具名（4 个受控名之一，须与实际装配的工具一致）")
     args: dict = Field(default_factory=dict, description="工具入参 dict（args_model 校验/解析）")
     reason: str = Field(default="", description="为什么调（验证哪个假设→要哪条证据）")
     priority: int = Field(default=5, ge=1, le=5, description="1 最优先（同轮按 priority 升序执行）")
@@ -83,7 +83,7 @@ class HypothesisUpdate(BaseModel):
 
 
 class ConflictNote(BaseModel):
-    """矛盾证据对说明（供 HUMAN_REVIEW 参考，权威判定在 ``contradiction_detect``）。"""
+    """矛盾证据对说明（供 HUMAN_REVIEW 参考；权威判定在 gate 的证据侧约束）。"""
 
     between: list[str] = Field(default_factory=list, description="两个冲突证据的引用/摘要")
     description: str = Field(default="")
@@ -125,16 +125,15 @@ class DecisionProposal(BaseModel):
 # 便于 gate/decide 使用词表（避免每处 import domain 枚举）。
 __all__ = [
     "ConflictNote",
+    "Decision",
     "DecisionProposal",
     "HypothesisProposal",
+    "HypothesisStatus",
     "HypothesisUpdate",
     "HypothesizeOutput",
     "PlanOutput",
     "PlannedToolCall",
     "ReevaluateOutput",
-    # 复导出（供节点 apply / gate 使用）
-    "Decision",
-    "HypothesisStatus",
     "RiskLevel",
     "RiskType",
 ]

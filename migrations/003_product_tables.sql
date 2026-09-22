@@ -1,10 +1,10 @@
 -- ============================================================================
 -- product-review-agent · 商品事实表 DDL + 开发/评测种子（迁移 003）
 -- ============================================================================
--- 背景：ProductTool 此前只读进程内种子（工具默认 _DEFAULT_PRODUCTS、评测世界
--- EVAL_PRODUCTS）。本迁移把「商品在库事实」落到真库，供
--- pra/tools/product/mysql_repo.py 的 MySQLProductRepository 读取。默认装配路径
--- （ProductTool() / build_tools() / 评测世界）**仍是 InMemory**，真库是显式 opt-in。
+-- 背景：ProductTool 此前只读进程内种子（工具默认 _DEFAULT_PRODUCTS）。本迁移把
+-- 「商品在库事实」落到真库，供 pra/tools/product/mysql_repo.py 的
+-- MySQLProductRepository 读取。默认装配路径（ProductTool() / build_tools()）**仍是
+-- InMemory**；生产与评测入口经 build_production_tools() 显式读本库。
 --
 -- 字段口径：只建 ProductSnapshot / 决策链真正消费的列（product_id / category / brand /
 -- version / status）；SKU 与图片两表随「未消费字段收敛」删除（存量库由迁移 005 DROP）。
@@ -16,9 +16,9 @@
 -- 它是「规避品牌」调查的起点信号，读成空串会把「没有品牌字段」伪装成「品牌为空」。
 --
 -- 幂等：CREATE TABLE IF NOT EXISTS + INSERT ... AS new ON DUPLICATE KEY UPDATE
--- （MySQL 8.0.19+ 行别名语法，不用已废弃的 VALUES()）。种子与
--- pra.evaluation.harness.agent_scheme.EVAL_PRODUCTS 同一份事实；本文件是静态 SQL，
--- 改一处须同步另一处。重复执行不新增行、不改行数。
+-- （MySQL 8.0.19+ 行别名语法，不用已废弃的 VALUES()）。种子 = 开发与评测共用的一套
+-- 商品事实（P_88231 即工具默认种子）；本文件是静态 SQL，改一处须同步另一处。
+-- 重复执行不新增行、不改行数。
 --
 -- 执行：docker exec -i mysql-dev mysql -uroot -proot product_review \
 --         < migrations/003_product_tables.sql
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS product (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商品在库事实（只存当前行；历史版本不入库）';
 
 -- ============================================================================
--- 开发/评测种子（12 商品 = EVAL_PRODUCTS 全量；P_88231 即工具默认种子）
+-- 开发/评测种子（12 商品；P_88231 即工具默认种子）
 -- 幂等：重复执行只覆盖为同一份事实，行数不变。
 -- ============================================================================
 

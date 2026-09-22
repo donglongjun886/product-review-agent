@@ -15,7 +15,7 @@
 ``required`` 的**唯一**来源是"平台风险分类 ⊗ 案件可观测事实"（见 ``required_dimensions``），
 不由 Agent 的 plan 决定 —— 否则判定会随 LLM 的计划波动；也不读 ``expected``/``annotation``。
 新增维度只需在 ``domain/measurement.py`` 加常量、在 ``required_dimensions`` 给出必需性来源、
-在 ``positive_dimensions`` 给出阳性映射三处登记，**不写死成永久规则**。
+在 ``positive_dimensions`` 给出阳性映射两处登记，**不写死成永久规则**。
 """
 
 from __future__ import annotations
@@ -27,13 +27,10 @@ from typing import Any
 
 from pra.domain.measurement import (
     ALL_DIMENSIONS,
-    DIM_IMAGE_APPEARANCE,
     DIM_LISTING_REGISTRY,
     DIM_MERCHANT_PROFILE,
     DIM_POLICY_CITATION,
     DIM_TEXT_COMPLIANCE,
-    EVIDENCE_MIN_SIM,
-    EVIDENCE_STRONG,
     MEASUREMENT_TYPE,
     MERCHANT_DIRTY_MIN,
     VERDICT_POSITIVE,
@@ -42,7 +39,6 @@ from pra.domain.measurement import (
     measurement_verdict,
 )
 from pra.domain.models import Evidence, ProductReviewCase
-from pra.tools.image_analysis.tool import IMAGE_LOGO_TYPE, IMAGE_SIMILARITY_TYPE
 from pra.tools.merchant.tool import MERCHANT_HISTORY_TYPE
 
 __all__ = [
@@ -52,9 +48,7 @@ __all__ = [
     "CoverageReport",
     "capabilities_from_tools",
     "coverage_report",
-    "listing_signal_present",
     "positive_dimensions",
-    "reject_positive_dims",
     "required_dimensions",
     "rule_hit_ids",
 ]
@@ -94,21 +88,12 @@ def positive_dimensions(evidence: Iterable[Evidence]) -> dict[str, list[Evidence
 
     阳性的**判定语义**（与 gate 的"硬阳性"要求同源，单一事实源）：
 
-    - ``IMAGE_SIMILARITY`` 且 ``weight >= EVIDENCE_STRONG``（0.85）→ ``image_appearance``；
-      **弱相似 0.70~0.85 不算阳性** —— 它未达处置阈值，应然处置是"与商品事实交叉"
-      （由 required set 的 ``listing_registry`` 覆盖承担），不能单独撑起 REJECT。
-    - ``IMAGE_LOGO`` → ``image_appearance``（检出即事实，信任工具置信度）；
     - ``MERCHANT_HISTORY`` 达 ``MERCHANT_DIRTY_MIN`` → ``merchant_profile``；
     - ``MEASUREMENT`` 且 ``verdict=POSITIVE`` → 该测量维度（与上面几条互为冗余校验）。
     """
     out: dict[str, list[Evidence]] = defaultdict(list)
     for e in evidence or []:
-        if e.type == IMAGE_SIMILARITY_TYPE:
-            if e.weight >= EVIDENCE_STRONG:
-                out[DIM_IMAGE_APPEARANCE].append(e)
-        elif e.type == IMAGE_LOGO_TYPE:
-            out[DIM_IMAGE_APPEARANCE].append(e)
-        elif e.type == MERCHANT_HISTORY_TYPE:
+        if e.type == MERCHANT_HISTORY_TYPE:
             if _merchant_is_dirty(e):
                 out[DIM_MERCHANT_PROFILE].append(e)
         elif e.type == MEASUREMENT_TYPE:
@@ -118,47 +103,11 @@ def positive_dimensions(evidence: Iterable[Evidence]) -> dict[str, list[Evidence
     return dict(out)
 
 
-def listing_signal_present(evidence: Iterable[Evidence]) -> bool:
-    """本案商品**自身**的外观信号是否存在（弱相似 >= 0.70 或 Logo 检出即算）。
-
-    用途：商家行为维度需要本 listing 的旁证才够格自动拒绝 —— 弱相似虽未达处置阈值
-    （不算阳性），却足以把"商家脏"从"仅商家画像"提升为"本 listing 也有疑点"。
-    """
-    for e in evidence or []:
-        if e.type == IMAGE_LOGO_TYPE:
-            return True
-        if e.type == IMAGE_SIMILARITY_TYPE and (e.weight or 0.0) >= EVIDENCE_MIN_SIM:
-            return True
-    return False
-
-
-def reject_positive_dims(evidence: Iterable[Evidence]) -> frozenset[str]:
-    """**足以授权自动 REJECT** 的阳性维度（比 ``positive_dimensions`` 更严）。
-
-    - ``image_appearance``：本 listing 的直接测量（强相似 / Logo）→ 直接授权；
-    - ``merchant_profile``：**需本 listing 的外观信号佐证**（``listing_signal_present``）——
-      仅"商家历史脏"不足以對本 listing 定案（reviewer 语义：疑似规避但图/文本无确证
-      → 克制转人工，见 GT 家族 ``dirty_brand_missing_cleanimg``）；反之
-      "商家脏 + 弱相似"（``wsim_dirty``）或"商家脏 + 强相似"则成立。
-
-    ``text_compliance`` 的规则级命中不在这里 —— 它由 gate 侧对确定性规则求值
-    （``RULE_EVASION_WORD`` 授权 REJECT、``RULE_BRAND_WORD`` 只阻塞 PASS）。
-    """
-    dims = set(positive_dimensions(evidence))
-    out: set[str] = set()
-    if DIM_IMAGE_APPEARANCE in dims:
-        out.add(DIM_IMAGE_APPEARANCE)
-    if DIM_MERCHANT_PROFILE in dims and listing_signal_present(evidence):
-        out.add(DIM_MERCHANT_PROFILE)
-    return frozenset(out)
-
-
 def required_dimensions(case: Any) -> tuple[str, ...]:
     """本案 PASS 前**必须完成**的关键测量维度（可观测事实导出）。
 
     - ``listing_registry`` / ``merchant_profile``：恒必需（商品与商家是两处可核验事实源）；
-    - ``text_compliance``：恒必需（确定性规则层，无需数据源，覆盖恒成立）；
-    - ``image_appearance``：**仅当案件带图时**必需（无图案件不存在外观风险面）。
+    - ``text_compliance``：恒必需（确定性规则层，无需数据源，覆盖恒成立）。
 
     ``policy_citation`` **不在 PASS 必需集内** —— 它是「可引用依据可得」的 REJECT 候选
     条件，与"证明无风险"无关。
@@ -168,11 +117,8 @@ def required_dimensions(case: Any) -> tuple[str, ...]:
     """
     if case is None:
         return ()
-    product = _coerce_case(case).product
-    dims = [DIM_LISTING_REGISTRY, DIM_MERCHANT_PROFILE, DIM_TEXT_COMPLIANCE]
-    if product.images:
-        dims.append(DIM_IMAGE_APPEARANCE)
-    return tuple(dims)
+    _coerce_case(case)  # 契约校验：dict 输入非法即抛，不静默放行
+    return (DIM_LISTING_REGISTRY, DIM_MERCHANT_PROFILE, DIM_TEXT_COMPLIANCE)
 
 
 def capabilities_from_tools(tools: Sequence[Any]) -> dict[str, bool]:
@@ -197,12 +143,7 @@ def capabilities_from_tools(tools: Sequence[Any]) -> dict[str, bool]:
 class CoverageReport:
     """一次判定所需的全部事实侧输入（gate 只消费本对象 + 规则命中）。
 
-    ``positive`` 与 ``reject_positive`` 是**两个不同强度的概念**，不可混用：
-
-    - ``positive``：任意维度的风险阳性 —— 用于**阻塞 PASS**（哪怕只是商家行为画像）；
-    - ``reject_positive``：**足以授权自动 REJECT** 的阳性 —— 额外要求"本 listing 级信号"，
-      因为商家行为是**针对该商家**的画像，不能单独当作本 listing 违规的确证
-      （reviewer 语义：疑似规避但图/文本无确证 → 克制转人工）。
+    ``positive`` 是任意维度的风险阳性 —— 用于**阻塞 PASS**（哪怕只是商家行为画像）。
     """
 
     required: tuple[str, ...]
@@ -210,7 +151,6 @@ class CoverageReport:
     missing: tuple[str, ...]  # required ∧ 未覆盖 ∧ 本环境可测 → NOT_MEASURED（可补救）
     unmeasurable: tuple[str, ...]  # required ∧ 未覆盖 ∧ 本环境不可测 → UNMEASURABLE
     positive: Mapping[str, list[Evidence]]
-    reject_positive: frozenset[str]
     capabilities: Mapping[str, bool]
 
 
@@ -240,7 +180,6 @@ def coverage_report(
         missing=missing,
         unmeasurable=unmeasurable,
         positive=positive_dimensions(evs),
-        reject_positive=reject_positive_dims(evs),
         capabilities=caps,
     )
 

@@ -26,7 +26,7 @@ from pra.domain.measurement import (
     VERDICT_NEGATIVE,
     VERDICT_POSITIVE,
 )
-from pra.domain.models import Budget, ProductImage, ProductReviewCase
+from pra.domain.models import Budget, ProductReviewCase
 from pra.infra import persist_service as ps
 from pra.infra.db import Settings, get_sessionmaker
 from pra.tools import build_production_tools, build_tools
@@ -303,21 +303,12 @@ async def test_mysql_merchant_repository_roundtrip_against_real_db():
 # 只在真库种子里的商家（``tool.py`` 的 _DEFAULT_MERCHANTS 只有 M_5512）—— 用它才能在证据层面
 # 区分「读了真库」与「读了 InMemory 默认世界」。
 _MYSQL_ONLY_MERCHANT = "M_8801"
-# 默认 Mock 图像源认得的图（认不得的图产不出 IMAGE_SIMILARITY，脚本化 plan 就不会去调 MerchantTool）。
-_KNOWN_IMAGE_URL = "https://cdn.example.com/products/P_88231/img1.jpg"
 
 
 def _case_for_merchant(case_id: str) -> ProductReviewCase:
-    """COMPLEX 案件（brand 空缺 → R-301），商家只有真库有，图片是 Mock 认得的那张。"""
-    case = make_case(
+    """COMPLEX 案件（brand 空缺 → R-301），商家只有真库有（与 InMemory 默认世界可区分）。"""
+    return make_case(
         case_id=case_id, brand=None, product_id="P_77310", merchant_id=_MYSQL_ONLY_MERCHANT
-    )
-    return case.model_copy(
-        update={
-            "product": case.product.model_copy(
-                update={"images": [ProductImage(url=_KNOWN_IMAGE_URL, source="主图")]}
-            )
-        }
     )
 
 

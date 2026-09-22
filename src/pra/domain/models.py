@@ -71,11 +71,11 @@ class HypothesisStatus(str, Enum):
 class ProductImage(_StrictModel):
     """商品图片（DB ``product_image``）。
 
-    ``ocr_text`` 预填机审阶段已产出的 OCR 结果，避免 Agent 重复调用 OCR Tool。
+    ``ocr_text`` 预填机审阶段已产出的 OCR 结果，供调查直接引用。
     """
 
     url: str = Field(description="图片地址")
-    ocr_text: str | None = Field(default=None, description="机审阶段已识别的 OCR 文本；为空表示未知，需 OCR Tool 补查")
+    ocr_text: str | None = Field(default=None, description="机审阶段已识别的 OCR 文本；为空表示未知")
     source: str = Field(description="图片位次/来源，如 主图 / 附图1")
 
 
@@ -91,8 +91,8 @@ class SkuInfo(_StrictModel):
 class ProductInfo(_StrictModel):
     """商品事实快照（DB ``product`` 主表）。
 
-    回答「商品事实到底是什么」—— 尤其 brand 是否真空缺、字段间是否冲突，是 ProductTool /
-    OCRTool 交叉验证的事实锚点。``version`` 为乐观锁版本号，同一商品不同版本只审一次。
+    回答「商品事实到底是什么」—— 尤其 brand 是否真空缺、字段间是否冲突，是 ProductTool
+    核验的事实锚点。``version`` 为乐观锁版本号，同一商品不同版本只审一次。
     """
 
     product_id: str = Field(description="商品 ID，如 P_88231")
@@ -123,23 +123,23 @@ class Evidence(_StrictModel):
     """单条证据（DB ``evidence``）—— 结论依据的最小可引用单元，区别于过程审计 ``tool_call_history``。
 
     ``source`` 记工具名，``ref_id`` 指向源对象（图片 URL / 商家 ID / 先例 case_id / 政策条款
-    ID 等）保证可回溯。``extra`` 承载结构化附加数值（similarity / removals /
-    violations_total / conflict 信号）供确定性函数机器读取 —— 人读摘要只进 ``value``。
+    ID 等）保证可回溯。``extra`` 承载结构化附加数值（removals / violations_total /
+    conflict 信号）供确定性函数机器读取 —— 人读摘要只进 ``value``。
     """
 
-    type: str = Field(description="证据类型（开放性文本），如 IMAGE_SIMILARITY / MERCHANT_HISTORY / CASE_PRECEDENT")
-    source: str = Field(description="证据来源工具，如 ImageAnalysisTool / MerchantTool")
-    value: str = Field(description="证据内容（人读摘要），如 similarity=0.91, match=某品牌经典鞋款")
-    weight: float = Field(ge=0.0, description="证据强度（非负）。量纲由来源工具定义：图像/OCR 相似度类为 0~1，先例检索分为后端口径 —— 所有读点都是「≥ 常量」比较，故不设上界")
+    type: str = Field(description="证据类型（开放性文本），如 PRODUCT_FACT / MERCHANT_HISTORY / CASE_PRECEDENT")
+    source: str = Field(description="证据来源工具，如 ProductTool / MerchantTool")
+    value: str = Field(description="证据内容（人读摘要），如 removals=5, title_relisting=2")
+    weight: float = Field(ge=0.0, description="证据强度（非负）。量纲由来源工具定义：命中类为 0~1，先例检索分为后端口径 —— 所有读点都是「≥ 常量」比较，故不设上界")
     ref_id: str | None = Field(default=None, description="引用的源对象 ID（用于去重/回溯，可空）")
-    extra: dict = Field(default_factory=dict, description="结构化附加数值（similarity/removals 等），供确定性函数读取，不进人读 value")
+    extra: dict = Field(default_factory=dict, description="结构化附加数值（removals/violations_total 等），供确定性函数读取，不进人读 value")
 
 
 class Hypothesis(_StrictModel):
     """风险假设（``hypotheses[]`` / ``hypothesis_trace[]`` 元素）—— Agent 是假设验证器而非分类器。
 
     每条假设携带 ``prior → posterior`` 的可解释演变与生命周期状态。``evidence_for /
-    evidence_against`` 为证据引用/摘要字符串（如 ``"image_similarity=0.91"``、
+    evidence_against`` 为证据引用/摘要字符串（如 ``"removals=5"``、
     ``"brand=null"``），结构化证据本体统一存 ``AgentState.evidence[]``，避免同一事实双份存。
     ``prior`` / ``posterior`` 为 None 表示尚未赋值/未评估，确定性公式按 0 处理。
     """

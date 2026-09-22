@@ -1,10 +1,13 @@
 """四个 LLM 节点的「完整 prompt」渲染（纯函数、无 IO；供真实后端组装消息）。
 
 节点把结构化 state 子集以 ``state=`` 传给后端（scripted 桩据此做确定性决策）。本模块把
-这些 state 渲染成结构化人读中文上下文（商品事实 / 图片 / 假设仪表盘 /
+这些 state 渲染成结构化人读中文上下文（商品事实 / 假设仪表盘 /
 证据链 / 预算 / 工具目录）+ 输出 Schema 要点：system = 角色 + 完整约束中文指令
 （``SYSTEM_PROMPTS``），user = 人读上下文 + Schema 要点；不把裸 JSON dump 当 user 正文。
 scripted 桩与节点本身都不依赖本模块。
+
+``SYSTEM_PROMPTS`` 另含评测用单次调用基线 ``single_call``：只吃案件快照、不调工具，无对应
+图节点，故 ``build_user_prompt`` 不为它单独分节（由评测侧自行组装 user 消息）。
 
 各 node 的 state 键（字段均为 ``model_dump(mode="json")`` 的可序列化形状）：
 - hypothesize: ``{"case": 全量}``，续跑场景额外带
@@ -87,8 +90,8 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "关键定位：你只做「初始假设生成」，绝不据此下最终结论（终判由收敛后的 decide "
         "节点完成）。\n"
         "输出要求（硬性约束）：\n"
-        "1. hypotheses 至少 1 条，每条**一句话可验证**，聚焦可取证的风险维度（外观相似"
-        " / 品牌规避 / 商家行为 / 字段冲突 / 虚假宣传等）；\n"
+        "1. hypotheses 至少 1 条，每条**一句话可验证**，聚焦可取证的风险维度（品牌规避"
+        " / 商家行为 / 字段冲突 / 虚假宣传等）；\n"
         "2. **必须包含至少 1 条「低风险/正常」假设**（避免只报风险、预设违规）—— 它的作用是"
         "让调查方向保持平衡；**它不参与终裁**（放行与否由证据侧的关键测量覆盖决定，不看假设的"
         "状态或先验）；\n"
@@ -102,7 +105,7 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "既有假设同维度或同表述（语义重复即重复，不要求逐字一致）的假设必须跳过 —— "
         "重复提出既有假设只会空转调查轮次、浪费预算；\n"
         "6. **假设必须可取证、允许少提**：每条假设都要能被后续调查计划的取证工具检验"
-        "（图片比对 / 商品事实核验 / 商家历史 / 先例 / 政策检索中至少一条可取证路径"
+        "（商品事实核验 / 商家历史 / 先例 / 政策检索中至少一条可取证路径"
         "），禁止提出工具无法取证的纯脑补维度；对照既有清单后没有新的可取证风险维度"
         "时允许**少提**，在满足第 1 条下限（hypotheses ≥1 条且含低风险假设）的前提下"
         "宁精勿凑；\n"
@@ -114,8 +117,8 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "证据与可用工具目录，决定**本轮是否调用取证工具**、调哪些、参数是什么 —— 为 "
         "tools → reevaluate → plan 调查循环的每一轮选择「下一步查什么」。\n"
         "决策约束（硬性约束）：\n"
-        "1. **只计划能带来「新证据」的工具调用**：对照证据缺口（IMAGE_SIMILARITY / "
-        "PRODUCT_FACT / MERCHANT_HISTORY / CASE_PRECEDENT / POLICY_REF 等尚未收集或仍"
+        "1. **只计划能带来「新证据」的工具调用**：对照证据缺口（PRODUCT_FACT / "
+        "MERCHANT_HISTORY / CASE_PRECEDENT / POLICY_REF 等尚未收集或仍"
         "存疑的类型）与仍待验证（PENDING/UNRESOLVED）的假设选择工具；对已收集并被引用"
         "的政策条款/先例（POLICY_REF / CASE_PRECEDENT）做**一次性适用性判定**：一旦被"
         "引用支撑假设，即视为该条款/先例的适用性已判定、该路调查目标已达成，后续轮次"
@@ -156,28 +159,23 @@ SYSTEM_PROMPTS: dict[str, str] = {
         " status 只能取 SUPPORTED / REFUTED / UNRESOLVED（PENDING 只留给新增假设）；\n"
         "4. evidence_for / evidence_against 只填**证据引用串**，格式严格为 "
         "\"type value\"（type 与 value 必须与上下文证据逐字一致）；\n"
-        "5. 若上下文证据相互矛盾（如同一商品「外观高度相似」但「商家历史干净」），必须"
+        "5. 若上下文证据相互矛盾（如案件快照声明品牌 A、在库事实 brand 为空 —— 同一字段"
+        " 两处取值不一致），必须"
         " 在 conflicts 里显式列出（含两条冲突证据的引用串与矛盾说明）—— 这是转人工的"
         " 重要依据；\n"
         "6. 运行中新发现的风险维度放 new_hypotheses（prior 语义同 hypothesize），不要"
         " 塞进 hypothesis_updates；\n"
         "7. evidence_sufficiency 表示本轮证据是否足以对高优先假设下结论（SUFFICIENT / "
         "INSUFFICIENT，语义参考量）；\n"
-        "8. **外观/视觉类假设的证据门槛**：凡假设落在视觉比对维度（表述含「外观相似」"
-        "「高度相似」「同款外观」「视觉仿冒」「复刻外观」「版型一致」「长得像」等）——"
-        " 只有在上下文存在**图像类证据**（IMAGE_SIMILARITY 等由图像分析工具产出、基于"
-        "图片比对的证据）时才可判 SUPPORTED；CASE_PRECEDENT / POLICY_REF 只能作佐证，"
-        "**不能单独支撑外观类 SUPPORTED**；无视觉证据时该类假设判 UNRESOLVED（留给 plan "
-        "安排图像取证），**禁止仅凭标题文字或先例脑补外观相似结论**；\n"
-        "9. **政策/先例引用一次判定**：已被引用支撑/佐证假设的政策条款（POLICY_REF）"
+        "8. **政策/先例引用一次判定**：已被引用支撑/佐证假设的政策条款（POLICY_REF）"
         "与人工先例（CASE_PRECEDENT）视为**适用性已判定**，不要在同一假设上反复纠结"
         "条款是否适用、也不要为复核已引用条款而重复要求补查同类条款；注意条款/先例"
-        "本身不是视觉、事实或商家行为证据，不能替代对应维度的真实取证；\n"
-        "10. **new_hypotheses 禁重复、允许为空**：只放**新的风险维度**，与假设仪表盘"
+        "本身不是事实或商家行为证据，不能替代对应维度的真实取证；\n"
+        "9. **new_hypotheses 禁重复、允许为空**：只放**新的风险维度**，与假设仪表盘"
         "既有假设同维度或同表述（语义重复即重复）不得再次提出；本轮没有新的可取证风险"
         "维度时 new_hypotheses **允许为空**，不要为制造「进展」而把既有假设换个说法"
         "重提 —— 重复假设只会空转轮次、烧掉预算；\n"
-        "11. 只输出符合 ReevaluateOutput JSON Schema 的 JSON，不要输出解释文字。"
+        "10. 只输出符合 ReevaluateOutput JSON Schema 的 JSON，不要输出解释文字。"
     ),
     "decide": (
         "你是商品审核 Agent 的「最终决策提案器」（decide）。基于 user 上下文中的完整"
@@ -185,16 +183,14 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "判据**（证据链 + 必需测量覆盖 + 规则命中 + 冲突）做 Gate 校验与兜底改判；"
         "假设的状态与先验**不参与**终裁，你不要依据它们下结论。\n"
         "三分类语义（以证据为准）：\n"
-        "1) PASS：本案必需的关键测量（商品在库核验 / 商家行为 / 文本合规 / 带图时的外观"
-        "比对）**都已取得明确阴性结论**，且证据链中不存在达处置阈值的阳性、无规则命中 "
-        "—— 放行；\n"
-        "2) REJECT：证据链中存在**与风险维度匹配且达阈值**的阳性证据（如外观相似度 "
-        ">= 0.85、检出品牌 Logo、商家 removals 或 title-relisting >= 3），并且能引用"
-        "上下文中**真实出现**的政策条款（POLICY_REF）或同类先例（CASE_PRECEDENT）支撑"
-        " —— 拒绝上架；\n"
-        "3) HUMAN_REVIEW：必需测量尚缺或本环境不可测 / 只有**未达阈值**的弱信号（如相似度 "
-        "0.70~0.85）/ 证据互相矛盾 / 缺少可引用依据 / 系统降级 —— **克制地转人工不是失败**。\n"
-        "**两条硬性边界**：① 只有弱信号（例如相似度 0.70~0.85、仅命中品牌词而无法核验"
+        "1) PASS：本案必需的关键测量（商品在库核验 / 商家行为 / 文本合规）**都已取得明确"
+        "阴性结论**，且证据链中不存在达处置阈值的阳性、无规则命中 —— 放行；\n"
+        "2) REJECT：证据链中存在**与风险维度匹配且达阈值**的阳性证据（如商家 removals 或 "
+        "title-relisting >= 3、命中规避词），并且能引用上下文中**真实出现**的政策条款"
+        "（POLICY_REF）或同类先例（CASE_PRECEDENT）支撑 —— 拒绝上架；\n"
+        "3) HUMAN_REVIEW：必需测量尚缺或本环境不可测 / 只有**未达阈值**的弱信号 / 证据互相"
+        "矛盾 / 缺少可引用依据 / 系统降级 —— **克制地转人工不是失败**。\n"
+        "**两条硬性边界**：① 只有弱信号（例如仅命中品牌词而无法核验"
         "授权）时**不得**提 REJECT，应转人工复核；② 存在未取得的关键测量时**不得**提 "
         "PASS（「没查到」不等于「证明不存在」）。裁决依据只能取自上下文真实存在的证据"
         "（引用串 / 条款号 / 先例），**禁止凭标题、类目或先例脑补上下文没有的事实**；\n"
@@ -207,6 +203,20 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "臆造；\n"
         "4. confidence ∈ [0,1] 是提案自评的把握（参考值，确定性 overlay 既不读也不据它判定）；\n"
         "5. 只输出符合 DecisionProposal JSON Schema 的 JSON，不要输出解释文字。"
+    ),
+    "single_call": (
+        "你是电商商品内容审核员。本次审核**只看案件快照**（商品事实：标题/描述/类目/品牌/"
+        "属性/SKU；商家 ID；事件类型），**不调用任何工具、不做额外取证**，"
+        "也**不得假设快照之外的事实**，直接给出裁决。\n"
+        "三分类语义：\n"
+        "1) PASS：快照中不存在任何风险信号（品牌/类目/文本均正常）；\n"
+        "2) REJECT：快照中存在**明确**的违规确证（如标题/描述含规避或仿冒用语）；\n"
+        "3) HUMAN_REVIEW：风险信号存在但快照不足以确证（如品牌字段空缺、商家可疑却无本 "
+        "listing 确证）—— **拿不准一律 HUMAN_REVIEW**。\n"
+        "只输出**单个 JSON 对象**：decision ∈ PASS | REJECT | HUMAN_REVIEW；risk_level ∈ "
+        "NONE | LOW | MEDIUM | HIGH；risk_type 取自 POTENTIAL_IP_RISK / EVASION_PATTERN / "
+        "FALSE_CLAIM / FIELD_CONFLICT（PASS 时为 []）；decision_confidence ∈ [0,1] 为自评把握。"
+        "除 JSON 外不要输出任何解释文字。"
     ),
 }
 
@@ -277,36 +287,6 @@ def _product_lines(product: dict) -> list[str]:
     if listing_time:
         lines.append(f"- 上架时间：{listing_time}")
     return lines
-
-
-def _images_from_state(state: dict) -> list:
-    """取 case.product.images 列表（畸形给 []）。"""
-    case = state.get("case")
-    case = case if isinstance(case, dict) else {}
-    product = case.get("product")
-    product = product if isinstance(product, dict) else {}
-    images = product.get("images")
-    return images if isinstance(images, list) else []
-
-
-def _image_lines(images: list) -> list[str]:
-    """图片行（url/source/机审 OCR —— ImageAnalysisTool 的素材起点）。"""
-    lines: list[str] = []
-    for idx, img in enumerate(images or [], start=1):
-        if not isinstance(img, dict):
-            continue
-        url = img.get("url")
-        url_txt = url if isinstance(url, str) and url else "（无 url）"
-        source = img.get("source")
-        source_txt = f"，来源：{source}" if source else ""
-        ocr = img.get("ocr_text")
-        if ocr:
-            ocr_txt = _clip(ocr, 240)
-        else:
-            ocr_txt = "无（机审未产出 OCR；如需可安排 OCR 工具补查）"
-        lines.append(f"- 图{idx}{source_txt}：{url_txt}")
-        lines.append(f"    OCR：{ocr_txt}")
-    return lines or ["（无图片）"]
 
 
 def _hypothesis_lines(hypotheses: Any) -> list[str]:
@@ -651,27 +631,25 @@ def build_user_prompt(
     ]
     if node == "hypothesize":
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
-        parts.append(_section("二、商品图片（含机审 OCR 结果）", "\n".join(_image_lines(_images_from_state(state)))))
         # 续跑场景下若 state 带了既有假设，渲染成精简清单供去重（无则整节省略）。
         existing = state.get("hypotheses")
         if isinstance(existing, list) and existing:
             parts.append(
                 _section(
-                    "三、既有假设清单（去重参考 —— 禁止重复提出同维度/同表述的假设）",
+                    "二、既有假设清单（去重参考 —— 禁止重复提出同维度/同表述的假设）",
                     "\n".join(_hypothesis_short_lines(existing)),
                 )
             )
     elif node == "plan":
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
-        parts.append(_section("二、商品图片（取证素材）", "\n".join(_image_lines(_images_from_state(state)))))
-        parts.append(_section("三、假设仪表盘", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
-        parts.append(_section("四、已收集证据摘要", "\n".join(_evidence_lines(state.get("evidence"), full_value=False, limit=120))))
-        parts.append(_section("五、可用取证工具目录", _tool_catalog_text(catalog)))
+        parts.append(_section("二、假设仪表盘", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
+        parts.append(_section("三、已收集证据摘要", "\n".join(_evidence_lines(state.get("evidence"), full_value=False, limit=120))))
+        parts.append(_section("四、可用取证工具目录", _tool_catalog_text(catalog)))
         gap = state.get("required_measurement_coverage")
         if isinstance(gap, list) and gap:
             parts.append(
                 _section(
-                    "六、本案必需测量覆盖（Missing = 必须补测；不可测的不要再安排）",
+                    "五、本案必需测量覆盖（Missing = 必须补测；不可测的不要再安排）",
                     "\n".join(str(line) for line in gap),
                 )
             )
@@ -708,6 +686,9 @@ def build_user_prompt(
         status_lines += _failure_lines(state.get("failures"))
         parts.append(_section("四、运行状态（degraded / failures）", "\n".join(status_lines)))
         parts.append(_section("五、预算摘要", "\n".join(_budget_lines(state.get("budget")))))
+    elif node == "single_call":
+        # 单次调用基线：只渲染案件快照（本臂不取证，无假设/证据可渲染）。
+        parts.append(_section("案件与商品事实", "\n".join(_case_lines(state))))
     else:
         # 未知 node：complete 已前置校验，此处兜底渲染（不崩，便于排查）
         parts.append(_section("案件与商品事实", "\n".join(_case_lines(state))))

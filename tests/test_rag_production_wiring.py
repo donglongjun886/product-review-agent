@@ -45,7 +45,7 @@ _CHROMA_PORT = 8001
 
 
 def test_production_assembly_injects_lazy_rag_indices():
-    """生产装配 = 默认 6 工具；商品/商家换真库、案例/政策换惰性 RAG；**装配期不构建**。"""
+    """生产装配 = 默认 4 工具；商品/商家换真库、案例/政策换惰性 RAG；**装配期不构建**。"""
     from pra.rag.lazy_index import LazyCaseIndex, LazyPolicyIndex
 
     prod = _REAL_BUILD_PRODUCTION_TOOLS()
@@ -59,17 +59,6 @@ def test_production_assembly_injects_lazy_rag_indices():
     assert isinstance(prod_policy._index, LazyPolicyIndex)
     # 惰性的全部意义：装配完还没建库（未 import 后端、未连服务端、未加载模型）——
     # 该契约的行为守护在 tests/test_rag_default_path_no_extra.py（子进程查 sys.modules）。
-    # 其余两个仍走 Mock 桩（image/ocr 无真实数据源）
-    assert (
-        type(tool_by_name(prod, "ImageAnalysisTool")).__name__
-        == type(tool_by_name(default, "ImageAnalysisTool")).__name__
-        == "ImageAnalysisTool"
-    )
-    assert (
-        type(tool_by_name(prod, "OCRTool")).__name__
-        == type(tool_by_name(default, "OCRTool")).__name__
-        == "OCRTool"
-    )
 
 
 def test_default_tools_keep_inmemory_knowledge_sources():
@@ -246,31 +235,15 @@ def _delete_prefix(prefix: str) -> None:
 def _demo_case():
     """走查案件（与 ``scripts/demo_api.build_demo_case`` 同口径）。
 
-    图片必须是 Mock 图像源认得的那张（``P_88231/img1.jpg``）—— 否则产不出 IMAGE_SIMILARITY，
-    scripted plan 卡在「先做外观比对」分支，永远不会去调 CaseSearch / PolicySearch。
+    scripted plan 先从商品在库事实 / 商家行为取证，再落到 CaseSearch / PolicySearch。
     """
     from helpers import make_case
 
-    from pra.domain.models import ProductImage
-
-    case = make_case(
+    return make_case(
         case_id=f"CASE_PROD_RAG_{uuid4().hex[:8]}",
         brand=None,
         product_id="P_88231",
         merchant_id="M_5512",
-    )
-    return case.model_copy(
-        update={
-            "product": case.product.model_copy(
-                update={
-                    "images": [
-                        ProductImage(
-                            url="https://cdn.example.com/products/P_88231/img1.jpg", source="主图"
-                        )
-                    ]
-                }
-            )
-        }
     )
 
 

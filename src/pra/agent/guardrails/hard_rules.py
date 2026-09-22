@@ -1,9 +1,6 @@
 """R1 硬规则（blacklist / 硬违禁）：命中强制 REJECT，不可被 LLM 覆盖。
 
-两条确定性扫描，**不用 LLM**：
-
-1. ``case.product.brand`` 命中品牌黑名单；
-2. 调查新证据 ``IMAGE_LOGO`` 识别到的品牌在黑名单内。
+一条确定性扫描，**不用 LLM**：``case.product.brand`` 命中品牌黑名单。
 
 品牌黑名单取 ``pra.screening.rule_engine.terms.BLACKLISTED_BRANDS``（内置固定 demo 词表），与
 Screening 规则层共享同一份；本文件不另建词表，也没有运行时替换机制。
@@ -36,25 +33,9 @@ def hard_rule_hit(state: dict[str, Any]) -> HardRuleHit | None:
     if case is None:
         return None
 
-    # ① 商品 brand 黑名单
+    # 商品 brand 黑名单
     brand = getattr(getattr(case, "product", None), "brand", None)
     if brand and brand in terms.BLACKLISTED_BRANDS:
         return HardRuleHit(risk_types=[RiskType.POTENTIAL_IP_RISK])
 
-    # ② 调查新证据：IMAGE_LOGO 命中黑名单品牌
-    for e in state.get("evidence") or []:
-        if e.type == "IMAGE_LOGO":
-            logo_brand = _extract_logo_brand(e.value)
-            if logo_brand in terms.BLACKLISTED_BRANDS:
-                return HardRuleHit(risk_types=[RiskType.POTENTIAL_IP_RISK])
-
     return None
-
-
-def _extract_logo_brand(value: str) -> str:
-    """从 IMAGE_LOGO 的 value（``logo=<brand>, conf=0.93``）尽力还原品牌名。"""
-    for part in value.split(","):
-        part = part.strip()
-        if part.startswith("logo="):
-            return part[len("logo="):]
-    return ""

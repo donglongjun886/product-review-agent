@@ -19,7 +19,7 @@ from helpers import (
 )
 
 from pra.agent.guardrails.converge import is_converged
-from pra.domain.measurement import DIM_IMAGE_APPEARANCE, DIM_POLICY_CITATION
+from pra.domain.measurement import DIM_MERCHANT_PROFILE, DIM_POLICY_CITATION
 from pra.domain.models import HypothesisStatus
 
 
@@ -37,10 +37,10 @@ def test_converged_when_all_required_covered():
 
 
 def test_not_converged_when_required_measurement_missing():
-    """外观维度本可测却没测（N1）→ 继续回环补测。"""
+    """商家画像本可测却没测（N1）→ 继续回环补测。"""
     evs = [
         e for e in covered_evidence()
-        if not (e.type == "MEASUREMENT" and e.ref_id.startswith(DIM_IMAGE_APPEARANCE))
+        if not (e.type == "MEASUREMENT" and e.ref_id.startswith(DIM_MERCHANT_PROFILE))
     ]
     assert is_converged(_state(evidence=evs)) is False
 
@@ -48,36 +48,36 @@ def test_not_converged_when_required_measurement_missing():
 def test_converged_when_required_dimension_is_unmeasurable():
     """环境测不了 ⇒ 不算缺口，不必再循环。"""
     caps = all_measureable_caps()
-    caps[DIM_IMAGE_APPEARANCE] = False
+    caps[DIM_MERCHANT_PROFILE] = False
     evs = [
         e for e in covered_evidence()
-        if not (e.type == "MEASUREMENT" and e.ref_id.startswith(DIM_IMAGE_APPEARANCE))
+        if not (e.type == "MEASUREMENT" and e.ref_id.startswith(DIM_MERCHANT_PROFILE))
     ]
     assert is_converged(_state(evidence=evs, caps=caps)) is True
 
 
 def test_converged_when_positive_has_citable():
     evs = [
-        *covered_evidence(similarity=0.93),
+        *covered_evidence(merchant_removals=5),
         ev("POLICY_REF", value="POLICY_3.2 v2 条款：x", weight=0.9, ref_id="POLICY_3.2_v2_c1"),
     ]
     assert is_converged(_state(evidence=evs)) is True
 
 
 def test_not_converged_when_positive_without_citable_but_citation_measurable():
-    assert is_converged(_state(evidence=covered_evidence(similarity=0.93))) is False
+    assert is_converged(_state(evidence=covered_evidence(merchant_removals=5))) is False
 
 
 def test_converged_when_positive_and_citation_unmeasurable():
     caps = all_measureable_caps()
     caps[DIM_POLICY_CITATION] = False
-    evs = covered_evidence(similarity=0.93)
+    evs = covered_evidence(merchant_removals=5)
     assert is_converged(_state(evidence=evs, caps=caps)) is True
 
 
 def test_citable_without_ref_id_does_not_count():
     evs = [
-        *covered_evidence(similarity=0.93),
+        *covered_evidence(merchant_removals=5),
         ev("POLICY_REF", value="POLICY_3.2 v2 条款：x", weight=0.9, ref_id=None),
     ]
     assert is_converged(_state(evidence=evs)) is False

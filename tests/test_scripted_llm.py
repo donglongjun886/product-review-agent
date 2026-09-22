@@ -24,12 +24,20 @@ from pra.agent.scripted_llm import ScriptedLLMBackend
 from pra.domain.models import HypothesisStatus
 from helpers import ev, hp, make_case
 
-_IMG_URL = "https://cdn.example.com/products/P_88231/img1.jpg"
+_PRODUCT_ID = "P_88231"
+_MERCHANT_ID = "M_5512"
 
 
-def _sim_evidence() -> object:
-    return ev("IMAGE_SIMILARITY", source="ImageAnalysisTool",
-              value="similarity=0.91, match=某品牌经典鞋款", weight=0.91, ref_id=_IMG_URL)
+def _prod_evidence() -> object:
+    return ev("PRODUCT_FACT", source="ProductTool",
+              value="brand=山丘, version=3（库中最新）", weight=0.6, ref_id=_PRODUCT_ID)
+
+
+def _merch_evidence(*, removals: int = 0, title: int = 0) -> object:
+    return ev("MERCHANT_HISTORY", source="MerchantTool",
+              value=f"0 similar / {removals} removals / {title} title-relisting, credit=90",
+              weight=0.85, ref_id=_MERCHANT_ID,
+              extra={"similar": 0, "removals": removals, "title": title, "credit": 90})
 
 
 def _pending_hypotheses() -> list:
@@ -59,7 +67,7 @@ def _state(
 
 async def test_deterministic_output_bytes_equal():
     backend = ScriptedLLMBackend()
-    state = _state(hypotheses=_pending_hypotheses(), evidence=[_sim_evidence()])
+    state = _state(hypotheses=_pending_hypotheses(), evidence=[_merch_evidence(removals=5)])
     # 同一 state 传两次（且不共享同一 dict 对象）→ 字节一致
     r1 = await backend.complete(
         node="reevaluate", state=dict(state), json_schema={}
@@ -82,26 +90,23 @@ async def test_hypothesize_script_passes_schema():
 
 
 async def test_plan_script_passes_schema_and_branches():
-    """plan 剧本：无外观证据 → call_tools(ImageAnalysisTool)；五类证据齐 → conclude。"""
+    """plan 剧本：缺商品/商家证据 → call_tools(ProductTool+MerchantTool)；四类证据齐 → conclude。"""
     backend = ScriptedLLMBackend()
     case = make_case()
 
-    # 分支 1：无 IMAGE_SIMILARITY、有图 → 先做外观比对
+    # 分支 1：商品事实与商家行为证据均缺 → 先补齐这两类
     st1 = _state(case=case)
     out1 = PlanOutput.model_validate_json(
         (await backend.complete(node="plan", state=st1, json_schema={})).content
     )
     assert out1.next_action == "call_tools"
-    assert [t.tool for t in out1.tools] == ["ImageAnalysisTool"]
-    assert out1.tools[0].args["image_urls"] == [case.product.images[0].url]
+    assert [t.tool for t in out1.tools] == ["ProductTool", "MerchantTool"]
+    assert out1.tools[0].args["product_id"] == case.product.product_id
 
-    # 分支 4：五类关键证据齐 → conclude（tools 空）
+    # 分支 3：四类关键证据齐 → conclude（tools 空）
     evs = [
-        _sim_evidence(),
-        ev("PRODUCT_FACT", source="ProductTool", value="brand=null", weight=0.6,
-           ref_id="P_88231"),
-        ev("MERCHANT_HISTORY", source="MerchantTool", value="5 removals", weight=0.85,
-           ref_id="M_5512"),
+        _prod_evidence(),
+        _merch_evidence(removals=5),
         ev("CASE_PRECEDENT", source="CaseSearchTool", value="case_1001", weight=0.8,
            ref_id="case_1001"),
         ev("POLICY_REF", source="PolicySearchTool", value="POLICY_3.2", weight=0.9,
@@ -119,30 +124,45 @@ async def test_reevaluate_script_passes_schema():
     backend = ScriptedLLMBackend()
     state = _state(
         hypotheses=_pending_hypotheses(),
-        evidence=[_sim_evidence()],
+        evidence=[_prod_evidence(), _merch_evidence(removals=5)],
     )
     state["pending_tool_calls"] = []
     resp = await backend.complete(node="reevaluate", state=state, json_schema={})
     out = ReevaluateOutput.model_validate_json(resp.content)
     by_id = {u.id: u for u in out.hypothesis_updates}
     assert set(by_id) == {"H1", "H2"}
-    # 剧本策略语义：强相似下 H1 翻 REFUTED、H2 立 SUPPORTED，且 H2 posterior 取自
-    # 证据相似度（round 两位）—— 是派生值而非独立种子
-    assert by_id["H1"].status == "REFUTED"
-    assert by_id["H2"].status == "SUPPORTED"
-    assert by_id["H2"].posterior == round(_sim_evidence().weight, 2)
+    # 剧本策略语义：商品事实成立 → H1 SUPPORTED；商家脏（removals>=3）→ H2 REFUTED
+    assert by_id["H1"].status == "SUPPORTED"
+    assert by_id["H2"].status == "REFUTED"
+    assert by_id["H2"].posterior is not None
     assert out.evidence_sufficiency == "INSUFFICIENT"  # 缺 case_pre/policy
+
+
+async def test_reevaluate_script_clean_merchant_supports_h2():
+    """对照分支：商家画像干净 → H2 SUPPORTED（与脏商家 REFUTED 可区分）。"""
+    backend = ScriptedLLMBackend()
+    state = _state(
+        hypotheses=_pending_hypotheses(),
+        evidence=[_prod_evidence(), _merch_evidence(removals=0)],
+    )
+    state["pending_tool_calls"] = []
+    out = ReevaluateOutput.model_validate_json(
+        (await backend.complete(node="reevaluate", state=state, json_schema={})).content
+    )
+    by_id = {u.id: u for u in out.hypothesis_updates}
+    assert by_id["H2"].status == "SUPPORTED"
 
 
 async def test_reevaluate_idempotent_after_apply():
     backend = ScriptedLLMBackend()
     hypotheses = _pending_hypotheses()
-    state1 = _state(hypotheses=hypotheses, evidence=[_sim_evidence()])
+    evidence = [_prod_evidence(), _merch_evidence(removals=5)]
+    state1 = _state(hypotheses=hypotheses, evidence=evidence)
     state1["pending_tool_calls"] = []
     first = ReevaluateOutput.model_validate_json(
         (await backend.complete(node="reevaluate", state=state1, json_schema={})).content
     )
-    assert len(first.hypothesis_updates) == 2  # H1→REFUTED、H2→SUPPORTED
+    assert len(first.hypothesis_updates) == 2  # H1→SUPPORTED、H2→REFUTED
 
     # 模拟 apply 之后：各假设到达 first 输出的目标态（目标值从 first 派生，不钉剧本
     # 种子数值 —— 种子调整不破坏幂等验证）
@@ -159,7 +179,7 @@ async def test_reevaluate_idempotent_after_apply():
                evidence_for=list(u.evidence_for),
                evidence_against=list(u.evidence_against))
         )
-    state2 = _state(hypotheses=applied, evidence=[_sim_evidence()])
+    state2 = _state(hypotheses=applied, evidence=evidence)
     state2["pending_tool_calls"] = []
     second = ReevaluateOutput.model_validate_json(
         (await backend.complete(node="reevaluate", state=state2, json_schema={})).content
@@ -173,7 +193,7 @@ async def test_decide_script_passes_schema():
     state = _state(
         hypotheses=[hp("H2", prior=0.4, posterior=0.91,
                        status=HypothesisStatus.SUPPORTED)],
-        evidence=[_sim_evidence()],
+        evidence=[_merch_evidence(removals=5)],
     )
     resp = await backend.complete(node="decide", state=state, json_schema={})
     out = DecisionProposal.model_validate_json(resp.content)

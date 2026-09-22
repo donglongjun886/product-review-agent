@@ -195,7 +195,7 @@ def build_agent_graph(
     tools_action = make_tools_node(tools)
 
     builder = StateGraph(AgentState)
-    # 测量环境能力：唯一权威来源 = 实际装配的工具集（生产 image 是 Mock 桩 ⇒ 外观维度不可测）。
+    # 测量环境能力：唯一权威来源 = 实际装配的工具集。
     # 由入口节点写入 state（唯一写入点）：plan 的缺口提示、decide 的 Gate、reevaluate 后的
     # 收敛路由一律直接读 state，不再各自包一层注入闭包。
     capabilities = capabilities_from_tools(tools)
