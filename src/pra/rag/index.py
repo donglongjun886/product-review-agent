@@ -100,12 +100,10 @@ def _risk_type_clause(risk_types: list[Any]) -> Any:
 
 
 def _where_from(clauses: list[Any]) -> Any | None:
-    """过滤子句列表 → ``MetadataFilters``（空 → ``None``；单条不套 ``$and``）。"""
+    """过滤子句列表 → ``MetadataFilters``（多条套 ``$and``；空 → ``None``：chromadb 拒绝 ``where={}``）。"""
     if not clauses:
         return None
     llama_ = llama()
-    if len(clauses) == 1:
-        return llama_.MetadataFilters(filters=clauses)
     return llama_.MetadataFilters(condition=llama_.FilterCondition.AND, filters=clauses)
 
 
@@ -141,8 +139,6 @@ class _ChromaIndexBase:
         # 客户端在构造期解析一次（缺 rag extra / 客户端装配错误即刻暴露），回填进 config →
         # 后续各层拿到的都是同一个实例，不再逐层重算 host/port/ephemeral。
         self._config = replace(cfg, client=make_chroma_client(cfg))
-        # LlamaIndex 装配面同样在构造期解析（缺 rag extra 不推迟到检索期）。
-        llama()
         # LlamaIndex ``BaseEmbedding``（官方集成承载编码）：查询/文本向量都走其公开方法。
         # **必填、无兜底** —— 构造编码器的唯一位置是 ``pra.tools.production_embedder``
         # （或调用方自己注入），不许在请求期联网下载模型。
@@ -304,7 +300,8 @@ class _ChromaIndexBase:
                 self._make_vector_retriever(full_ctx, filters),
                 make_bm25_retriever(sub_ctx, len(candidates)),
             ],
-            # ⚠️ 构造期只校验它是 LLM 实例；``num_queries=1`` 时一次都不会被调用。
+            # ⚠️ ``llm`` 必填：不传会走 ``Settings.llm`` → 拉 ``llama-index-llms-openai``（本仓不装）
+            # → ``ImportError``；``num_queries=1`` 时它一次都不会被调用。
             llm=llama().MockLLM(),
             mode=llama().FUSION_MODES.RECIPROCAL_RANK,
             num_queries=1,

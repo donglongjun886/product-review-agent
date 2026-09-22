@@ -16,7 +16,6 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import date
 from typing import Any
 
 from pra.rag.corpus.schema import CasePrecedentRecord, PolicyClauseRecord
@@ -127,10 +126,6 @@ def _open_collection(config: ChromaConfig, *, name: str) -> Any:
     )
 
 
-def _iso_or_empty(value: date | None) -> str:
-    return value.isoformat() if value is not None else ""
-
-
 def policy_node_metadata(row: PolicyClauseRecord) -> dict[str, Any]:
     """policy node metadata（**不进检索文本**，见 :func:`_build_nodes`）。
 
@@ -143,7 +138,9 @@ def policy_node_metadata(row: PolicyClauseRecord) -> dict[str, Any]:
         "version": int(row.version),
         "category": row.category,
         "status": row.status,
-        "effective_date": _iso_or_empty(row.effective_date),
+        "effective_date": (
+            row.effective_date.isoformat() if row.effective_date is not None else ""
+        ),
     }
     for risk_type in row.risk_type:
         meta[risk_type_key(risk_type)] = 1

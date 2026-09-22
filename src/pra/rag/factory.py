@@ -1,8 +1,8 @@
 """RAG 索引装配 —— ``build_policy_index`` / ``build_case_index``。
 
 语料固定取 ``rag/corpus/`` 内静态 JSON（文件缺失即抛带指引的 ``ValueError``，不静默）。
-注入点：``embedding_model``（LlamaIndex ``BaseEmbedding``，缺省 None → chroma 类内自建 fastembed
-集成）；``config``（``ChromaConfig``：client / host / port / ephemeral / collection 前缀，缺省全取默认值）。
+注入点：``embedding_model``（LlamaIndex ``BaseEmbedding``，**必填、本层不代建**）；
+``config``（``ChromaConfig``：client / host / port / ephemeral / collection 前缀，缺省全取默认值）。
 索引固定走 hybrid 检索（BM25 + Vector + RRF），无模式开关。
 
 两个 builder 只在「行类型 + corpus 加载器」上有别，实现只有 ``_build_index`` 一份。

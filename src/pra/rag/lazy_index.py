@@ -20,12 +20,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # 仅注解：本模块 import 期不拉起 tools 子包
-    from pra.tools.case_search.tool import CaseHit, CaseIndex, CaseSearchFilters
-    from pra.tools.policy_search.tool import (
-        PolicyClauseHit,
-        PolicyIndex,
-        PolicySearchFilters,
-    )
+    from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
+    from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
 __all__ = ["LazyCaseIndex", "LazyPolicyIndex"]
 
@@ -46,9 +42,6 @@ class _LazyIndex:
 class LazyPolicyIndex(_LazyIndex):
     """``PolicyIndex`` 的惰性代理：``builder`` 为无参可调用，返回任意实现该 Protocol 的索引。"""
 
-    def __init__(self, builder: Callable[[], PolicyIndex]) -> None:
-        super().__init__(builder)
-
     async def search(
         self,
         query: str,
@@ -61,9 +54,6 @@ class LazyPolicyIndex(_LazyIndex):
 
 class LazyCaseIndex(_LazyIndex):
     """``CaseIndex`` 的惰性代理：``builder`` 为无参可调用，返回任意实现该 Protocol 的索引。"""
-
-    def __init__(self, builder: Callable[[], CaseIndex]) -> None:
-        super().__init__(builder)
 
     async def search(
         self, query: str, filters: CaseSearchFilters, top_k: int
