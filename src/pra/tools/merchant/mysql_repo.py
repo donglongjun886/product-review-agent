@@ -16,19 +16,15 @@ docstring 的口径说明）。按墙钟重算会让同一案件随运行时间�
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import String, select
-from sqlalchemy.dialects.mysql import BIGINT, DATETIME, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ...infra.db import get_sessionmaker
-from .tool import MerchantEvent, MerchantProfile, MerchantViolations
+from .tool import MerchantProfile
 
 __all__ = [
-    "EVENT_TS_FORMAT",
-    "MerchantEventORM",
     "MerchantORM",
     "MySQLMerchantRepository",
     "to_profile",
@@ -36,81 +32,42 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# 商家 2 表 ORM（独立 DeclarativeBase：每个工具子包自持映射，勿跨包混用）
+# 商家表 ORM（独立 DeclarativeBase：每个工具子包自持映射，勿跨包混用）
 # ---------------------------------------------------------------------------
 
 
 class _MerchantBase(DeclarativeBase):
-    """商家 2 表专属 metadata 归属（与审核 5 表、商品 3 表的 Base 相互独立）。"""
+    """``merchant`` 表专属 metadata 归属（与审核 5 表、商品表的 Base 相互独立）。"""
 
 
 class MerchantORM(_MerchantBase):
     """``merchant`` 行 —— 每商家一行画像（预计算固定窗口快照，不按 ``window_days`` 重算）。
 
-    ``violations_by_type`` 无违规为 SQL NULL 或空对象，映射层统一归一为 ``{}``。
-
-    刻意不声明 ``relationship``：取事件走显式查询 —— 避免隐式懒加载在 ``async`` 会话里抛
-    ``MissingGreenlet``，也不引入双向导航。
+    只声明决策链真正消费的列（与 ``MerchantProfile`` 同形）。
     """
 
     __tablename__ = "merchant"
 
     merchant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    product_total: Mapped[int] = mapped_column(nullable=False)
     similar_product_count: Mapped[int] = mapped_column(nullable=False)
     removals: Mapped[int] = mapped_column(nullable=False)
     title_relisting_count: Mapped[int] = mapped_column(nullable=False)
-    violations_total: Mapped[int] = mapped_column(nullable=False)
-    violations_by_type: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     credit_score: Mapped[int] = mapped_column(nullable=False)
-
-
-class MerchantEventORM(_MerchantBase):
-    """``merchant_event`` 行（1 商家 N 事件；``sort_order`` 是读出顺序键，SQL 结果本身无序）。"""
-
-    __tablename__ = "merchant_event"
-
-    event_id: Mapped[int] = mapped_column(BIGINT, primary_key=True, autoincrement=True)
-    merchant_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    ts: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
-    sort_order: Mapped[int] = mapped_column(nullable=False)
 
 
 # ---------------------------------------------------------------------------
 # 行 → 画像（纯函数：不连库即可测全部字段边界）
 # ---------------------------------------------------------------------------
 
-EVENT_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
-
-def _format_event_ts(value: object) -> str:
-    """``DATETIME(3)`` 读出的 datetime → ``MerchantEvent.ts`` 的 ISO8601 展示串口径。
-
-    输出恒带 ``Z``（库中存 naive UTC）—— 与 InMemory 种子逐字一致；非 datetime（驱动/替身给
-    字符串）原样 ``str()`` 兜底。
-    """
-    if isinstance(value, datetime):
-        return value.strftime(EVENT_TS_FORMAT)
-    return str(value)
-
-
-def to_profile(merchant: MerchantORM, events: list[MerchantEventORM]) -> MerchantProfile:
+def to_profile(merchant: MerchantORM) -> MerchantProfile:
     """DB 行 → ``MerchantProfile``：只做类型/形态归一，不做业务判定。"""
     return MerchantProfile(
         merchant_id=merchant.merchant_id,
-        product_total=int(merchant.product_total),
         similar_product_count=int(merchant.similar_product_count),
         removals=int(merchant.removals),
         title_relisting_count=int(merchant.title_relisting_count),
-        violations=MerchantViolations(
-            total=int(merchant.violations_total),
-            by_type=dict(merchant.violations_by_type or {}),  # NULL / {} 均归一为 {}
-        ),
         credit_score=int(merchant.credit_score),
-        recent_events=[
-            MerchantEvent(event_type=e.event_type, ts=_format_event_ts(e.ts)) for e in events
-        ],
     )
 
 
@@ -150,16 +107,4 @@ class MySQLMerchantRepository:
             ).scalar_one_or_none()
             if merchant is None:
                 return None
-            events = (
-                (
-                    await session.execute(
-                        select(MerchantEventORM)
-                        .where(MerchantEventORM.merchant_id == merchant_id)
-                        .order_by(MerchantEventORM.sort_order, MerchantEventORM.event_id)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            # 在 session 关闭前物料化：避免依赖 detached 实例的属性访问语义
-            return to_profile(merchant, list(events))
+            return to_profile(merchant)

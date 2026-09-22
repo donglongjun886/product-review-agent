@@ -2,10 +2,10 @@
 
 保留范围（被测对象仍存在、且不依赖 ``--extra rag``）：
 - corpus loader / schema 校验：Policy/Case KB 规模与唯一性、≥2 条 EXPIRED、meta 隔离声明；
-- **隔离红线**：Case KB 的 case_id 与 eval_data v1+v2 全部 case 标识（含 InMemory 种子先例）无交集，
+- **隔离红线**：Case KB 的 case_id 与 eval_data v2 全部 case 标识（含 InMemory 种子先例）无交集，
   防评测作弊；
 - ``build_tools()`` 默认世界仍是 6 个 InMemory 工具；
-- 默认评测路径（``tool_world="eval"``）全量 v1 agent 决策序列 == 入库基线（回归不破）。
+- 默认评测路径（``tool_world="eval"``）全量 agent 决策序列 == 入库基线（回归不破）。
 
 **chroma 真实检索的离线验收用例已整体移除**：它们靠一个测试自持的假编码器（词面 sha256 特征）
 离线跑，验的是管道而非检索质量；假编码器及其用例一并删除后，chroma 检索只剩
@@ -31,18 +31,15 @@ from pra.tools import build_tools
 from pra.tools.policy_search.tool import InMemoryPolicyIndex
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EVAL_V1 = REPO_ROOT / "eval_data" / "v1" / "cases_v1.jsonl"
 EVAL_V2 = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
-BASELINE_FILE = REPO_ROOT / "eval_data" / "v1" / "regression_baseline.json"
+BASELINE_FILE = REPO_ROOT / "eval_data" / "v2" / "regression_baseline.json"
 
 
 def _eval_case_ids() -> set[str]:
-    """eval_data v1+v2 全部 case 标识（eval_case_id / input.case_id / lineage.seed_case_id）。"""
+    """eval_data/v2 全部 case 标识（eval_case_id / input.case_id / lineage.seed_case_id）。"""
     ids: set[str] = set()
-    for path in (EVAL_V1, EVAL_V2):
-        if not path.exists():
-            continue
-        for line in path.open(encoding="utf-8"):
+    if EVAL_V2.exists():
+        for line in EVAL_V2.open(encoding="utf-8"):
             line = line.strip()
             if not line:
                 continue
@@ -108,17 +105,17 @@ def test_build_tools_default_world_is_inmemory() -> None:
 
 
 async def test_default_eval_path_regression_intact() -> None:
-    # (a) 默认路径（tool_world="eval"）回归：全量 v1 agent 决策序列 == 入库基线
+    # (a) 默认路径（tool_world="eval"）回归：全量 agent 决策序列 == 入库基线
     baseline = json.loads(BASELINE_FILE.read_text(encoding="utf-8"))
     assert baseline.get("format_version") == 1
-    snap = await compute_current_snapshot(EVAL_V1, schemes=("agent",))
+    snap = await compute_current_snapshot(EVAL_V2, schemes=("agent",))
     assert snap["decisions"]["agent"] == baseline["decisions"]["agent"], (
         "默认 InMemory 评测路径回归失败：agent 决策序列与基线不一致"
     )
 
     # (b) 显式 EvalContext(tool_world="eval") 与默认 ctx 等价（回归不破坏）
     scheme = AgentScheme()
-    smoke = [c for c in load_dataset(EVAL_V1) if c.expected.decision == "REJECT"][:4]
+    smoke = [c for c in load_dataset(EVAL_V2) if c.expected.decision == "REJECT"][:4]
     ctx_default = EvalContext()
     assert ctx_default.tool_world == "eval"
     default_recs = [await scheme.run(c, ctx_default) for c in smoke]

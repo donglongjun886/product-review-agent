@@ -4,16 +4,13 @@
 **不 mock ``db._settings``、不注 ``_env_file``** —— 专测「.env / DATABASE_URL 配错就连不上」
 这条链；用例自建自删（``PYTEST_MERCHANT_`` 前缀 + ``finally`` 清理），重复跑不污染开发库。
 
-纯单测部分注入假 sessionmaker，覆盖 DB 行 → ``MerchantProfile`` 的边界（``violations_by_type``
-为 SQL NULL/空对象均归一 ``{}``、无事件 → 空列表、``DATETIME(3)`` → ISO8601 ``Z`` 展示串），
+纯单测部分注入假 sessionmaker，覆盖 DB 行 → ``MerchantProfile`` 的全部边界，
 并守护「默认装配路径仍是 InMemory、不连库」。
 """
 
 from __future__ import annotations
 
-import json
 import socket
-from datetime import datetime
 from typing import Self
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -23,22 +20,21 @@ from helpers import make_case, tool_by_name
 from sqlalchemy import text
 
 from pra import wiring
+from pra.domain.measurement import (
+    DIM_MERCHANT_PROFILE,
+    MEASUREMENT_TYPE,
+    VERDICT_NEGATIVE,
+    VERDICT_POSITIVE,
+)
 from pra.domain.models import Budget, ProductImage, ProductReviewCase
 from pra.infra import persist_service as ps
 from pra.infra.db import Settings, get_sessionmaker
 from pra.tools import build_production_tools, build_tools
 from pra.tools.base import ToolContext
 from pra.tools.merchant.mysql_repo import (
-    MerchantEventORM,
     MerchantORM,
     MySQLMerchantRepository,
     to_profile,
-)
-from pra.domain.measurement import (
-    DIM_MERCHANT_PROFILE,
-    MEASUREMENT_TYPE,
-    VERDICT_NEGATIVE,
-    VERDICT_POSITIVE,
 )
 from pra.tools.merchant.tool import (
     _DEFAULT_MERCHANTS,
@@ -72,20 +68,13 @@ def _inmemory_policy_index():
 
 
 class _FakeResult:
-    """够用即止：``scalar_one_or_none()`` 给首行，``scalars().all()`` 给子行列表。"""
+    """够用即止：``scalar_one_or_none()`` 给首行。"""
 
-    def __init__(self, *, first: object = None, rows: list | None = None) -> None:
+    def __init__(self, *, first: object = None) -> None:
         self._first = first
-        self._rows = list(rows or [])
 
     def scalar_one_or_none(self) -> object:
         return self._first
-
-    def scalars(self) -> Self:
-        return self
-
-    def all(self) -> list:
-        return self._rows
 
 
 class _FakeSession:
@@ -127,26 +116,10 @@ def _repo_with_fake_sessions(results: list[_FakeResult], *, error: Exception | N
 def _merchant_row(**overrides: object) -> MerchantORM:
     row = MerchantORM(
         merchant_id="M_TEST",
-        product_total=120,
         similar_product_count=23,
         removals=5,
         title_relisting_count=3,
-        violations_total=2,
-        violations_by_type={"IP_MIMIC": 1, "FALSE_CLAIM": 1},
         credit_score=62,
-    )
-    for key, value in overrides.items():
-        setattr(row, key, value)
-    return row
-
-
-def _event_row(**overrides: object) -> MerchantEventORM:
-    row = MerchantEventORM(
-        event_id=1,
-        merchant_id="M_TEST",
-        event_type="改标题重上架",
-        ts=datetime.fromisoformat("2024-09-01T10:00:00"),  # naive（DB DATETIME 口径）
-        sort_order=1,
     )
     for key, value in overrides.items():
         setattr(row, key, value)
@@ -163,35 +136,12 @@ def _ctx() -> ToolContext:
 
 
 def test_to_profile_maps_every_field():
-    profile = to_profile(_merchant_row(), [_event_row()])
+    profile = to_profile(_merchant_row())
     assert profile.merchant_id == "M_TEST"
-    assert profile.product_total == 120
     assert profile.similar_product_count == 23
     assert profile.removals == 5
     assert profile.title_relisting_count == 3
-    assert profile.violations.total == 2
-    assert profile.violations.by_type == {"IP_MIMIC": 1, "FALSE_CLAIM": 1}
     assert profile.credit_score == 62
-    assert [(e.event_type, e.ts) for e in profile.recent_events] == [
-        ("改标题重上架", "2024-09-01T10:00:00Z")
-    ]
-
-
-def test_violations_by_type_null_or_empty_both_become_empty_dict():
-    for raw in (None, {}):
-        profile = to_profile(_merchant_row(violations_total=0, violations_by_type=raw), [])
-        assert profile.violations.by_type == {}, f"raw={raw!r} 应归一为空 dict"
-        assert profile.violations.total == 0
-
-
-def test_no_events_yield_empty_list():
-    assert to_profile(_merchant_row(), []).recent_events == []
-
-
-def test_event_ts_is_formatted_as_iso8601_z():
-    """``DATETIME(3)`` → 带 ``Z`` 的展示串；毫秒截断（与 InMemory 种子逐字一致）。"""
-    row = _event_row(ts=datetime.fromisoformat("2024-09-01T10:00:00.123000"))
-    assert to_profile(_merchant_row(), [row]).recent_events[0].ts == "2024-09-01T10:00:00Z"
 
 
 def test_construction_does_not_touch_the_sessionmaker_provider():
@@ -206,17 +156,13 @@ def test_construction_does_not_touch_the_sessionmaker_provider():
     assert calls == []
 
 
-async def test_get_profile_loads_profile_and_recent_events():
-    """行为不变量：命中商家时画像非空，且近期事件已随画像装入（不钉内部查询编排）。"""
-    repo, _ = _repo_with_fake_sessions(
-        [_FakeResult(first=_merchant_row()), _FakeResult(rows=[_event_row()])]
-    )
+async def test_get_profile_loads_profile():
+    """行为不变量：命中商家时画像非空且字段来自库行。"""
+    repo, _ = _repo_with_fake_sessions([_FakeResult(first=_merchant_row())])
 
     profile = await repo.get_profile("M_TEST", window_days=90)
     assert profile is not None and profile.credit_score == 62
-    assert [(e.event_type, e.ts) for e in profile.recent_events] == [
-        ("改标题重上架", "2024-09-01T10:00:00Z")
-    ]
+    assert profile.removals == 5
 
 
 async def test_missing_merchant_returns_none():
@@ -274,54 +220,36 @@ def _mysql_reachable() -> bool:
         return False
 
 
-async def _insert_merchant(merchant_id: str, seed: dict, events: list[dict]) -> None:
+async def _insert_merchant(merchant_id: str, seed: dict) -> None:
     """用**裸 SQL** 写入 M_5512 同构种子（独立 merchant_id）。
 
-    绕开 ORM 写：这样列名/JSON/时间口径由手写 DDL 独立钉住，读路径才走 ORM ——
+    绕开 ORM 写：这样列名口径由手写 DDL 独立钉住，读路径才走 ORM ——
     DDL 与 ORM 谁漂移了都直接报错。
     """
     sm = get_sessionmaker()
     async with sm() as s:
         await s.execute(
             text(
-                "insert into merchant (merchant_id, product_total, similar_product_count, "
-                "removals, title_relisting_count, violations_total, violations_by_type, "
-                "credit_score) values (:mid, :pt, :sp, :rm, :tr, :vt, :vbt, :cs)"
+                "insert into merchant (merchant_id, similar_product_count, removals, "
+                "title_relisting_count, credit_score) values (:mid, :sp, :rm, :tr, :cs)"
             ),
             {
                 "mid": merchant_id,
-                "pt": seed["product_total"],
                 "sp": seed["similar_product_count"],
                 "rm": seed["removals"],
                 "tr": seed["title_relisting_count"],
-                "vt": seed["violations"]["total"],
-                "vbt": json.dumps(seed["violations"]["by_type"], ensure_ascii=False),
                 "cs": seed["credit_score"],
             },
         )
-        for order, event in enumerate(events, start=1):
-            await s.execute(
-                text(
-                    "insert into merchant_event (merchant_id, event_type, ts, sort_order) "
-                    "values (:mid, :et, :ts, :so)"
-                ),
-                {
-                    "mid": merchant_id,
-                    "et": event["event_type"],
-                    "ts": event["ts"].replace("T", " ").replace("Z", ""),
-                    "so": order,
-                },
-            )
         await s.commit()
 
 
 async def _delete_merchant(merchant_id: str) -> None:
     sm = get_sessionmaker()
     async with sm() as s:
-        for table in ("merchant_event", "merchant"):
-            await s.execute(
-                text(f"delete from {table} where merchant_id = :mid"), {"mid": merchant_id}
-            )
+        await s.execute(
+            text("delete from merchant where merchant_id = :mid"), {"mid": merchant_id}
+        )
         await s.commit()
 
 
@@ -332,23 +260,16 @@ async def test_mysql_merchant_repository_roundtrip_against_real_db():
     """MySQL → MerchantProfile → Evidence 全字段往返（种子取自 M_5512 的结构）。"""
     merchant_id = f"PYTEST_MERCHANT_{uuid4().hex[:8]}"
     seed = dict(_DEFAULT_MERCHANTS["M_5512"])
-    events = list(seed["recent_events"])
     try:
-        await _insert_merchant(merchant_id, seed, events)
+        await _insert_merchant(merchant_id, seed)
 
         profile = await MySQLMerchantRepository().get_profile(merchant_id, window_days=90)
         assert profile is not None
         assert profile.merchant_id == merchant_id
-        assert profile.product_total == seed["product_total"]
         assert profile.similar_product_count == seed["similar_product_count"]
         assert profile.removals == seed["removals"]
         assert profile.title_relisting_count == seed["title_relisting_count"]
-        assert profile.violations.total == seed["violations"]["total"]
-        assert profile.violations.by_type == seed["violations"]["by_type"]
         assert profile.credit_score == seed["credit_score"]
-        assert [(e.event_type, e.ts) for e in profile.recent_events] == [
-            (e["event_type"], e["ts"]) for e in events
-        ], "事件必须按 sort_order 稳定读出，ts 格式与 InMemory 种子逐字一致"
 
         tool = MerchantTool(repo=MySQLMerchantRepository())
         res = await tool.call(MerchantArgs(merchant_id=merchant_id), _ctx())

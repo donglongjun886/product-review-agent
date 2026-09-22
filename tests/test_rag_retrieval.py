@@ -99,42 +99,62 @@ def case_rows() -> Any:
     return load_cases()[0]
 
 
-def _build_index(kind: str, mode: str, *, rows: Any, embedder: Any, prefix: str) -> Any:
-    """按 kind/mode 装配一个 chroma 索引：进程内库 + 真编码器（prefix 隔离各自的 collection）。"""
+def _build_index(kind: str, *, rows: Any, embedder: Any, prefix: str) -> Any:
+    """装配一个 chroma 索引（恒 hybrid）：进程内库 + 真编码器（prefix 隔离 collection）。"""
     from pra.rag.chroma_store import ChromaConfig
     from pra.rag.factory import build_case_index, build_policy_index
 
     build = build_policy_index if kind == "policy" else build_case_index
     config = ChromaConfig(ephemeral=True, collection_prefix=prefix)
-    return build(rows=rows, embedding_model=embedder, mode=mode, config=config)
+    return build(rows=rows, embedding_model=embedder, config=config)
 
 
 @pytest.fixture(scope="module")
-def policy_bm25(policy_rows: Any, embedder: Any) -> Any:
+def policy_hybrid(policy_rows: Any, embedder: Any) -> Any:
     return _build_index(
-        "policy", "bm25", rows=policy_rows, embedder=embedder, prefix="pytest_rag_ret_pol_bm25"
-    )
-
-
-@pytest.fixture(scope="module")
-def policy_vector(policy_rows: Any, embedder: Any) -> Any:
-    return _build_index(
-        "policy", "vector", rows=policy_rows, embedder=embedder, prefix="pytest_rag_ret_pol_vec"
+        "policy", rows=policy_rows, embedder=embedder, prefix="pytest_rag_ret_pol_hyb"
     )
 
 
 @pytest.fixture(scope="module")
 def case_hybrid(case_rows: Any, embedder: Any) -> Any:
     return _build_index(
-        "case", "hybrid", rows=case_rows, embedder=embedder, prefix="pytest_rag_ret_case_hyb"
+        "case", rows=case_rows, embedder=embedder, prefix="pytest_rag_ret_case_hyb"
     )
 
 
-@pytest.fixture(scope="module")
-def case_vector(case_rows: Any, embedder: Any) -> Any:
-    return _build_index(
-        "case", "vector", rows=case_rows, embedder=embedder, prefix="pytest_rag_ret_case_vec"
-    )
+def _ranked(index: Any, kind: str, path: str, query: str, filters: Any, *,
+            effective_only: bool = False, top_k: int | None = None) -> list[tuple[int, float]]:
+    """直调索引内部单路检索器 → ``[(行索引, 该路原始分)]``。
+
+    索引层没有模式开关（``search`` 恒 hybrid）；单路只作验证 / 调试入口，这里直接调用两路
+    私有检索器，不构成对外参数面（BM25 / Vector 是 hybrid 的内部路径，不是可选模式）。
+    """
+    from pra.rag.deps import llama
+    from pra.rag.index import _case_candidates, _policy_candidates
+
+    if kind == "policy":
+        candidates = _policy_candidates(index._rows, filters, effective_only)
+    else:
+        candidates = _case_candidates(index._rows, filters)
+    if not candidates:
+        return []
+    bundle = llama().QueryBundle(query_str=query)
+    if path == "bm25":
+        ranked = index._rank_bm25(index._sub_context(candidates), bundle, len(candidates))
+    else:
+        ranked = index._rank_vector(
+            index._full_context(), bundle, index._filters_of(filters, effective_only)
+        )
+    return ranked if top_k is None else ranked[:top_k]
+
+
+def _policy_ids(index: Any, ranked: list[tuple[int, float]]) -> list[str]:
+    return [index._rows[i].clause_id for i, _ in ranked]
+
+
+def _case_ids(index: Any, ranked: list[tuple[int, float]]) -> list[str]:
+    return [index._rows[i].case_id for i, _ in ranked]
 
 
 def _tool_ctx() -> ToolContext:
@@ -167,11 +187,11 @@ def test_reseed_on_existing_collection_overwrites_same_id(
     shared = ChromaConfig(
         ephemeral=True, collection_prefix=prefix, client=make_chroma_client(base)
     )
-    build_policy_index(rows=policy_rows, embedding_model=embedder, mode="bm25", config=shared)
+    build_policy_index(rows=policy_rows, embedding_model=embedder, config=shared)
     marker = "重建改写标记字"
     patched = [policy_rows[0].model_copy(update={"text": marker}), *policy_rows[1:]]
     second = build_policy_index(
-        rows=patched, embedding_model=embedder, mode="bm25", config=shared
+        rows=patched, embedding_model=embedder, config=shared
     )
     expected_ids = [_node_id(second.collection_name, r.clause_id) for r in patched]
     collection = shared.client.get_collection(second.collection_name)
@@ -198,11 +218,11 @@ def test_reseed_on_shrunk_corpus_purges_stale_node_ids(
         ephemeral=True, collection_prefix=prefix, client=make_chroma_client(base)
     )
     full = build_policy_index(
-        rows=policy_rows, embedding_model=embedder, mode="bm25", config=shared
+        rows=policy_rows, embedding_model=embedder, config=shared
     )
     shrunk_rows = policy_rows[:-1]
     shrunk = build_policy_index(
-        rows=shrunk_rows, embedding_model=embedder, mode="bm25", config=shared
+        rows=shrunk_rows, embedding_model=embedder, config=shared
     )
     full_ids = {_node_id(full.collection_name, r.clause_id) for r in policy_rows}
     expected_ids = {_node_id(shrunk.collection_name, r.clause_id) for r in shrunk_rows}
@@ -218,24 +238,23 @@ def test_reseed_on_shrunk_corpus_purges_stale_node_ids(
 # ---------------------------------------------------------------------------
 
 
-async def test_bm25_recalls_expected_policy_clause(policy_bm25: Any) -> None:
+async def test_bm25_recalls_expected_policy_clause(policy_hybrid: Any) -> None:
     """BM25 路能按词面把「该命中的条款」召回进 Top-K。
 
     断言：查询「无品牌授权，鞋靴整体外观高度模仿知名品牌在售款」的 Top-5 含
     ``POLICY_1.4_v1_c1``（鞋靴外观高度模仿……条款）。意义：证明 BM25 路不是空转（此前被删的
     用例正是这一层）—— 分词 / 索引 / 召回任一环节坏掉，目标条款都会掉出 Top-K。
     """
-    hits = await policy_bm25.search(
+    ranked = _ranked(
+        policy_hybrid, "policy", "bm25",
         "无品牌授权，鞋靴整体外观高度模仿知名品牌在售款",
-        PolicySearchFilters(),
-        5,
-        True,
+        PolicySearchFilters(), effective_only=True, top_k=5,
     )
-    ids = [h.clause_id for h in hits]
+    ids = _policy_ids(policy_hybrid, ranked)
     assert "POLICY_1.4_v1_c1" in ids, f"BM25 未召回预期条款；实际 Top-5={ids}"
 
 
-async def test_bm25_no_global_tokenizer_patch(policy_bm25: Any) -> None:
+async def test_bm25_no_global_tokenizer_patch(policy_hybrid: Any) -> None:
     """BM25 分词是检索器自持的（``bm25s.tokenize`` 归库所有，不得再被全局替换）。
 
     断言：跑一次真实检索后，``rag/bm25.py`` 不再暴露全局替换件（``_TOKENIZER_LOCK`` /
@@ -246,8 +265,11 @@ async def test_bm25_no_global_tokenizer_patch(policy_bm25: Any) -> None:
 
     from pra.rag import bm25 as bm25_mod
 
-    hits = await policy_bm25.search("外观高度模仿知名品牌", PolicySearchFilters(), 3, True)
-    assert hits, "BM25 检索应有命中（空结果会让本用例失去意义）"
+    ranked = _ranked(
+        policy_hybrid, "policy", "bm25", "外观高度模仿知名品牌",
+        PolicySearchFilters(), effective_only=True, top_k=3,
+    )
+    assert ranked, "BM25 检索应有命中（空结果会让本用例失去意义）"
     assert not hasattr(bm25_mod, "_TOKENIZER_LOCK")
     assert not hasattr(bm25_mod, "bm25_tokenizer_context")
     assert bm25s.tokenize.__module__ == "bm25s.tokenization", (
@@ -255,20 +277,19 @@ async def test_bm25_no_global_tokenizer_patch(policy_bm25: Any) -> None:
     )
 
 
-async def test_vector_recalls_semantically_matching_clause(policy_vector: Any) -> None:
+async def test_vector_recalls_semantically_matching_clause(policy_hybrid: Any) -> None:
     """Vector 路能按语义把「措辞不同但同义」的条款召回进 Top-K。
 
     断言：查询「商品把 PU 材质宣称为真皮，属于成分虚假宣传」的 Top-5 含 ``POLICY_2.3_v1_c1``
     （材质/成分虚假声称）。意义：目标条款正文与查询措辞并不逐字相同，只有语义编码生效才会召回
     —— 用真 BGE 验证向量路真的做了语义检索，而非退化到词面匹配。
     """
-    hits = await policy_vector.search(
+    ranked = _ranked(
+        policy_hybrid, "policy", "vector",
         "商品把 PU 材质宣称为真皮，属于成分虚假宣传",
-        PolicySearchFilters(),
-        5,
-        True,
+        PolicySearchFilters(), effective_only=True, top_k=5,
     )
-    ids = [h.clause_id for h in hits]
+    ids = _policy_ids(policy_hybrid, ranked)
     assert "POLICY_2.3_v1_c1" in ids, f"Vector 未召回语义相关条款；实际 Top-5={ids}"
 
 
@@ -299,19 +320,19 @@ async def test_hybrid_scores_are_rrf_fusion_not_similarity(case_hybrid: Any) -> 
     )
 
 
-async def test_vector_scores_are_similarity_scale_unlike_rrf(case_vector: Any) -> None:
-    """对照反证：vector 模式的分是库口径 ``exp(-distance)``（⊂ ``(0, 1]``），量纲与 hybrid 的 RRF 分完全不同。
+async def test_vector_scores_are_similarity_scale_unlike_rrf(case_hybrid: Any) -> None:
+    """对照反证：vector 路的分是库口径 ``exp(-distance)``（⊂ ``(0, 1]``），量纲与 hybrid 的 RRF 分完全不同。
 
-    断言：同一查询在 vector 模式的 Top 分 **大于** RRF 上界 ``2/60``。意义：与上一条互为反证
+    断言：同一查询在 vector 路的 Top 分 **大于** RRF 上界 ``2/60``。意义：与上一条互为反证
     —— 若 hybrid 误用了 vector 的相似度分（或反之），两条用例必有一条失败；同时钉住「不得把
-    RRF 分称作语义相似度」这条术语红线。
+    RRF 分称作语义相似度」这条术语红线。vector 路经内部检索器直调（索引层无模式开关）。
     """
-    hits = await case_vector.search(
+    ranked = _ranked(
+        case_hybrid, "case", "vector",
         "无品牌外观高度模仿知名品牌，商家多次改标题重上架",
-        CaseSearchFilters(),
-        5,
+        CaseSearchFilters(), top_k=5,
     )
-    scores = [h.retrieval_score for h in hits]
+    scores = [score for _, score in ranked]
     assert scores, "vector 检索必须返回命中"
     assert max(scores) > _RRF_UPPER_BOUND, (
         f"vector 的库口径分应远大于 RRF 上界 {_RRF_UPPER_BOUND:.4f}，实际={scores}"
@@ -324,7 +345,7 @@ async def test_vector_scores_are_similarity_scale_unlike_rrf(case_vector: Any) -
 
 
 async def test_policy_effective_only_excludes_expired_clause(
-    policy_bm25: Any, policy_rows: Any
+    policy_hybrid: Any, policy_rows: Any
 ) -> None:
     """``effective_only`` 语义：True 时 EXPIRED 条款不得出现，False 时可出现。
 
@@ -336,22 +357,24 @@ async def test_policy_effective_only_excludes_expired_clause(
     query = "禁止销售仿冒、假冒注册商标的商品"
     top_k = len(policy_rows)
 
-    loose = await policy_bm25.search(query, PolicySearchFilters(), top_k, False)
-    assert "POLICY_1.1_v1_c1" in [h.clause_id for h in loose], (
+    loose = _ranked(policy_hybrid, "policy", "bm25", query, PolicySearchFilters(),
+                    effective_only=False, top_k=top_k)
+    assert "POLICY_1.1_v1_c1" in _policy_ids(policy_hybrid, loose), (
         "effective_only=False 时失效条款应可被召回（对照基准）"
     )
 
-    strict = await policy_bm25.search(query, PolicySearchFilters(), top_k, True)
-    assert "POLICY_1.1_v1_c1" not in [h.clause_id for h in strict], (
+    strict = _ranked(policy_hybrid, "policy", "bm25", query, PolicySearchFilters(),
+                     effective_only=True, top_k=top_k)
+    assert "POLICY_1.1_v1_c1" not in _policy_ids(policy_hybrid, strict), (
         "effective_only=True 时 EXPIRED 条款不得出现"
     )
-    assert all(h.status == "EFFECTIVE" for h in strict), (
+    assert all(policy_hybrid._rows[i].status == "EFFECTIVE" for i, _ in strict), (
         "effective_only=True 结果必须全为 EFFECTIVE"
     )
 
 
 async def test_policy_category_filter_keeps_full_category_clauses(
-    policy_bm25: Any, policy_rows: Any
+    policy_hybrid: Any, policy_rows: Any
 ) -> None:
     """``category`` 过滤含「全类目」语义：指定具体类目时，全类目条款也应保留。
 
@@ -359,19 +382,17 @@ async def test_policy_category_filter_keeps_full_category_clauses(
     ``POLICY_4.2_v2_c1``（全类目 + 改标题重上架 —— 查询正指向它）。意义：把「全类目」当普通类目
     精确匹配会把平台通用条款整批漏掉，本断言钉住 include-全类目 的过滤语义。
     """
-    hits = await policy_bm25.search(
-        "改标题、描述后重新上架规避审核",
-        PolicySearchFilters(category="箱包/女包"),
-        len(policy_rows),
-        True,
+    ranked = _ranked(
+        policy_hybrid, "policy", "bm25", "改标题、描述后重新上架规避审核",
+        PolicySearchFilters(category="箱包/女包"), effective_only=True, top_k=len(policy_rows),
     )
-    cats = {h.category for h in hits}
+    cats = {policy_hybrid._rows[i].category for i, _ in ranked}
     assert cats <= {"箱包/女包", "全类目"}, f"category 过滤漏了全类目语义：{cats}"
-    assert "POLICY_4.2_v2_c1" in [h.clause_id for h in hits], "全类目条款应被保留"
+    assert "POLICY_4.2_v2_c1" in _policy_ids(policy_hybrid, ranked), "全类目条款应被保留"
 
 
 async def test_policy_risk_type_filter_is_overlap_not_equality(
-    policy_bm25: Any, policy_rows: Any
+    policy_hybrid: Any, policy_rows: Any
 ) -> None:
     """``risk_type`` 过滤是**交叠非空**，不是相等匹配。
 
@@ -379,17 +400,17 @@ async def test_policy_risk_type_filter_is_overlap_not_equality(
     ``POLICY_2.3_v1_c1``（risk_type = [FALSE_CLAIM, FIELD_CONFLICT]，多标一个也要命中）。意义：
     相等匹配会漏掉「多风险类型」条款 —— 正是「漏召回只在带过滤时暴露」的典型场景。
     """
-    hits = await policy_bm25.search(
-        "材质成分虚假宣传 PU 冒充实皮",
-        PolicySearchFilters(risk_type=["FALSE_CLAIM"]),
-        len(policy_rows),
-        True,
+    ranked = _ranked(
+        policy_hybrid, "policy", "bm25", "材质成分虚假宣传 PU 冒充实皮",
+        PolicySearchFilters(risk_type=["FALSE_CLAIM"]), effective_only=True,
+        top_k=len(policy_rows),
     )
-    assert hits, "risk_type 过滤后应仍有命中"
-    assert all({t.value for t in h.risk_type} & {"FALSE_CLAIM"} for h in hits), (
-        "存在与过滤类型无交集的条款"
-    )
-    assert "POLICY_2.3_v1_c1" in [h.clause_id for h in hits], (
+    assert ranked, "risk_type 过滤后应仍有命中"
+    assert all(
+        {t.value for t in policy_hybrid._rows[i].risk_type} & {"FALSE_CLAIM"}
+        for i, _ in ranked
+    ), "存在与过滤类型无交集的条款"
+    assert "POLICY_2.3_v1_c1" in _policy_ids(policy_hybrid, ranked), (
         "多风险类型条款应被交叠匹配命中"
     )
 
@@ -418,7 +439,7 @@ async def test_case_filters_apply_before_retrieval(case_hybrid: Any, case_rows: 
     assert "RAG_CASE_0001" in ids, "组合过滤下预期先例被漏召回"
 
 
-async def test_filter_plus_retrieval_no_silent_recall_loss(policy_bm25: Any) -> None:
+async def test_filter_plus_retrieval_no_silent_recall_loss(policy_hybrid: Any) -> None:
     """红线：**带过滤时**的检索不得静默漏召回（漏召回只在带过滤时暴露）。
 
     断言：``category="女鞋/运动鞋"`` + ``effective_only=True`` + 指向该条款的查询下，Top-K 仍含
@@ -426,13 +447,11 @@ async def test_filter_plus_retrieval_no_silent_recall_loss(policy_bm25: Any) -> 
     Python 谓词**（BM25 路），若两处语义错位，目标条款会被静默剔除；本用例专门覆盖「过滤 + 检索」这一
     red-line 组合（与无过滤的召回用例互为补充）。
     """
-    hits = await policy_bm25.search(
-        "鞋靴整体外观高度模仿知名品牌且无授权",
-        PolicySearchFilters(category="女鞋/运动鞋"),
-        10,
-        True,
+    ranked = _ranked(
+        policy_hybrid, "policy", "bm25", "鞋靴整体外观高度模仿知名品牌且无授权",
+        PolicySearchFilters(category="女鞋/运动鞋"), effective_only=True, top_k=10,
     )
-    assert "POLICY_1.4_v1_c1" in [h.clause_id for h in hits], (
+    assert "POLICY_1.4_v1_c1" in _policy_ids(policy_hybrid, ranked), (
         "带 category 过滤时预期的类目条款被漏召回"
     )
 
@@ -443,12 +462,12 @@ async def test_filter_plus_retrieval_no_silent_recall_loss(policy_bm25: Any) -> 
 
 
 async def test_policy_where_pushdown_equals_python_candidates(
-    policy_vector: Any, policy_rows: Any
+    policy_hybrid: Any, policy_rows: Any
 ) -> None:
     """向量路下推的 ``where`` 与 BM25 路的 Python 谓词**必须给出同一打分域**。
 
     断言：遍历 ``category``（无 / 真实类目 / 全类目 / 不存在）× ``effective_only`` × ``risk_type``
-    （无 / 单值 / 双值）的全组合，``policy_vector.search(..., top_k=len(rows))`` 的命中集合
+    （无 / 单值 / 双值）的全组合，**向量路**取 ``top_k=len(rows)`` 的命中集合
     **逐组等于** ``_policy_candidates`` 算出的候选集合。
 
     意义：向量路把过滤**下推给 Chroma**（``where``），BM25 路只能在 Python 候选集上打分
@@ -470,25 +489,24 @@ async def test_policy_where_pushdown_equals_python_candidates(
                     policy_rows[i].clause_id
                     for i in _policy_candidates(policy_rows, filters, effective_only)
                 }
-                hits = await policy_vector.search(
+                ranked = _ranked(
+                    policy_hybrid, "policy", "vector",
                     "外观高度模仿知名品牌 / 材质虚假宣传 / 改标题重上架",
-                    filters,
-                    len(policy_rows),
-                    effective_only,
+                    filters, effective_only=effective_only, top_k=len(policy_rows),
                 )
-                assert {h.clause_id for h in hits} == expected, (
+                assert set(_policy_ids(policy_hybrid, ranked)) == expected, (
                     "where 下推与 Python 谓词不一致（带过滤的静默漏召回）："
                     f"category={category!r} effective_only={effective_only} risk_type={risks}"
                 )
 
 
 async def test_case_where_pushdown_equals_python_candidates(
-    case_vector: Any, case_rows: Any
+    case_hybrid: Any, case_rows: Any
 ) -> None:
     """case 侧同理；差异点：case **没有** ``effective_only``，``category`` 是**精确相等**。
 
     断言：``category``（无 / 真实类目 / 不存在）× ``risk_type``（无 / 单值 / 双值）全组合下，
-    ``case_vector.search(..., top_k=len(rows))`` 的命中集合逐组等于 ``_case_candidates`` 的候选集合。
+    向量路取 ``top_k=len(rows)`` 的命中集合逐组等于 ``_case_candidates`` 的候选集合。
     意义：case 的 ``category`` 若被误写成 policy 的三态（``$in [值, 全类目]``），带过滤时会**多召回**
     全类目先例 —— 本用例把它钉死（预期集合按 case 自己的精确相等语义现算）。
     """
@@ -500,12 +518,12 @@ async def test_case_where_pushdown_equals_python_candidates(
             expected = {
                 case_rows[i].case_id for i in _case_candidates(case_rows, filters)
             }
-            hits = await case_vector.search(
+            ranked = _ranked(
+                case_hybrid, "case", "vector",
                 "无品牌外观高度模仿，商家多次改标题重上架",
-                filters,
-                len(case_rows),
+                filters, top_k=len(case_rows),
             )
-            assert {h.case_id for h in hits} == expected, (
+            assert set(_case_ids(case_hybrid, ranked)) == expected, (
                 "case 侧 where 下推与 Python 谓词不一致："
                 f"category={category!r} risk_type={risks}"
             )
@@ -516,7 +534,7 @@ async def test_case_where_pushdown_equals_python_candidates(
 # ---------------------------------------------------------------------------
 
 
-async def test_index_search_returns_hit_models(policy_bm25: Any, case_hybrid: Any) -> None:
+async def test_index_search_returns_hit_models(policy_hybrid: Any, case_hybrid: Any) -> None:
     """索引检索返回的是工具契约的 Hit 模型（而非内部 node / dict）。
 
     断言：``ChromaPolicyIndex.search`` 返回 ``PolicyClauseHit``；``ChromaCaseIndex.search`` 返回
@@ -527,13 +545,13 @@ async def test_index_search_returns_hit_models(policy_bm25: Any, case_hybrid: An
     from pra.tools.case_search.tool import CaseHit
     from pra.tools.policy_search.tool import PolicyClauseHit
 
-    p_hits = await policy_bm25.search("外观模仿", PolicySearchFilters(), 3, True)
+    p_hits = await policy_hybrid.search("外观模仿", PolicySearchFilters(), 3, True)
     c_hits = await case_hybrid.search("外观模仿", CaseSearchFilters(), 3)
     assert p_hits and all(isinstance(h, PolicyClauseHit) for h in p_hits)
     assert c_hits and all(isinstance(h, CaseHit) for h in c_hits)
 
 
-async def test_policy_search_tool_produces_policy_ref_evidence(policy_bm25: Any) -> None:
+async def test_policy_search_tool_produces_policy_ref_evidence(policy_hybrid: Any) -> None:
     """Policy 两层：``ChromaPolicyIndex.search`` → ``PolicyClauseHit``；工具 → ``POLICY_REF``。
 
     断言：注入真索引的 ``PolicySearchTool.call`` 拿到 ≥1 个 ``PolicyClauseHit``；``to_evidence``
@@ -541,7 +559,7 @@ async def test_policy_search_tool_produces_policy_ref_evidence(policy_bm25: Any)
     clause_id。意义：「RAG 怎么检索」与「Evidence 怎么产生」是两个层次，本用例同时钉住命中类型与
     证据映射（可追溯引用 = ref_id 必填、政策依据 = 强权重 0.9）。
     """
-    tool = PolicySearchTool(index=policy_bm25)
+    tool = PolicySearchTool(index=policy_hybrid)
     result = await tool.call(
         PolicySearchArgs(query="外观高度模仿知名品牌设计", top_k=3, effective_only=True),
         _tool_ctx(),
@@ -587,18 +605,6 @@ async def test_case_search_tool_produces_case_precedent_evidence(case_hybrid: An
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_mode_raises_value_error(policy_rows: Any, embedder: Any) -> None:
-    """非法 ``mode`` 必须抛 ``ValueError``（而不是静默退回某个默认模式）。
-
-    断言：以 ``mode="similarity"`` 构造索引抛 ``ValueError``。意义：模式是检索语义开关，静默兜底
-    会让调用方以为跑的是它请求的模式（历史兼容分支正是被判定为「防御假想问题」而删除）。
-    """
-    from pra.rag.factory import build_policy_index
-
-    with pytest.raises(ValueError):
-        build_policy_index(rows=policy_rows, embedding_model=embedder, mode="similarity")
-
-
 async def test_unreachable_chroma_host_raises_instead_of_silent_empty(
     policy_rows: Any, embedder: Any
 ) -> None:
@@ -614,7 +620,7 @@ async def test_unreachable_chroma_host_raises_instead_of_silent_empty(
     config = ChromaConfig(host=_UNREACHABLE_HOST, port=_UNREACHABLE_PORT)
     try:
         index = build_policy_index(
-            rows=policy_rows, embedding_model=embedder, mode="vector", config=config
+            rows=policy_rows, embedding_model=embedder, config=config
         )
         await index.search("外观模仿", PolicySearchFilters(), 5, True)
     except Exception:  # noqa: BLE001 — 任意异常都算「已上抛」，见上 docstring

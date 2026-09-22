@@ -1,10 +1,10 @@
-"""Evaluation Phase 2 测试：Abstention / Regression 两组。
+"""评测抽象层测试：Abstention / Regression 两组。
 
 - ``test_abstention_*``：五指标在手工可算小样本上数值正确（SHOULD_ABSTAIN 被自动
   只表现为 recall 缺口、不进 wrong_auto；分母 0 → None；老数据无 abstain_label 兼容）；
-- ``test_regression_*``：篡改记录后比对失败，真实跑 v1 集两次 digest 一致。
+- ``test_regression_*``：篡改记录后比对失败，真实跑评测集两次 digest 一致。
 
-全程离线确定性；测试数据来自 eval_data/v1（只读），基线快照一律写 tmp_path。
+全程离线确定性；测试数据取 ``eval_data/v2`` 的子集（只读），基线快照一律写 tmp_path。
 """
 
 from __future__ import annotations
@@ -24,7 +24,15 @@ from pra.evaluation.regression import (
     write_baseline,
 )
 
-DATA_PATH = Path(__file__).resolve().parents[1] / "eval_data" / "v1" / "cases_v1.jsonl"
+DATA_PATH = Path(__file__).resolve().parents[1] / "eval_data" / "v2" / "cases_v2.jsonl"
+
+
+def _subset_path(tmp_path: Path, n: int = 4) -> str:
+    """把 v2 前 ``n`` 条写成临时 JSONL（回归机制用例只需一个小而确定的集）。"""
+    lines = DATA_PATH.read_text(encoding="utf-8").splitlines()[:n]
+    path = tmp_path / "cases_subset.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
 
 
 def _make_record(case_id: str, decision: str, scheme: str = "rule") -> EvalRecord:
@@ -140,9 +148,9 @@ def test_regression_tampered_record_fails() -> None:
     assert report.mismatches["agent"][0][3] == "HUMAN_REVIEW"  # 当前值
 
 
-def test_regression_subset_compare_and_missing_scheme() -> None:
+def test_regression_subset_compare_and_missing_scheme(tmp_path: Path) -> None:
     """基线只录两方案、当前只跑子集 → 同决策 PASS（子集比对不误报）；当前含基线未录的方案 → FAIL（提示重录）。"""
-    cases = [c for c in load_dataset(DATA_PATH)][:3]
+    cases = [c for c in load_dataset(_subset_path(tmp_path))][:3]
     base_records = {
         "rule": [_make_record(c.eval_case_id, "PASS") for c in cases],
         "single_call_llm": [_make_record(c.eval_case_id, "PASS") for c in cases],
@@ -165,15 +173,16 @@ def test_regression_subset_compare_and_missing_scheme() -> None:
     assert any("不在基线快照" in line for line in report.summary)
 
 
-async def test_regression_real_v1_run_twice_passes(tmp_path: Path) -> None:
-    """真实跑 v1 集两次 → 快照 digest 一致 → PASS（确定性重放；基线走 tmp_path 不碰数据目录）。"""
+async def test_regression_real_run_twice_passes(tmp_path: Path) -> None:
+    """真实跑同一评测集两次 → 快照 digest 一致 → PASS（确定性重放；基线走 tmp_path 不碰数据目录）。"""
+    data = _subset_path(tmp_path)
     baseline_file = tmp_path / "regression_baseline.json"
-    snap1 = await compute_current_snapshot(str(DATA_PATH), schemes=("single_call_llm", "rule"))
+    snap1 = await compute_current_snapshot(data, schemes=("single_call_llm", "rule"))
     write_baseline(snap1, baseline_file)
     from pra.evaluation.regression import run_regression
 
-    report = await run_regression(str(DATA_PATH), baseline_file, schemes=("single_call_llm", "rule"))
+    report = await run_regression(data, baseline_file, schemes=("single_call_llm", "rule"))
     assert report.ok is True and report.status == "PASS"
     # 再跑一次当前快照（不落盘）仍一致 —— 逐字节确定性
-    snap2 = await compute_current_snapshot(str(DATA_PATH), schemes=("single_call_llm", "rule"))
+    snap2 = await compute_current_snapshot(data, schemes=("single_call_llm", "rule"))
     assert snap2["digest"] == snap1["digest"]

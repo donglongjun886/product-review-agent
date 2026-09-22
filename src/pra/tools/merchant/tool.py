@@ -1,7 +1,7 @@
 """MerchantTool —— 行为模式工具。
 
 回答的业务问题：单商品看不出问题，商家的**历史行为**才是「规避」的关键信号 —— 相似商品数、
-违规/下架/改标题重上架次数、信用分。
+下架/改标题重上架次数、信用分。
 
 ``MerchantRepository`` 是窄接口（按 merchant_id 取行为画像；返回 None = 商家不存在 → ``ok=False``）；
 ``InMemoryMerchantRepository`` 是 **Mock 默认实现**（默认装配路径恒用它，CI 不连库、评测可重放），
@@ -36,28 +36,14 @@ MERCHANT_HISTORY_WEIGHT = 0.85  # 多信号聚合型证据默认高权重（暂�
 # ---------------------------------------------------------------------------
 
 
-class MerchantEvent(BaseModel):
-
-    event_type: str = Field(description="事件类型：违规 / 下架 / 改标题重上架 等")
-    ts: str = Field(description="事件时间 ISO8601")
-
-
-class MerchantViolations(BaseModel):
-
-    total: int = Field(default=0, ge=0)
-    by_type: dict[str, int] = Field(default_factory=dict, description="按违规类型计数")
-
-
 class MerchantProfile(BaseModel):
+    """商家行为画像（只保留决策链真正消费的列，与迁移 004 的 ``merchant`` 表同形）。"""
 
     merchant_id: str
-    product_total: int = Field(default=0, ge=0, description="在架商品总数")
     similar_product_count: int = Field(default=0, ge=0, description="与本案相似的商品数")
     removals: int = Field(default=0, ge=0, description="窗口内下架次数")
     title_relisting_count: int = Field(default=0, ge=0, description="窗口内改标题重上架次数")
-    violations: MerchantViolations = Field(default_factory=MerchantViolations)
     credit_score: int = Field(default=0, ge=0, description="商家信用分")
-    recent_events: list[MerchantEvent] = Field(default_factory=list, max_length=20, description="最近事件（≤20 条）")
 
 
 class MerchantRepository(Protocol):
@@ -76,16 +62,10 @@ class MerchantRepository(Protocol):
 _DEFAULT_MERCHANTS: Mapping[str, dict[str, Any]] = {
     "M_5512": {
         "merchant_id": "M_5512",
-        "product_total": 120,
         "similar_product_count": 23,
         "removals": 5,
         "title_relisting_count": 3,
-        "violations": {"total": 2, "by_type": {"IP_MIMIC": 1, "FALSE_CLAIM": 1}},
         "credit_score": 62,
-        "recent_events": [
-            {"event_type": "改标题重上架", "ts": "2024-09-01T10:00:00Z"},
-            {"event_type": "下架", "ts": "2024-08-20T09:00:00Z"},
-        ],
     },
 }
 
@@ -129,7 +109,7 @@ class MerchantResult(ToolResult):
 class MerchantTool:
 
     name = "MerchantTool"
-    description = "查询商家的系统性行为画像：在架商品数、相似商品数、历史违规/下架/改标题重上架次数、信用分"
+    description = "查询商家的系统性行为画像：相似商品数、历史下架/改标题重上架次数、信用分"
     args_model = MerchantArgs
     measured_dimensions: frozenset[str] = frozenset({DIM_MERCHANT_PROFILE})
     measurement_available: bool = True

@@ -74,13 +74,12 @@ _JSON_CAP = 64 * 1024
 _TRIGGER_SCREENING_DIRECT = "SCREENING_DIRECT"
 
 # 节点名 → review_trace.step_type 词汇表。tools 节点不落 "TOOLS" 行 —— 其 update 内每条
-# tool_call_history record 各落一行 TOOL_CALL（执行审计粒度）。
+# tool_call_history record 各落一行 TOOL_CALL（执行审计粒度），见 run_and_persist 的 tools 特判。
 _NODE_STEP_TYPE = {
     "hypothesize": "HYPOTHESIZE",
     "plan": "PLAN",
     "reevaluate": "REEVALUATE",
     "decide": "DECIDE",
-    "tools": "TOOL_CALL",  # 仅供识别；实际每行取 TOOL_CALL（见 run_and_persist tools 特判）
 }
 
 
@@ -258,7 +257,7 @@ def _evidence_row(
 def _result_payload(
     decision: ReviewDecision, case_id: str, source_run_id: str
 ) -> dict:
-    """review_result 行 payload（图终态与直判共用）；decision_json = ReviewDecision 全量快照，列清单单点维护防漂移。"""
+    """review_result 行 payload（图终态与直判共用）；列清单单点维护防漂移。"""
     return {
         "case_id": case_id,
         "source_run_id": source_run_id,
@@ -267,7 +266,6 @@ def _result_payload(
         "risk_type_json": [_enum_value(t) for t in decision.risk_type],
         "decision_confidence": decision.decision_confidence,
         "policy_refs_json": list(decision.policy),
-        "decision_json": decision.model_dump(mode="json"),
         "created_at": _utcnow(),
         "updated_at": _utcnow(),
     }
@@ -285,7 +283,6 @@ async def _upsert_result(session: Any, payload: dict) -> None:
             risk_type_json=payload["risk_type_json"],
             decision_confidence=payload["decision_confidence"],
             policy_refs_json=payload["policy_refs_json"],
-            decision_json=payload["decision_json"],
             updated_at=payload["updated_at"],
         )
     )
@@ -603,7 +600,7 @@ async def run_screening_direct(
         evidence_rows = 0
         evidence_list: list[Evidence] = []
         for hit in triage.hits:
-            ev = rule_evidence(case, hit)
+            ev = rule_evidence(hit)
             evidence_list.append(ev)
             _evidence_row(session, resolved_run_id, ev)
             evidence_rows += 1
@@ -650,7 +647,7 @@ async def process_review(
             run_id=run_id,
             triage_result="COMPLEX",
             # t.hits → RULE_HIT evidence：与直判路径同构，run_id 归属由 run_and_persist 落库。
-            extra_evidence=[rule_evidence(case, hit) for hit in t.hits],
+            extra_evidence=[rule_evidence(hit) for hit in t.hits],
         )
         return {
             "case_id": summary["case_id"],

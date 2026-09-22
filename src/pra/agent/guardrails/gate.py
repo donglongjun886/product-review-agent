@@ -7,12 +7,12 @@
 （PASS 提案走 PASS Gate、REJECT 提案走 REJECT Gate）以及非判定性的展示字段。
 
 顺序：① 硬规则命中 → REJECT/HIGH/1.0，LLM 不可覆盖；② 重算 ``decision_confidence``（事实侧）；
-③ 弃权清单（预算/冲突/关键工具失败/**关键测量缺口**/不可测维度/降级）任一命中 → HUMAN_REVIEW
+③ 弃权清单（预算/冲突/**关键测量缺口**/不可测维度/降级）任一命中 → HUMAN_REVIEW
 + 归因码；④ 无提案且无码 → 补 ``R5``；⑤ 提案 PASS 不过 PASS Gate → ``+R4``、提案 REJECT 不过
 REJECT Gate → ``+R2``；⑥ 采纳：decision 用提案、confidence 用重算值、overrides=[]。
 
 PASS Gate（全满足才放行）：无维度匹配的**阳性证据** ∧ 无**规则侧阳性**（R-102/R-302 命中）
-∧ 本案 required 维度**全部覆盖**（无 NOT_MEASURED、无 UNMEASURABLE）∧ 无关键工具失败 ∧ 无证据冲突。
+∧ 本案 required 维度**全部覆盖**（无 NOT_MEASURED、无 UNMEASURABLE）∧ 无证据冲突。
 
 REJECT Gate（全满足才自动拒绝）：∃ **真实证据链中、与风险维度匹配的硬阳性**（强相似 ≥0.85 /
 Logo / 商家达阈值 / 显式 ``MEASUREMENT=POSITIVE``）∧ ∃ 带 ``ref_id`` 的可引用依据 ∧ ``dc>=0.7``
@@ -26,7 +26,6 @@ Logo / 商家达阈值 / 显式 ``MEASUREMENT=POSITIVE``）∧ ∃ 带 ``ref_id`
 from __future__ import annotations
 
 from pra.agent.guardrails.budget import budget_exceeded, snapshot_budget
-from pra.agent.guardrails.errors import key_tool_failure
 from pra.agent.guardrails.hard_rules import hard_rule_hit
 from pra.agent.guardrails.measurements import (
     ALWAYS_COVERED_DIMENSIONS,
@@ -66,7 +65,6 @@ DC_CONFLICT_PENALTY = 0.20
 R1_HARD_RULE = "R1_HARD_RULE"
 R2_REJECT_GATE_FAIL = "R2_REJECT_GATE_FAIL"
 R3_BUDGET_EXHAUSTED = "R3_BUDGET_EXHAUSTED"
-R3_KEY_TOOL_FAILED = "R3_KEY_TOOL_FAILED"
 R3_EVIDENCE_CONFLICT = "R3_EVIDENCE_CONFLICT"
 R3_MEASUREMENT_MISSING = "R3_MEASUREMENT_MISSING"
 R3_DIMENSION_UNMEASURABLE = "R3_DIMENSION_UNMEASURABLE"
@@ -115,11 +113,6 @@ def contradiction_detect(state) -> bool:
     return bool(has_strong_sim and has_clean_merchant)
 
 
-def _key_evidence_complete(state) -> bool:
-    """关键证据完整 = 无未解决的 critical Tool 失败。"""
-    return not key_tool_failure(state, state.get("failures") or [])
-
-
 def coverage_of(state) -> CoverageReport:
     """从 state 的事实通道构造覆盖报告（不读 hypotheses）。"""
     return coverage_report(
@@ -143,10 +136,10 @@ def _rule_positive_dims(case) -> frozenset[str]:
 
 
 def pass_gate(state) -> bool:
-    """PASS Gate：五项全满足才放行（全部读事实通道）。
+    """PASS Gate：四项全满足才放行（全部读事实通道）。
 
     ① 无维度匹配的阳性证据；② 无规则侧阳性（R-102/R-302）；③ required 维度全部覆盖
-    （无 NOT_MEASURED / UNMEASURABLE）；④ 无未解决 critical Tool 失败；⑤ 无证据冲突。
+    （无 NOT_MEASURED / UNMEASURABLE）；④ 无证据冲突。
 
     空 state 防御：``case`` 缺失时 required 为空、其余条件也空 —— 若不放行这道守卫会
     **vacuous PASS**（什么都还没查就放行），故显式返回 False。
@@ -159,8 +152,6 @@ def pass_gate(state) -> bool:
     if _rule_positive_dims(state.get("case")):
         return False
     if cov.missing or cov.unmeasurable:
-        return False
-    if not _key_evidence_complete(state):
         return False
     return not contradiction_detect(state)
 
@@ -273,7 +264,6 @@ def _finalize_risk_type(state, proposal) -> list:
 
 def _build_decision(
     state: dict,
-    proposal,
     *,
     decision: Decision,
     risk_level: RiskLevel,
@@ -313,8 +303,8 @@ def _build_decision(
 def abstention_codes(state, cov: CoverageReport) -> list:
     """HUMAN_REVIEW 弃权清单：顺序固定，命中码全量收集（只读事实通道）。
 
-    只认 ``state["degraded"]`` 与未解决的 critical Tool 失败；``severity="warn"`` 的失败只进
-    审计、不触发。**关键测量缺口/不可测维度**是本次新增的两类弃权（可补救 vs 环境缺失）。
+    只认预算超限 / 证据冲突 / 测量缺口 / 不可测维度 / ``state["degraded"]``；
+    ``severity="warn"`` 的失败只进审计、不触发。
     """
     codes: list = []
     budget = state.get("budget")
@@ -322,8 +312,6 @@ def abstention_codes(state, cov: CoverageReport) -> list:
         codes.append(R3_BUDGET_EXHAUSTED)
     if contradiction_detect(state):
         codes.append(R3_EVIDENCE_CONFLICT)
-    if key_tool_failure(state, state.get("failures") or []):
-        codes.append(R3_KEY_TOOL_FAILED)
     if cov.missing:
         codes.append(R3_MEASUREMENT_MISSING)
     if cov.unmeasurable:
@@ -337,7 +325,6 @@ def _human_review(state, proposal, dc: float, overrides: list) -> ReviewDecision
     """转人工的统一组装：risk/risk_type 用 ``_finalize_risk_*``（展示），confidence 用 dc。"""
     return _build_decision(
         state,
-        proposal,
         decision=Decision.HUMAN_REVIEW,
         risk_level=_finalize_risk_level(state, proposal),
         risk_type=_finalize_risk_type(state, proposal),
@@ -356,7 +343,6 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
     if hit is not None:
         return _build_decision(
             state,
-            proposal,
             decision=Decision.REJECT,
             risk_level=RiskLevel.HIGH,
             risk_type=list(hit.risk_types),
@@ -396,7 +382,6 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
     # 6) 采纳：HUMAN 提案或 Gate 通过
     return _build_decision(
         state,
-        proposal,
         decision=Decision(proposal.decision),
         risk_level=RiskLevel(proposal.risk_level),
         risk_type=list(proposal.risk_type),
@@ -413,7 +398,6 @@ __all__ = [
     "R3_BUDGET_EXHAUSTED",
     "R3_DIMENSION_UNMEASURABLE",
     "R3_EVIDENCE_CONFLICT",
-    "R3_KEY_TOOL_FAILED",
     "R3_MEASUREMENT_MISSING",
     "R3_POSITIVE_INSUFFICIENT",
     "R4_PASS_GATE_FAIL",

@@ -4,7 +4,7 @@
 10/15/40000/30000），终态以确定性 overlay 后的 ``ReviewDecision`` 为评测真值。
 不落 DB；每 case 独立 build + compile 一个图，每次 ``ainvoke`` 都从
 ``build_initial_state`` 起算 → 天然隔离、可用桩重放。
-**scripted（CI 可跑）**：注入确定性 ``EvalScriptedLLMBackend``，工具用与 eval_data/v1
+**scripted（CI 可跑）**：注入确定性 ``EvalScriptedLLMBackend``，工具用与 eval_data/v2
 同一份 InMemory 种子世界 —— Agent 经工具拿到 Single-call / Rule 看不到的证据。
 **real**：``AgentScheme(llm=<对象>)`` 直接把该对象交给 ``build_agent_graph``；
 **非确定性、不可重放**、需 API key，仅作观测对照，不进确定性回归基线。
@@ -83,7 +83,7 @@ __all__ = [
     "make_rag_world_tools",
 ]
 
-# 评测种子世界（与 eval_data/v1 同一份"事实知识"；默认演示种子同源扩展）
+# 评测种子世界（与 eval_data/v2 同一份"事实知识"；默认演示种子同源扩展）
 # 三方案公平性：Rule / Single-call 只用基础输入（case 快照），本世界知识只能经
 # Agent 的 5 个 InMemory 工具获得 —— 多信号/对抗类案需要调查才能发现。
 
@@ -140,231 +140,138 @@ EVAL_IMAGE_MATCHES: dict[str, dict[str, Any]] = {
 EVAL_MERCHANTS: dict[str, dict[str, Any]] = {
     "M_5512": {  # 脏：5 removals / 3 改标题重上架（默认演示商家，同源）
         "merchant_id": "M_5512",
-        "product_total": 120,
         "similar_product_count": 23,
         "removals": 5,
         "title_relisting_count": 3,
-        "violations": {"total": 2, "by_type": {"IP_MIMIC": 1, "FALSE_CLAIM": 1}},
         "credit_score": 62,
-        "recent_events": [
-            {"event_type": "改标题重上架", "ts": "2024-09-01T10:00:00Z"},
-            {"event_type": "下架", "ts": "2024-08-20T09:00:00Z"},
-        ],
     },
     "M_8801": {  # 脏：7 removals / 4 改标题
         "merchant_id": "M_8801",
-        "product_total": 45,
         "similar_product_count": 31,
         "removals": 7,
         "title_relisting_count": 4,
-        "violations": {"total": 4, "by_type": {"IP_MIMIC": 3, "EVASION": 1}},
         "credit_score": 38,
-        "recent_events": [
-            {"event_type": "改标题重上架", "ts": "2024-09-02T10:00:00Z"},
-            {"event_type": "改标题重上架", "ts": "2024-08-15T10:00:00Z"},
-            {"event_type": "下架", "ts": "2024-08-10T09:00:00Z"},
-        ],
     },
     "M_3307": {  # 干净
         "merchant_id": "M_3307",
-        "product_total": 28,
         "similar_product_count": 0,
         "removals": 0,
         "title_relisting_count": 0,
-        "violations": {"total": 0, "by_type": {}},
         "credit_score": 96,
-        "recent_events": [],
     },
     "M_9904": {  # 干净
         "merchant_id": "M_9904",
-        "product_total": 12,
         "similar_product_count": 0,
         "removals": 0,
         "title_relisting_count": 0,
-        "violations": {"total": 0, "by_type": {}},
         "credit_score": 92,
-        "recent_events": [],
     },
     "M_6602": {  # 中性：1 removals（低于系统性阈值 3）
         "merchant_id": "M_6602",
-        "product_total": 8,
         "similar_product_count": 1,
         "removals": 1,
         "title_relisting_count": 0,
-        "violations": {"total": 1, "by_type": {"FALSE_CLAIM": 1}},
         "credit_score": 85,
-        "recent_events": [{"event_type": "下架", "ts": "2024-07-01T09:00:00Z"}],
     },
 }
 
-# 商品在库事实种子（ProductTool 用）
+# 商品在库事实种子（ProductTool 用）。``merchant_id`` 只服务 ``eval_dataset_gen.py`` 的
+# 「商品 → 商家」配对，不属 ``ProductSnapshot``（工具模型读出时忽略该键）。
 EVAL_PRODUCTS: dict[str, dict[str, Any]] = {
     "P_88231": {  # 默认演示商品（在库 brand=None；强相似图 0.91）
         "product_id": "P_88231",
         "merchant_id": "M_5512",
-        "title": "新款厚底复古跑鞋 女士百搭运动鞋",
-        "description": "经典复古跑鞋设计，轻量缓震，适合日常通勤和运动。",
         "category": "女鞋/运动鞋",
         "brand": None,
-        "attributes": {"材质": "PU", "鞋底": "橡胶", "适用人群": "女士"},
-        "sku_list": [{"sku_id": "S_1", "color": "米白", "size": "36-40", "price": 129.0}],
-        "images": [{"url": "https://cdn.example.com/products/P_88231/img1.jpg", "source": "主图"}],
         "version": 3,
-        "listing_time": "2024-09-06 14:00:00",
         "status": "ON_SALE",
     },
     "P_77310": {
         "product_id": "P_77310",
         "merchant_id": "M_5512",
-        "title": "复古板鞋 男女同款休闲鞋",
-        "description": "经典复古板鞋版型，街头风格。",
         "category": "女鞋/运动鞋",
         "brand": None,
-        "attributes": {"鞋面": "帆布", "适用人群": "男女通用"},
-        "sku_list": [{"sku_id": "S_1", "color": "黑色", "size": "38-44", "price": 99.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1001/img1.jpg", "source": "主图"}],
         "version": 1,
-        "listing_time": "2024-09-10 10:00:00",
         "status": "ON_SALE",
     },
     "P_55208": {  # 自有品牌（潮动）但外观 0.93 强相似 + 脏商家 —— 对抗案核心
         "product_id": "P_55208",
         "merchant_id": "M_5512",
-        "title": "潮动轻量缓震跑鞋",
-        "description": "轻量缓震，日常跑步通勤皆宜。",
         "category": "女鞋/运动鞋",
         "brand": "潮动",
-        "attributes": {"材质": "织物", "适用人群": "女士"},
-        "sku_list": [{"sku_id": "S_1", "color": "浅灰", "size": "36-40", "price": 159.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1001/img1.jpg", "source": "主图"}],
         "version": 2,
-        "listing_time": "2024-09-12 11:00:00",
         "status": "ON_SALE",
     },
     "P_31240": {
         "product_id": "P_31240",
         "merchant_id": "M_5512",
-        "title": "大容量百搭帆布包",
-        "description": "简约大容量帆布托特，日常通勤。",
         "category": "箱包/女包",
         "brand": None,
-        "attributes": {"材质": "帆布", "容量": "大容量"},
-        "sku_list": [{"sku_id": "S_1", "color": "米色", "size": "均码", "price": 49.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1005/img1.jpg", "source": "主图"}],
         "version": 1,
-        "listing_time": "2024-09-08 09:00:00",
         "status": "ON_SALE",
     },
     "P_66820": {
         "product_id": "P_66820",
         "merchant_id": "M_8801",
-        "title": "大容量托特包 通勤手提",
-        "description": "简约托特包，多袋设计。",
         "category": "箱包/女包",
         "brand": None,
-        "attributes": {"材质": "PU", "容量": "大容量"},
-        "sku_list": [{"sku_id": "S_1", "color": "黑色", "size": "均码", "price": 89.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1002/img1.jpg", "source": "主图"}],
         "version": 2,
-        "listing_time": "2024-09-09 15:00:00",
         "status": "ON_SALE",
     },
     "P_66900": {
         "product_id": "P_66900",
         "merchant_id": "M_8801",
-        "title": "简约通勤手提包",
-        "description": "简约设计，通勤多用。",
         "category": "箱包/女包",
         "brand": None,
-        "attributes": {"材质": "PU", "容量": "中容量"},
-        "sku_list": [{"sku_id": "S_1", "color": "棕色", "size": "均码", "price": 79.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1006/img1.jpg", "source": "主图"}],
         "version": 1,
-        "listing_time": "2024-09-07 12:00:00",
         "status": "ON_SALE",
     },
     "P_90771": {
         "product_id": "P_90771",
         "merchant_id": "M_8801",
-        "title": "复古印花宽松卫衣",
-        "description": "宽松版型，复古印花。",
         "category": "服装/卫衣",
         "brand": None,
-        "attributes": {"材质": "棉", "版型": "宽松"},
-        "sku_list": [{"sku_id": "S_1", "color": "灰色", "size": "M-2XL", "price": 129.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1003/img1.jpg", "source": "主图"}],
         "version": 1,
-        "listing_time": "2024-09-11 16:00:00",
         "status": "ON_SALE",
     },
     "P_55190": {  # 干净自有品牌（云步），在库 brand 可查
         "product_id": "P_55190",
         "merchant_id": "M_3307",
-        "title": "云步轻弹缓震跑步鞋 女款",
-        "description": "自主品牌轻弹缓震跑步鞋，适合日常慢跑。",
         "category": "女鞋/运动鞋",
         "brand": "云步",
-        "attributes": {"材质": "织物", "适用人群": "女士"},
-        "sku_list": [{"sku_id": "S_1", "color": "白色", "size": "36-40", "price": 199.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1007/img1.jpg", "source": "主图"}],
         "version": 2,
-        "listing_time": "2024-08-01 10:00:00",
         "status": "ON_SALE",
     },
     "P_44702": {
         "product_id": "P_44702",
         "merchant_id": "M_3307",
-        "title": "云步百搭小白鞋",
-        "description": "自主品牌百搭小白鞋，简约舒适。",
         "category": "女鞋/运动鞋",
         "brand": "云步",
-        "attributes": {"材质": "皮革", "适用人群": "女士"},
-        "sku_list": [{"sku_id": "S_1", "color": "白色", "size": "35-39", "price": 169.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1008/img1.jpg", "source": "主图"}],
         "version": 1,
-        "listing_time": "2024-08-10 10:00:00",
         "status": "ON_SALE",
     },
     "P_61040": {
         "product_id": "P_61040",
         "merchant_id": "M_3307",
-        "title": "简行极简通勤托特包",
-        "description": "自主品牌极简托特包，大容量通勤。",
         "category": "箱包/女包",
         "brand": "简行",
-        "attributes": {"材质": "帆布", "容量": "大容量"},
-        "sku_list": [{"sku_id": "S_1", "color": "米白", "size": "均码", "price": 139.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1009/img1.jpg", "source": "主图"}],
         "version": 1,
-        "listing_time": "2024-08-20 10:00:00",
         "status": "ON_SALE",
     },
     "P_23411": {
         "product_id": "P_23411",
         "merchant_id": "M_9904",
-        "title": "山丘基础款纯色卫衣",
-        "description": "自主品牌基础款纯色卫衣，重磅棉质。",
         "category": "服装/卫衣",
         "brand": "山丘",
-        "attributes": {"材质": "棉", "版型": "宽松"},
-        "sku_list": [{"sku_id": "S_1", "color": "黑色", "size": "M-2XL", "price": 99.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1010/img1.jpg", "source": "主图"}],
         "version": 1,
-        "listing_time": "2024-08-15 10:00:00",
         "status": "ON_SALE",
     },
     "P_44120": {  # 中性商家（M_6602）的干净自有品牌商品
         "product_id": "P_44120",
         "merchant_id": "M_6602",
-        "title": "山野宽松纯色卫衣",
-        "description": "自主品牌纯色卫衣。",
         "category": "服装/卫衣",
         "brand": "山野",
-        "attributes": {"材质": "棉", "版型": "宽松"},
-        "sku_list": [{"sku_id": "S_1", "color": "藏青", "size": "M-2XL", "price": 89.0}],
-        "images": [{"url": "https://cdn.example.com/eval/asset-1010/img1.jpg", "source": "主图"}],
         "version": 1,
-        "listing_time": "2024-08-25 10:00:00",
         "status": "ON_SALE",
     },
 }
@@ -469,7 +376,7 @@ def make_eval_world_tools(*, case_index=None, policy_index=None):
     对标时以本函数为准。
 
     默认注入本模块评测种子（默认演示种子 P_88231 / M_5512 / POLICY_3.2 / CASE_1832 已并入
-    EVAL_* 常量）—— 数据源与 eval_data/v1 同一份事实，杜绝"评测集与工具世界漂移"。
+    EVAL_* 常量）—— 数据源与 eval_data/v2 同一份事实，杜绝"评测集与工具世界漂移"。
 
     :param case_index: CaseSearchTool 的检索索引；None → 评测种子 ``InMemoryCaseIndex``
         （RAG 世界由 ``make_rag_world_tools`` 显式注入真实索引）。
@@ -509,9 +416,8 @@ def make_rag_world_tools():
 
     复用 ``make_eval_world_tools()`` 的 5 件工具（Product / Image / Merchant 沿用 eval 世界
     种子，事实锚点两世界共用），把 CaseSearchTool / PolicySearchTool 的索引换成**真实 RAG
-    索引** —— 输出仍恰好 5 件、无 OCR。检索模式固定为**生产口径 hybrid**：评测不做
-    bm25 / vector 的模式对照（模式调参见 ``pra.rag.retrieval.MODES``，调试 BM25 / Vector 用
-    独立 demo，不占评测 harness 的配置面）。
+    索引** —— 输出仍恰好 5 件、无 OCR。检索口径固定为**生产口径 hybrid**：索引层没有模式开关，
+    评测不做 BM25 / Vector 单路对照。
     """
     # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
     from pra.rag.factory import build_case_index, build_policy_index
@@ -522,8 +428,8 @@ def make_rag_world_tools():
     embedder = production_embedder()
     # 事实三件沿用 eval 世界种子，两个检索工具**构造时**注入真实 RAG 索引。
     return make_eval_world_tools(
-        case_index=build_case_index(mode="hybrid", embedding_model=embedder),
-        policy_index=build_policy_index(mode="hybrid", embedding_model=embedder),
+        case_index=build_case_index(embedding_model=embedder),
+        policy_index=build_policy_index(embedding_model=embedder),
     )
 
 

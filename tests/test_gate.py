@@ -30,7 +30,6 @@ from pra.agent.guardrails.gate import (
     R3_BUDGET_EXHAUSTED,
     R3_DIMENSION_UNMEASURABLE,
     R3_EVIDENCE_CONFLICT,
-    R3_KEY_TOOL_FAILED,
     R3_MEASUREMENT_MISSING,
     R3_POSITIVE_INSUFFICIENT,
     R4_PASS_GATE_FAIL,
@@ -386,17 +385,6 @@ def test_overlay_evidence_conflict_code():
     ]
     final = run_decision_overlay(st, _proposal(decision="PASS"))
     assert final.overrides == [R3_EVIDENCE_CONFLICT]
-
-
-def test_overlay_key_tool_failed_r3():
-    st = _pass_ready_state()
-    st["failures"] = [
-        make_failure(step_type="TOOL_CALL", severity="critical", tool="ProductTool",
-                     reason="x", seq=1)
-    ]
-    st["tool_call_history"] = [{"seq": 1, "tool": "ProductTool", "status": "error"}]
-    final = run_decision_overlay(st, _proposal(decision="PASS"))
-    assert final.overrides == [R3_KEY_TOOL_FAILED]
 
 
 def test_overlay_warn_failure_does_not_trigger():

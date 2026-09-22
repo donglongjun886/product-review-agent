@@ -15,7 +15,7 @@ Precision/Recall/FPR/FNR 只在自动判出子集上计算。
 ``blackbrand_field`` 家族 brand 即取自其中 → Rule 经 R-101 直判 REJECT（v1 无黑名单品牌）；品牌词
 （R-102）/规避词（R-302）/空缺（R-301）仍 COMPLEX→HUMAN，如实呈现，非缺陷。Single-call 为表面
 字段口径、**不拥有**确定性黑名单输入（§3.3）→ 黑名单案仍 PASS，属方案设计差异。结论边界块含
-「标注-审查员同口径耦合」声明与 real 实测对照（同口径耦合高估一致性、工具覆盖有限低估真实上限）。
+「标注-审查员同口径耦合」声明（同口径耦合高估一致性、工具覆盖有限低估真实上限）。
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ def render_report(result: EvaluationResult) -> str:
 
     add("-" * 100)
     add("结论边界 / 口径注记:")
-    add("  · 工具数据源: InMemory 种子世界 v1（与 eval_data/v1 同一份；仅 Agent 经工具取证可见）")
+    add("  · 工具数据源: InMemory 种子世界 v1（与 eval_data/v2 同一份；仅 Agent 经工具取证可见）")
     add("  · LLM: 确定性桩（rule=无 / single_call=single-call-mock-v1 / agent=eval-scripted-reviewer）")
     add("  · 输出空间对齐: Rule COMPLEX→HUMAN_REVIEW（评测语义：不可自动判）；Single-call confidence<0.7 的 REJECT→HUMAN")
     add("  · Accuracy=(TP+TN)/真值总数，预测 HUMAN_REVIEW 计为未命中真值(判错，入分母不入分子)；")
@@ -144,11 +144,6 @@ def render_report(result: EvaluationResult) -> str:
         "SHOULD 无负例）")
     add("      → scripted 高分含「标注-审查员同口径」耦合，主要衡量实现一致性而非调查能力；")
     add("      不可外推为真实 LLM 能力（理由见上一行同口径耦合）")
-    add("    - real 对照（v1 35 案 real 单次抽样）: acc 0.200 / human_review_rate 0.771，")
-    add("      27/35 转人工由确定性 Gate 归因（R3_BUDGET_EXHAUSTED×19 / R3_HYPOTHESES_INDISTINGUISHABLE×7）")
-    add("      —— 该抽样早于 Gate 语义重构，其中归因码已移除（仅作历史对照）")
-    add("      —— 与 scripted 高分方向相反（同口径耦合只会高估一致性，real 未调优首跑则大幅保守转人工）；"
-        "该抽样仅验证链路，非模型固定水平")
 
     add("-" * 100)
     add("总体指标   acc   prec  recall  fpr   fnr   hrr   auto    TP/FP/TN/FN   成本均值(llm/tool/tok)")

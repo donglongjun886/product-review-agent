@@ -7,8 +7,8 @@ Accuracy/Precision/Recall/FPR/FNR + HRR/自动化率；真值含 HUMAN_REVIEW �
 ``--out PATH`` 落盘的 real EvalRecord 全量 + 差异摘要，以及 overrides 归因码汇总（R5 降级 /
 R3 预算截胡 / R3+R5 混合案）—— 「整卷全 HUMAN 是链路降级」一眼可见。
 
-CLI：``--limit N`` / ``--ids "EC_0007,EC_0101"`` 定向取案子集；``--data`` 给 JSONL 或目录
-（eval_data/v1 → cases_v1.jsonl）；``--world {eval,rag}`` 选工具数据源世界（rag = 真实 KB
+CLI：``--limit N`` / ``--ids "EC_V2_0007,EC_V2_0101"`` 定向取案子集；``--data`` 给 JSONL 或目录
+（eval_data/v2 → cases_v2.jsonl）；``--world {eval,rag}`` 选工具数据源世界（rag = 真实 KB
 检索，hybrid）；``--model`` / ``--api-key`` / ``--base-url`` 配 LLM；``--out`` 写结果 JSON
 （父目录需已存在）。
 
@@ -67,7 +67,7 @@ from pra.evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
 from pra.evaluation.metrics.engineering import EngineeringEvaluator
 from pra.evaluation.runner import expected_index
 
-DEFAULT_DATA = "eval_data/v1"
+DEFAULT_DATA = "eval_data/v2"
 DEFAULT_MODEL = "deepseek/deepseek-chat"
 ENV_API_KEY = "DEEPSEEK_API_KEY"
 ENV_BASE_URL = "DEEPSEEK_BASE_URL"
@@ -85,7 +85,7 @@ __all__ = ["DEFAULT_DATA", "DEFAULT_MODEL", "REAL_NOTE", "_resolve_data_path", "
 
 def _resolve_data_path(raw: str) -> Path:
     """把 ``--data`` 解析为评测 JSONL 路径（直接 JSONL，或按目录名拼
-    ``cases_<目录名>.jsonl``：eval_data/v1 → cases_v1.jsonl）。"""
+    ``cases_<目录名>.jsonl``：eval_data/v2 → cases_v2.jsonl）。"""
     p = Path(raw)
     if p.is_file():
         return p
@@ -95,10 +95,10 @@ def _resolve_data_path(raw: str) -> Path:
             if cand.is_file():
                 return cand
         raise ValueError(
-            f"评测数据目录 {p} 无法定位 cases JSONL：目录名按 v1/v2 → "
+            f"评测数据目录 {p} 无法定位 cases JSONL：目录名按 v<数字> → "
             f"cases_<目录名>.jsonl（{p.name} 不是 v<数字> 目录名或该文件缺失）"
         )
-    raise ValueError(f"评测数据路径不存在: {p}（支持 JSONL 文件，或 eval_data/v1 / v2 目录）")
+    raise ValueError(f"评测数据路径不存在: {p}（支持 JSONL 文件，或 eval_data/v2 目录）")
 
 
 def _world_tools(world: str):
@@ -770,7 +770,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--data",
         default=DEFAULT_DATA,
-        help=f"评测集：JSONL 路径或目录（默认 {DEFAULT_DATA} → cases_v1.jsonl；v2 目录 → cases_v2.jsonl）",
+        help=f"评测集：JSONL 路径或目录（默认 {DEFAULT_DATA} → cases_v2.jsonl）",
     )
     parser.add_argument(
         "--model", default=DEFAULT_MODEL, help=f"real LLM 模型（默认 {DEFAULT_MODEL}）"

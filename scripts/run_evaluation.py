@@ -1,6 +1,6 @@
 """Evaluation 三方案（rule / single_call_llm / agent）对比跑分入口。
 
-``--data`` 指定评测集（默认 v1）、``--schemes`` 选方案子集（默认全三方案）、``--smoke`` /
+``--data`` 指定评测集（默认 v2 正式集）、``--schemes`` 选方案子集（默认全三方案）、``--smoke`` /
 ``--smoke-limit`` 跑确定性子集、``--abstain-threshold`` 改 Single-call REJECT 候选转人工的
 置信门槛（默认 0.7）。全链路确定性：无真 LLM / 无网络 / 无随机；退出码 0 = 全部 case 跑通
 （任何 scheme 抛异常 → 非零退出并打印 traceback，供 CI 捕获）。
@@ -32,7 +32,7 @@ from pra.evaluation.report import print_report
 from pra.evaluation.runner import ALL_SCHEMES, EvaluationRunner
 from pra.observability.tracing import flush_tracer, get_tracer
 
-DEFAULT_DATA = "eval_data/v1/cases_v1.jsonl"
+DEFAULT_DATA = "eval_data/v2/cases_v2.jsonl"
 #: 缺省实验版本名（与 pra.observability.tracing 同口径）。
 DEFAULT_EXPERIMENT = "baseline"
 #: Langfuse UI 地址缺省值（与 tracing.make_tracer 同口径）。
@@ -41,7 +41,7 @@ DEFAULT_LANGFUSE_HOST = "http://localhost:3000"
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluation Phase 1：rule / single_call_llm / agent 三方案对比（确定性、不落 DB）"
+        description="Evaluation：rule / single_call_llm / agent 三方案对比（确定性、不落 DB）"
     )
     parser.add_argument(
         "--data",

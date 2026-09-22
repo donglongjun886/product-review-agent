@@ -251,16 +251,18 @@ async def test_runner_wires_agent_metrics_and_engineering():
     """runner 只在 agent 方案上算 Agent 级指标；工程指标按方案各有一行。"""
     from pathlib import Path
 
+    from pra.evaluation.dataset.loader import load_dataset
     from pra.evaluation.runner import EvaluationRunner
 
-    data = Path(__file__).resolve().parents[1] / "eval_data" / "v1" / "cases_v1.jsonl"
-    result = await EvaluationRunner(data_path=data).run(include=("agent",))
+    data = Path(__file__).resolve().parents[1] / "eval_data" / "v2" / "cases_v2.jsonl"
+    cases = load_dataset(data)[:12]  # 确定性子集：跑通接线即可，指标口径由专项用例覆盖
+    result = await EvaluationRunner().run(cases=cases, include=("agent",))
 
     assert result.agent_metrics is not None
     am = result.agent_metrics
-    # v1 有 15 条未标注 expected_tools → 不进 Tool Selection 分母
-    assert am.tool_selection.cases_with_expectation == 20
-    assert am.tool_selection.tool_selection_accuracy == 1.0
+    # 有标注期望工具的案才进 Tool Selection 分母（空期望 = 未标注）
+    assert am.tool_selection.cases_with_expectation > 0
+    assert am.tool_selection.tool_selection_accuracy is not None
     # agent 每案都有 tool_history 透传（边际增益分母非空）
     assert am.marginal_gain.records_with_history == result.total_cases
     assert am.marginal_gain.evidence_gain_rate is not None

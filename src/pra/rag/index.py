@@ -1,6 +1,6 @@
 """Chroma 检索索引 —— ``ChromaPolicyIndex`` / ``ChromaCaseIndex``（向量 + BM25 + RRF）。
 
-查询链路：业务过滤 → 三模式检索（向量 / BM25 / hybrid）→ 排序截断。
+查询链路：业务过滤 → hybrid 检索（向量 / BM25 两路 + RRF 融合）→ 排序截断。
 
 **两路的过滤机制不同，且必须逐条等价**：
 - **向量路**：过滤**下推给 Chroma**（``_filters_of`` 把业务过滤编译成 ``MetadataFilters`` →
@@ -37,11 +37,7 @@ from pra.rag.chroma_store import (
 )
 from pra.rag.corpus.schema import CasePrecedentRecord, PolicyClauseRecord
 from pra.rag.deps import llama
-from pra.rag.retrieval import (
-    MODES,
-    RetrievalMode,
-    _RetrievalContext,
-)
+from pra.rag.retrieval import _RetrievalContext
 from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
 from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
@@ -112,12 +108,6 @@ def _where_from(clauses: list[Any]) -> Any | None:
     return llama_.MetadataFilters(condition=llama_.FilterCondition.AND, filters=clauses)
 
 
-def _validate_mode(mode: str) -> RetrievalMode:
-    if mode not in MODES:
-        raise ValueError(f"未知检索模式: {mode!r}（可选: {list(MODES)}）")
-    return mode  # type: ignore[return-value]
-
-
 # ---------------------------------------------------------------------------
 # Policy / Case 两个公开索引类（构造/检索签名与既有实现对齐）
 # ---------------------------------------------------------------------------
@@ -140,11 +130,9 @@ class _ChromaIndexBase:
         rows: Iterable[dict | Any],
         *,
         embedding_model: Any,
-        mode: RetrievalMode = "hybrid",
         config: ChromaConfig | None = None,
     ) -> None:
         self._rows: list[Any] = _normalize_rows(rows, self._record_type)
-        self.mode: RetrievalMode = _validate_mode(mode)
         cfg = config or ChromaConfig()
         # 空语料不建库（``collection_name`` 保持 ""）：该可见属性必须先有默认值，否则空 KB 上
         # 读它会抛 AttributeError。``_dim`` 留 0：空 KB 不解析维度（不建库、无向量可算）。
@@ -330,7 +318,7 @@ class _ChromaIndexBase:
         *,
         top_k: int,
     ) -> list[tuple[int, float]]:
-        """三模式检索 → ``[(行索引, 检索分)]``（已按 ``(分降序, 原序)`` 排序、已截断 Top-K）。
+        """hybrid 检索 → ``[(行索引, 检索分)]``（已按 ``(分降序, 原序)`` 排序、已截断 Top-K）。
 
         两路的**打分域不同**：向量路用全量 ctx + ``where``（过滤已下推给 Chroma），BM25 路用
         Python 候选子集（``candidates``）—— ``bm25s`` 内存索引没有 ``where``。
@@ -340,14 +328,7 @@ class _ChromaIndexBase:
         """
         if top_k < 1 or not candidates:
             return []
-        query_bundle = llama().QueryBundle(query_str=query)
-        if self.mode == "bm25":
-            ranked = self._rank_bm25(self._sub_context(candidates), query_bundle, len(candidates))
-        elif self.mode == "vector":
-            ranked = self._rank_vector(self._full_context(), query_bundle, filters)
-        else:
-            ranked = self._rank_hybrid(query, candidates, filters)
-        return ranked[:top_k]
+        return self._rank_hybrid(query, candidates, filters)[:top_k]
 
 
 class ChromaPolicyIndex(_ChromaIndexBase):
@@ -405,7 +386,7 @@ class ChromaPolicyIndex(_ChromaIndexBase):
         top_k: int,
         effective_only: bool,
     ) -> list[PolicyClauseHit]:
-        """检索政策条款（三模式；无命中 → ``[]``，工具 ok=True）。
+        """检索政策条款（hybrid；无命中 → ``[]``，工具 ok=True）。
 
         流程：业务过滤（向量路下推 Chroma ``where``；BM25 路走 Python 候选集）→ 打分/融合 →
         ``(分降序, corpus 原序)`` 排序 → Top-K。
@@ -426,11 +407,13 @@ class ChromaPolicyIndex(_ChromaIndexBase):
 class ChromaCaseIndex(_ChromaIndexBase):
     """``CaseIndex`` Protocol 的 Chroma + LlamaIndex 实现（``search`` 签名与工具契约一致）。
 
-    ``CaseHit.retrieval_score`` 是**检索分，不是语义相似度**，且**不做量纲适配**：``bm25`` =
-    ``bm25s`` 原始分（无界）；``vector`` = 库口径 ``exp(-distance)``；``hybrid`` = RRF 融合分
-    （``Σ 1/(k+rank)``，``k=60``，落在 ~(0, ``2/60 = 1/30``]）。**取值域由后端定义，字段不设上下界约束**。
-    **三种分数量纲互不可比，且都不参与 Gate 判定**（Gate 对 ``CASE_PRECEDENT`` / ``POLICY_REF``
-    只判存在性；见 :func:`pra.agent.guardrails.measurements.positive_dimensions` 的类型白名单）。
+    ``CaseHit.retrieval_score`` 是**检索分，不是语义相似度**，且**不做量纲适配**：生产
+    ``search`` 返回 hybrid 的 RRF 融合分（``Σ 1/(k+rank)``，``k=60``，落在 ~(0, ``2/60 = 1/30``]）。
+    两条内部路径各自的原始分只由 ``_rank_bm25``（``bm25s`` 原始分，无界）/ ``_rank_vector``
+    （库口径 ``exp(-distance)``，⊂ ``(0, 1]``）产出，仅供调试/验证，不构成对外模式开关。
+    **取值域由后端定义，字段不设上下界约束**；这些分都**不参与 Gate 判定**（Gate 对
+    ``CASE_PRECEDENT`` / ``POLICY_REF`` 只判存在性；见
+    :func:`pra.agent.guardrails.measurements.positive_dimensions` 的类型白名单）。
     构造签名见 :meth:`_ChromaIndexBase.__init__`。
     """
 

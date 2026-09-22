@@ -111,7 +111,7 @@ def test_rag_world_has_five_tools_with_swapped_knowledge_sources(monkeypatch):
 
 
 def test_rag_world_builders_use_production_hybrid_mode(monkeypatch):
-    """RAG 世界固定生产口径 ``hybrid``：评测不暴露 bm25/vector 模式配置面。"""
+    """RAG 世界固定生产口径 hybrid：builder 不接受任何模式参数。"""
     calls: list[tuple[str, dict]] = []
     from pra.rag import factory
 
@@ -126,7 +126,7 @@ def test_rag_world_builders_use_production_hybrid_mode(monkeypatch):
     make_rag_world_tools()
 
     assert [kind for kind, _ in calls] == ["case", "policy"]
-    assert all(kw.get("mode") == "hybrid" for _, kw in calls)
+    assert all("mode" not in kw for _, kw in calls), "索引层不再有模式开关"
     assert all(kw.get("embedding_model") is not None for _, kw in calls)
 
 

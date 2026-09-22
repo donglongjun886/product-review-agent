@@ -5,13 +5,14 @@
 2. 正式集（320 案）五指标与固化数字对齐（rule hrr 全量分母 0.606 vs 决策指标分母
    0.540；agent abstention_recall=1.0 / wrong_auto=0 / abstention_rate=10/274）；
 3. 渲染含三值真值分布、两套分母注记与五指标区（**数值存在性**断言，不锁装饰性文案）；
-4. v1（无 abstain 标签）路径无五指标区，数字基线按指标字段断言（不锁排版/空格对齐）。
+4. 老格式（无 abstain 标签）路径无五指标区，报告走 Phase 1 兼容口径。
 
-全程离线、被测对象确定性；只读 eval_data/v1、v2。
+全程离线、被测对象确定性；只读 eval_data/v2。
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,6 @@ from pra.evaluation.metrics.abstention import AbstentionEvaluator
 from pra.evaluation.report import render_report
 from pra.evaluation.runner import ALL_SCHEMES, EvaluationRunner
 
-DATA_V1 = Path(__file__).resolve().parents[1] / "eval_data" / "v1" / "cases_v1.jsonl"
 DATA_V2 = Path(__file__).resolve().parents[1] / "eval_data" / "v2" / "cases_v2.jsonl"
 
 # v2 确定性子集：5 条 AUTO_DECIDABLE（PASS×2/REJECT×3，覆盖五 scene）+ 3 条 SHOULD_ABSTAIN
@@ -70,9 +70,25 @@ async def test_runner_v2_wires_abstention_five_metrics() -> None:
     assert result.overall["agent"].total == _V2_SUBSET_N_AUTO
 
 
-async def test_runner_v1_no_should_abstention_empty_abstention() -> None:
-    # v1：真值仅 PASS/REJECT → abstention 区为空，走 Phase 1 兼容口径
-    result = await EvaluationRunner(data_path=str(DATA_V1)).run(smoke=True, smoke_limit=10)
+def _legacy_rows_jsonl(tmp_path: Path, n: int = 3) -> Path:
+    """老格式（无 abstain_label / 无 lineage、真值仅二值）最小评测集。"""
+    lines: list[str] = []
+    for c in load_dataset(DATA_V2)[:n]:
+        row = c.model_dump(mode="json")
+        row["schema_version"] = 1
+        row["lineage"] = None
+        row["expected"].pop("abstain_label", None)
+        if row["expected"]["decision"] == "HUMAN_REVIEW":
+            row["expected"]["decision"] = "PASS"  # 老格式没有三值真值
+        lines.append(json.dumps(row, ensure_ascii=False))
+    path = tmp_path / "legacy.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+async def test_runner_legacy_no_abstain_labels_runs_phase1_path(tmp_path: Path) -> None:
+    # 老格式：真值仅 PASS/REJECT → abstention 区为空，走 Phase 1 兼容口径
+    result = await EvaluationRunner(data_path=str(_legacy_rows_jsonl(tmp_path))).run()
     assert result.has_should_abstain is False
     assert result.abstention == {}
     assert result.abstention_grouped == {}
@@ -126,7 +142,7 @@ async def test_render_report_v2_sections() -> None:
     result = await EvaluationRunner(data_path=str(DATA_V2)).run()
     text = render_report(result)
     # 数值断言（评测即产品，这些数字是主要产出）：三值真值分布、两套分母、五指标区、
-    # agent accuracy 显示值与 real 对照数值。装饰性文案（标题、口径说明措辞）不逐字锁定。
+    # agent accuracy 显示值。装饰性文案（标题、口径说明措辞）不逐字锁定。
     assert "PASS=134 / REJECT=140 / HUMAN_REVIEW=46" in text  # 三值真值分布
     assert "274" in text and "320" in text  # 二值真值分母 / 全量分母
     for marker in (
@@ -140,44 +156,3 @@ async def test_render_report_v2_sections() -> None:
     ):
         assert marker in text, f"v2 Console Report 缺渲染要素: {marker}"
     assert "0.964" in text  # agent accuracy 显示值（264/274，见上方全量对齐用例）
-    assert "0.200" in text and "0.771" in text  # real 对照数值
-
-
-# --- 4) v1 路径：数字基线（按指标字段断言，不锁排版/空格对齐）
-
-
-async def test_render_report_v1_numeric_rows_unchanged() -> None:
-    result = await EvaluationRunner(data_path=str(DATA_V1)).run()  # 全量 35 条
-    text = render_report(result)
-    # v1 数字基线（回归护栏）：混淆矩阵计数 + 由计数推导的指标值 + 成本均值。
-    # 数值与 test_v2_full_run_abstention_matches_docs 同一纪律：评测即产品，数字不能漂。
-    assert result.total_cases == 35
-    expected_counts = {
-        "rule": (0, 0, 12, 1),  # tp/fp/tn/fn
-        "single_call_llm": (6, 0, 12, 1),
-        "agent": (20, 0, 15, 0),
-    }
-    for scheme, (tp, fp, tn, fn) in expected_counts.items():
-        m = result.overall[scheme]
-        assert (m.tp, m.fp, m.tn, m.fn) == (tp, fp, tn, fn), scheme
-        assert m.accuracy == pytest.approx((tp + tn) / 35), scheme
-        assert m.human_rate + m.automation == pytest.approx(1.0), scheme
-        # 渲染行仍含该方案的 accuracy 数值（3 位小数格式存在即可，不锁对齐）
-        assert f"{m.accuracy:.3f}" in text, scheme
-    # v1 口径细节基线：rule 无自动 REJECT（v1 无黑名单品牌案）→ precision 未定义、recall 0 / FNR 1；
-    # single_call_llm 精确 1.0、召回 6/7；agent 全对（fpr/fnr 0）
-    assert result.overall["rule"].precision is None
-    assert result.overall["rule"].recall == pytest.approx(0.0)
-    assert result.overall["rule"].fnr == pytest.approx(1.0)
-    assert result.overall["single_call_llm"].precision == pytest.approx(1.0)
-    assert result.overall["single_call_llm"].recall == pytest.approx(6 / 7)
-    assert result.overall["agent"].fpr == pytest.approx(0.0)
-    assert result.overall["agent"].fnr == pytest.approx(0.0)
-    # 成本基线（scripted 桩 tokens 恒 0 —— 绝不伪造）
-    assert result.cost_summary["rule"]["llm_calls"] == pytest.approx(0.0)
-    assert result.cost_summary["agent"]["llm_calls"] == pytest.approx(5.14)
-    assert result.cost_summary["agent"]["tool_calls"] == pytest.approx(4.14)
-    for scheme in ("rule", "single_call_llm", "agent"):
-        assert result.cost_summary[scheme]["tokens"] == pytest.approx(0.0)
-    # 真值分布（数字基线）
-    assert "PASS=15 / REJECT=20 / HUMAN_REVIEW=0" in text

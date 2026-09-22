@@ -1,7 +1,6 @@
 """ProductTool —— 事实锚点工具。
 
-回答的业务问题：判断「规避品牌」前，先确认商品在库最新事实 —— brand 是否真空缺、字段是否
-冲突、快照版本。
+回答的业务问题：判断「规避品牌」前，先确认商品在库最新事实 —— brand 是否真空缺、快照版本。
 
 ``ProductRepository`` 是窄接口（按 product_id 取在库事实快照）；``InMemoryProductRepository``
 是 **Mock 默认实现**（默认装配路径恒用它，CI 不连库、评测可重放），真实实现是
@@ -33,41 +32,16 @@ PRODUCT_FACT_WEIGHT = 0.6  # 默认权重（暂定默认，可调）
 # ---------------------------------------------------------------------------
 
 
-class SkuSnapshot(BaseModel):
-
-    sku_id: str
-    color: str
-    size: str
-    price: float
-
-
-class ProductImageSnapshot(BaseModel):
-    """商品图片行。
-
-    库中图片**不含 ocr_text** —— OCR 归 OCRTool，避免重复劳动。
-    """
-
-    url: str
-    source: str
-
-
 class ProductSnapshot(BaseModel):
-    """商品在库事实快照。
+    """商品在库事实快照（只保留决策链真正消费的列，与迁移 003 的 ``product`` 表同形）。
 
-    ``listing_time`` 为 DATETIME 展示串；``status`` 为上下架状态（如 ON_SALE / REMOVED）。
+    ``status`` 为上下架状态（如 ON_SALE / REMOVED）。
     """
 
     product_id: str
-    merchant_id: str
-    title: str
-    description: str
     category: str
     brand: str | None = Field(default=None, description="真空缺为 null —— '规避品牌'调查的起点信号")
-    attributes: dict[str, str] = Field(default_factory=dict)
-    sku_list: list[SkuSnapshot] = Field(default_factory=list)
-    images: list[ProductImageSnapshot] = Field(default_factory=list)
     version: int = Field(description="乐观锁版本号（库中最新 version）")
-    listing_time: str = Field(description="上架时间展示串，如 2024-09-06 14:00:00")
     status: str = Field(default="ON_SALE", description="商品状态，如 ON_SALE / REMOVED")
 
 
@@ -87,16 +61,9 @@ class ProductRepository(Protocol):
 _DEFAULT_PRODUCTS: Mapping[str, dict[str, Any]] = {
     "P_88231": {
         "product_id": "P_88231",
-        "merchant_id": "M_5512",
-        "title": "新款厚底复古跑鞋 女士百搭运动鞋",
-        "description": "经典复古跑鞋设计，轻量缓震，适合日常通勤和运动。",
         "category": "女鞋/运动鞋",
         "brand": None,
-        "attributes": {"材质": "PU", "鞋底": "橡胶", "适用人群": "女士"},
-        "sku_list": [{"sku_id": "S_1", "color": "米白", "size": "36-40", "price": 129.0}],
-        "images": [{"url": "https://cdn.example.com/products/P_88231/img1.jpg", "source": "主图"}],
         "version": 3,
-        "listing_time": "2024-09-06 14:00:00",
         "status": "ON_SALE",
     },
 }
@@ -145,7 +112,7 @@ class ProductResult(ToolResult):
 class ProductTool:
 
     name = "ProductTool"
-    description = "读取商品在库最新事实快照（标题/描述/属性/品牌/SKU/图片/版本），用于确认 brand 真空缺、字段冲突、版本漂移"
+    description = "读取商品在库最新事实快照（品牌/类目/版本/状态），用于确认 brand 真空缺与版本漂移"
     args_model = ProductArgs
     # 本工具覆盖的风险维度 + 本部署是否真的能测（gate 的 required/coverage 判定读它）
     measured_dimensions: frozenset[str] = frozenset({DIM_LISTING_REGISTRY})

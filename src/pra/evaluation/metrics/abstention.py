@@ -72,20 +72,6 @@ class AbstentionMetrics(BaseModel):
     abstention_recall: float | None = None  # 正确转人工召回：SHOULD..-HUMAN / SHOULD..
     wrong_auto_decision_rate: float | None = None  # AUTO.. 自动终裁中错误占比
 
-    def metric_row(self) -> dict:
-        """报告用一行摘要（None → "-"；键 = 五指标全名 + 计数）。"""
-        fmt = lambda v: "-" if v is None else f"{v:.3f}"
-        return {
-            "total": self.total,
-            "human_review_rate": fmt(self.human_review_rate),
-            "automation_coverage": fmt(self.automation_coverage),
-            "abstention_rate": fmt(self.abstention_rate),
-            "abstention_recall": fmt(self.abstention_recall),
-            "wrong_auto_decision_rate": fmt(self.wrong_auto_decision_rate),
-            "n_auto_decidable": self.auto_decidable_total,
-            "n_should_abstain": self.should_abstain_total,
-        }
-
 
 def _ratio(numer: int, denom: int) -> float | None:
     return numer / denom if denom else None

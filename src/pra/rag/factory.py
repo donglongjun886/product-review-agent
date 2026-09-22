@@ -1,8 +1,9 @@
 """RAG 索引装配 —— ``build_policy_index`` / ``build_case_index``。
 
 注入点：corpus 路径（缺省取 rag/corpus/ 内静态 JSON，失败即报错不静默）；``embedding_model``
-（LlamaIndex ``BaseEmbedding``，缺省 None → chroma 类内自建 fastembed 集成）；mode（三模式可切）；
+（LlamaIndex ``BaseEmbedding``，缺省 None → chroma 类内自建 fastembed 集成）；
 ``config``（``ChromaConfig``：client / host / port / ephemeral / collection 前缀，缺省全取默认值）。
+索引固定走 hybrid 检索（BM25 + Vector + RRF），无模式开关。
 
 两个 builder 只在「行类型 + corpus 加载器 + 缺省语料文件」上有别，实现只有 ``_build_index`` 一份
 （corpus_path 缺省由加载器自己兜底）。
@@ -18,8 +19,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pra.rag.corpus import CORPUS_DIR, load_cases, load_policies
-from pra.rag.retrieval import RetrievalMode
+from pra.rag.corpus import load_cases, load_policies
 
 if TYPE_CHECKING:  # 仅注解：本模块 import 期不拉起 tools / chroma_store
     from pra.rag.chroma_store import ChromaConfig
@@ -27,14 +27,9 @@ if TYPE_CHECKING:  # 仅注解：本模块 import 期不拉起 tools / chroma_st
     from pra.tools.policy_search.tool import PolicyIndex
 
 __all__ = [
-    "CASES_DEFAULT",
-    "POLICIES_DEFAULT",
     "build_case_index",
     "build_policy_index",
 ]
-
-POLICIES_DEFAULT = CORPUS_DIR / "policies.json"
-CASES_DEFAULT = CORPUS_DIR / "cases.json"
 
 
 def _build_index(
@@ -44,7 +39,6 @@ def _build_index(
     embedding_model: Any,
     corpus_path: str | Path | None = None,
     rows: Iterable[Any] | None = None,
-    mode: RetrievalMode = "hybrid",
     config: ChromaConfig | None = None,
 ) -> Any:
     """两个公开 builder 的唯一实现；差异只在调用方传进来的 ``index_cls`` / ``loader``。
@@ -60,7 +54,7 @@ def _build_index(
     else:
         record_rows = list(rows)
     return index_cls(
-        record_rows, embedding_model=embedding_model, mode=mode, config=config
+        record_rows, embedding_model=embedding_model, config=config
     )
 
 
@@ -69,7 +63,6 @@ def build_policy_index(
     *,
     embedding_model: Any,
     corpus_path: str | Path | None = None,
-    mode: RetrievalMode = "hybrid",
     config: ChromaConfig | None = None,
 ) -> PolicyIndex:
     """构造 PolicyIndex（corpus_path 缺省 = rag/corpus/policies.json）。
@@ -88,7 +81,6 @@ def build_policy_index(
         corpus_path=corpus_path,
         rows=rows,
         embedding_model=embedding_model,
-        mode=mode,
         config=config,
     )
 
@@ -98,7 +90,6 @@ def build_case_index(
     *,
     embedding_model: Any,
     corpus_path: str | Path | None = None,
-    mode: RetrievalMode = "hybrid",
     config: ChromaConfig | None = None,
 ) -> CaseIndex:
     """构造 CaseIndex（corpus_path 缺省 = rag/corpus/cases.json）；参数语义同 ``build_policy_index``。"""
@@ -110,6 +101,5 @@ def build_case_index(
         corpus_path=corpus_path,
         rows=rows,
         embedding_model=embedding_model,
-        mode=mode,
         config=config,
     )

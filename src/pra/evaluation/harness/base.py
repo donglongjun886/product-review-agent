@@ -35,7 +35,7 @@ class EvalContext(BaseModel):
     - ``abstain_confidence_threshold``：Single-call 的 REJECT 候选置信门槛 ——
       confidence < 门槛的 REJECT 候选确定性改记 HUMAN_REVIEW（与
       ``gate.CONFIDENCE_ABSTAIN_THRESHOLD=0.7`` 同口径）；
-    - ``tool_world``：Agent 的工具数据源 —— "eval" = 与 eval_data/v1 同一份种子世界
+    - ``tool_world``：Agent 的工具数据源 —— "eval" = 与 eval_data/v2 同一份种子世界
       （公平性：Rule/Single-call 只用基础输入，Agent 经工具取"基础输入之外"的证据）；
       "default" = 仓库默认演示种子；"rag" = RAG 世界（CaseSearch / PolicySearch 注入
       真实 RAG 索引，模式固定生产口径 hybrid；事实工具沿用 eval 世界）。评测默认 "eval"。

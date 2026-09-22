@@ -9,7 +9,8 @@
 --   1) evidence 挂 review_run（证据=某次 Run 动态调查产出；Case 多 Run 时证据隔离）
 --   2) review_result 为 Case 级最终生效裁决，source_run_id 指向被采纳的 Run
 --   3) review_run 不存 final_decision（避免与 review_result 双重事实来源）
---   4) review_result 保留 decision_json 完整快照；decision/risk 等列=查询投影
+--   4) review_result 只存查询投影列（decision/risk/confidence/policy）；裁决细节由
+--      review_trace（DECIDE 行含 overrides）与 review_evidence 承载
 --   5) review_run 无 budget_json/agent_state_json（MVP 收敛；tokens/latency 够统计）
 --   6) review_trace 只记录执行轨迹，不扩展复杂 Trace 模型
 --   7) 不固化 UNIQUE(product_id, version)——幂等键留待 API 请求语义确定
@@ -84,7 +85,6 @@ CREATE TABLE IF NOT EXISTS review_result (
   risk_type_json      JSON         NOT NULL COMMENT '风险类型词表数组',
   decision_confidence DOUBLE       NOT NULL COMMENT '确定性重算安全门槛（O-7 列名）',
   policy_refs_json    JSON         NULL     COMMENT '引用政策 id 数组',
-  decision_json       JSON         NOT NULL COMMENT 'ReviewDecision 全量快照（evidence/hypothesis_trace/budget_used/overrides），审计/申诉复原当时裁决',
   created_at          DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at          DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (case_id),

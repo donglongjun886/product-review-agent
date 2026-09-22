@@ -11,7 +11,6 @@ from __future__ import annotations
 from pra.rag.embedding import BGE_MODEL, production_embedder
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.rag.lazy_index import LazyCaseIndex, LazyPolicyIndex
-from pra.rag.retrieval import RetrievalMode
 
 from .base import Tool, ToolArgs, ToolContext, ToolResult
 from .case_search.tool import CaseIndex, CaseSearchTool
@@ -97,15 +96,14 @@ def build_production_tools() -> list[Tool]:
     )
 
 
-# 生产 RAG 检索口径：hybrid 三路融合。**不在这里给编码器兜底 mock** —— 真模型失败要显式报错，
+# 生产 RAG 检索口径 = hybrid（BM25 + Vector + RRF）；索引层没有模式开关。
+# **不在这里给编码器兜底 mock** —— 真模型失败要显式报错，
 # 缺 ``--extra rag`` / 服务端不可达 / 模型未缓存都会在首次检索时抛出带指引的错误。
-_PRODUCTION_RAG_MODE: RetrievalMode = "hybrid"
 
 
 def _build_production_case_index() -> CaseIndex:
     """构建生产 CaseSearch 索引（首次检索时调用；失败原样上抛，不缓存失败）。"""
     return build_case_index(
-        mode=_PRODUCTION_RAG_MODE,
         embedding_model=production_embedder(),
     )
 
@@ -113,6 +111,5 @@ def _build_production_case_index() -> CaseIndex:
 def _build_production_policy_index() -> PolicyIndex:
     """构建生产 PolicySearch 索引（首次检索时调用；失败原样上抛，不缓存失败）。"""
     return build_policy_index(
-        mode=_PRODUCTION_RAG_MODE,
         embedding_model=production_embedder(),
     )

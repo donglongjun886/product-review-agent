@@ -1,6 +1,6 @@
 """Phase 2 正式集（v2）确定性变异生成器。
 
-以 eval_data/v1 的 35 条手工种子 + 少量新增语义种子为模板做确定性字段变异（固定随机种子），
+以旧手工种子案（EC_*，35 条，已随 eval_data/v1 退役） + 少量新增语义种子为模板做确定性字段变异（固定随机种子），
 产出 ``eval_data/v2/cases_v2.jsonl`` + ``manifest.json``；命令
 ``uv run python scripts/eval_dataset_gen.py --out eval_data/v2/ --count 320 --seed 42``。
 不联网、不调 LLM；同 (count, seed) → 产物逐字节一致（可重放，进 Regression）。

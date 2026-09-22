@@ -8,7 +8,7 @@
    （业务侧 LLM 由 ``tests/conftest.py`` 钉回 scripted 桩）；
 6. 加 ``--experiment`` 后报告与不加时逐字节一致（不改评测指标）。
 
-数据集：``eval_data/v1`` 前 3 条写临时 JSONL。
+数据集：``eval_data/v2`` 前 3 条写临时 JSONL。
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ from pra.observability import tracing as T
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_EVAL_SCRIPT = REPO_ROOT / "scripts" / "run_evaluation.py"
 DEMO_SCRIPT = REPO_ROOT / "scripts" / "demo_langfuse_trace.py"
-V1_DATA = REPO_ROOT / "eval_data" / "v1" / "cases_v1.jsonl"
-#: 冒烟子集条数：v1 35 案的 scheme 分布在 3 条内已有 PASS/REJECT 混合。
+V2_DATA = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
+#: 冒烟子集条数：v2 前 3 案的 scheme 分布已有 PASS/REJECT 混合。
 SMOKE_CASES = 3
 
 #: 观测相关环境变量 —— 用例前后一律清空，保证"无凭据"路径与顺序无关。
@@ -81,9 +81,9 @@ def _offline_observability(monkeypatch):
 
 @pytest.fixture(scope="module")
 def smoke_data(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """最小评测集（v1 前 3 条）：确定性、不触网。"""
-    lines = V1_DATA.read_text(encoding="utf-8").splitlines()[:SMOKE_CASES]
-    assert len(lines) == SMOKE_CASES, "eval_data/v1 行数不足，无法构造最小评测集"
+    """最小评测集（v2 前 3 条）：确定性、不触网。"""
+    lines = V2_DATA.read_text(encoding="utf-8").splitlines()[:SMOKE_CASES]
+    assert len(lines) == SMOKE_CASES, "eval_data/v2 行数不足，无法构造最小评测集"
     path = tmp_path_factory.mktemp("s5b") / "cases_smoke.jsonl"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

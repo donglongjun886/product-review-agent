@@ -55,18 +55,6 @@ class DistributionMetrics(BaseModel):
             max=max(values),
         )
 
-    def metric_row(self) -> dict:
-        def fmt(value: float | None) -> str:
-            return "-" if value is None else f"{value:g}"
-
-        return {
-            "n": self.count,
-            "mean": fmt(self.mean),
-            "p50": fmt(self.p50),
-            "p95": fmt(self.p95),
-            "max": fmt(self.max),
-        }
-
 
 class EngineeringMetrics(BaseModel):
     """一次运行某方案的工程分布（成本 + 可选延迟）。"""

@@ -1,7 +1,7 @@
 """确定性重放回归：三方案决策序列 vs 基线快照。
 
-目的：任何改动（screening 修正 / RAG / LLM 接入）若改变三方案在 v1 集上的决策就报错，
-防静默行为漂移。机制：对 eval_data/v1 跑 rule / single_call_llm / agent（确定性脚本
+目的：任何改动（screening 修正 / RAG / LLM 接入）若改变三方案在 评测集（eval_data/v2）上的决策就报错，
+防静默行为漂移。机制：对 eval_data/v2 跑 rule / single_call_llm / agent（确定性脚本
 模式），把每条 EvalRecord 的 decision 序列做规范化序列化 + sha256 digest，连同
 eval_case_id 序与各 scheme 决策列表存基线快照 JSON（首次运行生成，之后比对）；
 重跑重算 digest 与序列比对 → ``REGRESSION PASS / FAIL``（退出码 0/1；报告含差异

@@ -1,14 +1,10 @@
-"""v1 / v2 正式集回归守护：三方案决策序列、digest 与数据字节锁。
-
-此前 v2 零回归守护、v1 基线只有 agent 单方案被断言，rule/single_call_llm 的决策
-漂移（screening 修正集、terms 词表变动等）CI 抓不到；本文件补齐：
+"""v2 正式集回归守护：三方案决策序列、digest 与数据字节锁。
 
 1. 入库 v2 基线静态结构 + digest 自洽（由文件内 ids+decisions 重算）；
 2. v2 三方案 320 决策序列与 digest 全部 == 入库基线；
 3. 重放快照的规范化序列化与入库文件逐字节一致；
 4. ``compare_snapshots`` 对 v2 基线判 PASS；
-5. v1 基线三方案全断言；
-6. (320,42) 重新生成与入库 ``cases_v2.jsonl`` 逐字节一致（防手改数据行 / 生成器漂移）。
+5. (320,42) 重新生成与入库 ``cases_v2.jsonl`` 逐字节一致（防手改数据行 / 生成器漂移）。
 
 全部离线确定性（scripted 桩）；基线/数据文件只读，重放不写 eval_data 目录。
 """
@@ -30,9 +26,7 @@ from pra.evaluation.regression import (
 from pra.evaluation.runner import ALL_SCHEMES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EVAL_V1 = REPO_ROOT / "eval_data" / "v1" / "cases_v1.jsonl"
 EVAL_V2 = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
-BASELINE_V1 = REPO_ROOT / "eval_data" / "v1" / "regression_baseline.json"
 BASELINE_V2 = REPO_ROOT / "eval_data" / "v2" / "regression_baseline.json"
 GEN_SCRIPT = REPO_ROOT / "scripts" / "eval_dataset_gen.py"
 
@@ -120,26 +114,7 @@ def test_v2_regression_compare_passes(v2_current_snapshot: dict) -> None:
     assert report.baseline_cases == 320 and report.current_cases == 320
 
 
-# --- 3) v1 基线三方案补全断言（rule/single_call_llm 此前无任何 CI 引用）
-
-
-async def test_v1_baseline_all_three_schemes_asserted() -> None:
-    baseline = _load_baseline(BASELINE_V1)
-    assert baseline["total_cases"] == 35
-    snap = await compute_current_snapshot(EVAL_V1, schemes=SCHEMES)
-    assert snap["per_case_ids"] == baseline["per_case_ids"]
-    for s in SCHEMES:
-        assert snap["decisions"][s] == baseline["decisions"][s], (
-            f"v1 scheme={s} 决策序列与入库基线不一致（screening/terms 词表漂移守卫）"
-        )
-    assert snap["digest"] == baseline["digest"]
-    report = compare_snapshots(snap, baseline)
-    assert report.ok is True and report.status == "PASS"
-    ser = _canonical_serialize({**snap, "data_hint": baseline["data_hint"]})
-    assert ser == BASELINE_V1.read_text(encoding="utf-8")
-
-
-# --- 4) 数据字节锁：(320,42) 重新生成 == 入库 cases_v2.jsonl（防手改数据行 / 生成器漂移）
+# --- 3) 数据字节锁：(320,42) 重新生成 == 入库 cases_v2.jsonl（防手改数据行 / 生成器漂移）
 
 
 def test_v2_dataset_generator_byte_lock_320_42() -> None:

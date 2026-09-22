@@ -56,22 +56,6 @@ class DecisionMetrics(BaseModel):
     reject_unhandled: float | None = None  # (truth REJECT ∧ pred HUMAN)/truth REJECT
     pass_unhandled: float | None = None  # (truth PASS ∧ pred HUMAN)/truth PASS
 
-    def metric_row(self) -> dict:
-        """报告用一行摘要（None → "-"；键用表头缩写 acc/prec/hrr/auto 等）。"""
-        fmt = lambda v: "-" if v is None else f"{v:.3f}"
-        return {
-            "total": self.total,
-            "auto": self.auto_decided,
-            "human": self.human_pred,
-            "acc": fmt(self.accuracy),
-            "prec": fmt(self.precision),
-            "recall": fmt(self.recall),
-            "fpr": fmt(self.fpr),
-            "fnr": fmt(self.fnr),
-            "hrr": fmt(self.human_rate),
-            "auto_rate": fmt(self.automation),
-        }
-
 
 def _ratio(numer: int, denom: int) -> float | None:
     return numer / denom if denom else None

@@ -72,10 +72,9 @@ def triage(case: ProductReviewCase) -> TriageResult:
     return TriageResult(verdict=verdict, hits=hits)
 
 
-def rule_evidence(case: ProductReviewCase, hit: RuleHit) -> Evidence:
+def rule_evidence(hit: RuleHit) -> Evidence:
     """把一条规则命中构造成 Evidence 对象（只构造，不落库）。
 
-    :param case: 触发命中的案件（预留上下文；当前 evidence 不引用 case 字段）。
     :param hit: 命中的 RuleHit。
     :return: ``Evidence(value=f"{rule_id} {name}: {detail}", ref_id=None, ...)`` ——
         确定性直判证据，供落库与决策快照引用。

@@ -5,16 +5,12 @@
 这条链；用例自建自删（``PYTEST_PRODUCT_`` 前缀 + ``finally`` 清理），重复跑不污染开发库。
 
 纯单测部分注入假 sessionmaker，覆盖 DB 行 → ``ProductSnapshot`` 的全部边界（``brand`` 为
-SQL NULL 不得归一成空串/``'null'``、``attributes`` 为 NULL/空、无 SKU、无图片、``DATETIME(3)``
-→ 展示串、``DECIMAL`` → float），并守护「默认装配路径仍是 InMemory、不连库」。
+SQL NULL 不得归一成空串/``'null'``），并守护「默认装配路径仍是 InMemory、不连库」。
 """
 
 from __future__ import annotations
 
-import json
 import socket
-from datetime import datetime
-from decimal import Decimal
 from typing import Self
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -24,24 +20,22 @@ from helpers import make_case, tool_by_name
 from sqlalchemy import text
 
 from pra import wiring
-from pra.domain.models import Budget, ProductImage, ProductReviewCase
-from pra.infra import persist_service as ps
-from pra.infra.db import Settings, get_sessionmaker
-from pra.tools import build_production_tools, build_tools
-from pra.tools.base import ToolContext
-from pra.tools.product.mysql_repo import (
-    MySQLProductRepository,
-    ProductImageORM,
-    ProductORM,
-    ProductSkuORM,
-    to_snapshot,
-)
 from pra.domain.measurement import (
     DIM_LISTING_REGISTRY,
     MEASUREMENT_TYPE,
     VERDICT_NEGATIVE,
 )
+from pra.domain.models import Budget, ProductImage, ProductReviewCase
+from pra.infra import persist_service as ps
+from pra.infra.db import Settings, get_sessionmaker
+from pra.tools import build_production_tools, build_tools
+from pra.tools.base import ToolContext
 from pra.tools.merchant.tool import InMemoryMerchantRepository
+from pra.tools.product.mysql_repo import (
+    MySQLProductRepository,
+    ProductORM,
+    to_snapshot,
+)
 from pra.tools.product.tool import (
     _DEFAULT_PRODUCTS,
     PRODUCT_FACT_TYPE,
@@ -74,20 +68,13 @@ def _inmemory_policy_index():
 
 
 class _FakeResult:
-    """``session.execute()`` 的替身：``scalar_one_or_none()`` 走 ``scalar``，``scalars().all()`` 走 ``many``。"""
+    """``session.execute()`` 的替身：``scalar_one_or_none()`` 走 ``scalar``。"""
 
-    def __init__(self, *, scalar: object = None, many: tuple = ()) -> None:
+    def __init__(self, *, scalar: object = None) -> None:
         self._scalar = scalar
-        self._many = list(many)
 
     def scalar_one_or_none(self) -> object:
         return self._scalar
-
-    def scalars(self) -> _FakeResult:
-        return self
-
-    def all(self) -> list:
-        return list(self._many)
 
 
 class _FakeSession:
@@ -140,53 +127,17 @@ def _repo_with_fake_sessions(results: list, *, error: Exception | None = None):
 def _product_row(**overrides: object) -> ProductORM:
     values: dict[str, object] = {
         "product_id": "P_TEST",
-        "merchant_id": "M_TEST",
-        "title": "新款厚底复古跑鞋 女士百搭运动鞋",
-        "description": "经典复古跑鞋设计，轻量缓震。",
         "category": "女鞋/运动鞋",
         "brand": None,
-        "attributes": {"材质": "PU"},
         "version": 3,
-        "listing_time": _NAIVE_LISTING_TIME,
         "status": "ON_SALE",
     }
     values.update(overrides)
     return ProductORM(**values)
 
 
-def _sku_row(**overrides: object) -> ProductSkuORM:
-    values: dict[str, object] = {
-        "product_id": "P_TEST",
-        "sku_id": "S_1",
-        "color": "米白",
-        "size": "36-40",
-        "price": Decimal("129.00"),
-        "sort_order": 1,
-    }
-    values.update(overrides)
-    return ProductSkuORM(**values)
-
-
-def _image_row(**overrides: object) -> ProductImageORM:
-    values: dict[str, object] = {
-        "image_id": 1,
-        "product_id": "P_TEST",
-        "url": "https://cdn.example.com/products/P_TEST/img1.jpg",
-        "source": "主图",
-        "sort_order": 1,
-    }
-    values.update(overrides)
-    return ProductImageORM(**values)
-
-
 def _ctx() -> ToolContext:
     return ToolContext(run_id="R_TEST", case_id="C_TEST", budget=Budget())
-
-
-# 库中 listing_time 是 naive DATETIME(3)（见 pra.infra.db 时间口径）；用 fromisoformat 造，
-# 避免 datetime(...) 触发 DTZ001 的同时保持 naive 语义。
-_NAIVE_LISTING_TIME = datetime.fromisoformat("2024-09-06T14:00:00")
-_NAIVE_LISTING_TIME_MS = datetime.fromisoformat("2024-09-06T14:00:00.123000")
 
 
 # ---------------------------------------------------------------------------
@@ -195,28 +146,17 @@ _NAIVE_LISTING_TIME_MS = datetime.fromisoformat("2024-09-06T14:00:00.123000")
 
 
 def test_to_snapshot_maps_every_field():
-    snap = to_snapshot(_product_row(brand="潮动"), [_sku_row()], [_image_row()])
+    snap = to_snapshot(_product_row(brand="潮动"))
     assert snap.product_id == "P_TEST"
-    assert snap.merchant_id == "M_TEST"
-    assert snap.title == "新款厚底复古跑鞋 女士百搭运动鞋"
-    assert snap.description == "经典复古跑鞋设计，轻量缓震。"
     assert snap.category == "女鞋/运动鞋"
     assert snap.brand == "潮动"
-    assert snap.attributes == {"材质": "PU"}
     assert snap.version == 3
-    assert snap.listing_time == "2024-09-06 14:00:00"
     assert snap.status == "ON_SALE"
-    assert [(s.sku_id, s.color, s.size, s.price) for s in snap.sku_list] == [
-        ("S_1", "米白", "36-40", 129.0)
-    ]
-    assert [(i.url, i.source) for i in snap.images] == [
-        ("https://cdn.example.com/products/P_TEST/img1.jpg", "主图")
-    ]
 
 
 def test_brand_sql_null_is_not_normalised_to_empty_string():
     """业务红线：brand 真空缺必须原样是 ``None``（不是 ''、不是 'null'）。"""
-    snap = to_snapshot(_product_row(brand=None), [], [])
+    snap = to_snapshot(_product_row(brand=None))
     assert snap.brand is None
     assert snap.brand != ""
     assert snap.brand != "null"
@@ -225,48 +165,6 @@ def test_brand_sql_null_is_not_normalised_to_empty_string():
     facts = [e for e in evs if e.type == PRODUCT_FACT_TYPE]
     assert len(facts) == 1
     assert "brand=null" in facts[0].value
-
-
-@pytest.mark.parametrize("attributes", [None, {}])
-def test_attributes_null_or_empty_both_become_empty_dict(attributes):
-    snap = to_snapshot(_product_row(attributes=attributes), [], [])
-    assert snap.attributes == {}
-
-
-def test_no_sku_and_no_image_yield_empty_lists():
-    snap = to_snapshot(_product_row(), [], [])
-    assert snap.sku_list == []
-    assert snap.images == []
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        _NAIVE_LISTING_TIME,
-        _NAIVE_LISTING_TIME_MS,  # DATETIME(3) 毫秒截断（展示串只到秒）
-        "2024-09-06 14:00:00",  # 驱动/替身直接给字符串时原样兜底
-    ],
-)
-def test_listing_time_is_formatted_to_display_string(raw):
-    snap = to_snapshot(_product_row(listing_time=raw), [], [])
-    assert snap.listing_time == "2024-09-06 14:00:00"
-
-
-def test_decimal_price_becomes_float():
-    snap = to_snapshot(_product_row(), [_sku_row(price=Decimal("159.50"))], [])
-    assert snap.sku_list[0].price == 159.5
-    assert isinstance(snap.sku_list[0].price, float)
-
-
-def test_sku_and_image_order_follows_provided_rows():
-    """顺序由 repo 的 ORDER BY 决定，映射层原样保序（不重排）。"""
-    snap = to_snapshot(
-        _product_row(),
-        [_sku_row(sku_id="S_2", sort_order=2), _sku_row(sku_id="S_1", sort_order=1)],
-        [_image_row(image_id=2, source="附图1"), _image_row(image_id=1, source="主图")],
-    )
-    assert [s.sku_id for s in snap.sku_list] == ["S_2", "S_1"]
-    assert [i.source for i in snap.images] == ["附图1", "主图"]
 
 
 # ---------------------------------------------------------------------------
@@ -286,24 +184,14 @@ def test_construction_does_not_touch_the_sessionmaker_provider():
     assert calls == []
 
 
-async def test_get_latest_assembles_snapshot_with_children():
-    """行为不变量：命中商品时 snapshot 非空，SKU 与图片已随快照装入（不钉内部查询编排）。"""
-    repo, _ = _repo_with_fake_sessions(
-        [
-            _FakeResult(scalar=_product_row()),
-            _FakeResult(many=(_sku_row(),)),
-            _FakeResult(many=(_image_row(),)),
-        ]
-    )
+async def test_get_latest_assembles_snapshot():
+    """行为不变量：命中商品时 snapshot 非空且字段来自库行。"""
+    repo, _ = _repo_with_fake_sessions([_FakeResult(scalar=_product_row(brand="云步"))])
     snap = await repo.get_latest("P_TEST")
     assert snap is not None
     assert snap.product_id == "P_TEST"
-    assert [(s.sku_id, s.color, s.size, s.price) for s in snap.sku_list] == [
-        ("S_1", "米白", "36-40", 129.0)
-    ]
-    assert [(i.url, i.source) for i in snap.images] == [
-        ("https://cdn.example.com/products/P_TEST/img1.jpg", "主图")
-    ]
+    assert snap.brand == "云步"
+    assert snap.status == "ON_SALE"
 
 
 async def test_get_latest_missing_product_returns_none():
@@ -367,69 +255,34 @@ def _mysql_reachable() -> bool:
 async def _insert_seed(product_id: str, seed: dict) -> None:
     """用**裸 SQL** 写入 P_88231 同构种子（独立 product_id）。
 
-    绕开 ORM 写：这样列名/JSON/NULL/DECIMAL 口径由手写 DDL 独立钉住，读路径才走 ORM ——
+    绕开 ORM 写：这样列名/NULL 口径由手写 DDL 独立钉住，读路径才走 ORM ——
     DDL 与 ORM 谁漂移了都直接报错。
     """
     sm = get_sessionmaker()
     async with sm() as s:
         await s.execute(
             text(
-                "insert into product (product_id, merchant_id, title, description, category, "
-                "brand, attributes, version, listing_time, status) values "
-                "(:pid, :mid, :title, :desc, :cat, :brand, :attrs, :ver, :lt, :status)"
+                "insert into product (product_id, category, brand, version, status) values "
+                "(:pid, :cat, :brand, :ver, :status)"
             ),
             {
                 "pid": product_id,
-                "mid": seed["merchant_id"],
-                "title": seed["title"],
-                "desc": seed["description"],
                 "cat": seed["category"],
                 "brand": seed["brand"],  # None → SQL NULL
-                "attrs": json.dumps(seed["attributes"], ensure_ascii=False),
                 "ver": seed["version"],
-                "lt": seed["listing_time"],
                 "status": seed["status"],
             },
         )
-        for order, sku in enumerate(seed["sku_list"], start=1):
-            await s.execute(
-                text(
-                    "insert into product_sku (product_id, sku_id, color, size, price, sort_order) "
-                    "values (:pid, :sid, :color, :size, :price, :order)"
-                ),
-                {
-                    "pid": product_id,
-                    "sid": sku["sku_id"],
-                    "color": sku["color"],
-                    "size": sku["size"],
-                    "price": sku["price"],
-                    "order": order,
-                },
-            )
-        for order, image in enumerate(seed["images"], start=1):
-            await s.execute(
-                text(
-                    "insert into product_image (product_id, url, source, sort_order) "
-                    "values (:pid, :url, :source, :order)"
-                ),
-                {
-                    "pid": product_id,
-                    "url": image["url"],
-                    "source": image["source"],
-                    "order": order,
-                },
-            )
         await s.commit()
 
 
 async def _delete_seed(product_id: str) -> None:
-    """自建自删：先子表后主表（级联已开，仍显式删，语义不依赖 DDL 开关）。"""
+    """自建自删（可重复运行）。"""
     sm = get_sessionmaker()
     async with sm() as s:
-        for table in ("product_image", "product_sku", "product"):
-            await s.execute(
-                text(f"delete from {table} where product_id = :pid"), {"pid": product_id}
-            )
+        await s.execute(
+            text("delete from product where product_id = :pid"), {"pid": product_id}
+        )
         await s.commit()
 
 
@@ -452,21 +305,10 @@ async def test_mysql_product_repository_roundtrip_against_real_db():
         snap = await MySQLProductRepository().get_latest(product_id)
         assert snap is not None
         assert snap.product_id == product_id
-        assert snap.merchant_id == seed["merchant_id"]
-        assert snap.title == seed["title"]
-        assert snap.description == seed["description"]
         assert snap.category == seed["category"]
         assert snap.brand is None, "真空缺 brand 必须读成 None，不得是空串/'null'"
-        assert snap.attributes == seed["attributes"]
         assert snap.version == seed["version"]
-        assert snap.listing_time == seed["listing_time"] == "2024-09-06 14:00:00"
         assert snap.status == seed["status"]
-        assert [(s.sku_id, s.color, s.size, s.price) for s in snap.sku_list] == [
-            ("S_1", "米白", "36-40", 129.0)
-        ]
-        assert [(i.url, i.source) for i in snap.images] == [
-            ("https://cdn.example.com/products/P_88231/img1.jpg", "主图")
-        ]
 
         tool = ProductTool(repo=MySQLProductRepository())
 

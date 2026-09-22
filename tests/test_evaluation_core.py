@@ -1,6 +1,6 @@
-"""Phase 1 评测护栏：数据集完整性、确定性重放、指标数值、三方案结构。
+"""三方案评测护栏：数据集完整性、确定性重放、指标数值、方案结构。
 
-1. 数据集 ≥30 条、五类 scene 齐全、真值仅二值（loader 校验即线上 DTO 校验）；
+1. 数据集规模 ≥300、五类 scene 齐全、真值三值（loader 校验即线上 DTO 校验）；
 2. 同数据同 runner 跑两遍 → EvalRecord 全字段序列化逐字节一致；
 3. DecisionEvaluator 在手工可算小样本上数值正确；
 4. smoke 跑通且三方案都产出 EvalRecord，成本无墙钟字段；
@@ -22,7 +22,7 @@ from pra.evaluation.harness.base import EvalRecord
 from pra.evaluation.metrics.business import DecisionEvaluator
 from pra.evaluation.runner import ALL_SCHEMES, EvaluationRunner
 
-DATA_PATH = Path(__file__).resolve().parents[1] / "eval_data" / "v1" / "cases_v1.jsonl"
+DATA_PATH = Path(__file__).resolve().parents[1] / "eval_data" / "v2" / "cases_v2.jsonl"
 
 _DECISION_SET = {"PASS", "REJECT", "HUMAN_REVIEW"}
 
@@ -49,7 +49,7 @@ def _make_record(case_id: str, decision: str) -> EvalRecord:
 
 def test_dataset_integrity() -> None:
     cases = load_dataset(DATA_PATH)
-    assert len(cases) >= 30, "Phase 1 数据集至少 30 条"
+    assert len(cases) >= 300, "正式评测集至少 300 条"
     scenes = {c.scene for c in cases}
     assert scenes == {
         "normal",
@@ -59,7 +59,7 @@ def test_dataset_integrity() -> None:
         "evasion",
     }, f"五类 scene 都应覆盖: {sorted(scenes)}"
     truths = {c.expected.decision for c in cases}
-    assert truths <= {"PASS", "REJECT"}, f"Phase 1 真值仅二值: {truths}"
+    assert truths <= {"PASS", "REJECT", "HUMAN_REVIEW"}, f"真值三值: {truths}"
     # input 是 ProductReviewCase（loader 校验即线上 DTO 校验）；抽查必填字段
     sample = cases[0]
     assert sample.input.product.product_id and sample.input.merchant_id
@@ -163,30 +163,30 @@ async def test_smoke_runs_all_schemes() -> None:
 
 async def test_three_scheme_contrast_flagship() -> None:
     runner = EvaluationRunner(data_path=str(DATA_PATH))
-    result = await runner.run()  # 全量 35 条
+    result = await runner.run()
     by_case = {scheme: {r.eval_case_id: r.decision for r in recs}
                for scheme, recs in result.records.items()}
     g = lambda s, cid: by_case[s][cid]
 
-    # EC_0401（brand 空缺 + 强相似 + 脏商家）→ 仅 Agent 能 REJECT
-    assert g("agent", "EC_0401") == "REJECT"
-    assert g("rule", "EC_0401") == "HUMAN_REVIEW"
-    assert g("single_call_llm", "EC_0401") == "HUMAN_REVIEW"
+    # EC_V2_0015（brand 空缺 + 强相似 + 脏商家）→ 仅 Agent 能 REJECT
+    assert g("agent", "EC_V2_0015") == "REJECT"
+    assert g("rule", "EC_V2_0015") == "HUMAN_REVIEW"
+    assert g("single_call_llm", "EC_V2_0015") == "HUMAN_REVIEW"
 
-    # EC_0402 自有品牌对抗：Rule 直漏 / Single 漏放 / Agent REJECT
-    assert g("rule", "EC_0402") == "PASS"
-    assert g("single_call_llm", "EC_0402") == "PASS"
-    assert g("agent", "EC_0402") == "REJECT"
+    # EC_V2_0065 自有品牌对抗：Rule 直漏 / Single 漏放 / Agent REJECT
+    assert g("rule", "EC_V2_0065") == "PASS"
+    assert g("single_call_llm", "EC_V2_0065") == "PASS"
+    assert g("agent", "EC_V2_0065") == "REJECT"
 
-    # EC_0201 边界 Agent 增量案（brand 空缺但在库可查 → Agent PASS）
-    assert g("agent", "EC_0201") == "PASS"
-    assert g("rule", "EC_0201") == "HUMAN_REVIEW"
+    # EC_V2_0008 边界 Agent 增量案（brand 空缺但在库可查 → Agent PASS）
+    assert g("agent", "EC_V2_0008") == "PASS"
+    assert g("rule", "EC_V2_0008") == "HUMAN_REVIEW"
 
-    # EC_0001 三方案一致 PASS；EC_0101 文本明示 → single/agent REJECT
-    assert g("rule", "EC_0001") == g("single_call_llm", "EC_0001") == g("agent", "EC_0001") == "PASS"
-    assert g("single_call_llm", "EC_0101") == "REJECT"
-    assert g("agent", "EC_0101") == "REJECT"
+    # EC_V2_0006 三方案一致 PASS；EC_V2_0002 文本明示 → single/agent REJECT
+    assert g("rule", "EC_V2_0006") == g("single_call_llm", "EC_V2_0006") == g("agent", "EC_V2_0006") == "PASS"
+    assert g("single_call_llm", "EC_V2_0002") == "REJECT"
+    assert g("agent", "EC_V2_0002") == "REJECT"
 
     # Agent 无 FN/FP：审查员模型与数据集同口径构造，"满分"是耦合结果而非能力
     m = result.overall["agent"]
-    assert m.fn == 0 and m.fp == 0 and m.total == result.total_cases
+    assert m.fn == 0 and m.fp == 0

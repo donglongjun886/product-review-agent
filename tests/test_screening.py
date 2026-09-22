@@ -310,7 +310,7 @@ def test_rule_evidence_shape():
     （rule_id/name/detail 保真）+ 确定性 weight=1.0；不锁 value 的拼接格式与 extra 全量键位。
     """
     hit = RuleHit(rule_id="R-102", name="品牌词命中", detail="标题/描述命中品牌词: NIKE")
-    ev = rule_evidence(_CLEAN, hit)
+    ev = rule_evidence(hit)
     assert ev.type == "RULE_HIT"
     assert ev.source == "ScreeningRuleEngine"
     assert ev.weight == 1.0  # 确定性直判证据：满权重
@@ -420,7 +420,7 @@ async def test_process_review_direct_branches(monkeypatch, case, expect_verdict)
                 "verdict": triage_result.verdict,
                 "decision": ps._direct_decision(
                     triage_result.verdict,
-                    [ps.rule_evidence(c, h) for h in triage_result.hits],
+                    [ps.rule_evidence(h) for h in triage_result.hits],
                 ),
                 "counts": {"evidence": len(triage_result.hits)}}
 
@@ -434,7 +434,7 @@ async def test_process_review_direct_branches(monkeypatch, case, expect_verdict)
     assert calls["direct"] == {"run_id": "RUN_DIRECT", "verdict": expect_verdict}
     assert out["verdict"] == expect_verdict
     assert out["run_id"] == "RUN_DIRECT"
-    # 直判 decision 与落库 decision_json 同构：确定性 confidence=1.0
+    # 直判 decision 与落库投影列同构：确定性 confidence=1.0
     assert isinstance(out["decision"], ReviewDecision)
     assert out["decision"].decision_confidence == 1.0
     assert out["decision"].decision == (Decision.PASS if expect_verdict == "PASS"
@@ -450,7 +450,7 @@ async def test_process_review_direct_decision_evidence(monkeypatch):
                 "verdict": triage_result.verdict,
                 "decision": ps._direct_decision(
                     triage_result.verdict,
-                    [ps.rule_evidence(c, h) for h in triage_result.hits],
+                    [ps.rule_evidence(h) for h in triage_result.hits],
                 ),
                 "counts": {"evidence": len(triage_result.hits)}}
 

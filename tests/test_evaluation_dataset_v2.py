@@ -3,10 +3,9 @@
 1. 规模 ≥300、五类 scene 分布容差 ±5pp、manifest 与实际 JSONL 分布一致；
 2. ``abstain_label`` 与 ``decision`` 100% 一致；AUTO 为主、SHOULD_ABSTAIN 集中在
    boundary/evasion/multi-signal；
-3. 每条 input 经 ProductReviewCase 强解析、schema_version=2、id 与 v1 不重叠、
-   lineage 完整、REJECT 案有可引用政策依据；
+3. 每条 input 经 ProductReviewCase 强解析、schema_version=2、lineage 完整、REJECT 案有可引用政策依据；
 4. 同 seed 生成两遍逐字节一致；
-5. v1 老 JSONL（无 abstain_label）照常读入且 None 等价 AUTO_DECIDABLE。
+5. 老格式 JSONL（无 abstain_label / 无 lineage）照常读入且 None 等价 AUTO_DECIDABLE。
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from pra.evaluation.dataset.loader import abstain_stats, load_dataset, scene_sta
 from pra.evaluation.dataset.schema import EvalCase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-V1_PATH = REPO_ROOT / "eval_data" / "v1" / "cases_v1.jsonl"
 V2_PATH = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
 V2_MANIFEST = REPO_ROOT / "eval_data" / "v2" / "manifest.json"
 GEN_SCRIPT = REPO_ROOT / "scripts" / "eval_dataset_gen.py"
@@ -91,13 +89,11 @@ def test_v2_truth_abstain_consistency() -> None:
 
 def test_v2_rows_are_valid_product_review_cases() -> None:
     cases = load_dataset(V2_PATH)
-    v1_ids = {c.eval_case_id for c in load_dataset(V1_PATH)}
     for c in cases:
         assert c.schema_version == 2, f"{c.eval_case_id} schema_version 应为 2"
-        assert c.eval_case_id not in v1_ids, "v2 与 v1 的 eval_case_id 不得重叠"
         parsed = ProductReviewCase.model_validate(c.input.model_dump())
         assert parsed.product.title and parsed.merchant_id
-        # lineage seed 为 v1 老案或 SEED_V2_* 语义种子
+        # lineage seed 为语义种子（SEED_V2_*）或模板案标识（EC_*）
         assert c.lineage is not None and c.lineage.seed_case_id and c.lineage.mutation
         seed = c.lineage.seed_case_id
         assert seed.startswith(("EC_", "SEED_V2_")), (
@@ -120,18 +116,17 @@ def test_eval_image_urls_carry_no_class_semantics() -> None:
     泄漏真值类目。本守护锁死「中性」这条不变量，防再手写回语义 url。
     """
     leaked = ("viol", "clean", "bound", "logo", "brand", "risk", "reject", "pass", "human")
-    for path in (V1_PATH, V2_PATH):
-        for c in load_dataset(path):
-            for img in c.input.product.images:
-                name = img.url.rsplit("/", 1)[-1].lower()
-                segment = img.url.rsplit("/", 2)[-2].lower()
-                assert segment.startswith("asset-") or segment.startswith("p_"), (
-                    f"{c.eval_case_id} 的图片 url 资源段非中性: {img.url}"
+    for c in load_dataset(V2_PATH):
+        for img in c.input.product.images:
+            name = img.url.rsplit("/", 1)[-1].lower()
+            segment = img.url.rsplit("/", 2)[-2].lower()
+            assert segment.startswith("asset-") or segment.startswith("p_"), (
+                f"{c.eval_case_id} 的图片 url 资源段非中性: {img.url}"
+            )
+            for token in leaked:
+                assert token not in segment and token not in name, (
+                    f"{c.eval_case_id} 的图片 url 含类别语义 {token!r}: {img.url}"
                 )
-                for token in leaked:
-                    assert token not in segment and token not in name, (
-                        f"{c.eval_case_id} 的图片 url 含类别语义 {token!r}: {img.url}"
-                    )
 
 
 def test_v2_families_cover_all_intended_shapes() -> None:
@@ -175,18 +170,27 @@ def test_v2_generator_quota_matches_schedule(tmp_path: Path) -> None:
                       "multi-signal": 64, "evasion": 32}
 
 
-# --- 5) Phase 1 老数据向后兼容（schema v2 校验器不破坏 v1）
+# --- 5) 老格式（无 abstain_label / 无 lineage）向后兼容
 
 
-def test_v1_backward_compat() -> None:
-    cases = load_dataset(V1_PATH)  # 无 abstain_label 字段的老 JSONL
-    assert len(cases) == 35
-    for c in cases:
-        assert c.expected.abstain_label is None, "v1 老数据 abstain_label 应为 None"
-        assert c.expected.decision in {"PASS", "REJECT"}
-        assert c.lineage is None, "v1 老数据无 lineage 字段"
+def test_legacy_rows_without_abstain_label(tmp_path: Path) -> None:
+    """老格式 JSONL 照常读入：缺 abstain_label → None，语义等价 AUTO_DECIDABLE。"""
+    src = load_dataset(V2_PATH)[0]
+    row = src.model_dump(mode="json")
+    row["schema_version"] = 1
+    row["lineage"] = None
+    row["expected"].pop("abstain_label", None)
+    row["expected"]["decision"] = "PASS"
+    path = tmp_path / "legacy.jsonl"
+    path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    cases = load_dataset(path)
+    assert len(cases) == 1
+    c = cases[0]
+    assert c.expected.abstain_label is None, "老数据缺 abstain_label 应读成 None"
+    assert c.expected.decision in {"PASS", "REJECT"}
+    assert c.lineage is None, "老数据无 lineage"
     aa = abstain_stats(cases)
-    assert aa["LEGACY_UNLABELED"] == 35  # None 等价 AUTO_DECIDABLE
-    assert aa["auto_decidable_equivalent"] == 35
-    for c in cases[:3]:
-        EvalCase.model_validate(c.model_dump())
+    assert aa["LEGACY_UNLABELED"] == 1  # None 等价 AUTO_DECIDABLE
+    assert aa["auto_decidable_equivalent"] == 1
+    EvalCase.model_validate(c.model_dump())

@@ -170,7 +170,6 @@ class ReviewResultORM(Base):
     risk_type_json: Mapped[list] = mapped_column(JSON, nullable=False)
     decision_confidence: Mapped[float] = mapped_column(DOUBLE, nullable=False)
     policy_refs_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-    decision_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # ReviewDecision 全量快照
     created_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
     updated_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
 

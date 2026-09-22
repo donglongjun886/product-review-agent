@@ -1,13 +1,13 @@
 """decide 节点：最终裁决 —— 图中唯一"LLM 提案 + 确定性 overlay"双层节点。
 
 职责：LLM 只产 **DecisionProposal 提案**；``run_decision_overlay`` 做确定性收口 ——
-硬规则优先、预算超限 / 证据矛盾 / 关键工具失败 / 政策不确定 / 假设不可区分 / degraded
+硬规则优先、预算超限 / 证据矛盾 / 政策不确定 / 假设不可区分 / degraded
 等条件一律弃权转人工（归因码写进 overrides），PASS/REJECT 只有过 Gate 才被采纳 →
 产出唯一终态 ``ReviewDecision``。DECIDED 是图内唯一终态：worker 在 invoke 返回后把
 decision 落 DB（本节点不落库、不写额外状态字段）。
 
 契约要点：
-1. ``can_llm`` = not degraded ∧ 预算未超限 ∧ 无未解决关键工具失败；否则不调 LLM：
+1. ``can_llm`` = not degraded ∧ 预算未超限；否则不调 LLM：
    proposal=None、budget=state["budget"]、decide_llm_failed=False。
 2. can_llm 时调 ``call_structured_llm(OutputModel=DecisionProposal, node="decide")``，
    按 outcome.attempts/tokens 记账。
@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
-from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, key_tool_failure, make_failure
+from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, make_failure
 from pra.agent.guardrails.gate import run_decision_overlay
 from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
 from pra.agent.guardrails.schemas import DecisionProposal
@@ -106,7 +106,6 @@ async def decide_node(state: dict, config, *, llm: LLMBackend) -> dict:
     can_llm = (
         not state["degraded"]
         and budget_exceeded(state["budget"]) is None
-        and not key_tool_failure(state, state["failures"])
     )
     if can_llm:
         outcome = await call_structured_llm(
@@ -122,7 +121,7 @@ async def decide_node(state: dict, config, *, llm: LLMBackend) -> dict:
         proposal = outcome.model
         decide_llm_failed = outcome.model is None
     else:
-        # 预算/降级/关键工具失败 → 不再烧 LLM；overlay 用 proposal=None 兜底。
+        # 预算/降级 → 不再烧 LLM；overlay 用 proposal=None 兜底。
         proposal = None
         budget = state["budget"]
         decide_llm_failed = False

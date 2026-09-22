@@ -10,15 +10,12 @@
 - ``abstain_stats(cases)``：abstention 标签（AUTO_DECIDABLE / SHOULD_ABSTAIN /
   老数据 None）计数 —— manifest 与 AbstentionEvaluator 前置口径的单一取数点。
 - ``smoke_subset(cases, limit)``：确定性取前 ``limit`` 条（不随机；文件行序即稳定序）。
-- ``load_manifest(dir)``：读 manifest.json（版本/分布/阈值口径快照/生成命令等元数据）；
-  只读不校验，与 JSONL 是否一致由评审复核（报告会打印实际分布）。
 
 行号从 1 起，异常信息含行号与 eval_case_id（若可解析）。
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pra.evaluation.dataset.schema import AbstainLabel, EvalCase
@@ -26,7 +23,6 @@ from pra.evaluation.dataset.schema import AbstainLabel, EvalCase
 __all__ = [
     "abstain_stats",
     "load_dataset",
-    "load_manifest",
     "scene_stats",
     "smoke_subset",
 ]
@@ -146,19 +142,3 @@ def smoke_subset(cases: list[EvalCase], limit: int = 10) -> list[EvalCase]:
     if limit <= 0:
         return []
     return list(cases[:limit])
-
-
-def load_manifest(data_dir: str | Path) -> dict:
-    """读取 ``manifest.json``（版本/分布/口径快照等元数据）；缺失返回 {}。
-
-    只读不校验：manifest 与 JSONL 的一致性由报告侧打印实际分布供人核对。
-    """
-    p = Path(data_dir) / "manifest.json"
-    if not p.exists():
-        return {}
-    with p.open("r", encoding="utf-8") as fh:
-        try:
-            obj = json.load(fh)
-        except (ValueError, TypeError):
-            return {}
-    return obj if isinstance(obj, dict) else {}

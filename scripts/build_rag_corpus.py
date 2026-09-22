@@ -3,7 +3,7 @@
 产物 ``src/pra/rag/corpus/policies.json`` 与 ``cases.json``：静态、git 入库、可评审；
 幂等（同输入重跑逐字节一致），已存在文件会被覆盖。
 
-隔离不变量：Case KB 的 case_id 与 eval_data/v1 + v2 的全部 case 标识（eval_case_id /
+隔离不变量：Case KB 的 case_id 与 eval_data/v2 的全部 case 标识（eval_case_id /
 input.case_id / lineage.seed_case_id）无交集，否则非零退出 —— 防「检索到 eval GT = 作弊」。
 
 数据：Policy KB 手写 24 条款（品牌/IP、虚假宣传、类目准入与标识、规避行为、处置与复核
@@ -32,7 +32,6 @@ POLICIES_FILE = CORPUS_DIR / "policies.json"
 CASES_FILE = CORPUS_DIR / "cases.json"
 
 EVAL_FILES = [
-    REPO_ROOT / "eval_data" / "v1" / "cases_v1.jsonl",
     REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl",
 ]
 
@@ -509,7 +508,7 @@ def _finalize_cases(curated: list[dict], variants: list[dict]) -> list[dict]:
 
 
 def _eval_case_ids() -> set[str]:
-    """eval_data/v1 + v2 全部 case 标识（隔离自检用）。"""
+    """eval_data/v2 全部 case 标识（隔离自检用）。"""
     ids: set[str] = set()
     for path in EVAL_FILES:
         if not path.exists():
@@ -561,7 +560,7 @@ def build() -> tuple[dict, dict]:
     }
     case_meta = {
         "source": "手写种子（demo P_88231/M_5512 剧情改写 + 合成各案型） + 程序化变体（固定 seed）",
-        "isolation_declaration": "红线 R-4：Case KB 与 eval_data/v1、v2 的 ground-truth 严格隔离 —— "
+        "isolation_declaration": "红线 R-4：Case KB 与 eval_data/v2 的 ground-truth 严格隔离 —— "
                                  "case_id 统一 RAG_CASE_ 前缀（与 EC_*/EC_V2_*/CASE_EC_*/CASE_EC_V2_* 无交集），"
                                  "剧情不与任何 eval 违规案一一对应（防检索到 GT = 评测作弊）",
         "generated_by": "scripts/build_rag_corpus.py",
@@ -600,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Case KB   : {case_env['meta']['counts']['total']} 条"
           f"（手写 {case_env['meta']['counts']['curated']} + 变体 {case_env['meta']['counts']['variants']}）")
     if ok:
-        print("  隔离自检   : PASS（Case KB case_id 与 eval_data/v1+v2 全部 case 标识无交集）")
+        print("  隔离自检   : PASS（Case KB case_id 与 eval_data/v2 全部 case 标识无交集）")
     else:
         print(f"  隔离自检   : FAIL —— 交集 {sorted(overlap)[:10]}", file=sys.stderr)
 

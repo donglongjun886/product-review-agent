@@ -1,7 +1,7 @@
 {
   "meta": {
     "source": "手写种子（demo P_88231/M_5512 剧情改写 + 合成各案型） + 程序化变体（固定 seed）",
-    "isolation_declaration": "红线 R-4：Case KB 与 eval_data/v1、v2 的 ground-truth 严格隔离 —— case_id 统一 RAG_CASE_ 前缀（与 EC_*/EC_V2_*/CASE_EC_*/CASE_EC_V2_* 无交集），剧情不与任何 eval 违规案一一对应（防检索到 GT = 评测作弊）",
+    "isolation_declaration": "红线 R-4：Case KB 与 eval_data/v2 的 ground-truth 严格隔离 —— case_id 统一 RAG_CASE_ 前缀（与 EC_*/EC_V2_*/CASE_EC_*/CASE_EC_V2_* 无交集），剧情不与任何 eval 违规案一一对应（防检索到 GT = 评测作弊）",
     "generated_by": "scripts/build_rag_corpus.py",
     "seed": 20260908,
     "counts": {
