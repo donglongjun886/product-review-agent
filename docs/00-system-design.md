@@ -1,14 +1,12 @@
-# 电商平台商品内容治理 · 复杂风险调查 Agent —— 系统设计拆解（v1.1）
+# 电商平台商品内容治理 · 复杂风险调查 Agent —— 设计口径与决策依据
 
 > 主线：**业务价值 → 决策难点 → 系统设计 → 验证结果**
 > 原则：能用规则解决的，不交给 LLM；传统机审发现异常，Agent 调查复杂异常；Agent 不是全量审核系统，而是机审链路里的"复杂案件处理节点"。
 >
-> v1.1 修订（review 复核）：决策机制升级为 **decision_confidence（自动决策安全门槛）与 risk 分离 + PASS/REJECT/HUMAN_REVIEW 三个 Decision Gate**（§7）；
-> 预算明确为 **Guardrail 上界（10/15/40000/30s）而非目标**，Trace/Evaluation 增 Budget Utilization（§8/§10.3/§11.3）；
-> 相似度阈值三档化并配置化 + validation sweep（§7.6/§11.5）；补三方案公平性前提（§12.0）与 **Ablation Evaluation**（§13.4）；
-> 成本/调查效率指标含 **Marginal Evidence Gain**（§11.3）；顶层包更名 `pra`（§15）。
->
-> **现状口径（2026-09）**：本文兼含**已实现**与**设计蓝图**。已实现 = `pra` 包（同步 HTTP `POST /api/v1/reviews` + 工具数据源 MySQL / Chroma RAG + Langfuse 观测 + 三方案评测与回归）；**MQ 异步 worker、Redis 幂等限流、审核工作台、多标注者交叉校验、OTel 链路指标仅为本节蓝图，未实现**（逐条标注见 §1.2 表、§8.2-3/5、§9.3、§10.1、§13.2-4；放弃项见 §14.3 与 README Roadmap）。
+> **本文只承载口径与决策依据**：为什么这么设计、要满足什么不变量、什么算合规、什么明确不做。
+> 字段 / 表结构 / 目录 / 工具 schema / 配置常量等实现规格一律以代码为准，本文只给指针；
+> 实现状态（已落地 / 规划中）见 [README](../README.md) 的「当前实现边界」与「Roadmap」，
+> 评测数字、数据集规模与评测口径见 [docs/02-evaluation.md](02-evaluation.md)。
 
 ---
 
@@ -77,13 +75,13 @@ HUMAN_REVIEW → 人工裁决 → 回流案例库 + 策略库 + 评测集
 
 | 层 | 技术载体 | 体现的能力 |
 |---|---|---|
-| 接入 | MQ（Kafka / RabbitMQ）（**规划，未实现**；现状：同步 HTTP `POST /api/v1/reviews`） | 异步解耦、削峰、事件溯源 |
+| 接入 | 同步 HTTP `POST /api/v1/reviews`（MQ Topic 为后续扩展位） | 异步解耦、削峰、事件溯源 |
 | 同步机审 | FastAPI 服务 + 规则引擎 | 高吞吐、低延迟、确定性 |
 | 分流 | 状态机 + 阈值规则 | 明确性决策，不滥用 LLM |
-| 复杂调查 | LangGraph StateGraph（asyncio + Worker） | 预算控制、可恢复状态机 |
+| 复杂调查 | LangGraph StateGraph（asyncio） | 预算控制、可恢复状态机 |
 | 工具/RAG | 内部服务 + 向量检索（ChromaDB） | 多源数据访问 |
-| 人工回流 | 审核工作台 + 反馈 Topic（**规划，未实现**） | 闭环、知识沉淀 |
-| 全链路 | MySQL 状态机（**已用**）+ Redis 幂等/限流、OTel（**规划，未实现**） | 可靠性、可观测性（现状：可观测性为 Langfuse，见 §10.4） |
+| 人工回流 | 审核工作台 + 反馈 Topic | 闭环、知识沉淀 |
+| 全链路 | MySQL 状态机 + Langfuse 观测（Redis 幂等/限流、OTel 链路为后续扩展位，见 §10.4） | 可靠性、可观测性 |
 
 ### 1.3 关键架构决策：为什么"同步 + 异步"两段式
 
@@ -99,65 +97,20 @@ Case 是系统的核心数据对象，**输入是商品事实，输出是结构�
 
 ### 2.1 输入：ProductReviewCase（商品事实快照）
 
-```json
-{
-  "case_id": "CASE_20240907_001",
-  "product": {
-    "product_id": "P_88231",
-    "title": "新款厚底复古跑鞋 女士百搭运动鞋",
-    "description": "经典复古跑鞋设计，轻量缓震，适合日常通勤和运动。",
-    "category": "女鞋/运动鞋",
-    "brand": null,
-    "attributes": { "材质": "PU", "鞋底": "橡胶", "适用人群": "女士" },
-    "sku_list": [
-      { "sku_id": "S_1", "color": "米白", "size": "36-40", "price": 129.0 }
-    ],
-    "images": [
-      { "url": ".../img1.jpg", "ocr_text": null, "source": "主图" }
-    ],
-    "listing_time": "2024-09-06 14:00:00",
-    "version": 3
-  },
-  "merchant_id": "M_5512",
-  "event_type": "NEW_LISTING",
-  "screening_signals": [
-    { "name": "KEYWORD", "result": "PASS", "score": 0.0 },
-    { "name": "LOGO_DETECT", "result": "PASS", "score": 0.0 },
-    { "name": "CATEGORY_RULE", "result": "PASS", "score": 0.0 },
-    { "name": "IMAGE_NSFW", "result": "PASS", "score": 0.0 }
-  ]
-}
-```
+字段与序列化形态以 `src/pra/domain/models.py` 为准，本文不再镜像字段清单。设计上这条输入必须自带
+Agent 调查的**起点信息**：商品事实（标题 / 描述 / 属性 / 类目 / 品牌 / SKU / 图片 / 版本）、机审已产出的
+OCR 文本与 `screening_signals`（即 §12.0 的"基础输入"）。
 
 ### 2.2 输出：ReviewDecision（结构化裁决）
 
-```json
-{
-  "decision": "HUMAN_REVIEW",
-  "risk_level": "HIGH",
-  "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
-  "decision_confidence": 0.95,
-  "evidence": [
-    { "type": "IMAGE_SIMILARITY", "source": "ImageAnalysisTool", "value": "similarity=0.91, match=某品牌经典鞋款", "weight": 0.9 },
-    { "type": "MERCHANT_HISTORY", "source": "MerchantTool", "value": "23 similar / 5 removals / 3 relisting", "weight": 0.85 },
-    { "type": "CASE_PRECEDENT", "source": "CaseSearchTool", "value": "CASE_1832 → REJECT", "weight": 0.8 }
-  ],
-  "policy": ["POLICY_3.2"],
-  "hypothesis_trace": [
-    { "id": "H3", "statement": "刻意规避品牌识别", "prior": 0.2, "posterior": 0.88, "status": "SUPPORTED" }
-  ],
-  "budget_used": { "llm_calls": 4, "tool_calls": 5, "tokens": 18000, "latency_ms": 9200 }
-}
-```
-
-> 字段语义修订（v1.1，见 §7）：输出字段即 **`decision_confidence`（自动决策的安全门槛，非模型真实概率）**（该字段由早期的 `confidence` 改名而来，旧名已废弃），
-> 与 `risk_level`（风险本身高低）**相互独立** —— HIGH risk + 证据不足仍应 HUMAN_REVIEW，不能仅因 risk_level=HIGH 就 REJECT（§7.5）。
+字段与取值域以 `src/pra/domain/models.py` 为准，本文不再镜像。两条口径不变：`decision_confidence` 是
+**自动决策的安全门槛**，与 `risk_level` 相互独立（§7.1 / §7.4）；支撑判定的证据必须带可追溯引用（§7.2）。
 
 ### 2.3 Case 模型的设计要点
 
-1. **输入 = 事实，输出 = 裁决 + 证据链**。证据链是核心，需要解释"为什么这么判"时，答案在 `evidence[]` 和 `hypothesis_trace[]` 里。
+1. **输入 = 事实，输出 = 裁决 + 证据链**。证据链是核心，需要解释"为什么这么判"时，答案在证据与假设轨迹里。
 2. `screening_signals` 记录传统机审已做过什么、结果是什么，作为 Agent 的**起点信息**（避免 Agent 重复劳动）。
-3. 结构化的 `risk_type` 使用**受控词表**（见 §7），保证可统计、可评测。
+3. 结构化的 `risk_type` 使用**受控词表**（§7.3），保证可统计、可评测。
 
 ---
 
@@ -165,83 +118,32 @@ Case 是系统的核心数据对象，**输入是商品事实，输出是结构�
 
 Agent 的状态**必须是显式、可序列化、可持久化、可恢复**的，而不是藏在 LLM 的上下文里。这是"工程化 Agent"和"Prompt 循环"的分水岭。
 
-```json
-{
-  "run_id": "RUN_20240907_001_01",
-  "case_id": "CASE_20240907_001",
-  "status": "INVESTIGATING",           // PENDING | INVESTIGATING | DECIDED | ESCALATED | BUDGET_EXCEEDED | FAILED
-  "hypotheses": [
-    {
-      "id": "H1", "statement": "普通复古设计，无违规",
-      "prior": 0.5, "posterior": 0.05, "status": "REFUTED",
-      "evidence_for": [], "evidence_against": ["image_similarity=0.91"]
-    },
-    {
-      "id": "H2", "statement": "参考了某知名品牌经典设计",
-      "prior": 0.4, "posterior": 0.9, "status": "SUPPORTED",
-      "evidence_for": ["image_similarity=0.91"], "evidence_against": []
-    },
-    {
-      "id": "H3", "statement": "刻意规避品牌识别",
-      "prior": 0.2, "posterior": 0.88, "status": "SUPPORTED",
-      "evidence_for": ["brand=null", "标题/描述无品牌", "商家3次改标题重上架"],
-      "evidence_against": []
-    },
-    {
-      "id": "H4", "statement": "商家系统性类似行为",
-      "prior": 0.15, "posterior": 0.85, "status": "SUPPORTED",
-      "evidence_for": ["23 similar / 5 removals"], "evidence_against": []
-    }
-  ],
-  "evidence": [],                      // 已收集证据（去重、合并）
-  "investigation_queue": [             // 待验证问题（优先级排序）
-    { "q": "商品外观是否对应某品牌?", "priority": 1, "status": "DONE" },
-    { "q": "商家是否系统性类似行为?", "priority": 2, "status": "DONE" }
-  ],
-  "tool_call_history": [               // 调用审计
-    { "seq": 1, "tool": "ImageAnalysisTool", "args": "{...}", "result_ref": "IMAGE_SIMILARITY similarity=0.91, match=某品牌经典鞋款", "latency_ms": 1200, "tokens": 800 }
-  ],
-  "budget": {
-    "llm_calls": 0, "tool_calls": 0, "tokens": 0,
-    "start_time": "2024-09-07T10:00:00Z",
-    "limits": { "max_llm_calls": 10, "max_tool_calls": 15, "max_tokens": 40000, "max_latency_ms": 30000 }
-  },
-  "decision": null                     // 收敛后写入 ReviewDecision
-}
-```
-
-> 实现映射说明：LangGraph 的实际 `AgentState`（`src/pra/agent/state.py`）**只装调查记忆**——
-> `run_id/case_id` 映射为 LangGraph **thread_id**（Checkpointer 线程键，调用方携带）；`status` 由 DB `review_run.status` 承载，
-> **DECIDED 是图内唯一终态**（PASS/REJECT/HUMAN_REVIEW 都是 `ReviewDecision.decision` 取值，不是图终态；预算耗尽/工具失败/降级
-> 通过 `decision.overrides` 记录，见 §7/§8）。本节 JSON 是设计视角的全量形态。
+> 字段清单、合并（reducer）语义与数量上限以代码为准：`src/pra/agent/state.py`、
+> `src/pra/agent/guardrails/schemas.py`。本文不再镜像 State 字段表。
 
 ### 3.1 设计要点
 
 1. **Hypothesis 是状态的核心**：Agent 不是"分类器"，而是"假设验证器"。每个假设有 `prior → posterior` 的演变，这是可解释的。
-2. **状态持久化**：`AgentState` 即 LangGraph 的 State（`TypedDict`/Pydantic），由 LangGraph **Checkpointer** 每步后持久化；
-   **MVP 实现为进程内 `InMemorySaver`**（`src/pra/agent/checkpointer.py`），MySQL Checkpointer 为**规划项（未实现）**
-   ——「worker 崩溃可恢复 / 断点续跑」以持久化落地为前提，当前由内存 checkpointer 支撑 eval 重放。
-3. **`budget` 是状态的硬字段**：条件边路由函数在每轮进入节点前检查预算，超限即路由到转人工止损。
-4. **`evidence` 与 `tool_call_history` 分离**：前者是"结论依据"，后者是"过程审计"，两者都进 trace。
-5. **实现映射**：`run_id/case_id` → LangGraph thread_id；`status` 落 DB `review_run.status`（DECIDED 为图唯一终态）；图内另有 `pending_tool_calls / degraded / failures` 三个内部通道。
+2. **状态持久化**：`AgentState` 即 LangGraph 的 State，由 LangGraph **Checkpointer** 每步后持久化——「崩溃可恢复 / 断点续跑」以持久化落地为前提。
+3. **预算（budget）是状态的硬字段**：条件边路由函数在每轮进入节点前检查预算，超限即路由到转人工止损。
+4. **"结论依据"与"过程审计"分离**：证据是前者，工具调用历史是后者，两者都进 trace。
+5. **图的终态只有一个**：收敛即终态；`PASS / REJECT / HUMAN_REVIEW` 是 `ReviewDecision.decision` 的取值，不是图终态；
+   预算耗尽 / 工具失败 / 降级通过 decision 的 overrides 记录（§7 / §8）。`run_id` / `case_id` 等价于 LangGraph thread_id，
+   运行状态由 DB `review_run.status` 承载。
 
 ### 3.2 AgentState 实现契约（结论）
 
-- **只装调查记忆**：`case / hypotheses / evidence / investigation_queue / tool_call_history / budget / decision`，外加三个内部通道
-  `pending_tool_calls / degraded / failures`；`run_id/case_id` 不进 state（等价于 thread_id），`status` 不进 state（由 DB `review_run.status` 承载）。
-- **reducer 分两类**：`evidence` 走自定义去重合并（key = `(type, source, ref_id)`，`ref_id` 为 None 时回退用 value；
-  同 key 丢弃新增——证据一旦收集不可篡改）；`tool_call_history` / `failures` 走 append；其余字段
-  （`hypotheses / investigation_queue / budget / decision / degraded / pending_tool_calls / case`）**覆盖写**：本图是单路径线性链，
-  不存在两个节点同轮写同一字段，写入方返回完整集合即可。
-- **不使用 `MessagesState`**：四个 LLM 节点每次调用都从 state 重新组装 prompt，不累积 message 历史——可序列化、token 可预算、重放确定；
-  单次调用内部的对话（含 schema 重试的修正提示）只存在于该次节点调用内，随 `review_trace` 落库。
-- **数量上限用 schema 约束**（`src/pra/agent/guardrails/schemas.py`）：假设 ≤5、调查队列 ≤8、单轮计划工具 ≤3（Pydantic `max_length` 字面约束，
-  无独立常量）；`guardrails/gate.py` **不提供任何读 `prior` 的出口**，两道 Gate 与收敛判定都不消费它
-  （`prior` 只由评测侧审查员桩用于假设筛选，见 `evaluation/harness/agent_scheme.py`）。
-- **LLM 步失败降级**（`guardrails/llm_shell.py`）：Pydantic schema 校验失败自动重试 **1 次**（把校验错误回喂修正），仍失败则该节点返回降级结果并置
-  `degraded=True`，后续 LLM 节点不再调用 LLM（只做必要透传），统一按「证据不足」路由到 decide，由确定性 overlay 产出 `HUMAN_REVIEW`（硬规则命中除外）。
-- **假设生命周期**：`PENDING → SUPPORTED / REFUTED / UNRESOLVED`（`UNRESOLVED` = 已查证但未能证实也未证伪，与「还没查」区分）；假设状态**只引导调查与留痕**，终裁由证据事实决定（§7.2），不由假设状态推导；
-  hypothesize 只在入口执行 1 次，运行中新出现的假设由 reevaluate 追加。
+- **只装调查记忆与图内控制通道**：调查记忆（商品事实 / 假设 / 证据 / 待验证问题 / 工具调用历史 / 预算 / 决策）外加图内控制通道；
+  `run_id` / `case_id` 不进 state（等价于 thread_id），运行状态不进 state（落 DB）。
+- **证据一旦收集不可篡改**：证据合并按去重键丢弃新增而非覆盖；工具调用历史与失败记录为追加。
+- **不累积对话历史**：每个 LLM 节点都从 state 重新组装 prompt，单次调用内部的对话只存在于该次节点调用内 —— 可序列化、token 可预算、重放确定。
+- **边界由入参 schema 约束，判定不读模型量**：假设数 / 调查队列长度 / 单轮计划工具数由 schema 限定；
+  两道 Gate 与收敛判定都不消费 LLM 产出的 `prior` / `posterior`（§7.2）。
+- **LLM 步失败降级**：结构化输出校验失败自动重试一次，仍失败则该节点返回降级结果并标记降级，后续 LLM 节点不再调用 LLM，
+  统一按「证据不足」路由到 decide，由确定性 overlay 产出 `HUMAN_REVIEW`（硬规则命中除外）；重试上限与降级标记以
+  `src/pra/agent/guardrails/llm_shell.py` 为准。
+- **假设生命周期**：`PENDING → SUPPORTED / REFUTED / UNRESOLVED`（`UNRESOLVED` = 已查证但未能证实也未证伪，与「还没查」区分）；
+  假设状态**只引导调查与留痕**，终裁由证据事实决定（§7.2），不由假设状态推导；假设在入口生成一次，运行中新出现的假设由再评估节点追加。
 
 ---
 
@@ -280,40 +182,7 @@ Decision（充分 → PASS/REJECT/HUMAN_REVIEW；不足 → 回到 Plan 或转�
 | 7. Uncertainty / Abstention | `decide` 节点 + 确定性 Decision Gate | required 测量维度未覆盖（可补救）/ 维度不可测 / 阳性不足以自动拒绝 / Gate 不通过（含 decision_confidence<0.7、关键矛盾、关键 Tool 失败、预算耗尽、降级）→ HUMAN_REVIEW（§7.2） |
 | 8. Cost / Latency Budget | 条件边的确定性 `budget_check` | 超限 → 直接路由到转人工 |
 
-**StateGraph 草图：**
-
-```python
-class AgentState(TypedDict):
-    case: dict                 # ProductReviewCase 事实快照
-    hypotheses: list[dict]     # 风险假设（prior / posterior / status）
-    evidence: list[dict]       # 已收集证据
-    investigation_queue: list[dict]
-    tool_call_history: list[dict]
-    budget: dict               # 已用 + 限额
-    decision: dict | None      # 收敛后的 ReviewDecision
-
-graph = StateGraph(AgentState)
-
-graph.add_node("hypothesize", hypothesize_node)   # LLM：生成/更新假设
-graph.add_node("plan", plan_node)                 # LLM：决定下一步调查
-graph.add_node("tools", ToolNode(tools))          # 确定性：执行工具
-graph.add_node("reevaluate", reevaluate_node)     # LLM：证据综合、更新后验
-graph.add_node("decide", decide_node)             # LLM 提案 + 硬规则校验
-
-graph.set_entry_point("hypothesize")
-graph.add_edge("hypothesize", "plan")
-
-# plan 之后：有工具要调且预算够 → tools；否则 → decide
-graph.add_conditional_edges("plan", route_after_plan,
-    {"tools": "tools", "decide": "decide"})
-graph.add_edge("tools", "reevaluate")
-
-# reevaluate 之后：证据不足且预算够 → 回 plan；否则 → decide
-graph.add_conditional_edges("reevaluate", route_after_reevaluate,
-    {"continue": "plan", "decide": "decide"})
-
-app = graph.compile(checkpointer=make_memory_checkpointer())  # MVP：InMemorySaver（MySQL Checkpointer 为规划项）
-```
+> 节点 / 边装配与条件边路由以 `src/pra/agent/graph.py` 为准，本文不再镜像代码草图。
 
 ### 4.3 关键分工：LangGraph 只做"编排骨架"，其余是确定性代码 + LLM 节点
 
@@ -325,7 +194,7 @@ app = graph.compile(checkpointer=make_memory_checkpointer())  # MVP：InMemorySa
 | Tool 执行、结果反序列化、证据去重合并 | ToolNode + 确定性 Python | 不浪费 LLM token |
 | 假设生成 / 计划 / 证据综合 / 决策推理 | LLM 节点（结构化 JSON + Schema 校验） | 需要语义推理 |
 | 硬规则兜底（黑名单必 REJECT） | `decide` 节点的确定性 overlay | 安全红线 |
-| State 持久化 / 恢复 / 重放 | LangGraph Checkpointer（**MVP：`InMemorySaver`**；MySQL 为规划项） | eval 重放（崩溃恢复待持久化落地） |
+| State 持久化 / 恢复 / 重放 | LangGraph Checkpointer（持久化后端可替换） | eval 重放与崩溃恢复 |
 
 **为什么选 LangGraph（而非自研 Loop）**：LangGraph 的核心模型（显式 State + Graph + Checkpointer + 条件边）恰好就是本项目 Loop 需要的骨架，直接复用能省掉自写状态机 / 持久化 / 重放的重复劳动。但 LangGraph **只负责编排骨架**，以下仍是自研：预算护栏、硬规则兜底、证据去重、Tool 的 JSON Schema、决策 guardrail、trace 落库——既吃到框架红利，又保留工程可控性。
 
@@ -374,16 +243,17 @@ app = graph.compile(checkpointer=make_memory_checkpointer())  # MVP：InMemorySa
 
 ## 5. Tool 列表及职责
 
-每个 Tool 必须回答"审核员为什么需要这个信息"。**v1 只做这 6 个，不为数量堆工具。**
+每个 Tool 必须回答"审核员为什么需要这个信息"。**v1 只做这 6 个，不为数量堆工具**；
+字段级输入 / 输出 schema 以 `src/pra/tools/`（`base.py` 与各工具目录）为准，本文只写职责。
 
-| Tool | 回答的业务问题 | 输入 | 输出 | 实现类型 |
-|---|---|---|---|---|
-| **ProductTool** | 这个商品的事实是什么？（尤其 brand 是否为空、字段是否冲突） | product_id | 结构化商品快照（标题/描述/属性/品牌/SKU/图片/版本） | 确定性（MySQL 读） |
-| **ImageAnalysisTool** | 商品外观是否与某品牌/违禁视觉高度相似？ | image url(s) | 相似度 Top-K、Logo 检测、视觉风险描述 | 混合（向量检索 + 视觉 LLM） |
-| **OCRTool** | 图片里到底写了什么？ | image | 文字 + 坐标 + 语言 | 确定性（OCR 服务） |
-| **MerchantTool** | 这个商家是否系统性地做类似行为？ | merchant_id | 商品总数、相似商品数、历史违规/下架/改标题重上架数、信用分 | 确定性（聚合 + 向量扫描） |
-| **CaseSearchTool** | 有没有类似且已有人工裁决的先例？结论是什么？ | 自然语言/结构化查询 | Top-K 相似案例 + 元数据（决策/风险类型/关键证据/政策） | RAG（案例库检索） |
-| **PolicySearchTool** | 当前有效政策对这类情况怎么说？ | 查询 + 类目/风险类型过滤 | Top-K 政策条款 + 引用（policy_id/版本/生效日期） | RAG（政策库检索） |
+| Tool | 回答的业务问题（职责） |
+|---|---|
+| **ProductTool** | 这个商品的事实是什么？（尤其 brand 是否为空、字段是否冲突） |
+| **ImageAnalysisTool** | 商品外观是否与某品牌 / 违禁视觉高度相似？ |
+| **OCRTool** | 图片里到底写了什么？（用于与标题 / 描述交叉验证） |
+| **MerchantTool** | 这个商家是否系统性地做类似行为？ |
+| **CaseSearchTool** | 有没有类似且已有人工裁决的先例？结论是什么？ |
+| **PolicySearchTool** | 当前有效政策对这类情况怎么说？ |
 
 ### 5.1 每个 Tool 的"为什么需要"一句话
 
@@ -396,14 +266,7 @@ app = graph.compile(checkpointer=make_memory_checkpointer())  # MVP：InMemorySa
 
 ### 5.2 Tool 的工程抽象（为未来 MCP 留口，但不提前引入）
 
-统一 `Tool` 接口：
-
-```python
-class Tool(Protocol):
-    name: str
-    description: str            # 给 LLM 的 tool schema（JSON Schema）
-    async def call(self, args: ToolArgs, ctx: ToolContext) -> ToolResult: ...
-```
+统一 `Tool` 接口（协议与工具 schema 以 `src/pra/tools/base.py` 为准，本文不再镜像）：
 
 - 所有 Tool 注册到 `ToolRegistry`，Agent 的 Plan 步骤只输出 `{tool, args}`，由 Controller 调度执行。
 - **MCP 的定位**：v1 的 6 个工具都是**内部服务**，用统一 `Tool` 接口 + 注册表即可，**不需要 MCP**。
@@ -411,15 +274,11 @@ class Tool(Protocol):
 
 ### 5.3 六个 Tool 的实现现状（重要边界）
 
-| Tool | 默认实现（`build_tools()` / 评测世界） | 生产 / HTTP 入口（`build_production_tools()`） |
-|---|---|---|
-| ProductTool / MerchantTool | InMemory 种子（`InMemoryProductRepository` / `InMemoryMerchantRepository`） | 真库：`MySQLProductRepository`（`product/product_sku/product_image`）/ `MySQLMerchantRepository`（`merchant/merchant_event`） |
-| CaseSearchTool / PolicySearchTool | InMemory 种子（`InMemoryCaseIndex` / `InMemoryPolicyIndex`） | 真实 RAG（chroma 后端 + FastEmbed 编码器 + hybrid）；经 `Lazy*Index` **惰性构建**——装配期零 IO（不建库 / 不连 Chroma / 不加载模型），首次检索才建库连 Chroma |
-| ImageAnalysisTool / OCRTool | Mock 桩（`MockImageAnalysisProvider` / `MockOcrProvider`） | 同左（未接真实视觉模型 / OCR 服务） |
+装配层决定每个 Tool 的数据源：默认装配路径与评测世界使用**固定种子数据**（评测确定性红线 —— CI 不连外部数据源），
+生产 / HTTP 入口读真库与真实 RAG；具体实现类与装配入口以 `src/pra/tools/`、`src/pra/wiring.py` 为准。
 
-> 边界：**默认装配路径（`build_tools()` 与 `build_agent_graph()` 缺省）与两个评测世界仍是 InMemory**（评测确定性红线，CI 不连 MySQL / Chroma）；
-> 生产 / HTTP 入口读真库 + 真实 RAG。真链路不可用时（表不存在 / Chroma 不可达 / 未装 `--extra rag` / BGE 模型未缓存）在**首次工具调用**抛出带指引的错误，
-> 由工具层记 warn failure，**不静默回退 InMemory 种子**。
+**真链路不可用时（库 / 索引 / 依赖不可达）必须在首次工具调用显式失败并记为失败，不静默回退种子数据** ——
+这是"禁止静默降级"的系统契约（§8.2）。
 
 ---
 
@@ -459,13 +318,14 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
   **两路的过滤机制不同、语义必须等价**：向量路把过滤**下推给 Chroma `where`**（在库侧收窄打分域）；
   BM25 路是 `bm25s` 内存索引、**没有 `where`**，只能在 Python 候选集上建索引打分。两侧等价性由
   `tests/test_rag_retrieval.py` 的过滤器全组合用例锁住（漏召回只在带过滤时暴露）。
-- **融合与截断**：向量 + BM25 混合召回经 **RRF（Reciprocal Rank Fusion）** 融合后取 Top-K，控制注入上下文的量；当前实现**没有重排序（rerank）环节**，"粗召回 Top-50 → 精排 Top-5（重排模型或 LLM 打分）"尚未实现。
+- **融合与截断**：向量 + BM25 混合召回经 **RRF（Reciprocal Rank Fusion）** 融合后取 Top-K，控制注入上下文的量；**v1 不做重排序（rerank）环节**。
 - **引用格式**：检索结果必须带 `policy_id + 版本 + 条款原文` / `case_id + 决策`，进 `evidence[]` 时保留可追溯引用。
 
 ### 6.4 向量库选型
 
-- 数据量小（实测：Policy 24 条 / Case 67 条），向量库现状为 **ChromaDB**（Docker 服务端 + HttpClient，LlamaIndex 装配）；**v1 明确不做 ES / Milvus / 知识图谱**，不引入重型向量库，降低工程复杂度。
-- 向量模型：文本统一用 **BGE**（`BAAI/bge-small-zh-v1.5`，dim 512）—— 生产与测试/回归/评测同一真语义模型，`src/` 内**不存在确定性 mock 编码器**。**图片向量单独存**（ImageAnalysisTool 用于品牌款相似度检索的向量库，可与文本向量库分开）。
+- 向量库选型为 **ChromaDB**（Docker 服务端 + HttpClient，LlamaIndex 装配）；语料属小语料量级，**v1 明确不做 ES / Milvus / 知识图谱**，不引入重型向量库，降低工程复杂度。
+- 向量模型：文本在**生产 / 测试 / 回归 / 评测中用同一真语义模型**（BGE 系）—— 不得为测试引入确定性 mock 编码器，
+  具体模型与维度以 `src/pra/rag/embedding.py` 为准。**图片向量单独存**（ImageAnalysisTool 的品牌款相似度检索可与文本向量库分开）。
 
 ### 6.5 知识回流（闭环）
 
@@ -473,74 +333,32 @@ CasePrecedent (case_id, 商品摘要, 商家摘要, 证据摘要, decision, risk
 
 ### 6.6 RAG 实现现状与硬约束（结论）
 
-**链路**：`Query → 双路召回（ChromaDB(cosine) + BGE 向量 / BM25(bm25s + jieba)）→ RRF 融合 → Top-K → CaseSearch / PolicySearch Tool → Evidence → Agent`。
+**链路**：`Query → 双路召回（向量（ChromaDB, cosine）+ BM25）→ RRF 融合 → Top-K → CaseSearch / PolicySearch Tool → Evidence → Agent`。
+索引装配与两路实现以 `src/pra/rag/` 为准（`chroma_store.py` / `index.py` / `bm25.py` / `factory.py`），本文只写口径。
 
-- **唯一检索后端是 chroma**：`factory.py` 的 `build_policy_index` / `build_case_index` 不再有 `backend` 开关，直接装配
-  ChromaDB(cosine) + LlamaIndex + FastEmbed 编码器；原先的 `local` 后端（纯 Python 余弦内存索引：`RagPolicyIndex` / `RagCaseIndex` / `rank_documents` / `BM25Index`）已整体移除。
-  生产 / HTTP 入口（`build_production_tools()`）即用 **chroma + BGE + hybrid**，但经 `Lazy*Index` 惰性构建（首次检索才建库）。
-  装 `--extra rag` 才可用；**默认 `build_tools()` 与评测世界仍是 InMemory 种子**（见 §6.4 工具装配），要跑真实检索须走生产/HTTP 入口 `build_production_tools()`，或评测侧切到 RAG 世界（`EvalContext.tool_world="rag"` / `make_rag_world_tools()`）。
-- 🔴 **Chroma 建库必须显式 `space="cosine"`**：缺省是 `l2`，会让**间距语义整体偏离** —— BGE 向量的"像不像"是**方向**，
-  `l2` 下距离受模长干扰，排名与分数一起失真，**且不报错**。唯一保证就是建库那一句
-  （`chroma_store._open_collection` 的 `embedding_function=None` + `configuration={"hnsw": {"space": "cosine"}}`）。
-  **运行期的空间自检已删** —— 本项目没有 l2 库来源，为假想的「库被人建错」维护一套检查属过度工程。
-  collection 名形如 `pra_<policy|case>_<dim>_v<schema>`：末段是 **metadata 形状版本**，形状一改必须换名字 ——
-  `_open_collection` 是「先 get 后 create」，同名旧库会被原样复用，新 `where` 对旧 metadata 会**静默零命中**。
-- 🔴 **向量取数的分直接采库口径 `exp(-distance)`，不做量纲换算**：`ChromaVectorStore.query` 给的就是它
-  （cosine 空间下 ⊂ `(0, 1]`、越大越近）。**为什么不必换算成 `1 − distance`**：① 排名只依赖单调性，
-  任何 distance 的单调降函数都给出同一顺序；② 该分往下只变成 `CaseHit.retrieval_score`（渲染给 LLM 的证据行
-  + 落库审计），**不参与任何 Gate 判定**（Gate 对 `CASE_PRECEDENT` / `POLICY_REF` 只判存在性、不读 value）；
+- **唯一检索后端是 chroma**：不保留后端开关；生产 / HTTP 入口即用 chroma + BGE + hybrid，默认装配路径与评测世界用种子数据（§5.3）。
+- 🔴 **建库必须显式按 cosine 度量**：缺省度量会让"像不像"的**间距语义整体偏离**（排名与分数一起失真，**且不报错**）。
+- 🔴 **向量取数的分直接采库口径 `exp(-distance)`，不做量纲换算**：① 排名只依赖单调性，任何 distance 的单调降函数给出同一顺序；
+  ② 该分往下只变成检索分（渲染给 LLM 的证据行 + 落库审计），**不参与任何 Gate 判定**（Gate 对案例先例 / 政策引用只判存在性、不读分值）；
   ③ `1 − distance` 在 `d > 1` 时被 clamp 塌成 0，低分区区分度反而更差。
-- 🔴 **`retrieval_score` 不设取值域约束，也不做量纲适配**：它是**后端口径的检索分**，取值域由检索后端定义
-  （`bm25` = `bm25s` 原始分、**无界**；`vector` = `exp(-distance)` ⊂ (0,1]；`hybrid` = RRF ⊂ (0, `2/60`]），
-  **schema 不替后端 policing 一个既不归它管、也不参与决策的量**，代码也不把三种量纲「拉平」。
-  - 曾有的 `ge=0, le=1` 只产生两处代价：向量路为不触发 `le=1` 而在 cosine 距离浮点微负时给 `exp(-d)` 钳位，
-    以及三份 docstring 为这条约束写的辩护。约束去掉后**两处一并删除**。
-  - 曾有 `normalize_minmax` 把 BM25 原始分在**候选集内** min-max 到 [0,1]（等值集 → 全 `1.0` 防除零）——
-    它只为「让三路同量级」这个伪目标存在：RRF 只读**名次**，min-max 是单调变换，对融合与截断**零影响**；
-    而等值集给满分是**伪造**（最差的匹配也会显示 `weight=1.0`）。已整体删除，BM25 分改为原样透传后端。
-  - 下游 `Evidence.weight` 同步**只保留 `ge=0`、去掉 `le=1`**：`weight` 的上界从来不是为检索分设的 ——
-    它源自 `IMAGE_SIMILARITY` 的三档阈值语义（`0.70 / 0.85`），而 `weight` 的**全部读点**都是
-    `>= 常量` 比较与 `max()`（`measurements.positive_dimensions` / `dimension_strength` /
-    `listing_signal_present` / `gate`），**上界从未被读**，去掉 `le=1` 不改变任何判定结果、不改任何渲染文本。
-- 🔴 **写入 Chroma 走 `ChromaVectorStore` 的 delete-then-add**（`rag/index.py::_seed`）：先按 node id
-  `delete_nodes`、再 `add`。⚠️ 理由**不是**「重复 id 会报错」—— chromadb 1.5.9 的 `collection.add` 对
-  已存在的 id **静默跳过**（既不覆盖也不抛错，重复 `add` 后 `count` 不变）⇒ 不先删，同 id 的旧记录会留在
-  库里、新内容写不进去。写入的 metadata 由库的 `node_to_metadata_dict(node, remove_text=True,
-  flat_metadata=True)` 生成：扁平业务键供 `where` 过滤，`_node_content`（整份 node JSON）供取数时
-  **无损还原** `node_id` 与 `hash`。缺它时 `metadata_dict_to_node` 直接抛 `ValueError`、被 `except` 兜到
-  legacy 分支按回读的 metadata 重算 `hash` —— 而 Chroma 回读的键序不固定（1.5.9），同一行的 `hash` 会漂移
-  ⇒ 与另一条路（BM25 侧存了 `_node_content`）**不同源**。
-  ⚠️ `add` 逐节点取 `node.get_embedding()` ⇒ `_seed` 须把文本向量回填到 node（`TextNode.hash` 只吃
-  `text` + `metadata`，回填 embedding 不改变融合去重键）。
-  ⚠️ metadata 形状变更 ⇒ collection 名末段 `_SCHEMA_VERSION` 必须递增（v2 = `rt_<值>` 整数键；
-  v3 = 带 `_node_content`；v4 = metadata 改由库 `add` 生成、`_node_content` 内的 text 被清空）。
-- 🔴 **向量路的过滤下推给 Chroma `where`**（`rag/index.py::_filters_of` 把业务过滤编译成 `MetadataFilters`，
-  经 `VectorIndexRetriever` 透传到 `collection.query(where=...)`）：打分域 = **库内全集 ∩ `where`**。
-  - `risk_type` 的「交叠非空」由**每个枚举值一个 `rt_<值>: 1` 整数键 + `$or`** 表达（Chroma `where` 只支持标量比较、
-    没有数组交叠操作符）；值取整数 `1` 而非 `True`，因为 `MetadataFilter.value` 的 pydantic 联合类型**不收 `bool`**。
-  - `category`：policy 是三态 `{占位, 值, 全类目}` → `$in [值, 全类目]`；case 是**精确相等** → `$eq`。
-  - ⚠️ 过滤语义因此有**两处定义**（向量路 `where` + BM25 路的 Python 谓词 `_policy_candidates` / `_case_candidates`），
-    两者必须**逐条等价** —— 由 `tests/test_rag_retrieval.py::test_policy_where_pushdown_equals_python_candidates`
-    与 `::test_case_where_pushdown_equals_python_candidates` 的过滤器全组合用例锁住。**改任一侧都要同步另一侧与该用例。**
-  - **候选 id 预览式锁定（`vector_store_kwargs={"ids": ...}`）已删除**：它要求先算出 Python 候选集，
-    与「下推」重复；实测两者在 114 组过滤器组合上打分域、排名、分数、hybrid 融合**逐位一致**。
-- **取回多少就是多少**：`top-k` 不保证返回数量等于 `top_k`（带过滤的 HNSW 检索尤其如此），故不再有「候选集覆盖率自检 / 重试 / 从 stored vectors 补算」这套兜底 ——
-  检索**真失败**（服务端不可达、collection 不存在、embedding 抛错）由 Chroma 直接上抛，不自己补一套检索系统。
-- **`retrieval_score` 是检索分**（hybrid 下即 RRF 分 `Σ1/(60+rank)`，rank 从 0 起 → 上界 `2/60 ≈ 0.0333`），**任何场合不得称为「语义相似度」**；
-  **它也不参与任何 Gate 判定**：`gate` 对 `CASE_PRECEDENT` / `POLICY_REF` 只要求**存在**（可引用依据），
-  不读 `weight`；`measurements.positive_dimensions` 的阳性类型白名单里根本没有这两类。
-  ⚠️ `CaseSearchTool` 把它原样塞进 `Evidence.weight`（见上一节的 `ge=0` 无上界口径）——
-  这是**沿用**而非耦合：`weight` 对该类型证据从不被读，两者量纲不同也无副作用。
-  `image_analysis` 的外观相似度是另一回事：它在 evidence 里叫 `IMAGE_SIMILARITY`。
-- **三模式分数量纲互不可比**（`vector` = 库口径 `exp(-distance)`、`bm25` = `bm25s` 原始分、`hybrid` = RRF 分），
-  只断言「候选完整 + 可复现 + 案例库与评测真值零交集」。
-- 🔴 **BM25 分词自持**（`rag/bm25.py` 自建检索器：jieba 切词 + `bm25s.BM25` 自建索引，`_tokenize` 语料/查询共用；
-  不继承库 `BM25Retriever`、**不替换 `bm25s.tokenize` 全局符号**）。故无锁、无上下文管理器、无调用顺序约束 ——
-  并发下各检索器实例各持分词器与索引，互不干扰。
-- **CI 只跑 `uv sync --frozen`（不装任何 extra）** → `chromadb` / LlamaIndex 都不在环境里，chroma 相关测试文件在 CI 上**整文件 skip**
-  （**不得声称「CI 覆盖 chroma」**）；CI 上真正跑的检索侧守护是「默认路径不引入这 4 个 extra 模块」的契约测试。
-- **历史教训（Qdrant 后端已移除，结论对 chroma 同样成立）**：进程内模式（`:memory:` / `EphemeralClient`）对 id / 维度等约束
-  **比真服务端宽松**，缺陷可能在单测全绿下潜伏、**只在真 server 上以 4xx 暴露** ⇒ 真服务端集成用例不可省（Qdrant point id 曾因此踩坑）。
+- 🔴 **检索分（`retrieval_score`）不设取值域约束，也不做量纲适配**：它是**后端口径的检索分**，取值域由检索后端定义
+  （BM25 = 原始分**无界**；vector = `exp(-distance)` ⊂ (0,1]；hybrid = RRF ⊂ (0, `2/60`]）。schema 不为一个既不归它管、
+  也不参与决策的量 policing 取值域，代码也不把三种量纲"拉平"；用 min-max 把等值集抬成满分属**伪造**，不做。
+  下游证据 `weight` 同理只要求非负、**不设上界**——`weight` 的上界从来不是为检索分设的（它源自外观相似度的三档阈值语义），
+  且其全部读点都是 `>= 常量` 比较与 `max()`。
+- 🔴 **检索分是检索分，任何场合不得称为「语义相似度」**，也不参与 Gate 判定（Gate 对案例先例 / 政策引用只要求**存在**）。
+  外观相似度是另一类证据（`IMAGE_SIMILARITY`），两者量纲不同。
+- **三模式（vector / bm25 / hybrid）分数量纲互不可比**，跨模式只断言「候选完整 + 可复现 + 案例库与评测真值零交集」。
+- **过滤语义的两处实现必须逐条等价**：向量路把过滤下推到库侧 `where`，BM25 路只能在 Python 候选集上过滤；
+  改任一侧都要同步另一侧，并由 `tests/test_rag_retrieval.py` 的全组合用例锁死（§6.3）。
+- **写入与 metadata 形状**：同 id 记录不会被覆盖，写入须先删后加；metadata 形状变更必须换 collection 名，
+  否则旧库被原样复用、新过滤条件**静默零命中**。
+- **取回多少就是多少**：`top-k` 不保证返回数量等于 `top_k`；检索**真失败**（服务端不可达 / collection 不存在 / 编码失败）直接上抛，
+  不另补一套检索系统兜底。
+- **BM25 路自持分词与索引**：不替换第三方库的全局符号，各检索器实例互不共享状态 —— 并发下互不干扰，无锁、无调用顺序约束。
+- **不得声称「CI 覆盖 chroma」**：CI 不安装 RAG extra，chroma 相关用例在 CI 上不执行。
+- 🔴 **进程内向量库模式（内存 / 临时 client）对 id / 维度等约束比真服务端宽松**，缺陷可能在单测全绿下潜伏、**只在真服务端暴露**
+  ⇒ 真服务端集成用例不可省。
 
 ---
 
@@ -630,14 +448,15 @@ FIELD_CONFLICT        商品字段信息冲突
 - `risk_level`（LOW/MEDIUM/HIGH/NONE）只用于**展示、人工队列排序、审核优先级与统计**；**不作为路由或 overlay 的判定输入**（避免把展示口径变成判定逻辑）。
 - 典型反例（面试可讲）：**risk_level = HIGH 且证据不足 → HUMAN_REVIEW**，而不是 HIGH → REJECT。风险高 ≠ 可以自动判；能否自动判取决于 §7.2 的 Decision Gate（证据 + 政策依据 + decision_confidence）。
 
-### 7.6 数值口径总览（v1 工程初始值，非理论最优，验证集校准）
+### 7.6 数值口径总览（v1 工程初始值，非理论最优，未做数据集校准）
 
-> 本节三个数字都是 **v1 工程初始值**（第一版可跑的起点，不是调参后的最优值），全部**配置化**（不写死在逻辑里），并在 **02-evaluation** 的 validation set 上做校准后确定最终 operating point：
+> 本节三个数值都是 **v1 工程初始值**（第一版可跑的起点，不是调参后的最优值），以**代码常量为单一来源**（不写死在分支逻辑里）；
+> **未做数据集校准**：曾有的评测侧阈值扫点能力已移除（§11.5），这些值不参与拟合，也不因评测结果回改。
 
-| 数值 | 语义 | 校准方式 |
+| 数值 | 语义 | 取值依据 |
 |---|---|---|
-| 相似度 `0.70 / 0.85` | ImageAnalysis 三档证据分界：`<0.70` 不作证据 / `0.70~0.85` 普通证据 / `≥0.85` **Strong Evidence**（代码常量 `EVIDENCE_MIN_SIM` / `EVIDENCE_STRONG`，见 §11.5） | **threshold sweep**（0.60/0.65/0.70/0.75/0.80/0.85/0.90），看 Recall/Precision/FPR/human_review_rate 选点 |
-| `decision_confidence 0.7` | 自动 REJECT 的**安全门槛**（非模型真实概率） | validation set 上按误伤（FPR）/漏放（Risk Recall）权衡校准 |
+| 相似度 `0.70 / 0.85` | ImageAnalysis 三档证据分界：`<0.70` 不作证据 / `0.70~0.85` 普通证据 / `≥0.85` **Strong Evidence**（代码常量 `EVIDENCE_MIN_SIM` / `EVIDENCE_STRONG`，见 §11.5） | 工程初始值，未做数据集拟合（§11.5） |
+| `decision_confidence 0.7` | 自动 REJECT 的**安全门槛**（非模型真实概率） | 工程初始值：门槛不达标即转人工，未按误伤 / 漏放校准 |
 | LLM `10` / Tool `15` 上限 | **Budget 是 Guardrail 上界、不是目标调用次数**（§8.1）；余量用于 schema 重试 1 次、工具失败恢复与防无限循环 | 观测 Budget Utilization（§11.3）——正常案件应明显低于上限 |
 
 ---
@@ -646,34 +465,37 @@ FIELD_CONFLICT        商品字段信息冲突
 
 ### 8.1 Budget（成本 / 延迟 Guardrail）
 
-| 维度 | v1 上限（Guardrail，非目标） | 超限行为 |
-|---|---|---|
-| 最大 LLM 调用次数 | **10**（代码 `BudgetLimits` 默认 10） | 停止调查 → 输出部分证据 + HUMAN_REVIEW（overrides=R3_BUDGET_EXHAUSTED） |
-| 最大 Tool 调用次数 | **15**（同上） | 同上（tools_node 内部也按此截断单批执行） |
-| 最大 Token | 40,000 | 触发上下文压缩 / 停止 |
-| 最大执行时间 | 30s | 超时 → 转人工 |
+四组上限（LLM 调用次数 / Tool 调用次数 / Token / 执行时间）为**可配置的 Guardrail 上界**，默认值是 v1 工程初始值
+（见 §7.6），具体常量与配置项以 `src/pra/agent/guardrails/budget.py` 为准。超限行为按维度定义：
+
+| 维度 | 超限行为 |
+|---|---|
+| LLM 调用次数 / Tool 调用次数 | 停止调查 → 输出已收集的部分证据 + HUMAN_REVIEW（归因码 `R3_BUDGET_EXHAUSTED`）；工具节点同批执行也按上限截断 |
+| Token | 触发上下文压缩 / 停止 |
+| 执行时间 | 超时 → 转人工 |
 
 - **语义（重要）**：Budget 是 **Guardrail 上界，不是目标调用次数**。正常案件的实际调用应**明显低于上限**——
-  主链路（《00》§4.4 走查）常态为 8 次 LLM / 5 次 Tool，多出的余量只用于覆盖"schema 校验失败→重试 1 次"、
-  工具失败恢复与防无限循环。评测用 **Budget Utilization**（§11.3）证明 Agent 不是为耗完预算而调工具。
+  主链路（§4.4 走查）的调用量远低于上限，多出的余量只用于覆盖 schema 校验失败重试、工具失败恢复与防无限循环。
+  评测用 **Budget Utilization**（§11.3）证明 Agent 不是为耗完预算而调工具。
 - Budget 在**条件边路由函数里、每次进入节点前**检查（确定性代码），不是"跑完才发现超了"。
-- 上限**运行时可由配置覆盖**（v1 工程初始值，非理论最优，见 §7.6）；Trace 层记录四组占用率：
-  `llm_calls/max_llm_calls`、`tool_calls/max_tool_calls`、`tokens/max_tokens`、`latency/max_latency`（§10.3）。
+- 上限**运行时可由配置覆盖**；Trace 层记录四组占用率（§10.3）。
 - 超限的语义是：**"调查成本已超过可接受范围，证据不足以自动判，转人工最稳妥"**——这本身就是正确的业务行为，不是失败。
 
 ### 8.2 安全 / 业务 Guardrail
 
+> 下列为与实现进度无关的设计约束；哪些已落地见 [README](../README.md) 的「当前实现边界」。
+
 1. **硬规则不可被 LLM 覆盖**（黑名单、硬违禁）→ 防漏放。
 2. **REJECT 必须有可引用依据** → 防误伤商家。
-3. **PII / 敏感信息**：工具返回给 LLM 前做脱敏（商家联系方式等），LLM 输出不落地敏感字段（**规划，未实现**）。
+3. **PII / 敏感信息**：工具返回给 LLM 前做脱敏（商家联系方式等），LLM 输出不落地敏感字段。
 4. **决策审计**：每个决策必须带完整 `evidence[] + hypothesis_trace[] + tool_call_history[]`，可回溯到"谁（哪个工具）提供的哪条证据导致这个结论"。
-5. **幂等 / 去重**：同一商品同一版本只审一次（Redis setnx + MySQL 唯一索引），防止重复消费 MQ 重复计费（**规划，未实现**；当前同步单请求路径无并发消费）。
+5. **幂等 / 去重**：同一商品同一版本只审一次（幂等键 + 唯一索引），防止重复消费导致重复计费。
 
 ### 8.3 终止性（结论）
 
-- 图里**唯一的回环**是 `plan → tools → reevaluate → plan`；`decide` 无出边。离开回环只有三个出口：收敛（`is_converged`）、plan 侧 conclude、预算超限。
-- 每一轮回环至少消耗 1 次 plan + 1 次 reevaluate 的 LLM 调用 → 由 `max_llm_calls = 10` 可推出**回环轮数上界约 4 轮**（实际因早停更少）。
-- 不烧预算的"空转"也被堵死：plan 反复提议同一动作 → 去重 guardrail 第 2 次即清空并视同 conclude；工具只有 6 个且 `max_tool_calls = 15` 兜底；degraded 短路直接进 decide。
+- 图里**唯一的回环**是 `plan → tools → reevaluate → plan`；`decide` 无出边。离开回环只有三个出口：收敛判定、plan 侧 conclude、预算超限。
+- 每一轮回环至少消耗 1 次 plan + 1 次 reevaluate 的 LLM 调用 → 由 LLM 调用上限可推出**回环轮数上界约 4 轮**（实际因早停更少）。
+- 不烧预算的"空转"也被堵死：plan 反复提议同一动作 → 去重 guardrail 第 2 次即清空并视同 conclude；工具只有 6 个且 Tool 调用上限兜底；任一节点降级即短路进 decide。
 - 预算在**每个节点入口与每次条件边路由**都检查（确定性纯函数），任一维度超限 → 带部分证据转人工（`overrides=["R3_BUDGET_EXHAUSTED"]`）。
 - 路由 / 预算 / 收敛 / Gate 全为纯函数（无随机、无 LLM）→ 同 state 必同后继，不存在"同 state 走不同分支"的非确定性死循环。
 
@@ -681,69 +503,23 @@ FIELD_CONFLICT        商品字段信息冲突
 
 ## 9. 数据库核心表设计（MySQL 8 / InnoDB / utf8mb4）
 
-> 主键统一 bigint（雪花），版本字段做乐观锁，状态字段加索引。JSON 列用于半结构化（如 attributes、agent_state）。ORM 用 SQLAlchemy 2.0（async），迁移为 `migrations/` 下的**手写 SQL**（Alembic 仅在依赖里、未启用），Pydantic 负责模型校验与序列化。
+> 设计约定：主键统一 bigint（雪花），版本字段做乐观锁，状态字段加索引；JSON 列用于半结构化数据。
+> ORM 用 SQLAlchemy 2.0（async），迁移为 `migrations/` 下的**手写 SQL**（不用 Alembic 自动生成），Pydantic 负责模型校验与序列化。
 
 ### 9.1 核心表清单
 
-| 表 | 职责 | 关键字段 |
-|---|---|---|
-| `product` | 商品主表（只存当前行，`version` 即最新乐观锁版本） | product_id, merchant_id, title, description, category, brand, attributes(JSON), version, listing_time, status |
-| `product_sku` | SKU（1 商品 N SKU） | product_id, sku_id, color, size, price, sort_order |
-| `product_image` | 商品图片（**不含 ocr_text 与向量列**——OCR 归 OCRTool，避免重复劳动） | image_id, product_id, url, source, sort_order |
-| `merchant` | 商家画像（数据源侧预计算的固定窗口快照，不按墙钟重算） | merchant_id, product_total, similar_product_count, removals, title_relisting_count, violations_total, violations_by_type(JSON), credit_score |
-| `merchant_event` | 商家行为事件 | event_id, merchant_id, event_type(违规/下架/改标题重上架), ts, sort_order |
-| `review_case` | 审核案件（一次事件一个） | case_id, product_id, merchant_id, event_type, triage_result, status, version, case_json |
-| `review_run` | Agent 运行 | run_id, case_id, status, trigger_type, started_at, ended_at |
-| `review_trace` | Agent 步骤 trace | trace_id, run_id, seq, step_type, tool_name, input_json, output_json, tokens, latency_ms |
-| `review_evidence` | 收集的证据 | evidence_id, run_id, type, source_tool, value, weight, ref_id, extra_json |
-| `review_result` | 最终裁决（每案一行） | case_id, source_run_id, decision, risk_level, risk_type_json, decision_confidence, policy_refs_json, decision_json |
-| `review_signal` | 传统机审信号（**规划，未实现**；当前机审信号随 `review_case.case_json` 的 `screening_signals` 走） | signal_id, case_id, signal_name, result, score |
-| `policy` / `policy_clause` | 政策库（**规划，未实现**；当前政策语料在代码内、经真实 RAG 检索） | policy_id, version, category, risk_type, status, effective_date / clause_id, policy_id, text |
-| `policy_chunk` / `policy_embedding` | 政策分块+向量（**规划，未实现**；向量由 Chroma collection 承载） | chunk_id, clause_id, chunk_text, embedding |
-| `case_precedent` | 历史案例库（**规划，未实现**；当前为 RAG 案例语料） | case_id, summary, decision, risk_type, risk_level, policy_refs |
-| `case_chunk` / `case_embedding` | 案例分块+向量（**规划，未实现**） | chunk_id, precedent_id, chunk_text, embedding |
-| `eval_dataset` / `eval_case` | 评测集（**规划，未实现**；当前评测集为 `eval_data/*.jsonl` + schema 校验） | dataset_id, name, version / eval_case_id, dataset_id, case_json, expected_json |
-| `eval_run` / `eval_result` | 评测运行（**规划，未实现**；当前评测不落 DB，仅内存 EvalRecord + 可选落库路径） | run_id, scheme(rule/llm/agent), dataset_id, metrics_json / result_id, run_id, eval_case_id, actual_json, is_correct |
-
-> 上表前 10 行为 `migrations/001–004` **已落地**表（字段以迁移为准）；其余为**设计蓝图（未实现）**。
+表的划分与字段清单**一律以 `migrations/*.sql` 为准**（ORM 映射在 `src/pra/infra/`），本文不再镜像字段表。
+划分口径：商品事实（product / product_sku / product_image）、商家画像与行为事件（merchant / merchant_event）、
+案件与运行轨迹（review_case / review_run / review_trace / review_evidence / review_result）。
+其中商品图片表**不存 OCR 文本与向量列** —— OCR 归 OCRTool、向量归向量库，同一事实不两处存储。
 
 ### 9.2 关键 DDL 示例（代表性强，非全量）
 
-> 以下 DDL 为**写法示意**（主键 / 版本 / JSON 列 / 索引风格）；**字段与类型一律以 `migrations/*.sql` 为准**。
-
-```sql
-CREATE TABLE review_case (
-  case_id       BIGINT PRIMARY KEY,
-  product_id    BIGINT NOT NULL,
-  merchant_id   BIGINT NOT NULL,
-  event_type    VARCHAR(32) NOT NULL,
-  triage_result VARCHAR(16) NOT NULL,          -- PASS / REJECT / COMPLEX
-  status        VARCHAR(16) NOT NULL,          -- PENDING/SCREENED/INVESTIGATING/DECIDED
-  version       INT NOT NULL,
-  created_at    DATETIME(3) NOT NULL,
-  KEY idx_status (status, created_at),
-  KEY idx_product_version (product_id, version)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE review_trace (
-  trace_id    BIGINT NOT NULL AUTO_INCREMENT,   -- DB 行号（自增）
-  run_id      VARCHAR(64) NOT NULL,             -- 归属 run（thread_id）
-  seq         INT NOT NULL,                     -- run 内步骤序号（轨迹还原顺序）
-  step_type   VARCHAR(24) NOT NULL,             -- HYPOTHESIZE/PLAN/TOOL_CALL/REEVALUATE/DECIDE
-  tool_name   VARCHAR(64) NULL,                 -- TOOL_CALL 行的工具名
-  input_json  JSON NULL,                        -- 步骤输入摘要
-  output_json JSON NULL,                        -- 步骤输出
-  tokens      INT NOT NULL DEFAULT 0,           -- 本步 token（预算/评测统计）
-  latency_ms  INT NOT NULL DEFAULT 0,           -- 本步耗时（预算/评测统计）
-  created_at  DATETIME(3) NOT NULL,
-  PRIMARY KEY (trace_id),
-  UNIQUE KEY uq_run_seq (run_id, seq)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+DDL 真身在 `migrations/*.sql`，本文不再镜像建表语句。
 
 ### 9.3 Redis / MQ 使用（**规划，未实现** —— 现状为同步 HTTP + 进程内状态）
 
-> 本节为设计蓝图：MVP 不引入 Redis / MQ（幂等、限流、分布式锁、异步 worker 均未做）。
+> v1 不引入 Redis / MQ：核心闭环不依赖它们（可选项不得成为默认路径的前置条件）。下列是出现并发与异步需求时的落点。
 
 - **Redis**：幂等去重（setnx）、LLM/Tool 限流（令牌桶）、worker 抢占 case 的分布式锁、政策版本/案例索引热点缓存、agent_state 热快照（落库为准）。
 - **MQ**：`product_review_request`（接入）、`complex_review`（分流投递）、`review_feedback`（人工裁决回流）、重试 + 死信队列。
@@ -754,12 +530,14 @@ CREATE TABLE review_trace (
 
 ### 10.1 观测分层与现状
 
-| 层 | 内容 | 载体与现状 |
+| 层 | 内容 | 载体 |
 |---|---|---|
-| **Agent 内部 Trace** | Agent 每一步（Hypothesize/Plan/Tool/Re-evaluate/Decide）的 tool 名、args、结果、tokens、latency | 落 MySQL `review_trace` 表（**已落地**；业务审计的真相所在） |
-| **LLM 调用级 Trace** | 每次 LLM 调用的 prompt / 输出 / tokens / 成本 | **Langfuse（已接入，见 §10.4）** |
-| **链路 Trace** | 全审核链路（接入→机审→分流→Agent→决策）一个 traceId 贯穿 | OpenTelemetry / Jaeger（**规划，未实现**） |
-| **业务指标** | 决策分布、转人工率、自动化率、各风险类型占比 | Prometheus + 指标表（**规划，未实现**；当前指标由评测侧离线计算） |
+| **Agent 内部 Trace** | Agent 每一步（Hypothesize/Plan/Tool/Re-evaluate/Decide）的 tool 名、args、结果、tokens、latency | 落 MySQL `review_trace` 表（业务审计的真相所在） |
+| **LLM 调用级 Trace** | 每次 LLM 调用的 prompt / 输出 / tokens / 成本 | Langfuse（§10.4） |
+| **链路 Trace** | 全审核链路（接入→机审→分流→Agent→决策）一个 traceId 贯穿 | OpenTelemetry / Jaeger |
+| **业务指标** | 决策分布、转人工率、自动化率、各风险类型占比 | 指标表 / Prometheus |
+
+> 各层的落地状态见 [README](../README.md) 的「当前实现边界」。
 
 > 职责分离：**Langfuse 管 LLM 调用级可观测性**，**MySQL `review_trace` 管业务步骤审计**——两者互补，不互相替代。
 
@@ -780,14 +558,18 @@ CREATE TABLE review_trace (
 ### 10.4 Langfuse 可观测性（现状与口径）
 
 - **本地 Docker 自托管**（`deploy/langfuse`，UI :3000，端口全部绑回环）；适配层在 `src/pra/observability/`。
-- **无凭据 → 回落 `NullTracer`（全 no-op）**：测试与默认开发路径永不联网（conftest 已预置 NullTracer）。
+- **无凭据 → 回落 `NullTracer`（全 no-op）**：**观测路径不因 Langfuse 联网** —— 缺凭据时 Langfuse 侧不产生网络调用、不阻塞主流程。
+  这条只约束观测：默认开发路径（起 HTTP 服务）本身会连真实 LLM 网关。
 - **开关语义（最容易说错的一条）**：**未设 `PRA_LANGFUSE_ENABLED` = 启用**，但缺凭据即实际 no-op；只有 `PRA_LANGFUSE_ENABLED=0` 才是显式强制关闭。
-- **口径红线**：默认 scripted 桩路径下 **token=0 / cost 为空 / latency≈0 是真实情况**（没有真实 provider 调用），**绝不伪造**；真实 token / latency 只在 real LLM 评测里出现。
+- **口径红线（不得伪造观测）**：scripted / 桩路径下 **token=0 / cost 为空 / latency≈0 是真实情况**（没有真实 provider 调用），**绝不填充**；
+  真实 token / latency 出现在任何走真实 LLM 的路径（生产 HTTP 入口与 real LLM 评测）。两个世界的数字不得混算或互相暗示。
 - 埋点覆盖 root / 节点 / generation / tool / gate；评测可带 `eval_case_id` 把 trace 与评测用例关联。
 
 ---
 
 ## 11. Evaluation Dataset 设计
+
+> 评测集真身在 `eval_data/`（JSONL + manifest + schema 校验），可执行口径见 [docs/02-evaluation.md](02-evaluation.md)；本文只写设计口径。
 
 ### 11.1 数据集规模与分布（实测规模：v1 35 Case；v2 320 Case）
 
@@ -801,23 +583,13 @@ CREATE TABLE review_trace (
 
 ### 11.2 每个 Case 的结构化标签
 
-```json
-{
-  "eval_case_id": "EC_001",
-  "input": { "...": "ProductReviewCase" },
-  "expected": {
-    "decision": "HUMAN_REVIEW",
-    "risk_level": "HIGH",
-    "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
-    "evidence": ["image_similarity>=0.85", "merchant_history>=5_removals"],
-    "applicable_policy": ["POLICY_3.2"]
-  }
-}
-```
+每条 case = 输入快照 + 结构化期望标签；字段与序列化形态以 `eval_data/`（JSONL + schema）与
+`src/pra/evaluation/dataset/` 为准，本文不再镜像。
 
-> 关键：标签**不是只有 PASS/REJECT**，而是结构化地包含 `expected_decision / risk_type / risk_level / evidence / applicable_policy`。这样评测能区分"结论对但理由错"（Decision Correct vs Reasoning Correct）。
-> `expected.evidence` 里的阈值标签（如 `image_similarity>=0.85`）是标注时的证据口径，与运行时阈值
-> `EVIDENCE_MIN_SIM / EVIDENCE_STRONG`（0.70/0.85，**v1 工程初始值**，§7.6/§11.5）一致；阈值经 sweep 校准变更后同步修订标签。
+> 关键：标签**不是只有 PASS/REJECT**，而是结构化地包含 期望决策 / 风险类型 / 风险等级 / 证据 / 适用政策。
+> 这样评测能区分"结论对但理由错"（Decision Correct vs Reasoning Correct）。
+> 标注时的证据阈值标签（如 `image_similarity>=0.85`）是标注口径，必须与**运行时证据阈值**口径一致
+> （v1 工程初始值，§7.6 / §11.5）；阈值变更后同步修订标签。
 
 ### 11.3 评测指标
 
@@ -830,8 +602,7 @@ CREATE TABLE review_trace (
 - Tool Selection Accuracy（选对了工具吗）
 - Evidence Sufficiency（证据是否足以支撑结论）
 - Reasoning Correctness（推理过程是否正确，即使结论对）
-- **Marginal Evidence Gain / Investigation Efficiency**（每次 Tool Call 带来多少新有效信息；数据来自
-  `tool_call_history` 的 before/after 字段：`before_confidence` / `after_confidence` / `evidence_added` / `decision_changed`）——Investigation Efficiency =
+- **Marginal Evidence Gain / Investigation Efficiency**（每次 Tool Call 带来多少新有效信息）——Investigation Efficiency =
   Σ(单次调用后 decision_confidence 增量或新增关键证据数) / Tool Calls，用于暴露"为调查而调查"的低效调用
 - **Budget Utilization**：四组占用率（llm_calls / tool_calls / tokens / latency 各 ÷ 对应上限），
   证明 Budget 是 Guardrail 而非目标（§8.1）
@@ -845,13 +616,13 @@ CREATE TABLE review_trace (
 - 同一份 `eval_dataset`，三个 scheme（rule / single-call-llm / agent）跑同一 harness，产出可比 metrics。
 - Agent 评测支持**确定性重放**（工具返回 mock 或录制的结果），保证可重复。
 
-### 11.5 阈值与口径校准（threshold sweep）
+### 11.5 阈值与口径校准（**阈值扫描能力已移除**）
 
-- 相似度分界 `0.70 / 0.85`（§7.6）与决策门槛 `0.7` 都是 **v1 工程初始值**，必须在 **validation set** 上校准后定 operating point：
-- **threshold sweep**：对 `EVIDENCE_MIN_SIM / EVIDENCE_STRONG` 扫 `0.60 / 0.65 / 0.70 / 0.75 / 0.80 / 0.85 / 0.90`，
-  观察 **Risk Recall / Precision / False Positive Rate / Human Review Rate** 四条曲线的 trade-off，在验证集上选取 operating point；
-  校准只动配置常量（`EVIDENCE_MIN_SIM / EVIDENCE_STRONG`、`CONFIDENCE_ABSTAIN_THRESHOLD`），不动判定逻辑。
-- 校准结果**不回写生产常量**：§7.6 口径表与代码里的阈值常量均不改——当前 sweep 只观测评测确定性审查员的读证据视图，把选点写进生产属"写进未测层级"，禁止（docs/02 §5.3）；曲线与选点仅作**评测内部实验记录**。报告必须附 sweep 曲线而不是只报最终点（证明阈值是"选"出来的，不是拍脑袋）。
+- 相似度分界与决策门槛都是 **v1 工程初始值**，未在数据集上拟合；生产判定读的就是这些常量。
+- **曾有的评测侧阈值扫点（threshold sweep）已移除**：被扫的阈值只作用于评测确定性审查员读证据的视图，
+  与生产实际读常量的位置不是同一处，且评测世界相似度数据只有 {0.72,0.73} 与 {0.90+} 两簇 ——
+  曲线恒定或近平，对任何决策都不可行动。移除决策与边界见 [docs/02-evaluation.md](02-evaluation.md) §5。
+- 要校准生产阈值，须先把可配置点下沉到生产实际读常量的位置并补齐中间相似度带数据，届时另行设计。
 
 ---
 
@@ -919,7 +690,8 @@ CREATE TABLE review_trace (
 1. **人工构造对抗样本**：基于核心场景（品牌模仿/规避），故意设计"无 Logo、无品牌词、但外观高度相似 + 商家有规避史"。
 2. **从真实案例改写**：把历史人工裁决案件脱敏改写为 benchmark 条目。
 3. **程序化变异**：对模板做字段变异（改相似度、改商家历史、改 OCR 冲突）制造边界。
-4. **人工标注 + 交叉校验**：每条由人工给 `expected_decision + evidence + policy`，至少两人一致性校验（**未实现**：当前评测集为单一标注者构造）。
+4. **人工标注 + 交叉校验**：每条由人工给 `expected_decision + evidence + policy`；**质量门槛是至少两人一致性校验**。
+   当前数据集为**单一标注者**、未做第二标注者交叉校验，属已知局限（见 `02-evaluation` §2）；标注者构成随数据集 manifest 记录。
 
 ### 13.3 Hard Case 的具体形态（对应核心场景）
 
@@ -931,14 +703,26 @@ CREATE TABLE review_trace (
 | 弱信号叠加 | 多个弱信号各自 PASS，组合后高风险 | 多源综合 |
 
 > 注：Hard Case 里的相似度（如 0.91）与运行时证据阈值（0.70/0.85，§7.6）口径一致——0.91 属于
-> **Strong Evidence（≥0.85）** 档；阈值是 v1 工程初始值，经 §11.5 sweep 校准。
+> **Strong Evidence（≥0.85）** 档；阈值是 v1 工程初始值（§11.5）。
 
-### 13.4 Ablation Evaluation（Agent 组件必要性）
+### 13.4 Ablation Evaluation（方案级；组件级能力已移除）
 
-回答"Agent 里每个组件（Tool/RAG）是否真的必要"——在同一 eval_dataset + 同一 Agent 图结构上**逐组件去掉**跑消融：
+回答"给 Single-call 更多文本、再多步主动调查各能提升多少"——在同一 eval_dataset 上跑三个变体：
 
-| Ablation 变体 | 去掉的能力 | 要回答的问题 |
+| 变体 | 装配差异 | 要回答的问题 |
 |---|---|---|
+| **2a** | Single-call + Raw Input | 一次调用只看基础输入的上限 |
+| **2b** | Single-call + RAG-in-prompt（预塞政策/先例文本） | 多给文本能提升多少？（本评测世界实测 2a≡2b，该腿 inert） |
+| **2c** | Multi-step Agent（主动调查） | 相对 Single-call 的整体差异 |
+
+- 评价口径：各变体在 **Decision Accuracy / Risk Recall / False Positive Rate / Human Review Rate** 上的差异
+  （三变体均保留 Decision Gate，三分类口径一致）。
+- **口径边界**：2c 相对 2a/2b 的差异是"工具 + 多步 + mock 变体"的**整体**差异，不可分解归因于"主动调查"。
+- **曾有的组件级消融（逐工具裁剪）已移除**：它需要图装配层裁剪参数与评测侧裁剪口径，只服务一次性的
+  组件必要性论证；改为在消融报告里附**工具证据覆盖**（哪些 case 的 `expected_tools` 含该工具），
+  覆盖为空的工具不做"不必要"判定。
+
+---|---|---|
 | **Full Agent**（基线） | 无 | 完整 Agent 的上限 |
 | Agent - RAG（无 CaseSearch/PolicySearch） | 案例库 + 政策库检索 | 没有"政策依据/先例"时，REJECT 与 HUMAN_REVIEW 的质量掉多少？ |
 | Agent - MerchantTool | 商家历史画像 | 单看商品/图片能否识别"规避模式"（H3/H4 类假设）？ |
@@ -964,7 +748,7 @@ CREATE TABLE review_trace (
 4. LangGraph StateGraph 编排的 Agent Loop（显式状态机 + 预算护栏 + 动态选工具）。
 5. 两类 RAG（Policy KB + Case KB，各几十~几百条种子数据）。
 6. 三分类决策 + 证据链输出。
-7. 评测集（v1 35 Case；v2 320 Case，含 Hard Case）+ 三方案对比 harness。
+7. 评测集（分阶段：先小集跑通、再扩到含 Hard Case 的正式集）+ 三方案对比 harness。
 8. 全链路 Trace + 指标 + 成本统计。
 
 ### 14.2 支撑场景（第二阶段再加，不阻塞核心）
@@ -987,58 +771,12 @@ CREATE TABLE review_trace (
 
 ## 15. 最终项目目录结构（Python 3.12 + uv + FastAPI，src 布局）
 
-```
-product-review-agent/
-├── pyproject.toml                   # uv 管理依赖，统一版本
-├── README.md
-├── docs/
-│   ├── 00-system-design.md          # 本文档：唯一架构设计文档
-│   └── 02-evaluation.md             # 评测数字与口径边界（全部数字的权威出处）
-│
-├── src/pra/                         # 主包
-│   ├── domain/                      # 领域模型：Case/AgentState/Evidence/Decision（Pydantic）
-│   ├── screening/                   # 传统机审初筛 + 三分流（triage 为 engine.py 里的纯函数）
-│   │   └── rule_engine/             # 规则引擎（黑名单/关键词/类目/阈值）
-│   ├── agent/                       # Agent 核心（LangGraph StateGraph）
-│   │   ├── state.py                 # AgentState（TypedDict / Pydantic）
-│   │   ├── graph.py                 # StateGraph：节点 + 边 + 条件边 + 路由
-│   │   ├── nodes/                   # hypothesize / plan / reevaluate / decide 节点
-│   │   ├── tools_node.py            # ToolNode + 6 个 Tool 注册
-│   │   ├── guardrails/              # 预算护栏、硬规则兜底、决策校验（确定性）
-│   │   └── checkpointer.py          # Checkpointer 工厂（MVP：InMemorySaver；MySQL 为未来项）
-│   ├── tools/                       # 6 个 Tool + ToolRegistry + 统一 Tool 接口
-│   │   ├── product/
-│   │   ├── image_analysis/
-│   │   ├── ocr/
-│   │   ├── merchant/
-│   │   ├── case_search/
-│   │   └── policy_search/
-│   ├── rag/                         # 政策库 + 案例库检索：chroma（ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF）
-│   │   ├── deps.py                  #   第三方重依赖的延迟 import 边界（唯一）
-│   │   ├── embedding.py             #   BGE 编码器构造点（production_embedder）
-│   │   ├── retrieval.py             #   模式枚举 / 检索上下文
-│   │   ├── chroma_store.py          #   Chroma 连接、collection（含 metadata 形状版本）与 Node 装配
-│   │   ├── bm25.py                  #   BM25 路（jieba 分词 + bm25s 自建索引）
-│   │   ├── index.py                 #   ChromaPolicyIndex / ChromaCaseIndex（两路过滤 + 三模式 + RRF）
-│   │   ├── lazy_index.py            #   索引构建推迟到首次检索的代理
-│   │   ├── factory.py               #   装配入口 build_policy_index / build_case_index
-│   │   └── corpus/                  #   静态 corpus（policies.json / cases.json）+ schema
-│   ├── evaluation/                  # 评测 harness + 三方案对比 + Hard Case Benchmark
-│   ├── api/                         # FastAPI 路由 + 审核工作台接口
-│   ├── infra/                       # MySQL 接入（db / persist_service / rdb_models）
-│   └── observability/               # 可观测性适配层（Langfuse；无凭据 → NullTracer 全 no-op）
-│
-├── migrations/                      # 手写 SQL 迁移（001_review_core_tables.sql、002_review_case_triage.sql；Alembic 仅在依赖里）
-├── scripts/                         # 数据初始化、评测集生成、跑分
-└── tests/                           # pytest：单测 + 评测（LLM 响应 mock 保证确定性）
-```
+目录结构以仓库实际布局为准（[README](../README.md) 的「项目结构」与 `src/pra/`），本文不再镜像目录树。
+分层约定不变：`src/pra/` 是唯一主包，按 `domain / screening / agent / tools / rag / evaluation / api / infra / observability` 分包；
+SQL 迁移在 `migrations/`，数据初始化与跑分脚本在 `scripts/`，测试在 `tests/`。
 
 ### 15.1 模块划分理由
 
-- **domain** 独立：Case/AgentState/Evidence 是核心领域模型（Pydantic），被 screening/agent/evaluation 三处复用。
+- **domain** 独立：案件、证据等核心领域契约（Pydantic）位于 `pra.domain`，被 screening / agent / evaluation 三处复用；Agent 的 State 归 `pra.agent`。
 - **agent / tools / rag 分层**：StateGraph 依赖 Tool 接口，不依赖具体实现（依赖倒置，便于 pytest mock 工具、未来替换）。
 - **evaluation 独立**：评测是独立关注点，不污染业务代码。
-
----
-
-> 下一步（进入实现前）：先做 **StateGraph 的节点/状态契约 + 6 个 Tool 的 JSON Schema + 一个可跑的最小闭环（核心场景单链路）**，再铺评测集。不要一上来就写全量代码。

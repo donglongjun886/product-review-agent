@@ -22,28 +22,21 @@
 ```
 
 调查范式是**假设验证**而非直接分类：`hypothesize` 先给出风险假设先验，`reevaluate` 依据取证结果把假设
-更新为后验（`SUPPORTED` / `REFUTED` / `UNRESOLVED`），假设轨迹与证据链全程保留、可重放。
-先验/后验只用于**引导调查与留痕，不参与最终裁决**——`PASS` / `REJECT` 由 Gate 依据证据事实确定性算出
-（必需测量维度是否全覆盖、是否存在维度匹配的硬阳性、规则命中、证据冲突）。证据不足时 Agent 主动克制地
-转人工，而不是强行下结论。
+更新为后验，假设轨迹与证据链全程保留、可重放。先验 / 后验只用于**引导调查与留痕，不参与最终裁决**——
+`PASS` / `REJECT` 由 Gate 依据证据事实确定性算出。证据不足时 Agent 主动克制地转人工，而不是强行下结论。
 
 ## 核心特性
 
-- **假设驱动的调查子图**：5 节点 7 边单回环（`hypothesize → plan → tools → reevaluate → decide`），
-  未收敛则在预算 / 收敛 / 去重护栏约束下回到 `plan`。
-- **LLM 只提案，确定性 Gate 收口**：LLM 产出 `DecisionProposal`，最终裁决由硬规则、abstention 清单与
-  PASS/REJECT Gate 依据**证据事实**（必需测量维度是否全覆盖、是否存在维度匹配的阳性证据、规则命中、
-  证据冲突）决定；每次改判的原因码写入 `ReviewDecision.overrides`，可审计。
-- **6 个可插拔调查工具**：商品事实、商家历史、图像分析、OCR、案例检索、政策检索，统一 `Tool` 抽象。
-- **确定性可重放**：测试、评测与 `demo_walkthrough.py`（自建图）使用 scripted LLM 桩 + InMemory
-  数据源 + InMemory Checkpointer，无 API key、无网络即可跑通；`demo_api.py` / `demo_langfuse_trace.py`
-  与生产 HTTP 入口走组合根装配的真实 LLM（配置见下）。
-- **检索增强（RAG）**：政策库与案例库由 ChromaDB + LlamaIndex + BGE + BM25/jieba + RRF
-  混合检索提供（需 `--extra rag`）。
-- **评测体系**：三方案对比（Rule / Single-call LLM / Agent）、业务与 abstention 指标、消融、阈值扫描、
+- **假设驱动的多步调查**：`hypothesize → plan → tools → reevaluate → decide`，未收敛则在预算 / 收敛 /
+  去重护栏约束下回到 `plan`。
+- **LLM 只提案，确定性 Gate 收口**：LLM 产出决策提案，最终裁决由硬规则、abstention 清单与 PASS/REJECT
+  Gate 依据**证据事实**决定；每次改判的原因码写入 `overrides`，可审计。
+- **多源取证工具**：商品事实、商家历史、图像分析、OCR、案例检索、政策检索，统一工具抽象。
+- **两条路径都开箱可跑**：默认（测试 / 评测 / 离线走查）为确定性桩 + InMemory 数据源，无凭据、无网络
+  即可跑通全流程；生产入口走真实网关与真实数据源，**缺凭据显式失败**，不静默回落。
+- **评测体系**：三方案对比（Rule / Single-call LLM / Agent）、业务与 abstention 指标、方案级消融、
   决策序列回归。
-- **可选可观测性**：Langfuse 适配层上报 root / node / generation / tool / gate span 树，
-  `trace_id` 与落库 `run_id` 同值。
+- **可选检索与观测**：知识库支持向量 + 关键词混合检索，观测层支持 trace 树；两者均为可选依赖。
 
 ## 快速开始
 
@@ -51,192 +44,128 @@
 
 ```bash
 uv sync                                    # 默认依赖 + dev 组（pytest / ruff / httpx）
-uv sync --extra rag --extra observability  # 可选：真实 RAG / Langfuse；两个 --extra 需同时写（只写一个会移除另一个）
+uv sync --extra rag --extra observability  # 可选：真实检索 / Langfuse（两个 --extra 需同时写）
+uv run pytest tests/ -q                    # 确定性用例，不联网、不需要凭据
+uv run python scripts/demo_walkthrough.py  # 离线端到端走查：跑通完整调查子图并执行内置断言
 ```
 
-### 端到端走查（无需 API key）
+## 用法
+
+### HTTP 服务
 
 ```bash
-uv run python scripts/demo_walkthrough.py
-```
-
-默认装配 scripted 桩 + InMemory 工具 + InMemory Checkpointer，跑通完整调查子图并执行内置断言。
-确定性输出：`decision=HUMAN_REVIEW` / `risk_level=HIGH` /
-`risk_type=[POTENTIAL_IP_RISK, EVASION_PATTERN]` / `decision_confidence=0.95` / `overrides=[]`。
-
-### 运行测试
-
-```bash
-uv run pytest tests/ -q
-```
-
-全部用例均为确定性 mock，**不联网、不需要 API key**。依赖外部条件的用例在不可用时自动 skip：
-真库冒烟需本机 MySQL 可达，BGE 真模型需模型缓存，RAG 真链路 e2e 需 `--extra rag` + Chroma 服务端
-+ 模型缓存。
-
-### 启动服务并受理一次审核
-
-生产入口装配真实 LLM 后端：需在仓库根 `.env` 配置 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`
-/ `DEEPSEEK_MODEL`）；缺 key 时图装配期显式失败（HTTP 500），不回退 scripted 桩。
-
-```bash
-uv run uvicorn pra.api.app:app --reload            # http://127.0.0.1:8000
-curl http://127.0.0.1:8000/api/v1/health           # {"status":"ok"}
+cp .env.example .env                        # 填 DATABASE_URL 与生产入口所需凭据
+uv run uvicorn pra.api.app:app --reload     # http://127.0.0.1:8000
+curl http://127.0.0.1:8000/api/v1/health    # {"status":"ok"}
 
 uv run python -c "from scripts.demo_api import build_demo_case; import json; print(json.dumps(build_demo_case().model_dump(mode='json'), ensure_ascii=False))" > case.json
 curl -X POST http://127.0.0.1:8000/api/v1/reviews -H 'Content-Type: application/json' -d @case.json
-# → {"run_id": "<32-hex>", "review_decision": {"decision": "...", "risk_level": ..., "risk_type": [...], ...}}
 ```
 
-请求体为 `ProductReviewCase`，关键字段 `case_id` / `product`（`product_id`、`title`、`category`、
-`images` …）/ `merchant_id` / `event_type` / `screening_signals`，完整契约见 `src/pra/domain/models.py`。
-服务端**受理即分流**：`COMPLEX` 进入调查子图并落库，`PASS` / `REJECT` 由规则直判落库（无 trace）。
-不经 HTTP 的执行器级演示见 `scripts/demo_api.py`（同走生产入口，需 `.env` 凭据）。
+请求体为 `ProductReviewCase`（商品快照 + 商家 + 事件类型 + 机审信号），契约见
+[`src/pra/domain/models.py`](src/pra/domain/models.py)。服务端**受理即分流**：明确正常 / 明确违规由规则
+直判落库，复杂低置信进入调查子图后落库。不经 HTTP 的执行器级演示见
+[`scripts/demo_api.py`](scripts/demo_api.py)（同走生产入口）。
 
 ### 数据库（可选）
 
+MySQL 承担落库与审计链；离线走查与评测不需要它，HTTP 入口需要。
+
 ```bash
-# 仅绑回环，勿用 -p 3306:3306 暴露到局域网
 docker run --name mysql-dev -e MYSQL_ROOT_PASSWORD=<your-password> -p 127.0.0.1:3306:3306 -d mysql:8
 docker exec -i mysql-dev mysql -uroot -p<your-password> -e "CREATE DATABASE IF NOT EXISTS product_review CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-docker exec -i mysql-dev mysql -uroot -p<your-password> product_review < migrations/001_review_core_tables.sql
-cp .env.example .env   # 填 DATABASE_URL
+for f in migrations/*.sql; do docker exec -i mysql-dev mysql -uroot -p<your-password> product_review < "$f"; done
 ```
 
-DDL 位于 `migrations/`：`001_review_core_tables.sql`（审核核心 5 表）、
-`002_review_case_triage.sql`（分流增量列）、`003_product_tables.sql`（商品 3 表）、
-`004_merchant_tables.sql`（商家 2 表），全部幂等。未配置 `.env` 时代码使用内置本地开发默认 DSN。
+DDL 位于 [`migrations/`](migrations/)，全部幂等；Chroma 与 Langfuse 的本地部署见 [`deploy/`](deploy/)。
 
-## 配置
+## 架构
 
-配置经 pydantic-settings 从仓库根 `.env` 读取，模板见 `.env.example`：
+- **调查子图**：`hypothesize → plan → tools → reevaluate → decide` 单回环，`decide` 是唯一终态出口。
+- **裁决收口**：硬规则强制 `REJECT`（LLM 不可覆盖）→ abstention 清单 → PASS/REJECT Gate；改判原因码
+  全量写入 `overrides`。
+- **置信度是确定性门槛，不是模型概率**：按证据事实以固定公式重算，系数结构性给定、不用数据集拟合；
+  不达标转人工。模型产出的假设与概率类中间结果**不参与最终裁决**。
+- **预算是护栏上界而非目标**：超限不是失败，而是带部分证据转人工止损。
+- **证据不可篡改**：去重后不可修改；证据不足转人工，禁止用推测、默认值或空证据补齐。
+- **测量边界显式声明**：外观维度在缺少真实视觉服务时声明为不可测，不因缺席而放行。
 
-| 变量 | 说明 |
-|---|---|
-| `DATABASE_URL` | MySQL 连接串（aiomysql 异步驱动） |
-| `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 真实 LLM 网关凭据与模型名（`DEEPSEEK_MODEL` 缺省 `deepseek/deepseek-chat`）；生产 HTTP 入口与 `scripts/demo_api.py` 等生产入口调用方必填 `DEEPSEEK_API_KEY`（缺则装配期报错），`run_evaluation_real.py` 亦用 |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Langfuse 凭据，缺省走 `NullTracer` |
-| `PRA_LANGFUSE_ENABLED` | 总开关；`0/false/no/off` 关闭，未设置 = 有凭据即启用 |
-| `PRA_LANGFUSE_EXPERIMENT` / `PRA_LANGFUSE_SAMPLE` / `PRA_LANGFUSE_SESSION` | trace 版本名 / 采样率 / 会话分组 |
-
-`Settings` 保持 `extra="forbid"`：出现未知键名直接报错，避免拼写错误静默连错库。
+判定语义、Gate 规则与数据模型口径见 [docs/00-system-design.md](docs/00-system-design.md)。
 
 ## 评测
 
-评测方法与口径（三方案定义、abstention 指标、消融、阈值扫描、结论边界）以
-[docs/02-evaluation.md](docs/02-evaluation.md) 为权威出处：**§11** = scripted 封板结果表，
-**§12** = 语义重构前的 real 历史基线，**§13** = Gate 语义重构，**§14** = 重构后 real 全量（单次运行）。
+评测方法与口径（三方案定义、指标分子 / 分母、结论边界）以
+[docs/02-evaluation.md](docs/02-evaluation.md) 为权威出处：**§11** = 最近一次 scripted 封板结果，
+**§12** = 最近一次 real 全量（单次运行）。
 
 ```bash
-uv run python scripts/run_evaluation.py      # 三方案对比（默认 v1 数据集）
-uv run python scripts/run_regression.py      # 决策序列 sha256 与基线快照比对
-uv run python scripts/run_ablation.py        # 方案级 / 组件级消融
-uv run python scripts/run_sweep.py           # 阈值扫描
-uv run python scripts/run_evaluation_real.py --limit 10   # 真实 LLM 对照（需 API key，有费用）
+uv run python scripts/run_evaluation.py                 # 三方案对比（默认 v1 数据集）
+uv run python scripts/run_regression.py                 # 决策序列 sha256 与基线快照比对
+uv run python scripts/run_ablation.py                   # 方案级消融
+uv run python scripts/run_evaluation_real.py --limit 10 # 真实 LLM 对照（需凭据、有费用）
 ```
 
-## 检索（Policy KB / Case KB）
+两条世界口径必须同框引用：**scripted 数字衡量实现一致性，不外推模型能力**；**real 数字为单次运行、
+非确定性、不可重放**。评测世界的数据源与工具集也与生产不同，详见 docs/02 §7。
 
-检索后端为 ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF（需 `--extra rag`），检索口径见
-[docs/00-system-design.md](docs/00-system-design.md) §6；代码在 `src/pra/rag/`：
-`embedding.py`（BGE 编码器）/ `retrieval.py`（模式枚举 + 检索上下文）/ `bm25.py`（BM25 路 + jieba 分词 + bm25s 自建索引）/
-`chroma_store.py`（建库与 Node 装配）/ `index.py`（Policy / Case 索引）。
-**默认装配路径（`build_tools()` 与评测世界）仍是 InMemory 种子、不连向量库** —— 只有生产入口
-（`build_production_tools()`）与评测侧显式切到 RAG 世界（`EvalContext.tool_world="rag"` /
-`make_rag_world_tools()`）才走真实检索。
+## 配置
 
-```bash
-uv run python scripts/run_rag_demo.py                  # 三模式（bm25/vector/hybrid）Top-K 检索演示
-```
+配置经 pydantic-settings 从仓库根 `.env` 读取，**全部键与说明以 [`.env.example`](.env.example) 为准**。
+两条约束：未知键名直接报错，不静默忽略；生产入口缺 LLM 凭据时装配期显式失败。
 
-`run_rag_demo.py` 默认使用进程内 `EphemeralClient`（无需本机服务端）；
-部署 Chroma 服务端见 [deploy/chroma/README.md](deploy/chroma/README.md)。
+可选依赖组 `rag`（真实检索）与 `observability`（Langfuse）只增强能力，不装也能跑默认路径。
 
-## 可观测性（Langfuse，可选）
+## 开发
 
-`pra.observability` 是薄适配层：**无凭据时使用 `NullTracer`，全链路 no-op、零网络、不影响测试**；
-配置凭据后上报 root / node / generation / tool / gate span 树，`trace_id` 与 MySQL `review_run.run_id`
-同值，审计链可互跳。
-
-```bash
-cd deploy/langfuse && docker compose up -d                             # 本地自托管，UI http://localhost:3000
-uv run python scripts/demo_langfuse_trace.py                           # 打印 trace UI 链接
-uv run python scripts/langfuse_smoke.py                                # 端到端自检（无凭据 exit 0）
-```
-
-部署与实测记录见 [deploy/langfuse/README.md](deploy/langfuse/README.md)。
+- **测试**：`uv run pytest tests/ -q`（确定性、不联网）。依赖外部条件的用例在不可用时自动 skip：
+  真库冒烟需本机 MySQL，真实向量检索需 `rag` extra + Chroma 服务端 + 模型缓存。
+- **静态检查**：`uv run ruff check` —— 仓库未配置 ruff 规则集，改动后对照是否新增告警。
+- **检索**：向量 + 关键词混合（需 `rag` extra）。两路分数不可比、不参与裁决，分数口径见
+  [docs/00-system-design.md](docs/00-system-design.md) §6。
+- **常用脚本**：`scripts/demo_walkthrough.py`（离线走查）、`scripts/run_rag_demo.py`（检索三模式）、
+  `scripts/demo_langfuse_trace.py`（观测 trace）。
 
 ## 项目结构
 
 ```text
 src/pra/
-  agent/           LangGraph 调查子图：state / graph / nodes / tools_node / guardrails / checkpointer / llm 后端
-  api/             FastAPI 接入层（POST /api/v1/reviews、GET /api/v1/health）
-  domain/          Pydantic 契约（ProductReviewCase / ReviewDecision / Evidence …）
-  tools/           6 个调查工具：product / merchant / image_analysis / ocr / case_search / policy_search
-  screening/       机审引擎与三分流
-  rag/             知识库检索：chroma 后端（ChromaDB + LlamaIndex）、BM25、embedder、惰性索引
-  evaluation/      评测 harness、数据集、指标、消融、扫描、回归
-  infra/           MySQL 五表落库（SQLAlchemy 2.0 async）
-  observability/   Tracer 适配层（Langfuse / Null）
-docs/              系统设计与评测口径 · migrations/ DDL · scripts/ 演示与评测脚本 · tests/ pytest 用例
+  agent/          调查子图：state / graph / nodes / tools_node / guardrails / checkpointer / LLM 后端
+  api/            FastAPI 接入层
+  domain/         Pydantic 契约（案件、裁决、证据）
+  tools/          调查工具（商品 / 商家 / 图像 / OCR / 案例检索 / 政策检索）
+  screening/      机审引擎与三分流
+  rag/            知识库检索（向量 + 关键词混合，惰性构建）
+  evaluation/     评测 harness、数据集、指标、消融、回归
+  infra/          落库与持久化（SQLAlchemy 2.0 async）
+  observability/  Tracer 适配层（Langfuse / Null）
+docs/ · migrations/ · scripts/ · tests/ · deploy/
 ```
-
-## 关键设计
-
-- **裁决收口**：R1 硬规则强制 `REJECT`（LLM 不可覆盖）→ abstention 清单 → PASS/REJECT Gate；
-  改判原因码全量写入 `overrides`。
-- **`decision_confidence` 是确定性安全门槛，不是模型概率**：按证据事实以固定公式重算
-  （`0.40*测量覆盖 + 0.30*证据强度 + 0.20*可引用依据 + 0.10 − 0.20*冲突`，系数结构性给定、未用数据集拟合）；
-  `0.7` 仅作为 REJECT 的安全门槛（不达标转 `HUMAN_REVIEW`），PASS 另有独立 Gate 校验。
-- **预算是护栏上界而非目标**：默认 10 次 LLM 调用 / 15 次工具调用 / 40k tokens / 30s；
-  超限不是失败，而是带部分证据转人工止损。
-- **`DECIDED` 是唯一终态**：`decide` 之后无出边，超限与降级只记入 overrides 与预算快照。
-- **证据不可篡改**：去重指纹为 `(type, source, ref_id)`（`ref_id` 优先、缺失回退 `value`），
-  收集后不可修改。字段语义见 `src/pra/agent/state.py` 与 `src/pra/agent/guardrails/schemas.py`。
 
 ## 技术栈
 
 | 关注点 | 选型 |
 |---|---|
-| 语言 / 包管理 | Python 3.12+ · uv（`rag` / `observability` / `dev` 依赖组） |
-| 接入层 | FastAPI + uvicorn |
-| 调查编排 | LangGraph StateGraph（5 节点 7 边单回环）+ InMemory Checkpointer |
-| LLM | `LLMBackend` 抽象：`build_agent_graph(llm=None)` 不注入后端（沿用进程级当前后端，测试 / 评测 / `demo_walkthrough.py` 的确定性世界为 scripted 桩）；生产入口由 `pra.wiring.build_llm_backend` 按 `.env` 装配 `LiteLLMBackend` 并经 `build_agent_graph(llm=)` 注入，缺 `DEEPSEEK_API_KEY` 直接报错 |
-| 检索 | chroma（ChromaDB + LlamaIndex + BGE + BM25(jieba) + RRF）；默认装配与评测世界为 InMemory 种子 |
-| 数据层 | SQLAlchemy 2.0 async · aiomysql · MySQL |
-| 可观测性 | Langfuse v4（自托管）· Null Object 兜底 |
+| 语言 / 包管理 | Python 3.12+ · uv |
+| 服务与编排 | FastAPI + uvicorn · LangGraph |
+| LLM | 后端抽象：生产走真实网关，测试 / 评测走确定性桩 |
+| 检索 | ChromaDB + LlamaIndex + BGE + BM25（可选依赖） |
+| 数据与观测 | MySQL（SQLAlchemy async）· Langfuse（可选） |
 | 质量 | pytest（含超时守护）· ruff · GitHub Actions |
-
-## 当前实现边界
-
-- **测试 / 评测 / `demo_walkthrough.py` 的全链路为 scripted LLM 桩 + InMemory 数据源**，保证确定性可重放；
-  该路径下 token = 0、latency ≈ 0、cost 为空是真实情况，不做填充。
-- **生产 / HTTP 入口 `build_production_tools()` 使用真实数据源**：商品、商家接 MySQL，
-  案例、政策接真实 RAG（惰性构建，首次检索才建库连服务端；失败记 warn failure，不静默回退种子）；
-  LLM 由 `pra.wiring.build_llm_backend` 按 `.env` 装配 `LiteLLMBackend`，缺 `DEEPSEEK_API_KEY`
-  直接失败、不回落桩 —— 该路径 token / latency 为真实值，结果非确定性。
-  默认 `build_tools()` 与评测世界仍是 InMemory；评测世界为 5 个工具，比生产少一个 `OCRTool`。
-- `image_analysis` 与 `ocr` 尚未接入真实视觉模型与 OCR 服务，为 Mock 桩；生产装配据此把
-  "外观测量"声明为**不可测**（带图案件不会因此自动放行，属已声明的覆盖缺口而非静默降级）。
-- 真实 LLM 除生产 HTTP 入口外，评测侧仅通过 `scripts/run_evaluation_real.py` 触发，需 API key、有费用、
-  **非确定性且不可重放**；已发布的对照为单次运行（v1 35 案与 v2 320 案各一次，见
-  [docs/02-evaluation.md](docs/02-evaluation.md) §12/§14），**不代表模型固定水平**。
-- 评测集由单一标注者按与审查员同源的规则构造，未做多标注者交叉校验，因此 scripted 高分只反映实现一致性。
-- **已识别但未排期的边界**：生产预算档位调优（`LLM_CALLS=10 → 12/15`）、`GT=REJECT→HUMAN_REVIEW`
-  回收（回环/取证）、`listing_registry` 阳性路径（案件声明与在库事实的确定性比对）、真实视觉/OCR 数据源。
-- 尚未实现：MQ 异步 worker、Redis 幂等与限流、审核工作台、OpenTelemetry 跨服务链路。
-
-## 文档
-
-- [docs/00-system-design.md](docs/00-system-design.md) —— 系统设计总览：业务价值 → 决策难点 → 设计 → 验证
-- [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测方案与指标口径
 
 ## Roadmap
 
-- **RAG 语料与模型扩展**：扩大语料与模型对比范围、补充检索指令，并配套独立评测口径。
-- **异步化接入**：MQ 异步 worker + 人工审核队列，配套 MySQL Checkpointer 续跑与 Redis 幂等。
-- **可观测性**：在 Langfuse 之上补充 OpenTelemetry 跨服务链路 trace、采样与容量治理。
+- **真实视觉 / OCR 接入**：图像分析与 OCR 目前为桩，生产据此声明外观维度不可测。
+- **RAG 语料与模型扩展**：扩大语料与模型对比范围，并配套独立评测口径。
+- **异步化接入**：MQ worker + 人工审核队列，配套续跑与幂等。
+- **审核工作台与跨服务链路观测**：在现有 trace 之上补跨服务链路与容量治理。
+
+## 文档
+
+- [docs/00-system-design.md](docs/00-system-design.md) —— 设计口径与决策依据：业务约束、判定机制、边界与「不做什么」
+- [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测口径与最近一次结果：三方案定义、指标分子 / 分母、最近一次 scripted / real 运行
+
+> 两份文档只写**口径与决策**；字段、表结构、目录、配置值与当前实现状态以代码与本 README 为准。
+> 评测结果只保留**最近一次**运行，重跑即覆盖（历次数字见版本库）。
 
 ## 许可证
 

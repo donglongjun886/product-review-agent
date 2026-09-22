@@ -210,6 +210,9 @@ ONNX 模型，既慢又与「默认不联网」基调冲突。
 - 换算口径：`cos = 1 − distance`（`space="cosine"` 下），**`distance` 已含归一化** ——
   传 `[0.9,0.1,0]` 还是单位化的 `[0.9,0.1,0]/‖·‖`，`cosine` space 下返回的都是 `0.006116271`
   （两种输入实测同值），所以**不需要自己先归一化**；但**必须**确认 `space` 正确。
+- ⚠️ **`cos = 1 − distance` 只用于理解与核验 Chroma 的 `distance`，不是项目内的检索分口径**：项目把库返回的
+  distance 直接取 `exp(-distance)` 作检索分（单调等价，且避免 `d > 1` 时被 clamp 塌成 0），见
+  [docs/00-system-design.md](../../docs/00-system-design.md) §6.6。**不要把 `1 − distance` 当项目分数用。**
 
 ### 6.3 配置红线：**别把连接串写进仓库根 `.env`**
 

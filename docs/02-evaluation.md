@@ -1,14 +1,17 @@
 # 电商平台商品内容治理 · 复杂风险调查 Agent —— 评测方案执行细化（02-evaluation）
 
 > 本文档把《00》评测相关章节（§11 Evaluation Dataset、§12 三方案对比、§13 Hard Case Benchmark，及 §7.6 数值口径）
-> 落成**实现层唯一依据**，服务对象是写 `src/pra/evaluation/**` 与 `scripts/` 评测脚本的人。
+> 落成**可执行口径与决策依据**，服务对象是写 `src/pra/evaluation/**` 与 `scripts/` 评测脚本的人；
+> 实现规格（模块、字段、配置取值、进度状态）以代码与 README 为准。
 > 引用约定：总设计写作 **《00》§x.y**（即 `docs/00-system-design.md`）；本文内部节号直接写 §x.y。
 > 字段级契约以代码为准（`src/pra/agent/state.py`、`src/pra/domain/models.py`、`src/pra/agent/guardrails/schemas.py`）。
 >
-> **本文档不包含业务代码**：只写 eval_case schema、模块划分、伪代码与指标口径（与 01 同一原则），它们是"契约"。
+> **本文档不包含业务代码**：只写评测口径与决策依据 —— 数据集口径、三方案定义与输入边界、每个指标的分子/分母/取数字段、拍板记录与结论边界声明；
+> 具体实现（模块划分、字段、配置取值、进度状态）一律以代码与 README 为准，本文不镜像。
 > **版本状态：v1（P-1~P-5 已拍板）**：评测口径按拍板结果定稿，正文不再标 [待拍板]（逐条决策记录见 §9，供追溯）；
-> 正文残留的〔细化待定〕均为**实现者可自行收敛**的落地细节，不阻塞实现；命名/模块结构以 §3.5 为准（**已实现部分以 `src/pra/evaluation/` 实际结构为准**，见该节"命名注"）。
-> 本文不评审、不引用 `pra/screening` 的具体规则动作（并行修正集进行中，见 §7），评测框架与具体规则解耦，只按"运行时当前行为"取数并记录行为快照。
+> 正文残留的〔细化待定〕均为**实现者可自行收敛**的落地细节，不阻塞实现；harness 代码落点见 §3.5（**以代码实际结构为准**）。
+> **结果只保留最近一次运行**（§11/§12）：重跑即整节覆盖，历次数字由版本库承担。
+> 本文不评审、不引用 `pra/screening` 的具体规则动作（并行修正集进行中，见 §7），评测框架与具体规则解耦，只按当次运行的 screening 行为取数并记录行为快照。
 
 ---
 
@@ -23,7 +26,7 @@
 | §11.1/§11.2 | 评测集规模分布 + Case 结构化标签 | §2 eval_dataset 文件格式、schema、构造与版本管理 |
 | §11.3 | 业务/Agent/工程三组指标 | §4 每个指标的计算口径（分子/分母/取数字段） |
 | §11.4 | 三方案同一 harness、可比 metrics、确定性重放 | §3 harness 模块划分与 SchemeRunner 契约 |
-| §11.5 | threshold sweep、只动配置 | §5 sweep 脚本、曲线与 operating point 选取 |
+| §11.5 | threshold sweep（**能力已移除**） | §5 移除决策记录 |
 | §12.0–12.4 | 三方案公平性前提与预期结论 | §3.1–3.4 每方案的执行语义与装配 |
 | §13.1–13.4 | Hard Case 定义/构造/Ablation | §2.4（占比与挑选）、§6（Ablation 二期） |
 
@@ -38,9 +41,9 @@
 
 | 文档 | 关系 |
 |---|---|
-| 00-system-design | 本文件是其 §7.6/§11–13 的可执行细化；sweep 校准结果**只作评测内部实验记录，不写回《00》§7.6 口径表**（§5.3） |
+| 00-system-design | 本文件是其 §7.6/§11–13 的可执行细化；阈值校准工具已移除（§5），《00》§7.6 口径表保持代码常量 |
 | Agent 契约（代码） | Agent 指标取数依据：`tool_call_history` 边际增益 4 字段、Tool Selection Accuracy 评测接口、`ReviewDecision` 终形状 —— 实现见 `src/pra/agent/state.py`、`src/pra/agent/tools_node.py`、`src/pra/domain/models.py` |
-| 参数口径（代码） | 权威值在代码常量：预算 10/15、`EVIDENCE_MIN_SIM=0.70` / `EVIDENCE_STRONG=0.85`（`src/pra/tools/image_analysis/tool.py`）、`CONFIDENCE_ABSTAIN_THRESHOLD=0.7`（`src/pra/agent/guardrails/gate.py`）；校准结果**不回写生产常量**（§5.3） |
+| 参数口径（代码） | 阈值/预算等**具体取值以代码常量为准**（生产侧 `src/pra/tools/image_analysis/tool.py`、`src/pra/agent/guardrails/gate.py`；预算上限见 guardrails 配置），本文不复制；口径约定：阈值不随数据集调参（校准工具已移除，见 §5） |
 | 图装配（代码） | Agent scheme 的图装配与 Ablation 变体构造依据（工具注册层裁剪，见 §6）：`src/pra/agent/graph.py` |
 
 ---
@@ -69,7 +72,8 @@
 > - **单一标注者**：全部真值由生成器按与评测审查员同源的规则程序化标注（`annotation.labelers=["eval-phase2"]`），**无第二标注者交叉校验** → §3.3 同口径耦合的直接来源，只衡量实现一致性，不外推调查能力。
 > - **无可见内容重复案**：`_dedupe_visible_rows` 保证 v2 不存在只差 `product_id/version/listing_time` 的重复行（改前 18 组、改后 0 组，20 行标题后缀改写）；但标题核心词仍跨案复用（表观多样性局限，非重复案）。
 > - **`expected_tools` 空列表 = 未标注**（干净案、三方案一致 PASS），**不计入 Tool Selection 指标分母**，不得解读为「应调用 0 个工具」；「需调查才能判」的 AUTO 案已给非空期望（brand / category 空缺核验 30 案 = `ProductTool + MerchantTool`）。
-> - **真 LLM 对照仅 v1 35 案单次抽样**（acc 0.200 / human_review_rate 0.771）：只作「真实 LLM 链路已跑通」的证明，**不是模型水平**；未跑 v2、未重复采样（重复采样仅限小 subset 看稳定性）。
+> - **真 LLM 对照是单次运行、无重复采样**：故真 LLM 数字只证明真实链路已跑通、暴露迭代方向，
+>   **不代表模型固定水平**；real 臂非确定性、不可重放。
 
 ### 2.2 eval_case 结构化标签 schema（引用《00》§11.2，细化字段清单）
 
@@ -100,7 +104,7 @@
 要点：
 - **每条 eval_case 必须有明确 Ground Truth**：Phase 1 只允许 `expected.decision ∈ {PASS, REJECT}`；Phase 2 才允许 HUMAN_REVIEW（`SHOULD_ABSTAIN` 案，§4.4），不强制占比、不为凑比例塞数据（P-4）。
 - 标签**不只是 PASS/REJECT**：`expected.evidence / risk_type / expected_tools` 使评测能区分"结论对但理由错"（《00》§11.2）。
-- `expected.evidence` 里的阈值（如 `>=0.85`）是**标注时的证据口径**，须与运行时 `EVIDENCE_MIN_SIM/STRONG` 口径一致；阈值经 §5 sweep 校准变更后**同步修订标签**（《00》§11.2 注）。
+- `expected.evidence` 里的阈值（如 `>=0.85`）是**标注时的证据口径**，须与运行时 `EVIDENCE_MIN_SIM/STRONG` 口径一致；阈值变更须同步修订标签（《00》§11.2 注）。
 - `input.images` 的素材引用（URL vs 本地 asset）与 OCR 文本是否内联，〔细化待定：实现者可自行收敛〕：影响 ImageAnalysis/OCR 工具的评测可复现性，建议 eval 专用 asset 目录 + URL 占位，避免外网依赖。
 
 ### 2.3 构造流程（对应《00》§13.2，落到"谁产、什么格式、存哪、版本怎么管"）
@@ -123,11 +127,11 @@
 - **验证方法**：①③需在 Rule / Agent 冒烟跑分后回填确认（先粗标、跑分后复核 hard_reason 是否成立），②由标注者按证据缺口判断。
 - 占比终值（已拍板，P-4）：Phase 2 正式集目标 **≥15%**（`evasion` 10% + `boundary` 中符合三选一者）；Phase 1（30–50 条）不设硬性占比，以覆盖五类、跑通框架为准。
 
-### 2.5 数据集划分（sweep 校准与报告隔离）
+### 2.5 数据集划分（报告隔离）
 
-- 一次划分成 **report 集（主跑分报告）** 与 **validation 集（§5 sweep 校准 operating point）**，按 scene 分层抽样，比例建议 70/30。
-- 报告必须声明 operating point 取自 validation；report 集只在定稿后跑一次全量，避免"调参调到报告集"。
-- 划分自 **Phase 2（300+）** 起执行；Phase 1（30–50 条）以全集跑通框架与指标口径即可，不在 Phase 1 集上做 sweep 选点（sweep 排在 Phase 1 框架跑通之后，§5/§8）。
+- 一次划分成 **report 集（主跑分报告）** 与 **validation 集**（供人工复核与后续校准实验），按 scene 分层抽样，比例建议 70/30。
+- 报告只报 report 集数字，避免"看着 validation 改到 report 集"。
+- 划分自 **Phase 2（300+）** 起执行；Phase 1（30–50 条）以全集跑通框架与指标口径即可。
 
 ---
 
@@ -166,7 +170,7 @@
 
 ### 3.4 Agent（真实执行语义；Phase 1 运行模式已拍板）
 
-- 走 **`build_agent_graph`**（hypothesize→plan→tools→reevaluate→decide，状态 `AgentState`，预算 10/15/40000/30000 Guardrail）；终态以确定性 overlay 后的 `ReviewDecision`（`src/pra/domain/models.py`）为判决策略真值；HUMAN_REVIEW 是三个 Decision Gate 之一（abstention 清单语义），即 **Agent 有 HUMAN_REVIEW 语义**。
+- 走 **`build_agent_graph`**（hypothesize→plan→tools→reevaluate→decide，状态 `AgentState`；决策预算与 Guardrail 上限由图装配配置给定，取值以代码为准）；终态以确定性 overlay 后的 `ReviewDecision`（`src/pra/domain/models.py`）为判决策略真值；HUMAN_REVIEW 是三个 Decision Gate 之一（abstention 清单语义），即 **Agent 有 HUMAN_REVIEW 语义**。
 - **运行模式（P-2 已拍板）**：
   - **Phase 1 默认：scripted Agent + InMemory 种子数据**（Case/Policy/Merchant 现状）——确定性、可重复、**CI 可回归**（同 case 重跑同结果，《00》§11.4）；
   - **Real LLM Evaluation 排后续阶段（Phase 3，§8）**：真实 LLM + 真实工具数据源（RAG 未接前不可用），复核 scripted 结论（尤其 Tool Selection / Evidence Sufficiency 等依赖 LLM 行为的指标）。
@@ -174,52 +178,15 @@
 
 ### 3.5 Harness 代码落点（src/pra/evaluation/ 模块划分）
 
-```
-src/pra/evaluation/
-├── dataset/
-│   ├── schema.py          # EvalCase Pydantic 模型 + 校验（§2.2 JSON 对齐；标签完整性/受控词表）
-│   └── loader.py          # JSONL 读取、manifest 解析、report/validation 划分、scene 分层统计
-├── harness/
-│   ├── base.py            # EvalContext（阈值常量/预算/LLM 模式/工具数据源）+ SchemeRunner 抽象 + EvalRecord（见 3.6）
-│   ├── rule_scheme.py     # P-1 已拍板：薄封装 pra.screening 三分流（PASS/REJECT/COMPLEX→HUMAN_REVIEW）；(b) 独立二分 rule 本期不做（RuleBaseline）
-│   ├── single_call_scheme.py  # prompt 构造 + 单次调用 + JSON 校验降级（与 Agent 的 LLM 调用壳同款：重试 1 次，失败→HUMAN_REVIEW；低置信 REJECT 候选→HUMAN_REVIEW）（SingleCallScheme）
-│   └── agent_scheme.py    # build_agent_graph + scripted/real LLM + 工具数据源注入 + 结果转录（AgentScheme）
-├── metrics/
-│   ├── business.py        # §4.1：Accuracy/Precision/Recall/FPR/FNR + human_review_rate/automation_coverage（DecisionMetrics/DecisionEvaluator；命名以 §4 为准，无 HRR 缩写）
-│   ├── abstention.py      # §4.4：abstention_rate/abstention_recall/wrong_auto_decision_rate（AbstentionMetrics/AbstentionEvaluator）
-│   ├── agent.py           # §4.2：Tool Selection Accuracy / Evidence Sufficiency / Reasoning Correctness / Marginal Evidence Gain（AgentMetricsBundle；Budget Utilization 未实现，见 §4.2）
-│   └── engineering.py     # §4.3：llm_calls/tool_calls/tokens（+real 臂 latency）的均值/P50/P95（EngineeringMetrics）
-├── runner.py              # 数据集遍历 + 方案调度 + 结果汇总（EvaluationRunner/EvaluationResult，含 cost 均值）
-├── ablation.py            # §6：Ablation（方案级 2a/2b/2c + 组件级；AblationRunner）
-├── regression.py          # §8：确定性回归（baseline digest 记录与比对；RegressionReport）
-├── report.py              # 汇总 → markdown/json 报告；含按 scene 分层表 + 《00》§12.4 预期结论对照 + 结论边界声明
-└── sweep.py               # §5：threshold sweep 驱动（只改配置；Phase 2，见 §5；ThresholdSweepRunner）
+**代码落点**：`src/pra/evaluation/`（数据集加载、harness、metrics、runner、报告、消融与回归驱动）与 `scripts/` 下的跑分入口；**实际模块划分与文件名以代码为准**，本文不镜像目录树。
 
-scripts/
-├── eval_dataset_gen.py    # §2.3 程序化变异/合成入口（确定性种子）
-└── run_evaluation.py      # 跑分入口：load → N schemes → metrics → report（子命令 --scheme/--split）
-```
+契约标识符（语义固定，实现层名字以代码为准）：`EvalCase`（数据集条目）/ `RuleBaseline`·`SingleCallScheme`·`AgentScheme`（三个 SchemeRunner）/ `EvalRecord`（统一结果记录）/ `metrics.business`。三条不变：
 
-> **命名注**：本节是**设计期规划**；**已实现部分以 `src/pra/evaluation/` 的实际结构为准**（上面目录树已按实现对齐：
-> `EvalRecord` 与 `EvalContext` / `SchemeRunner` 同落 `harness/base.py`，abstention 指标落 `metrics/abstention.py`，
-> 另含本节最初未列的 `runner.py` / `ablation.py` / `regression.py` / `report.py` / `sweep.py` / `dataset/`）。
-> 契约标识符 `eval_case` / `SchemeRunner`×3 / `EvalRecord` / `metrics.business` 的语义不变；实现层实际使用的名字为
-> `EvalCase` / `RuleBaseline`·`SingleCallScheme`·`AgentScheme` / `EvalRecord` / `metrics.business`
-> （`DecisionEvaluator` / `AbstentionEvaluator`），另有 `EvaluationRunner`（`runner.py`）、`AblationRunner`（`ablation.py`）等。
-> **不得引入与本节平行的新抽象命名**；`§4.2/§4.3` 的 agent / engineering 指标已落
-> `metrics/agent.py` / `metrics/engineering.py`（口径见 §4.2/§4.3 的实现状态注）。
+- **EvalContext** 承载注入配置（工具数据源 / 检索模式 / abstention 门槛）——判定逻辑与评测代码**不得内联阈值常量**；
+- **SchemeRunner** 契约：`async run(case: EvalCase, ctx: EvalContext) -> EvalRecord`，`name ∈ {rule, single_call_llm, agent}`；
+- **metrics 层只吃 EvalRecord**，不直接吃 DB / AgentState。
 
-SchemeRunner 契约（伪代码；实现者照此写，不强求框架）：
-
-```python
-# harness/base.py
-class SchemeRunner(ABC):
-    name: str                       # "rule" | "single_call_llm" | "agent"
-    async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord: ...
-
-# EvalContext：注入配置（阈值/预算/LLM 模式/工具数据源/随机种子）——sweep 只改这里的常量（§5）
-# EvalRecord：见 3.6 —— metrics 层只吃 EvalRecord，不直接吃 DB/State
-```
+> **不得引入与本节平行的新抽象命名。**
 
 ### 3.6 同一次运行产出可比 metrics（《00》§11.4）
 
@@ -239,8 +206,8 @@ class SchemeRunner(ABC):
 }
 ```
 
-- Agent 的 EvalRecord 由 **AgentState/review_trace/review_result 字段转录**（review_trace(PLAN).output_json → plan_outputs；AgentState.tool_call_history → trace；decision_json.budget_used → cost）；rule/llm 的 EvalRecord 由各自执行结果构造。
-- **DB 落库非必需**：评测以内存 EvalRecord 为主（快、可并行、不污染业务表）；DB 版（走 run_and_persist/SCREENING_DIRECT 真落库）作集成测试可选路径〔细化待定：实现者可自行收敛〕。
+- **转录口径**：Agent 的 EvalRecord 由 AgentState / review_trace / review_result 字段转录（review_trace(PLAN).output_json → plan_outputs；AgentState.tool_call_history → trace；decision_json.budget_used → cost）；rule/llm 的 EvalRecord 由各自执行结果构造。
+- **DB 落库非必需**：评测以内存 EvalRecord 为主（快、可并行、不污染业务表）。
 - **确定性重放**：scripted 模式要求同 case 重跑产出**逐字节一致**的 EvalRecord（mock/录制工具结果，随机种子固定），作为 Phase 1 验收断言（§8）。
 
 ---
@@ -259,7 +226,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | Accuracy（决策准确率） | 二值真值案（expected∈{PASS,REJECT}）上 decision==expected 的占比；**预测 HUMAN_REVIEW 计为错** | decision × expected.decision | 实现口径（2026-09-09 Q1 拍板 (b)），口径注见下表 |
 | Precision（精确率） | 预测 REJECT 且 expected=REJECT / 预测 REJECT | 同上 | 误拒直接伤害商家 |
 | Recall（违规召回） | 预测 REJECT 且 expected=REJECT / expected=REJECT | 同上 | 违规漏放伤害平台 |
-| False Positive Rate（FPR，误杀率） | expected=PASS（正常）中自动终裁为 REJECT 的比例 | 同上 | **防误伤红线、Phase 1 重点观察**（《00》§7.2-2）；sweep 主观察曲线之一 |
+| False Positive Rate（FPR，误杀率） | expected=PASS（正常）中自动终裁为 REJECT 的比例 | 同上 | **防误伤红线、Phase 1 重点观察**（《00》§7.2-2） |
 | False Negative Rate（FNR，漏放率） | expected=REJECT（违规）中自动终裁为 PASS 的比例 | 同上 | 与 Recall 互补 |
 | human_review_rate | 输出 HUMAN_REVIEW 的 case 占全部 case 的比例 | decision | 转人工占用（人工负担）；Rule 的 COMPLEX 映射与 Agent/Single-call 的 abstention 都计入 |
 | automation_coverage | 1 − human_review_rate（自动终裁占比） | decision | 自动化覆盖率；与 FPR/FNR **必须并读**（§4.4 核心口径） |
@@ -278,13 +245,11 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 ### 4.2 Agent 指标（仅 agent scheme 有意义）
 
-> **实现状态（2026-09-11）**：Tool Selection / Evidence Sufficiency / Reasoning Correctness /
-> Marginal Evidence Gain 已落 `metrics/agent.py`（只读统计，不参与判定；**空真值不进分母** ——
-> `expected_tools=[]` / `expected.evidence=[]` / `expected.risk_type=[]` 的案被排除，案数与无法
-> 映射的期望标签数在报告行内显式给出）。口径细节：覆盖口径 `expected_tools ⊆ actual_tools`，
-> 「调用少」另立 `redundant_tool_rate`；证据覆盖按**可映射标签**计算（不硬猜映射）；推理正确性是
-> **自动代理**（无人工第二标注者）。**`Budget Utilization` 未实现** —— `EvalRecord` 不含预算上限
-> （评测侧可为预算覆盖实验改上限，硬算会失真），占用率请用 `cost` 与跑分时的预算配置共同解读。
+> **取数与报告口径**：① **空真值不进分母** —— `expected_tools=[]` / `expected.evidence=[]` /
+> `expected.risk_type=[]` 的案被排除，案数与无法映射的期望标签数在报告行内显式给出；②覆盖口径为
+> `expected_tools ⊆ actual_tools`，「调用少」另立 `redundant_tool_rate`；③证据覆盖按**可映射标签**
+> 计算（不硬猜映射）；④推理正确性是**自动代理**（无人工第二标注者），只能近似。
+> 各指标的**实现状态以代码为准**（未实现项不以其名义出数，如实留空）。
 
 | 指标 | 计算口径（建议） | 取数字段 | 备注 |
 |---|---|---|---|
@@ -292,16 +257,14 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | Evidence Sufficiency | ① expected.evidence 的**证据类型**被实际 evidence 覆盖比例；② REJECT 案是否满足 REJECT Gate 前置（有可引用依据 `CITABLE_TYPES`、无关键矛盾） | expected.evidence × evidence | 精确公式〔细化待定：实现者可自行收敛〕 |
 | Reasoning Correctness | 结论对但推理错：risk_type 命中率（expected.risk_type ⊆ 输出）+ risk_level 档位一致 + 抽样人工复核结构化理由 | risk_type/risk_level/trace | 自动化近似无法全覆盖 → 抽样人工复核子集（标注） |
 | Marginal Evidence Gain / Investigation Efficiency | 逐 tool_call 记 `after_confidence−before_confidence` 与 `evidence_added` 非空、`decision_changed`；效率 = Σ(新增证据数 + 决策翻转权重) / 有效 Tool Calls | trace.tool_call_history 边际增益 4 字段（`src/pra/agent/state.py`） | 暴露"为调查而调查"；加权口径〔细化待定：实现者可自行收敛〕 |
-| Budget Utilization | 四组占用率：llm_calls/tool_calls/tokens/latency 各 ÷ 上限（10/15/40000/30000），报均值与分布（**未实现**，见本节实现状态注） | cost + decision_json.budget_used | 证明 Budget 是 Guardrail 非目标（《00》§10.3/§11.3） |
+| Budget Utilization | 四组占用率：llm_calls/tool_calls/tokens/latency 各 ÷ 上限（上限取值以代码配置为准），报均值与分布（**未实现**，见本节取数与报告口径） | cost + decision_json.budget_used | 证明 Budget 是 Guardrail 非目标（《00》§10.3/§11.3） |
 
 ### 4.3 工程指标（成本与效率，三方案同口径）
 
-> **实现状态（2026-09-11）**：已落 `metrics/engineering.py` —— 每方案报 llm_calls / tool_calls /
-> tokens 的均值、P50、P95、max（nearest-rank，无插值）。两条如实口径：①scripted 路径
-> `tokens=0` 是真实情况（确定性桩不烧 token），报告如实显示、**不伪造估算值**；②**墙钟延迟不落
-> `EvalRecord`**（评测逐字节可重放红线），仅 real 臂在进程内计时后传入其报告，故主评测报告的延迟
-> 一栏为 `-`。**未实现**：按 scene 分层的分布（只报每方案总体分布）与单 Case 成本折算（需要价目表，
-> 当前只有 token 量）。
+> **报告口径**：每方案报 llm_calls / tool_calls / tokens 的分位数（均值、P50、P95、max）。两条如实口径：
+> ①scripted 路径 `tokens=0` 是真实情况（确定性桩不烧 token），报告如实显示、**不伪造估算值**；
+> ②**墙钟延迟不落 `EvalRecord`**（评测逐字节可重放红线），仅 real 臂在进程内计时后传入其报告，
+> 故主评测报告的延迟一栏为 `-`。各指标的**实现状态以代码为准**（未实现项如实留空，不用填充值代替）。
 
 - LLM Calls（平均/P95）、Tool Calls（平均/P95）、Token Usage、P50/P95 Latency、单 Case 成本。
 - 一律报**分位数与分布**（不只均值），用于回答"Agent 贵在哪、是否值得"（《00》§11.3）；按 scene 分层报。
@@ -329,80 +292,69 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 - **Rule baseline（P-1(a)）**：PASS→PASS、REJECT→REJECT、**COMPLEX→HUMAN_REVIEW**（评测语义 = "不可自动判"：无 Agent 时复杂案只能人工）；报告须注明该 "COMPLEX→人工" 与线上 "COMPLEX→Agent" 是**不同口径**（§3.2/§7.1）。
 - **Single-call LLM**：REJECT 候选 `decision_confidence < CONFIDENCE_ABSTAIN_THRESHOLD(0.7)` 经确定性后处理记 HUMAN_REVIEW（与 Agent 的 REJECT Gate 同源口径；§3.3）。
 - **Agent**：三个 Decision Gate 的终态之一（PASS/REJECT Gate + HUMAN_REVIEW abstention 清单），无额外映射。
+- **Evidence 三态口径（决定 HUMAN_REVIEW 怎么归因）**：`MEASURED_POSITIVE` / `MEASURED_NEGATIVE` 由证据承载
+  （含阴性结论）；`NOT_MEASURED` / `UNMEASURABLE` **不是证据**，由 Gate 按「required 维度 × 证据存在性 ×
+  环境能力」推导 —— **不为"缺席"造证据**，以保住"查不到 ≠ 证明无"。二者在报告里必须分开：
+  **未测是可补救的（路由先回环补测）**，**环境不可测不回环**（如生产视觉桩）。
 - 映射影响 FPR / human_review_rate trade-off 的形状，报告须写明所用映射；转人工与安全并读（§4.4 核心口径）。
 
 ---
 
-## 5. Threshold Sweep（P-5 已拍板：单参数、排在 Phase 1 之后）
+## 5. Threshold Sweep（**已移除**）
 
-> sweep **排在 Phase 1 框架跑通之后**（先有三方案可比指标与 §4 口径，再谈校准；落 Phase 2，§8）。
-> P-5 已拍板：第一轮**只 sweep Evidence 阈值、单参数**，不做多参数联合 Grid Search。
+> 本节标题保留为稳定锚点（外部按节号引用）；内容记录**移除决策**，不描述已不存在的实现。
 
-### 5.1 扫哪些常量（只动配置，不动判定逻辑；《00》§11.5）
-
-| 常量 | 第一轮口径（P-5） | 实际影响路径（2026-09-09 Q4 拍板 (b)，实证收窄） |
-|---|---|---|
-| `EVIDENCE_MIN_SIM` / `EVIDENCE_STRONG` | **只 sweep Evidence 阈值一维**：0.60/0.65/0.70/0.75/0.80/0.85/0.90；每次只动一个常量、另一个取当前默认（0.70/0.85）固定 | **只作用于评测确定性审查员（EvalScriptedLLMBackend）读证据视图的阈值**（sweep.py 经 EvalContext 注入）；**生产侧 tools_node quality_filter（0.70）/ REJECT Gate 强档（0.85）不随 sweep 变化**，Rule baseline 不读相似度（无图片相关路径）——sweep **不校准生产常量**（§5.3 已修订）；另见下方数据带限制注 |
-| `CONFIDENCE_ABSTAIN_THRESHOLD` | **固定 0.7，第一轮不扫** | REJECT Gate 安全门槛 → 主要影响 Agent 与 Single-call LLM 的 abstention |
-
-> **数据带限制（2026-09-09 实证）**：当前种子世界图片相似度权重仅两簇——{0.72,0.73}（弱相似）与
-> {0.90,0.91,0.93,0.95}（强相似），**(0.73,0.90) 区间无任何数据**。实测 v2 320 案：EVIDENCE_STRONG
-> 全网格 0.60–0.90 **0 决策差异**、EVIDENCE_MIN_SIM 仅 0.90 档 14 案变化（v1 仅 2 案）。因此
-> **曲线平不代表生产阈值不敏感**——是数据带没覆盖；任何 operating point 结论都受此限制，报告必须
-> 注明。若要把 sweep 变成生产阈值的校准工具，须先把注入下沉到 tools_node/gate 实际常量读取点并补
-> 0.75–0.88 区间 family（另行立项，Q4 本轮未做）。
-
-- **不做多参数联合 Grid Search**（EVIDENCE×CONFIDENCE 乃至 MIN×STRONG 全组合都不做）——变量过多、无法判断效果来源（P-5）。
-- 第一轮观察 **Accuracy / Precision / Recall / FPR / FNR / human_review_rate / automation_coverage（自动化覆盖率）** 随 Evidence 阈值的变化，判断效果来源后，再决定是否联合校准 Confidence（P-5）。
-- **实现约束**：阈值全部经配置层注入（EvalContext），评测代码与判定逻辑**不得内联阈值常量**；sweep 只是换 EvalContext 重跑 agent/rule scheme，Rule 与 Agent 共用同一份配置快照。
-- sweep 第一轮两个 Evidence 常量各自的扫描次序等细节〔细化待定：实现者可自行收敛〕（其余常量取默认固定值即可）。
-
-### 5.2 观察哪些曲线、在哪定 operating point
-
-- 主曲线：§5.1 七项指标对 Evidence 阈值的 trade-off（每 scheme 一组；重点看 Agent 与 Rule baseline）；自动化相关（human_review_rate / automation_coverage）须与 FPR/FNR 同图呈现（§4.4 核心口径）。
-- 只允许在 **validation 集**（§2.5）上选取 operating point；选点优先级建议：先压 FPR（防误伤商家红线，《00》§7.2-2），再保 Recall（违规召回），human_review_rate / automation_coverage 作为可接受成本。
-- operating point 定义 = (`EVIDENCE_MIN_SIM`, `EVIDENCE_STRONG`) 一组值（第一轮 `CONFIDENCE_ABSTAIN_THRESHOLD` 固定 0.7），记录选点理由与所选点的观测指标值。
-
-### 5.3 校准结果回写（2026-09-09 Q4 拍板 (b) 修订）
-
-- **当前 sweep 只观测评测确定性审查员的读证据视图，不写回生产常量**（tools_node quality_filter /
-  gate 强档未被 sweep 观测过——把选点写进生产属于"写进未测层级"，禁止）。旧版"回写生产常量表 +
-  同步修订 eval_case 标签阈值口径"的回写流程**仅在注入下沉到生产常量读取点、并补齐中间相似度带
-  数据后才可启用**（另行立项）。
-- sweep 结论（曲线/选点）作为**评测内部实验记录**，附 §5.1 数据带限制注后，可与 docs §8 一并引用。
-- 报告必须附 **sweep 曲线**而不是只报最终点（《00》§11.5 精神：证明阈值是"选"出来的，不是拍脑袋
-  ——在当前数据带下曲线近平，如实呈现并注明限制）。
+- 该能力曾在评测侧实现为「按一组 Evidence 阈值重跑 agent scheme 并出曲线」。**结论（2026-09 复核）**：
+  被扫的阈值只作用于评测确定性审查员读证据的视图，**与生产 tools_node quality_filter / REJECT Gate
+  的实际常量不是同一处**（把选点写回生产属于"写进未测层级"，本就禁止），且评测世界相似度数据只有
+  {0.72,0.73} 与 {0.90+} 两簇、中间带无 case → 曲线恒定或近平，**对任何决策都不可行动**。
+- **决策**：删除阈值注入与 sweep 入口，连同其配置字段、脚本与测试。生产阈值保持代码常量不变；
+  三方案决策序列不变（决策序列回归守护）。
+- **若未来确需校准生产阈值**：须先把可配置点下沉到生产实际读常量的位置，并补齐中间相似度带数据 ——
+  届时按新需求重新设计，不复活本节的旧形态。
+- 生产侧相似度分界（`EVIDENCE_MIN_SIM` / `EVIDENCE_STRONG`）仍是 **v1 工程初始值**，未做数据集拟合。
 
 ---
 
 ## 6. Ablation Evaluation（Phase 2；引用《00》§13.4）
 
-- 回答"Agent 每个组件/每层能力是否真的必要"，两类消融跑**同一 eval_dataset**：
-  - **方案级（Single-call 的上下文 vs Agent 的主动调查，§3.3 变体）**：2a（Raw Input）→ 2b（+RAG-in-prompt 预塞政策）→ 2c（Multi-step Agent + 主动调查）——先量化"给 Single-call 更多文本能提升多少"，再看"Agent 额外收益是否来自主动调查而非只是看到更多文本"；
-  - **组件级（同图结构逐组件去掉）**：Full Agent（基线）/ −RAG（无 CaseSearch+PolicySearch）/ −MerchantTool / −CaseTool / −ImageTool。
-- **Phase 2 做，不阻塞 Phase 1 三方案可比跑分**（三方案主对比之后；真实 RAG 接入后组件级消融更可信）。
-- 实现只做装配层裁剪，不动判定逻辑与评测集（差异唯一归因）：方案级只换装配（Single-call prompt 是否预塞政策 / Agent 是否给工具）；组件级只做"图装配层不给该工具注册 / plan prompt 不注入该工具描述"，基于 04-graph-design 的注册表。
-- 判定规则：去掉后指标几乎不变 → 组件必要性存疑；显著变差 → 必要能力（《00》§13.4）。
-- 前置依赖：工具数据源至少达"能区分有/无该工具证据"的种子覆盖（InMemory 种子里查不到先例时，−CaseTool 必然无差异，结论失效——见 §7.2）。
+- 回答"给 Single-call 更多文本、再多步主动调查各能提升多少"，方案级消融跑**同一 eval_dataset**：
+  **2a**（Raw Input）→ **2b**（+RAG-in-prompt 预塞政策）→ **2c**（Multi-step Agent + 主动调查）。
+- **Phase 2 做，不阻塞 Phase 1 三方案可比跑分**（三方案主对比之后）。
+- 实现只换装配（Single-call prompt 是否预塞政策），不动判定逻辑与评测集（差异唯一归因）。
+- 判定规则：2b 与 2a 无差异 → "更多文本"增益在本数据上不可测；2c 相对 2a/2b 的差异是
+  Single-call→Agent 的**整体**差异（工具 + 多步 + mock 变体一并替换），不可分解归因于"主动调查"。
+- **组件级消融（逐工具裁剪）已移除**：其能力只服务一次性的组件必要性论证，需要图装配层裁剪参数与
+  评测侧裁剪口径，属一次性实验脚手架；报告保留**工具证据覆盖**标注（哪些 case 的
+  `expected_tools` 含该工具），覆盖为空的工具不做"不必要"判定（见 §7.2）。
 
 ---
 
 ## 7. 与 screening 修正集 / RAG 现状的关系
 
+> 标题是**稳定锚点**（外部按节号引用），不随本文"不镜像实现现状"的原则改写；本节正文只写**本文数字基于什么世界口径**，不描述代码现状。
+
 ### 7.1 Rule baseline 依赖 screening（行为以运行时为准）
 
-- Rule baseline 选项 (a) 复用 `pra.screening`：三值裁决直接取自运行时规则层，规则语义一变，本 baseline 数字随之变动。
-- **本文档刻意不与具体规则对齐**：harness 不做规则动作断言，只按"运行时当前行为"取数；报告必须记录 **screening 行为快照**（git commit / 规则语义版本）。
+- Rule baseline 复用 screening 层的三值裁决；规则语义一变，该 baseline 数字随之变动。
+- **本文档刻意不与具体规则对齐**：harness 不做规则动作断言，只按**当次运行的 screening 行为**取数；报告必须记录 **screening 行为快照**（git commit / 规则语义版本）。
 - 因此 Rule baseline 的数字**只在声明的行为快照下成立**：词表或规则动作变更后必须重跑并纳入 Regression（§11/§8）；两次快照之间的差异属**结论边界**（§3.4），不得与旧数字混读。
 - Fix 5（品牌词命中 REJECT vs COMPLEX→Agent 上下文终裁）本身是评测实验点：评测集需含"品牌词命中但可能合法"样本，报告给出两种规则动作下的对比行；其与评测口径 "COMPLEX→人工"（§3.2/§4.5）的差异须一并注明。
 
 ### 7.2 Agent 工具数据源的结论边界（评测世界 InMemory vs 生产真链路）
 
-- **评测世界**：Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）；评测侧可经 `EvalContext.tool_world="rag"`（`make_rag_world_tools()`）切到真实检索，向量库为 ChromaDB + LlamaIndex（见 [docs/00-system-design.md](00-system-design.md) 的 RAG 节与 `src/pra/rag/`）。
-- **生产 / HTTP 入口已接真实链路**：`build_production_tools()` 注入商品/商家 MySQL 与案例/政策的真实 RAG（`Lazy*Index` 惰性构建：装配期零 IO、不 import 检索后端，首次检索才建库连 Chroma）。故**本文所有数字仍是 InMemory 评测世界口径**，不得读成生产链路成绩。
-- **工具集口径**：本文所有 Agent 数字均出自**评测世界的 5 个工具**（`make_eval_world_tools()`：Product / ImageAnalysis / Merchant / CaseSearch / PolicySearch），比生产 `build_tools()` 的 6 个**少一个 `OCRTool`** —— 评测集 `expected_tools` 从不含它、机审 OCR 文本近乎全空，补进去只是多一个拿不到数据的工具。两者清单各自维护、**无"同构"约束**，Tool Selection Accuracy 真值按该 5 工具集合计。
+- **评测世界（本文数字的世界口径）**：Agent scheme 的 CaseSearch / PolicySearch / Merchant 以 **InMemory 种子数据**运行（scripted 模式，§3.4 已拍板为 Phase 1 默认）；评测侧另可切到真实检索（ChromaDB + LlamaIndex），两种世界的结果不得混读。
+- **生产 / HTTP 入口走真实链路**：工具侧注入商品/商家 MySQL 与案例/政策的真实 RAG，LLM 侧经**组合根 `pra.wiring.build_llm_backend()`** 装配真实 litellm 网关（缺 `DEEPSEEK_API_KEY` **显式抛错、不回落 scripted 桩**）。故**本文所有数字仍是 InMemory 评测世界口径**，不得读成生产链路成绩。
+- **工具集口径**：本文所有 Agent 数字均出自**评测世界的 5 个工具**（Product / ImageAnalysis / Merchant / CaseSearch / PolicySearch），比生产工具集**少一个 `OCRTool`** —— 评测集 `expected_tools` 从不含它、机审 OCR 文本近乎全空，补进去只是多一个拿不到数据的工具。两者清单各自维护、**无"同构"约束**，Tool Selection Accuracy 真值按该 5 工具集合计。
 - **报告必带边界声明（P-2 口径）**："当前结果主要验证 **Agent Workflow、规则协同与 Evaluation Framework**，不代表真实 LLM 最终能力；InMemory 种子覆盖有限，**可能低估 Agent 上限**。"（与 §3.4 同文）
 - 局限：种子里缺失的真实先例/完整规避史 Agent 取不到 → 多信号与对抗类案的 Evidence Sufficiency、Marginal Evidence Gain 等指标会**低估上限**。
+- **环境能力声明（生产与评测不同，如实声明）**：生产的 `image_analysis` / `ocr` 仍是**冻结 Mock 桩**
+  （真实商品图永远空命中）⇒ 生产装配显式把 `image_appearance` 声明为 **不可测（UNMEASURABLE）**，
+  不把"桩测不出"误判成"测过且阴性"。**后果**：生产入口对带图案件在拿到真实视觉数据源之前不会自动放行 ——
+  这是已声明的覆盖缺口，不是静默降级；评测世界的工具则声明了可测能力（故评测结果里该归因码为 0）。
+- **"仅商家行为脏"不授权自动拒绝**（需本 listing 的外观或文本信号佐证）—— 收严来自 reviewer 语义
+  （"疑似规避但图/文本无确证 → 克制转人工"），由判定侧显式实现并有单测锁定；业务若改判该族，
+  必须先改这条语义再改实现。
 - 真实 RAG/Merchant 接入后以 real 模式复核（Phase 3，§8）。
 
 ---
@@ -411,23 +363,18 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 | 阶段 | 内容 | 交付 / 验收 |
 |---|---|---|
-| **Phase 1**（当前） | eval_data schema + **30~50 条 golden cases**（PASS/REJECT 真值，§2.1）→ Rule / Single-call / Agent 三 **SchemeRunner**（§3.2–3.4）→ 决策指标评测（Accuracy/Precision/Recall/FPR/FNR，§4.1）→ Console Report → **确定性重放断言** | **三方案在同一数据集上可比跑分**（含 metrics 金标准小样本单测）；scripted 同 case 重跑**逐字节一致**；报告含结论边界声明（§3.4/§7.2）与 screening 行为快照（§7.1）；FPR 为 Phase 1 重点指标 |
-| **Phase 2** | 300+ 正式集（§2.1 五类分布）；Evidence 侧指标评测（Evidence Sufficiency / Marginal Evidence Gain，§4.2）；**Ablation**（2a/2b/2c + 组件级，§3.3/§6）；**abstention 评测**（AUTO_DECIDABLE / SHOULD_ABSTAIN，§4.4）；**Threshold Sweep**（Evidence 单参数、CONFIDENCE 固定 0.7，§5）；**Regression** | sweep 曲线与 operating point（validation 集）**只作评测内部实验记录，不写回生产常量**（§5.3）；abstention 五指标在正式集出数；修正集合入后重跑 Rule 基线并纳入回归（§7.1） |
+| **Phase 1** | eval_data schema + **30~50 条 golden cases**（PASS/REJECT 真值，§2.1）→ Rule / Single-call / Agent 三 **SchemeRunner**（§3.2–3.4）→ 决策指标评测（Accuracy/Precision/Recall/FPR/FNR，§4.1）→ Console Report → **确定性重放断言** | **三方案在同一数据集上可比跑分**（含 metrics 金标准小样本单测）；scripted 同 case 重跑**逐字节一致**；报告含结论边界声明（§3.4/§7.2）与 screening 行为快照（§7.1）；FPR 为 Phase 1 重点指标 |
+| **Phase 2** | 300+ 正式集（§2.1 五类分布）；Evidence 侧指标评测（Evidence Sufficiency / Marginal Evidence Gain，§4.2）；**Ablation**（方案级 2a/2b/2c，§3.3/§6）；**abstention 评测**（AUTO_DECIDABLE / SHOULD_ABSTAIN，§4.4）；**Regression** | abstention 五指标在正式集出数；修正集合入后重跑 Rule 基线并纳入回归（§7.1） |
 | **Phase 3** | **Real LLM Evaluation**；LLM-as-a-Judge（如必要）；Regression Report | real 模式复核 scripted 结论（§3.4/§7.2）；完整报告逐行对照《00》§12.4 预期结论、明确回答 Q1–Q4（§1.2），附全部结论边界标注 |
 
-> **Phase 3 实现状态（2026-09-08 已落地首次复核）**：`LiteLLMBackend`（`pra/agent/litellm_backend.py`，
-> 四节点完整 prompt 见 `pra/agent/llm_prompts.py`）经 `AgentScheme(llm=..., budget_limits=...)`
-> 接入评测；`scripts/run_evaluation_real.py` 跑 real vs scripted 对照（需 API key；real 臂评测侧
-> 放宽 max_latency_ms 墙钟护栏 —— 生产 30s 对真实 LLM 过紧，见脚本 docstring 与 README「评测与
-> 结论」）。**v1 35 案首次 real 单次抽样已出**（deepseek 网关）：human_review_rate 0.771 / acc 0.200，27/35 转人工
-> 全部由确定性 Gate 归因（R3_BUDGET_EXHAUSTED×19 收敛效率、R3_HYPOTHESES_INDISTINGUISHABLE×7）；
-> 实证 scripted 高分含「标注-审查员同口径」耦合，real 显著更保守且暴露 1 例无视觉证据的幻觉性
-> SUPPORTED 误杀（EC_0007）。**该抽样只验证链路与暴露迭代方向，不代表模型固定水平**；剩余为
-> prompt/约束迭代（禁重复假设、外观类假设须引用 IMAGE_SIMILARITY），LLM-as-a-Judge 按需。
-> **以上为 Gate 语义重构前的历史记录**：其中 `R3_HYPOTHESES_INDISTINGUISHABLE` 等归因码已随重构移除，
-> 当时的"外观类假设须引用 IMAGE_SIMILARITY"由 prompt 约束，现由事实侧 Gate 承担（见 §13）。
+> **本节只留验收口径**：各阶段的落地进度不写在此处（结果见 §11/§12 的最近两次运行）。
 
-> **最终主线**：**Rule Baseline → Single-call LLM → Multi-step Agent → Ablation → Abstention → Threshold Sweep → Regression**。
+> **real 臂的接入方式（口径）**：评测侧经 `AgentScheme(llm=...)` 接 `LiteLLMBackend`，入口为
+> `scripts/run_evaluation_real.py`（需 API key；real 臂评测侧放宽墙钟护栏 —— 生产护栏对真实 LLM 过紧）；
+> **生产入口另经组合根 `pra.wiring.build_llm_backend()` 直接装配真实 LLM 网关**（缺凭据显式抛错，
+> 不回落 scripted 桩），与评测侧的接法相互独立。
+
+> **最终主线**：**Rule Baseline → Single-call LLM → Multi-step Agent → Ablation → Abstention → Regression**。
 > Smoke 集（≤10 条 demo case）先行验证 loader/harness/EvalRecord 链路，不混入正式统计（§2.3）。
 > Phase 1 是"能跑且可比"的门槛，Phase 2/3 才回答 Q1–Q4；Phase 1 与 Phase 2 数据构造可并行推进。
 
@@ -443,47 +390,29 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | P-2 | Agent 评测模式与数据源 | scripted Agent + InMemory 为默认；real 模式二期复核 | **Phase 1 默认 scripted Agent + InMemory 种子数据**（确定性、可重复、CI 可回归）；**Real LLM Evaluation 排后续阶段**；报告必声明结论边界（验证 Agent Workflow/规则协同/Evaluation Framework，不代表真实 LLM 最终能力；InMemory 种子覆盖有限可能低估 Agent 上限） | §3.4/§7.2/§8 |
 | P-3 | HUMAN_REVIEW / Abstention 语义与指标 | 三分类统一 + HRR 细分三率 + HUMAN 期望案单列 abstention 质量 | 三分类统一但 **HUMAN_REVIEW 不当普通第三分类**（评估 Agent 的 abstention/转人工能力）；指标命名**去 HRR 缩写**，统一 `human_review_rate` / `abstention_rate` / `automation_coverage` / `abstention_recall` / `wrong_auto_decision_rate`；**Phase 1 只有 PASS/REJECT 真值案**，指标 = Accuracy/Precision/Recall/FPR/FNR（重点 FPR）；**Phase 2 引入 AUTO_DECIDABLE / SHOULD_ABSTAIN** 两类语义；核心口径：**不是为降转人工牺牲安全——自动化必须与 FPR/FNR 并读** | §4.1/§4.4/§4.5 |
 | P-4 | 数据集规模/来源/阶段 | 规模 300 起步；demo case 作 smoke ≤10 条不混正式分布；含少量 HUMAN 期望案（≤10%） | **推翻"300 起步"**：Phase 1 **30~50 条**（跑通 Golden Dataset → Rule → Single-call LLM → Agent → Evaluator → Metrics → Console Report 全链路）；Phase 2 **300+ 条**正式集（normal 20% / violation 20% / boundary 30% / multi-signal 20% / evasion 10%）；Smoke ≤10 条（P_88231 等）仅快速验证、不混正式统计；HUMAN 期望案不强制占比；**每个 case 必须有明确 Ground Truth，不为凑比例塞数据** | §2.1–§2.4/§8 |
-| P-5 | sweep 范围与顺序 | EVIDENCE 双阈值网格全扫、CONFIDENCE 先固定 0.7 观察 | **第一轮只 sweep Evidence 阈值**（0.60/0.65/0.70/0.75/0.80/0.85/0.90 单参数），`CONFIDENCE_ABSTAIN_THRESHOLD` **固定 0.7**；**不做多参数联合 Grid Search**（变量过多无法判断效果来源）；观察 Accuracy/Precision/Recall/FPR/FNR/human_review_rate/自动化覆盖率后再决定是否联合校准 Confidence；**sweep 排在 Phase 1 框架跑通之后** | §5/§8 |
+| P-5 | ~~sweep 范围与顺序~~（**该能力已移除**，见 §5） |
 
 > 其余〔细化待定〕（不含 P 编号，均为**实现者可自行收敛**的落地细节；如与实现冲突以本文口径为准）：
 > evidence 引用素材形态（§2.2）、数据文件分卷方式（§2.3）、Marginal Evidence Gain 加权口径（§4.2）、Evidence Sufficiency 精确公式（§4.2）、
-> sweep 第一轮两个 Evidence 常量的扫描次序与其余常量取值（§5.1）、harness 是否含 DB 真落库集成路径（§3.6）。
+> harness 是否含 DB 真落库集成路径（§3.6）。
 
 ---
 
-## 10. 检索层与可观测性实测数字（快照，供追溯）
-
-> 本节收集原先散落在设计文档里的**实测数字**，避免随文档收敛而丢失。数值口径与限制条件必须同框阅读；
-> 绝对值随语料 / 模型 / 服务状态变化，**勿照抄为结论**。
-
-### 10.1 可观测性实测（Langfuse）
-
-- 本地 Docker 自托管 Langfuse **4.32.0**，**6 个常驻容器**（另加一次性 `minio-init`）；health 200；project `pra-local`。
-- 埋点覆盖 root / node / generation / tool / gate：单案真实路径 **≈26 observation**；评测侧 `--langfuse`
-  实测 **3 case → 3 条 root trace / 69 条 observation**，全部 `sessionId=eval-demo-1`，每 case 带 `eval_case_id`。
-- **口径**：scripted 桩路径下 token=0 / cost 空 / latency≈0 是真实情况，不得伪造（详见 docs/00 可观测性节）。
-
-### 10.2 已移除后端的历史教训（Qdrant `url=` 远端 server，2026-09-10）
-
-- 阻断缺陷：point id 取 sha256 前 16 字节 → **128 位整数**，而 Qdrant 服务端只接受 u64/UUID；
-  其**进程内模式不校验上界**，**只在真 server 上以 400 暴露**。
-- 修复（截为 u64）后：真 server 落库 **24 / 67 点**，与当时的 `local` 后端 top3 逐条一致（local 已于 2026-09-19 移除，此条为历史记录）。
-- **该后端与 `deploy/qdrant` 已从仓库移除**，此条只保留教训：进程内模式的约束比真服务端宽松，
-  缺陷可潜伏于全绿单测 ⇒ 真服务端集成用例不可省（当前 chroma 后端同样适用）。
-
----
+> 以下为**最近一次运行的结果**；重跑实验后**整节覆盖**，不追加历史（历次数字见版本库）。
+> 两块结果分属不同世界，**不可混读**：§11 为 scripted 桩 + InMemory 种子世界（可逐字节重放）；
+> §12 为真实 LLM（单次运行、非确定性、不可重放，**不代表模型固定水平**）。
 
 ## 11. 封板结果表（v2 320 案；2026-09-22 重放）
 
-> **本节是 v2 三方案结果的唯一权威快照**，全部数字由当前工作区代码**重放**产生，非历史引用：
-> 代码 `237f03b` + 工作区未提交改动（`src/` `tests/` `eval_data/`）+ 数据集
-> `eval_data/v2/cases_v2.jsonl`（320 案；2026-09-22 重生成：`blackbrand_field` 家族 brand 改用
-> `terms.BLACKLISTED_BRANDS` 成员，使 R-101 黑名单直判 REJECT 名副其实）。
+> **本节为最近一次 scripted 三方案封板运行的结果**：运行锚点 = 日期 **2026-09-22** + 代码 `237f03b`
+> + 工作区未提交改动（`src/` `tests/` `eval_data/`）+ 数据集 `eval_data/v2/cases_v2.jsonl`（320 案；
+> 该次重生成把 `blackbrand_field` 家族 brand 改用 `terms.BLACKLISTED_BRANDS` 成员，使 R-101 黑名单
+> 直判 REJECT 名副其实）。
 > 重放命令：`uv run python scripts/run_evaluation.py --data eval_data/v2/cases_v2.jsonl`（§11.1/11.2/11.5）、
 > `uv run python scripts/run_error_analysis.py --data eval_data/v2/cases_v2.jsonl`（§11.3/11.4）、
-> `uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl` → **REGRESSION PASS**
+> `uv run python scripts/run_regression.py --data eval_data/v2/cases_v2.jsonl` → 该次 **REGRESSION PASS**
 > （决策序列与 `eval_data/v2/regression_baseline.json` 一致，digest `93f3e988…`）。
-> 指标**口径定义**见 §4.1/§4.2/§4.4；本节只承载该口径下的最终数值，两者冲突时以 §4 定口径、以本节记数。
+> 指标**口径定义**见 §4.1/§4.2/§4.4；本节只承载该口径下的当次数值，两者冲突时以 §4 定口径、以本节记数。
 
 ### 11.1 主结果（业务分母 = 二值真值 274：PASS 134 / REJECT 140）
 
@@ -496,7 +425,7 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 > 口径：Accuracy 分母 = 274，**预测 HUMAN_REVIEW 计为错**；Precision/Recall/FPR/FNR 只在自动判出
 > （pred ∈ {PASS,REJECT}）子集上计算——预测 HUMAN 不入其分母（HUMAN 不当第三真值类，§4.1 口径注）。
 > 漏放 = truth REJECT ∧ pred PASS；误杀 = truth PASS ∧ pred REJECT。
-> tokens = 0 是 scripted 桩路径的真实值（不伪造，§4.5/§10.3）。
+> tokens = 0 是 scripted 桩路径的真实值（不伪造，§4.3）。
 
 ### 11.2 转人工 / abstention（分母：全量 320；AUTO_DECIDABLE 274 / SHOULD_ABSTAIN 46）
 
@@ -559,10 +488,10 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 > 成本分布（均值/P50/P95）：LLM 调用 5.450/6.000/10.000；Tool 调用 4.190/5.000/6.000；tokens 0.000/0.000/0.000
 > （脚本路径恒 0 为真实值）。延迟仅 real 臂进程内墙钟，scripted 无此项。
-> **risk_type_coverage 与 decision_changed_rate 的本次变化由 2026-09-22 数据集重生成引入**：
-> `blackbrand_field` 12 案改为 R-101 直判后，scripted Agent 不再对这 12 案输出 `EVASION_PATTERN`
-> → risk_type_coverage 1.000→0.914、翻转调用 432→408。两者均为**只读审计字段**，三方案决策与成本零变化。
-> 未实现的 Agent 级口径（Budget Utilization、按 scene 分层分布、单案成本折算）见 §4.2 实现状态注。
+> **本次运行的计数口径**：`blackbrand_field` 12 案由 R-101 直判，scripted Agent 对这 12 案不输出
+> `EVASION_PATTERN` ⇒ risk_type_coverage 0.914（128/140）、触发翻转的调用 408。两者均为**只读审计字段**，
+> 三方案决策与成本不受影响。
+> 未实现的 Agent 级口径（Budget Utilization、按 scene 分层分布、单案成本折算）见 §4.2 取数与报告口径。
 > 未映射期望标签 98 个实例、仅含未映射标签被剔除的案 10（缺口显式化，不硬猜映射）。
 
 ### 11.6 封板结论与对外表述边界
@@ -574,308 +503,65 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 - **代价与收益同框**：Agent 5.450 LLM + 4.190 Tool 调用/案，换得转人工率 0.606 → **0.175**、
   自动化覆盖率 0.394 → **0.825**、`wrong_auto_decision_rate` 0.079/0.134 → **0.000**。
 - **结论边界（必须同框引用）**：本表为 **scripted 桩 + InMemory 种子世界**（衡量实现一致性与工作流，
-  §3.4/§7.2）；real LLM 仅 v1 35 案**单次抽样**（acc 0.200 / human_review_rate 0.771，§8 Phase 3 注），
-  未跑 v2、未重复采样；真值由**单一标注者**按与审查员同源规则构造，SHOULD_ABSTAIN 无对抗负例
-  → 不得读成真实 LLM 能力，也不得外推为线上成绩。
+  §3.4/§7.2）；真值由**单一标注者**按与审查员同源规则构造，SHOULD_ABSTAIN 无对抗负例
+  → 不得读成真实 LLM 能力，也不得外推为线上成绩。真实 LLM 世界见 §12（**单次、不可重放、不可外推**）。
 - **封板判定**：本表 + §11.4 归因 + 回归守护（`tests/test_regression_v2.py`）构成 P0 全集；
-  Ablation / Sweep / real 冒烟为 P1（不做不影响 eval 完整性）；P2 不做项见 §5.3、§4.2、§7.2
-  与 README「当前实现边界」。**此后除非 §11 的任一输入改变（数据集 / 判定逻辑 / 指标口径 / RAG 组件），
-  不再重跑这三条命令。**
+  Ablation / real 冒烟为 P1（不做不影响 eval 完整性）；P2 不做项见 §4.2、§7.2
+  与 README「当前实现边界」。**重跑这三条命令（数据集 / 判定逻辑 / 指标口径 / RAG 组件任一改变后）
+  即整节覆盖本表，不追加历史。**
 
 ---
 
-## 12. real-LLM 结果（v2 320 案；**与 §11 是不同世界，不可混读**）
+## 12. real-LLM 全量结果（v2 320 案；单次、不可重放）
 
-> ⚠ **本节是 Gate 语义重构（§13）之前的历史基线，已被 §14 取代**：本节 real 数字由重构前的
-> 假设状态侧 Gate 产出；引用 real 320 数字时**以 §14 为准**，本节仅作"重构前 vs 重构后"的对照证据。
-
-> ⚠ **数据集范围注记（2026-09-22）**：本节（及 §14）real 臂跑的是 **2026-09-22 重生成之前**的
-> `cases_v2.jsonl`；该次重生成仅改 `blackbrand_field` 12 案的 brand（→ R-101 直判 REJECT）。
-> real 数字**未重跑**（不可重放、单次约 15 分钟 / 5.17M token），故本节 real 列仍是旧数据集观测；
-> 与 §11（新数据集）对照时只可用于**方向性**结论，不得逐项相减。
-
-> **本节记录 v2 在真实 LLM 下的单次运行结果**，与 §11 的 scripted 封板表**并列但不可混算**：
-> §11 是确定性桩 + 同源标注世界（衡量实现一致性、可逐字节重放）；本节是真实 LLM（非确定性、不可重放、
-> 单次抽样，不代表模型固定水平）。两表指标名相同但含义不同，**引用时必须带世界标签**。
-> 运行：`uv run python scripts/run_evaluation_real.py --data eval_data/v2 --concurrency 8`（2026-09-11）；
-> 数据 `eval_data/v2/cases_v2.jsonl`（320 案）· world=eval（与 §11 同一 InMemory 种子世界，LLM 是唯一变量）·
-> Agent/Gate/指标口径代码为 `c60d578`（本次仅评测驱动脚本新增 `--concurrency` 与 Agent 级指标输出）。
-> **模型**：配置串 `deepseek/deepseek-chat` → 网关实际服务 **DeepSeek-V4.1-Flash**（`resp.model` 实测）。
-> 交叉验证：**同一次运行的 scripted 臂复现了 §11 的全部指标**（0.964 / 1.000 / 1.000 / hrr 0.036 等），
-> 说明两臂确为同一 harness 与同一工具世界。
-> 复现命令：`--concurrency N` 只改调度（用例间天然隔离）；**并发必须依赖脚本内的"钉住进程级 LLM 后端"
-> 守卫**——`AgentScheme.run` 的 finally 会 `set_llm_backend(None)`，并发下会让在飞案件静默退回 scripted
-> 桩；报告含 `real 臂 token=0 案数` 审计（桩恒 0 / real 恒 >0），**该值必须为 0 才可用**。
+> **本节为最近一次 real 臂 320 全量运行的结果**：运行锚点 = 日期 **2026-09-11** + 代码 `ba97fda`
+> + 数据集 `eval_data/v2/cases_v2.jsonl`（320 案）+ world=eval（与 §11 同一 InMemory 种子世界，
+> LLM 是唯一变量）。与 §11 的 scripted 封板表**分属不同世界，不可混读**：§11 是确定性桩世界
+> （可逐字节重放，衡量实现一致性）；本节是真实 LLM 世界（**单次运行、非确定性、不可重放，
+> 不代表模型固定水平**）。重跑即整节覆盖。
+>
+> ⚠ **数据集范围注记（2026-09-22）**：本节 real 臂与 §12.5 的 scripted 配对列取自 **2026-09-22 数据集
+> 重生成之前**的 `cases_v2.jsonl`（该次重生成仅改 `blackbrand_field` 12 案的 brand → R-101 直判 REJECT）。
+> real 未重跑（不可重放、单次 5.17M token）—— 与 §11（新数据集）比较只可用于**方向性**结论，
+> 逐项差异见 §12.5 注。
+>
+> - 命令：`uv run python scripts/run_evaluation_real.py --data eval_data/v2 --concurrency 8 --out .cache/real_v2_gate.json`
+> - 模型：配置串 `deepseek/deepseek-chat` → 网关实服 **DeepSeek-V4.1-Flash**
+> - 预算：**生产护栏未动**（llm / tool / token 上限取代码配置值）；仅按既有评测口径放宽墙钟
+> - 320/320 全部产出裁决，墙钟 ≈15 分钟，token **5,173,433**（估算 ≈$2.56 峰价 / $1.29 谷价，
+>   单价口径见 §12.5 —— **金额是估算，token 总量是硬数**）
+> - 产物（gitignored）：`.cache/real_v2_gate.json`（real 全量记录 + 两臂指标）、`.cache/real_v2_gate_console.txt`
+>   （Console 报告）、`.cache/real_v2_gate_diff.tsv`（320 行逐案 truth/scripted/real/归因）、
+>   `.cache/real_v2_gate_analysis.txt`（事后复算：abstention 五指标 / 安全面 / 分场景 / 归因汇总）
+> - **交叉验证**：同一次运行的 scripted 配对臂与 §11 **Agent 主结果逐项一致**（0.964 / 1.000 / 1.000 /
+>   hrr 0.036 / 140-0-124-0；仅审计字段有两处差异，见 §12.5 注）⇒ 两臂同 harness、同世界，LLM 是唯一变量。
 
 ### 12.1 主结果（业务分母 = 二值真值 274，口径同 §4.1）
 
 | Strategy | Accuracy | Precision | Recall | FPR | FNR | 漏放 | 误杀 | TP/FP/TN/FN |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | scripted（= §11） | 0.964 | 1.000 | 1.000 | 0.000 | 0.000 | 0 | 0 | 140/0/124/0 |
-| **real-LLM（单次）** | **0.109** | 0.938 | 1.000 | **1.000** | 0.000 | **0** | **2** | 30/2/0/0 |
-
-> ⚠ real 的 FPR=1.000 是**退化值**：real 臂 `TN=0`（320 案中**一例 PASS 都没自动放行**），故 FPR=2/2。
-> 读 real 行必须配 TP/FP 一起看，不能单独引用 FPR。
-> ⚠ real 与 scripted 相差 **−85.5pp**；归因见 §12.6，**不是「模型不会判」**。
+| **real-LLM（单次）** | **0.850** | **1.000** | 1.000 | **0.000** | 0.000 | **0** | **0** | **118/0/115/0** |
 
 ### 12.2 全量 320 口径（口径同 §4.4）
-
-| Strategy | human_review_rate | automation_coverage | SHOULD_ABSTAIN 正确转人工 | pred 分布 |
-|---|---:|---:|---:|---|
-| scripted（= §11） | 0.175 (56) | 0.825 (264) | 46/46 | PASS 124 / REJECT 140 / HUMAN 56 |
-| **real-LLM（单次）** | **0.900 (288)** | **0.100 (32)** | 46/46 | PASS **0** / REJECT 32 / HUMAN 288 |
-
-### 12.3 三分类混淆矩阵（行 = pred，列 = truth）
-
-| real-LLM | PASS | REJECT | HUMAN |
-|---|---:|---:|---:|
-| PASS | 0 | 0 | 0 |
-| REJECT | **2** | 30 | 0 |
-| HUMAN_REVIEW | 132 | 110 | 46 |
-
-> 全量三分类命中：scripted 310/320、real 76/320 —— **该口径不参与方案排名**（会把"多转人工"算成命中，§11.3）。
-> real 的 46 例 HUMAN 真值案全部正确转人工；**0 例 SHOULD_ABSTAIN 被自动终裁**。
-
-### 12.4 按 scene（二值真值案）
-
-| scene | n | scripted acc | real acc | real hrr | real TP/FP |
-|---|---:|---:|---:|---:|---:|
-| normal | 64 | 1.000 | **0.000** | 1.000 | 0/0 |
-| violation | 64 | 1.000 | 0.172 | 0.828 | 11/0 |
-| boundary | 70 | 0.857 | **0.000** | 0.971 | 0/2 |
-| multi-signal | 56 | 1.000 | 0.250 | 0.750 | 14/0 |
-| evasion | 20 | 1.000 | 0.250 | 0.750 | 5/0 |
-
-> real 在 `normal` 上 0 例自动放行（64 案全转人工）——保守度不是按场景分布的，而是全场景统一退缩。
-
-### 12.5 调用 / token / 工具 / 证据链（两臂同口径）
-
-| 统计项 | scripted | **real-LLM** |
-|---|---|---|
-| LLM 调用 均值 / P50 / P95 | 6.79 / 7 / 10（合计 ≈2,173） | **8.78 / 9 / 10（合计 2,810）** |
-| tool 调用 均值 / P50 / P95 | 5.09 / 5 / 6 | **5.37 / 5 / 8（合计 1,719）** |
-| tokens 均值 / P50 / P95 | 0 / 0 / 0（桩不烧 token） | **22,891 / 24,179 / 28,873（合计 7,325,188；min 10,332 / max 31,457）** |
-| 单案墙钟 均值 / P50 / P95 | – | **22.6s / 23.6s / 29.1s** |
-| tool_selection_accuracy（覆盖口径） | 0.870 (188/216) | **0.486 (105/216)** |
-| redundant_tool_rate | 0.222 (48/320) | 0.338 (73/320) |
-| evidence_type_coverage（micro） | 1.000 (345/345) | **1.000 (345/345)** |
-| reject_evidence_gate_pass_rate | 1.000 (140/140) | **1.000 (32/32)** |
-| risk_type_coverage | 1.000 (140/140) | 0.850 (119/140) |
-| risk_level_agreement | 0.775 (248/320) | 0.466 (149/320) |
-| evidence_gain_rate | 0.910 (1380/1516) | 0.817 (1314/1608) |
-| decision_changed_rate | 0.100 (152/1516) | 0.040 (65/1608) |
-
-> **成本口径**：`EvalRecord.cost` 只有 token **总量**（`usage.total_tokens`，含缓存命中），
-> **input/output 拆分不落 record**（只进 Langfuse），**金额完全未采集**。本次用一次性诊断
-> （运行时包装 `litellm.acompletion`，1 案 10 次调用）实测拆分为 **input 78.2% / output 21.8%**；
-> 据此按 Flash 官方价（输入按最贵档 cache-miss）估算 **7.33M tokens ≈ $3.63（峰价）/ $1.82（谷价）**，
-> 墙钟 ≈16 分钟（`--concurrency 8`）。**金额是估算，token 总量是硬数。**
-
-### 12.6 overrides 归因与异常审计
-
-| 项 | scripted | **real-LLM** |
-|---|---:|---:|
-| 带 overrides 案数 | 28/320 | **212/320** |
-| R3_BUDGET_EXHAUSTED（先撞维度） | 28（全 LLM_CALLS） | **157（全 LLM_CALLS）** |
-| R3_POLICY_UNCERTAIN | 0 | 79 |
-| R3_HYPOTHESES_INDISTINGUISHABLE | 0 | 11 |
-| R2_REJECT_GATE_FAIL | 0 | 11 |
-| R3_CRITICAL_CONFLICT | 4 | 4 |
-| R4_PASS_GATE_FAIL | 0 | 1 |
-| **R5_DEGRADED_OR_FAILED_STEP** | 0 | **0** |
-
-> **异常审计（可证伪）**：R5 降级 **0 案**（无 LLM 失败/降级兜底）；`token=0` 案 **0**（无静默退回桩）；
-> 320/320 全部产出裁决；运行日志无 traceback / 超时 / 连接错误。
-> **口径限制（不谎称 0 重试）**：`llm_calls` 与 `tokens` 按 `attempts` 累计（一次 schema 重试占 2 格），
-> 因此**单次重试次数无法从 record 分离**——能证明的只有"无最终降级、无静默回退、无异常中止"。
-
-### 12.7 结论与不可外推边界
-
-- **真实 LLM 下系统按设计退化为保守转人工**：90% 转人工、**0 例自动放行**、漏放 0；但出现 **2 例高置信误杀**
-  （`EC_V2_0163` conf 0.89 / `EC_V2_0219` conf 0.87，均 boundary 且 Gate 未拦 —— 与 v1 35 案 real 抽样的
-  EC_0007 同类：真实 LLM 会产出能通过 Gate 的幻觉性 SUPPORTED 假设）。
-- **瓶颈是收敛/预算，不是工具或证据链**：49%（157/320）的案件在 10 次 LLM 调用预算内不收敛而被截胡转人工
-  （scripted 仅 28 案）；同时工具侧指标正常（证据类型覆盖 1.000、REJECT 依据前置 1.000），
-  仅工具选择准确性下降（0.870 → 0.486）。
-- **方向与 v1 35 案 real 抽样一致**（v1: acc 0.200 / hrr 0.771；本节: acc 0.109 / hrr 0.900），互为佐证。
-- **不可外推**：单次运行、单模型、无 prompt 调优、生产预算未放宽、InMemory 工具世界、非确定性。
-  本节**不得**用于暗示 §11 的 0.964 是真实能力；它的价值是**量化了 scripted 评测的高估幅度（−85.5pp）**
-  并给出可复现的归因。
-- **后续可选实验**（P1）：`--llm-budget 12/15` 跑同批数据 —— 抬高预算后转人工率显著下降 ⇒ 瓶颈是预算；
-  仍打满 ⇒ 瓶颈是收敛。该实验不改任何判定规则与数据集。
-
----
-
-## 13. Gate 语义重构：三态测量 + 事实侧裁决（2026-09-11）
-
-> **与 §11/§12 的关系**：§11（scripted 封板）与 §12（real 单次）是**重构前**的历史基线，
-> **原样保留、不覆盖、不改写**。本节记录重构后的语义与验证结果，供与 `--git` 历史对照。
-> 本节数字由 HEAD 实测产出（`run_evaluation.py` / `pytest`），产出命令写在 13.4。
-
-### 13.1 改什么、为什么
-
-原链路 `LLM Hypothesis → prior → high_priority → 必须 REFUTED → PASS` 有三处结构性问题
-（归因见 §12.7 与错误分析；`high_priority` 及其阈值常量已随重构删除，`gate.py` 不再有读 `prior` 的出口）：
-
-1. **`prior` 是 LLM 自由生成的调查优先级**，却被当成 Gate 的"高优先风险集合"依据；
-   实测 0.25/0.30 两个刻度占全部假设的 39.8%，阈值正好压在其间；
-2. **normal 假设与 risk 假设语义混用**：被强制产出的"正常假设"一旦 `prior>=0.3` 进入
-   `hp`，Gate 就要求它被"证伪"，而"商品正常"只可能被证据**支持**；
-3. **Evidence 无法区分"没测"与"测过且阴性"**：干净图 `to_evidence()` 返回 `[]`，
-   与"根本没调工具"在证据层完全同形 —— 证据只能停留在 `UNRESOLVED`。
-
-### 13.2 新语义
-
-**Evidence 三态**（`domain/measurement.py`）：`MEASURED_POSITIVE` / `MEASURED_NEGATIVE`
-由证据承载（新增 `MEASUREMENT` 类型，含阴性结论）；`NOT_MEASURED` / `UNMEASURABLE`
-**不是证据**，由 Gate 用 `required × 证据存在性 × 环境能力` 推导 —— 不为"缺席"造证据，
-以保住"查不到 ≠ 证明无"。
-
-**required measurement set**（`guardrails/measurements.py`）：只由**案件可观测事实**导出，
-不读 `expected/annotation/family`（有 AST 守卫测试）：`listing_registry` / `merchant_profile` /
-`text_compliance` 恒必需；`image_appearance` 仅当案件带图；`policy_citation` **仅 REJECT 候选**必需。
-
-**两道 Gate 只读事实通道**（证据链 + 覆盖 + 规则命中 + 冲突），**不读** `prior` / `posterior` /
-`Hypothesis.status` / `evidence_for`（有参数化不变量测试逐字段篡改后断言结果不变）：
-
-| 终裁 | 判据 |
-|---|---|
-| **PASS** | 无维度匹配阳性 ∧ 无规则阳性（R-102/R-302）∧ required 全覆盖（无 NOT_MEASURED / UNMEASURABLE）∧ 无关键工具失败 ∧ 无证据冲突 |
-| **REJECT** | ∃ 真实证据链中**与风险维度匹配的硬阳性**（强相似 ≥0.85 / Logo / 商家 removals 或 title-relisting ≥3 / 显式 POSITIVE 测量）∧ ∃ 带 `ref_id` 的可引用依据 ∧ `dc≥0.7` ∧ 无冲突 |
-| **HUMAN_REVIEW** | 上述任一不满足；归因码区分：`R3_MEASUREMENT_MISSING`（未测，**可补救**，路由先回环补测）/ `R3_DIMENSION_UNMEASURABLE`（环境缺失，**不回环**）/ `R3_POSITIVE_INSUFFICIENT`（只有弱信号）/ `R3_EVIDENCE_CONFLICT`（冲突） |
-
-**弱相似 0.70~0.85 的显式处置**：不算阳性 ⇒ 单独不足以自动 REJECT（`EC_V2_0163`/`EC_V2_0219`
-两例误杀的成因）；其应然处置是"与商品事实交叉"，由 required 维度 `listing_registry` 承担 ——
-商品在库不可核验时该维度落 `NOT_MEASURED`，案件自然转人工（对应 `weak_sim_noinfo` 一族）。
-
-**`decision_confidence` 重算**：主项从"LLM posterior"改为事实侧
-（`0.40*coverage + 0.30*strength + 0.20*citation + 0.10 - 0.20*conflict`）；
-`MAX_EXPECTED_EVIDENCE` 的 `len(evidence)/8` 完整性项已废弃（测量证据会使其饱和）。
-系数为结构性给定，**未用任何数据集拟合**；`CONFIDENCE_ABSTAIN_THRESHOLD = 0.7` 未改。
-
-**归因码变更**：新增 `R3_MEASUREMENT_MISSING` / `R3_DIMENSION_UNMEASURABLE` /
-`R3_POSITIVE_INSUFFICIENT` / `R3_EVIDENCE_CONFLICT`；移除 `R3_POLICY_UNCERTAIN` /
-`R3_HYPOTHESES_INDISTINGUISHABLE` / `R3_VISUAL_CLAIM_UNSUPPORTED`（均以假设状态为前提）。
-⇒ **§12.6 的 overrides 分布与本节不可直接比数**。
-
-### 13.3 环境能力声明（生产与评测不同）
-
-生产的 `image_analysis` / `ocr` 仍是**冻结 Mock 桩**（真实商品图永远空命中）⇒
-`build_production_tools()` 显式声明 `image_appearance` 为 **UNMEASURABLE**。
-不声明会把"桩测不出"误判成"测过且阴性"。**后果（如实声明）**：生产入口对带图案件
-在拿到真实视觉数据源之前不会自动放行 —— 这是已声明的覆盖缺口，不是静默降级。
-
-### 13.4 验证记录（重构后）
-
-命令：`uv run pytest tests/ -q` / `uv run ruff check src/ scripts/ tests/` /
-`uv run python scripts/run_evaluation.py --data eval_data/v2/cases_v2.jsonl --schemes agent`
-
-| 项 | 重构前 | 重构后 |
-|---|---|---|
-| pytest | 566 passed, 4 skipped | **582 passed, 4 skipped** |
-| ruff | 118 | **112** |
-| scripted v2 agent（§11 口径） | 0.964 / 1.000 / 1.000 / FPR 0 / FNR 0 / hrr 0.036 / 140-0-124-0 | **完全一致**（含混淆矩阵） |
-| scripted v2 **逐案决策变化** | — | **0 / 320** |
-| 安全单调性（GT=PASS→REJECT / GT=REJECT→PASS / SHOULD_ABSTAIN 被自动终裁 / 丢历史 REJECT） | — | **0 / 0 / 0 / 0** |
-| abstention_recall | 46/46 = 1.000 | **46/46 = 1.000** |
-| scripted v2 成本/案 | llm 6.79 · tool 5.09 | **llm 5.45 · tool 4.19** |
-| v1 35 案 agent | acc 1.000 · llm 6.37 · tool 5.00 | acc **1.000** · llm **5.14** · tool **4.14** |
-
-> **结论**：本次重构在 scripted 基线（v2 320 / v1 35）上**决策零变化**、四项安全单调性全 0、
-> 而单案 LLM/工具调用下降约 20%/18% —— 即"用事实侧判据替换 LLM 自报判据"未改变已有行为，
-> 只削减了空转。**历史基线 §11 保持可对照，未被本次改动覆盖。**
-
-### 13.5 real 臂分层小样本复验（16 案；单次、不可重放）
-
-命令：`run_evaluation_real.py --data eval_data/v2 --ids <16 个分层案> --concurrency 4`
-（按 scene × GT 分层各 2 案 + 两例历史误杀案；**不跑 320 全量**、不重复采样）。
-
-| 指标 | §12（重构前 320 全量） | 本次 16 案样本 |
-|---|---|---|
-| GT=PASS → PASS | **0 / 64** | **5 / 5** |
-| GT=REJECT → REJECT | 30 / 140 | 5 / 6 |
-| GT=HUMAN_REVIEW → HUMAN_REVIEW | 46 / 46 | 5 / 5 |
-| 漏放（GT=REJECT → PASS） | 0 | **0** |
-| 误杀（GT=PASS → REJECT） | **2** | **0** |
-| SHOULD_ABSTAIN 被自动终裁 | 0 | **0** |
-| 撞 `LLM_CALLS=10` | 157 / 320（49%） | 4 / 16（25%） |
-| `token=0` 案（静默回退审计） | 0 | 0 |
-
-- 两例历史误杀（`EC_V2_0163` / `EC_V2_0219`，均 `weak_sim_own`）本次**均为 PASS** ——
-  弱相似不再授权自动拒绝，其应然处置（与商品事实交叉）由 required 维度承担。
-- 样本内出现的 1 例 `GT=REJECT → HUMAN_REVIEW` 与 4 例预算截胡均**不是 PASS 漏放**（安全侧无损）。
-- 单案工具调用 4.12（§12 为 5.6 量级）；`llm/案` 6.5 与 §12 的 9.17 相比下降，但本样本按分层取案，
-  **成本数字不可与 §12 直接比数**。
-
-> **不可外推**：16 案、单次、单模型、非确定性、InMemory 工具世界且生产视觉不可测。
-> 本表只用于验证"两个已知结构性问题在真实 LLM 下是否消失"，**不得**当作 real 能力的估计。
-> **后续已按本表结论跑过 320 全量**（同一重构后代码，单次），结果见 **§14**。
-
-### 13.6 尚未做与边界
-
-- **预算调优未做**（第二阶段）：`is_converged` 改为覆盖判定后收敛提前，但 `LLM_CALLS=10` 上限未动。
-- 110 例 `GT=REJECT → HUMAN_REVIEW`（§12.3）属回环/取证问题，**不在本次语义重构范围**。
-- `listing_registry` 的**阳性路径**（案件声明与在库事实不一致的确定性比对）未实现，
-  仍是既有已知边界；该维度只判"事实取到了没有"。
-- **"仅商家行为脏"不授权自动拒绝**（需本 listing 外观信号佐证）—— 该收严来自 reviewer 语义
-  （"疑似规避但图/文本无确证 → 克制转人工"，GT 家族 `dirty_brand_missing_cleanimg`），
-  由 `measurements.reject_positive_dims` 实现，并有单测锁定；若后续业务改判该族，
-  必须先改这条语义再改实现。
-
----
-
-## 14. 重构后 real-LLM 全量（v2 320 案；单次、不可重放）
-
-> **本节是 Gate 语义重构（§13）之后 real 臂的第一次、也是唯一一次 320 全量运行**，与 §11（scripted 封板）
-> 并列、与 §12（**重构前** real 历史基线）构成对照。运行期间**未改任何规则 / 架构 / 数据集 / 指标口径**，
-> 唯一变量是 LLM（scripted ↔ real）。
->
-> ⚠ **数据集范围注记（2026-09-22）**：本节 real 臂与 §14.5 的 scripted 配对列均取自 **2026-09-22
-> 数据集重生成之前**的 `cases_v2.jsonl`（该次重生成仅影响 `blackbrand_field` 12 案的 brand → R-101
-> 直判 REJECT）。real 未重跑（不可重放、单次 5.17M token）—— 与 §11（新数据集）比较只可用于
-> **方向性**结论，逐项差异见 §14.5 注。
->
-> - 命令：`uv run python scripts/run_evaluation_real.py --data eval_data/v2 --concurrency 8 --out .cache/real_v2_gate.json`
-> - 代码：`ba97fda`（三态测量 + 事实侧 Gate）· world=eval（与 §11/§12 同一 InMemory 种子世界）
-> - 模型：配置串 `deepseek/deepseek-chat` → 网关实服 **DeepSeek-V4.1-Flash**（与 §12 同模型）
-> - 预算：**生产护栏未动**（llm 10 / tool 15 / token 40000）；仅按既有评测口径放宽墙钟到 600000ms
-> - 320/320 全部产出裁决，墙钟 ≈15 分钟，token **5,173,433**（估算 ≈$2.56 峰价 / $1.29 谷价，
->   单价口径同 §12.5 —— **金额是估算，token 总量是硬数**）
-> - 产物（gitignored）：`.cache/real_v2_gate.json`（real 全量记录 + 两臂指标）、`.cache/real_v2_gate_console.txt`
->   （Console 报告，含 51 条差异明细）、`.cache/real_v2_gate_diff.tsv`（320 行逐案 truth/scripted/real/归因）、
->   `.cache/real_v2_gate_analysis.txt`（事后复算：abstention 五指标 / 安全面 / 分场景 / 归因汇总）
-> - **交叉验证**：同一次运行的 scripted 臂与 §11 **Agent 主结果逐项一致**（0.964 / 1.000 / 1.000 /
->   hrr 0.036 / 140-0-124-0；仅审计字段有两处差异，见 §14.5 注）；且其**逐案决策与重构前 scripted
->   比对为 0/320 变化** ⇒ 两臂同 harness、同世界，LLM 是唯一变量，本次改动无 scripted 侧回归。
-
-### 14.1 主结果（业务分母 = 二值真值 274，口径同 §4.1）
-
-| Strategy | Accuracy | Precision | Recall | FPR | FNR | 漏放 | 误杀 | TP/FP/TN/FN |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| scripted（= §11） | 0.964 | 1.000 | 1.000 | 0.000 | 0.000 | 0 | 0 | 140/0/124/0 |
-| **real-LLM（重构后 · 单次）** | **0.850** | **1.000** | 1.000 | **0.000** | 0.000 | **0** | **0** | **118/0/115/0** |
-| real-LLM（§12 · 重构前） | 0.109 | 0.938 | 1.000 | 1.000 | 0.000 | 0 | 2 | 30/2/0/0 |
-
-### 14.2 全量 320 口径（口径同 §4.4）
 
 | Strategy | human_review_rate | automation_coverage | abstention_rate | abstention_recall | wrong_auto_decision_rate | pred 分布 |
 |---|---:|---:|---:|---:|---:|---|
 | scripted（= §11） | 0.175 (56) | 0.825 (264) | 0.036 (10/274) | 46/46 = 1.000 | 0.000 (0/264) | PASS 124 / REJECT 140 / HUMAN 56 |
-| **real-LLM（重构后）** | **0.272 (87)** | **0.728 (233)** | 0.150 (41/274) | 46/46 = 1.000 | **0.000 (0/233)** | PASS **115** / REJECT 118 / HUMAN 87 |
-| real-LLM（§12 重构前） | 0.900 (288) | 0.100 (32) | – | 46/46 = 1.000 | 0.062 (2/32) | PASS 0 / REJECT 32 / HUMAN 288 |
+| **real-LLM（单次）** | **0.272 (87)** | **0.728 (233)** | 0.150 (41/274) | 46/46 = 1.000 | **0.000 (0/233)** | PASS **115** / REJECT 118 / HUMAN 87 |
 
-### 14.3 三分类混淆矩阵（行 = pred，列 = truth；含 HUMAN 真值）
+### 12.3 三分类混淆矩阵（行 = pred，列 = truth；含 HUMAN 真值）
 
-| real（重构后） | truth PASS | truth REJECT | truth HUMAN |
+| real | truth PASS | truth REJECT | truth HUMAN |
 |---|---:|---:|---:|
 | pred PASS | **115** | 0 | 0 |
 | pred REJECT | 0 | **118** | 0 |
 | pred HUMAN_REVIEW | 19 | 22 | **46** |
 
-> 对照 scripted 的 HUMAN 行 `10 / 0 / 46`：scripted 有 10 例对 PASS 真值刻意过度转人工（既有观测点），
-> real 反而在该 10 例上判对；real 的 41 例 HUMAN 全部落在安全侧（无 PASS/REJECT 误终裁）。
+> 两臂的 HUMAN 行不同：scripted 会把 10 例 PASS 真值刻意过度转人工（既有观测点），real 在该 10 例上判对；
+> real 的 41 例 HUMAN 全部落在安全侧（无 PASS/REJECT 误终裁）。
 
-### 14.4 按 scene（二值真值案）
+### 12.4 按 scene（二值真值案）
 
 | scene | scripted acc | **real acc** | real TP | real FP | real hrr |
 |---|---:|---:|---:|---:|---:|
@@ -885,38 +571,39 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 | multi-signal | 1.000 | **0.786** | 44 | 0 | 0.312 |
 | evasion | 1.000 | **0.850** | 17 | 0 | 0.469 |
 
-> `normal` 从 §12 的 **0.000 / hrr 1.000** 变为 **0.953 / hrr 0.047**（64 案里 3 案过度保守）；
-> 全场景 **FP = 0**（§12 有 2 例误杀，均在 boundary）。
+> `normal` 上 real 的 hrr 为 0.047（64 案里 3 案过度保守）；全场景 **FP = 0**。
 
-### 14.5 调用 / token / 工具 / 证据链（两臂同口径）
+### 12.5 调用 / token / 工具 / 证据链（两臂同口径）
 
-| 统计项 | scripted | **real（重构后）** | real（§12 重构前） |
-|---|---|---|---|
-| LLM 调用 均值 / P50 / P95 / max | 5.45 / 6 / 10 / 10 | **5.93 / 6 / 10 / 10** | 8.78 / 9 / 10 / 10 |
-| tool 调用 均值 / P50 / P95 / max | 4.19 / 5 / 6 / 6 | **3.83 / 4 / 6 / 8** | 5.37 / 5 / 8 / – |
-| tokens 均值 / P50 / P95 / max | 0（桩不烧 token） | **16,167 / 16,436 / 30,360 / 31,787** | 22,891 / 24,179 / 28,873 / 31,457 |
-| tokens 合计 | 0 | **5,173,433** | 7,325,188 |
-| tool_selection_accuracy（覆盖口径） | 0.870 (188/216) | **0.296 (64/216)** | 0.486 (105/216) |
-| redundant_tool_rate | 0.176 | 0.245 | 0.338 |
-| evidence_type_coverage（micro） | 1.000 (345/345) | **1.000 (345/345)** | 1.000 (345/345) |
-| reject_evidence_gate_pass_rate | 1.000 (140/140) | **1.000 (118/118)** | 1.000 (32/32) |
-| risk_type_coverage | 1.000 (140/140) | 0.971 (136/140) | 0.850 (119/140) |
-| risk_level_agreement | 0.775 (248/320) | **0.816 (261/320)** | 0.466 (149/320) |
-| evidence_gain_rate | 1.000 | 0.999 | 0.817 |
-| decision_changed_rate | 0.352 | 0.377 | 0.040 |
+| 统计项 | scripted（配对臂） | **real** |
+|---|---|---|
+| LLM 调用 均值 / P50 / P95 / max | 5.45 / 6 / 10 / 10 | **5.93 / 6 / 10 / 10** |
+| tool 调用 均值 / P50 / P95 / max | 4.19 / 5 / 6 / 6 | **3.83 / 4 / 6 / 8** |
+| tokens 均值 / P50 / P95 / max | 0（桩不烧 token） | **16,167 / 16,436 / 30,360 / 31,787** |
+| tokens 合计 | 0 | **5,173,433** |
+| tool_selection_accuracy（覆盖口径） | 0.870 (188/216) | **0.296 (64/216)** |
+| redundant_tool_rate | 0.176 | 0.245 |
+| evidence_type_coverage（micro） | 1.000 (345/345) | **1.000 (345/345)** |
+| reject_evidence_gate_pass_rate | 1.000 (140/140) | **1.000 (118/118)** |
+| risk_type_coverage | 1.000 (140/140) | 0.971 (136/140) |
+| risk_level_agreement | 0.775 (248/320) | **0.816 (261/320)** |
+| evidence_gain_rate | 1.000 | 0.999 |
+| decision_changed_rate | 0.352 | 0.377 |
 
-> **本表 scripted 列是 §14 那次实跑的配对臂（旧数据集），与 2026-09-22 刷新后的 §11.5 有两行差异**：
-> risk_type_coverage 1.000→0.914、decision_changed_rate 0.352→0.332 —— 由 2026-09-22 数据集重生成
-> （`blackbrand_field` 12 案改由 R-101 直判）引入，均为**只读审计字段**，主结果（决策）零变化。
-> 其余行（redundant 0.176 / gain 1.000 / tool_sel 0.870 等）与 §11.5 一致 —— §11.5 此前停在更早值
-> （redundant 0.222、gain 0.910、changed 0.100），根因是工具层新增 `MEASUREMENT` 证据（阴性也算
-> "新增证据"）且 Gate 探测点随语义变化；见 §13.4 的逐案 0/320。
-> **real 侧工具选择准确率下降（0.486→0.296）但证据链指标全满**：真实 LLM 会多调"期望外"的工具去补
-> 判断，属行为差异而非判定缺陷（覆盖口径见 §4.2）。
+> **成本口径**：`EvalRecord.cost` 只有 token **总量**（`usage.total_tokens`，含缓存命中），
+> **input/output 拆分不落 record**（只进 Langfuse），**金额完全未采集**。金额估算口径：用一次性诊断
+> （运行时包装 `litellm.acompletion`，1 案 10 次调用）实测拆分为 **input 78.2% / output 21.8%**，
+> 据此按 Flash 官方价（输入按最贵档 cache-miss）估算。**金额是估算，token 总量是硬数。**
+> **scripted 配对臂（本表第 2 列）与 §11 的差异**：表内 scripted 列取自**同一次 real 运行的配对臂**
+> （2026-09-22 数据集重生成前的版本），与刷新后的 §11.5 有两行审计字段差异
+> （risk_type_coverage 0.914 对 1.000、decision_changed_rate 0.332 对 0.352，源于 `blackbrand_field`
+> 12 案的 R-101 直判），**主结果（决策）一致**。
+> **real 侧工具选择准确率偏低但证据链指标全满**：真实 LLM 会多调"期望外"的工具去补判断，
+> 属行为差异而非判定缺陷（覆盖口径见 §4.2）。
 
-### 14.6 overrides 归因与异常审计
+### 12.6 overrides 归因与异常审计
 
-| 项 | scripted | **real（重构后）** |
+| 项 | scripted | **real** |
 |---|---:|---:|
 | 带 overrides 案数 | 28/320 | **66/320** |
 | R3_BUDGET_EXHAUSTED（先撞维度） | 28（全 `LLM_CALLS`） | **50（全 `LLM_CALLS`）** |
@@ -930,42 +617,30 @@ Phase 1 Golden Dataset 只有 PASS/REJECT 真值（P-3/P-4），故业务主指�
 
 > **异常审计（可证伪）**：R5 降级 **0 案**、`token=0` 案 **0**（无静默回退）、320/320 全部产出裁决、
 > 日志无 traceback / 超时 / 连接错误。`R3_DIMENSION_UNMEASURABLE = 0` 是**预期**：评测世界 5 个工具都
-> 声明了可测能力，该码只在生产视觉桩（§13.3）下才会出现。
-> 口径限制同 §12.6：`llm_calls`/`tokens` 按 attempts 累计，单次重试次数无法从 record 分离。
+> 声明了可测能力，该码只在生产视觉桩（见 §7.2 环境能力声明）下才会出现。
+> **口径限制（不谎称 0 重试）**：`llm_calls` / `tokens` 按 attempts 累计（一次 schema 重试占 2 格），
+> 单次重试次数无法从 record 分离 —— 能证明的只有"无最终降级、无静默回退、无异常中止"。
 
-### 14.7 逐案 Decision diff（scripted ↔ real，差异 51/320）
+### 12.7 结论与不可外推边界
 
-| 组 | 案数 | 真值 | 机制归因 |
-|---|---:|---|---|
-| scripted REJECT → real HUMAN | 22 | REJECT | 100% `R3_BUDGET_EXHAUSTED`（先撞 `LLM_CALLS=10`）——收敛/预算边界 |
-| scripted PASS → real HUMAN | 19 | PASS | `overrides=[]`：**LLM 自行提案 HUMAN**（`dc` 全 0.75，coverage 满但无 citation/strength 加分）；16 boundary + 3 normal |
-| scripted HUMAN → real PASS | 10 | PASS | 全 boundary（scripted 刻意过度转人工的观测点），real 判对 |
-| （两臂同为 HUMAN，机制不同） | 16 | HUMAN | real 的 LLM 提案被**事实侧 Gate 拦下**：8×`R4_PASS_GATE_FAIL` + 8×`R2_REJECT_GATE_FAIL`（含 `R3_POSITIVE_INSUFFICIENT`）—— **16/16 真值均为 HUMAN_REVIEW，拦截全部正确** |
-
-> 二值真值案一致率 223/274；全量一致 269/320。**差异无一项是"该自动却转人工造成漏放"或"不该判却自动终裁"**：
-> 22 例是预算截胡（安全侧保守），19 例是 LLM 自评证据不足，10 例是 real 优于 scripted，16 例是 Gate 正确拦截。
-
-### 14.8 结论：重构目标在 real 全量上成立，且无安全侧损失
-
-- **两个结构性目标达成**：① 干净案 **PASS 可达**（GT=PASS→PASS：§12 的 0/64 → **115/134**，hrr 0.900→0.272）；
-  ② 弱相似不再授权自动拒绝，**两例历史误杀（`EC_V2_0163`/`EC_V2_0219`）本次均为 PASS**，误杀 2 → **0**。
+- **两个结构性目标达成**：① 干净案 **PASS 可达**（GT=PASS→PASS = **115/134**，hrr **0.272**）；
+  ② 弱相似不授权自动拒绝，**误杀 0**。
 - **安全面全清**：漏放 0、误杀 0、错误自动终裁 0.000、SHOULD_ABSTAIN 被自动终裁 0/46、R5 0、`token=0` 0。
-- **剩余失败 41 案全部在安全侧**（19 自转人工 + 22 预算截胡），没有一项是危险终裁；boundary 仍是最保守族
-  （hrr 0.438）。**没有发现由本轮 Measurement / Gate 重构引入的 bug**：脚本侧逐案决策 0/320 变化、
-  `UNMEASURABLE`/`KEY_TOOL_FAILED`/`R5`/`token=0` 全 0、16 次 Gate 拦截全部落在真值 HUMAN 案上。
-- **成本**：real 每案 LLM 8.78→**5.93**、tool 5.37→**3.83**、tokens 22,891→**16,167**，总 token 7.33M→**5.17M**。
+- **剩余失败 41 案全部在安全侧**（19 自转人工 + 22 预算截胡），没有一项是危险终裁；boundary 是最保守族
+  （hrr 0.438）。
+- **成本**：real 每案 LLM 调用 5.93、tool 调用 3.83、tokens 16,167，总 token **5.17M**。
 - **不可外推**：单次运行、单模型、非确定性、InMemory 工具世界、生产视觉不可测；real 数字**只代表这一次运行**，
   不得当模型固定水平，也不得与 §11 的 scripted 数字混算（§11 衡量实现一致性）。**不重复采样。**
 
-### 14.9 已知边界与后续演进（本轮明确不做）
+### 12.8 已知边界与后续演进（本轮明确不做）
 
 | 项 | 状态 |
 |---|---|
-| `LLM_CALLS=10 → 12/15` 生产预算调整 | 未做（50 案仍撞墙；`--llm-budget` 对照实验可选，不改规则） |
-| 110 例 `GT=REJECT → HUMAN_REVIEW` 的回收（回环/取证） | 未做（§12 遗留；本轮 22 例同族） |
+| 生产预算档位调整（抬高 `LLM_CALLS` 上限） | 未做（50 案仍撞墙；`--llm-budget` 对照实验可选，不改规则） |
+| `GT=REJECT → HUMAN_REVIEW` 的回收（回环/取证） | 未做（本轮 22 例同族） |
 | `listing_registry` **阳性路径**（声明与在库事实确定性比对） | 未实现（现只判"事实取到了没有"） |
 | 真实视觉 / OCR 数据源 | 冻结（生产 `image_appearance` 声明为 UNMEASURABLE） |
-| Ablation 在重构后装配下重跑 | 未做（agent 逐案决策零变化 ⇒ 预期不变，未实测） |
+| Ablation 在评测世界跑 | 未做（agent 逐案决策零变化 ⇒ 预期不变，未实测） |
 | MQ / 异步 / Observability 扩展 / MySQL Checkpointer 等生产化增强 | 未做（§「不做什么」清单） |
 | 其他功能扩展 | 不做 |
 
