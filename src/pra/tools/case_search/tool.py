@@ -1,18 +1,7 @@
-"""CaseSearchTool —— 先例检索工具（RAG · Case KB）。
+"""CaseSearchTool：先例检索工具（RAG · Case KB）。
 
-回答的业务问题：有没有类似且已有人工裁决的先例？结论是什么 —— 提供决策参照，是 REJECT 的
-**可引用依据**来源之一。
-
-``CaseIndex`` 是窄接口（混合检索的查询面）；``InMemoryCaseIndex`` 是**Mock 默认实现**，只做
-元数据过滤 + 按种子 ``retrieval_score`` 排序截断，**不做真实语义检索**。生产/HTTP 入口
-（``pra.tools.build_production_tools()``）注入真实 RAG 索引（chroma + BGE + hybrid，装配期
-惰性、首次检索才建库）；默认与评测世界仍是 ``InMemoryCaseIndex``。本工具不含业务判定：
-每个 hit → 1 条 CASE_PRECEDENT 证据（``weight=retrieval_score``、``ref_id=case_id`` 必填）。
-
-``retrieval_score`` 是**检索分，不是语义相似度**，且**不做量纲适配**：生产口径恒 hybrid，
-对外返回值即 RRF 融合分（``Σ 1/(k+rank)``）；``bm25s`` 原始分（无界）与库口径
-``exp(-distance)`` 只是 hybrid 内部两条路径的原始分。**取值域由检索后端定义，schema 不设约束**
-（详见 ``docs/00-system-design.md`` 的 RAG 分数口径）。
+默认/评测世界用 ``InMemoryCaseIndex``（Mock：只做元数据过滤 + 种子分排序，``query`` 不参与匹配），
+生产/HTTP 入口注入真实 RAG 索引；``retrieval_score`` 是检索分、不是语义相似度，也不做量纲适配。
 """
 
 from __future__ import annotations
@@ -89,10 +78,9 @@ _DEFAULT_PRECEDENTS: list[dict[str, Any]] = [
 
 
 class InMemoryCaseIndex:
-    """CaseIndex 的 Mock 默认实现（仅供开发/测试/演示）。
+    """``CaseIndex`` 的 Mock 默认实现（仅供开发/测试/演示）。
 
-    检索 = 元数据过滤（category 精确 / risk_type 交叠）+ 按种子 ``retrieval_score`` 降序 +
-    top_k 截断；**query 不参与匹配**（种子检索分即最终排序值）。
+    检索 = 元数据过滤（category 精确 / risk_type 交叠）+ 种子分降序 + top_k；**query 不参与匹配**。
     """
 
     def __init__(self, precedents: list[dict[str, Any]] | None = None) -> None:
@@ -141,11 +129,9 @@ class CaseSearchTool:
         return CaseSearchResult(hits=hits)
 
     def to_evidence(self, result: CaseSearchResult) -> list[Evidence]:
-        """结果 → Evidence：每个 hit 1 条 CASE_PRECEDENT。
+        """结果 → Evidence：每个 hit 1 条 ``CASE_PRECEDENT``。
 
-        ``weight=retrieval_score``（检索分即证据强度，**不要**读成语义相似度）；
-        ``ref_id=case_id`` **必填**（可追溯引用）；``policy_refs`` 等信息留待后续
-        ``Evidence.extra`` 承载，value 只给决策参照摘要。
+        ``weight=retrieval_score``（检索分即证据强度，**不是**语义相似度）；``ref_id=case_id`` 必填。
         """
         evidences: list[Evidence] = []
         for h in result.hits:

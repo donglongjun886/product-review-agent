@@ -1,13 +1,7 @@
-"""PolicySearchTool —— 政策依据检索工具（RAG · Policy KB）。
+"""PolicySearchTool：政策依据检索工具（RAG · Policy KB）。
 
-回答的业务问题：当前有效政策对这类情况怎么说 —— 决定「能不能判、判到什么程度」，是
-REJECT/HUMAN_REVIEW 的**可引用依据**来源。
-
-``PolicyIndex`` 是窄接口（政策库检索的查询面）；``InMemoryPolicyIndex`` 是 **Mock 默认实现**，
-只做版本有效性 + 元数据过滤与种子排序截断，**不做真实语义检索**。生产/HTTP 入口
-（``pra.tools.build_production_tools()``）注入真实 RAG 索引（chroma + BGE + hybrid，装配期
-惰性、首次检索才建库）；默认与评测世界仍是 ``InMemoryPolicyIndex``。本工具不含业务判定：每个 hit
-→ 1 条 POLICY_REF 证据（``weight=0.9``、``ref_id=clause_id`` 必填），政策是否适用归 reevaluate/decide。
+默认/评测世界用 ``InMemoryPolicyIndex``（Mock：只做元数据过滤，``query`` 不参与匹配），
+生产/HTTP 入口注入真实 RAG 索引；本工具不含业务判定，每个 hit → 1 条 ``POLICY_REF`` 证据。
 """
 
 from __future__ import annotations
@@ -22,8 +16,8 @@ from ..base import ToolArgs, ToolContext, ToolResult
 
 # ---- 受控证据类型 & 默认证据强度 ----
 POLICY_REF_TYPE = "POLICY_REF"
-POLICY_REF_WEIGHT = 0.9  # 默认权重（暂定默认，可调）
-POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限（全文在 Result/审计）
+POLICY_REF_WEIGHT = 0.9  # 默认权重
+POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限（全文在 Result）
 
 
 # ---------------------------------------------------------------------------
@@ -38,11 +32,7 @@ class PolicySearchFilters(BaseModel):
 
 
 class PolicyClauseHit(BaseModel):
-    """单个政策条款命中（DB ``policy / policy_clause``）。
-
-    ``status`` 取 "EFFECTIVE"（生效）/ "EXPIRED"（失效）；``effective_date`` 为生效日期
-    （ISO date）。``version`` 用于 policy_id + version 的唯一引用。
-    """
+    """单个政策条款命中（DB ``policy / policy_clause``）；``status`` 取 "EFFECTIVE" / "EXPIRED"。"""
 
     policy_id: str
     version: int
@@ -93,10 +83,9 @@ _DEFAULT_CLAUSES: list[dict[str, Any]] = [
 
 
 class InMemoryPolicyIndex:
-    """PolicyIndex 的 Mock 默认实现（仅供开发/测试/演示）。
+    """``PolicyIndex`` 的 Mock 默认实现（仅供开发/测试/演示）。
 
-    检索 = 版本有效性过滤（effective_only 时只留 status=EFFECTIVE）+ 元数据过滤
-    （category / risk_type）+ top_k 截断；**query 不参与匹配**。
+    检索 = 版本有效性 + 元数据过滤（category / risk_type）+ top_k 截断；**query 不参与匹配**。
     """
 
     def __init__(self, clauses: list[dict[str, Any]] | None = None) -> None:
@@ -154,11 +143,9 @@ class PolicySearchTool:
         return PolicySearchResult(hits=hits)
 
     def to_evidence(self, result: PolicySearchResult) -> list[Evidence]:
-        """结果 → Evidence：每个 hit 1 条 POLICY_REF。
+        """结果 → Evidence：每个 hit 1 条 ``POLICY_REF``。
 
-        ``weight=0.9``（政策条款为强依据）；``ref_id=clause_id`` **必填**（可追溯）；
-        value 形如 ``"POLICY_3.2 v2 条款：…"``；``policy_id`` / ``policy_version`` 从
-        ``PolicyClauseHit`` 直接写入 ``extra``（供 Gate 读引用依据），不反向解析 value。
+        ``ref_id=clause_id`` 必填（可追溯）；``policy_id`` / ``policy_version`` 写入 ``extra`` 供 Gate 读引用。
         """
         evidences: list[Evidence] = []
         for h in result.hits:

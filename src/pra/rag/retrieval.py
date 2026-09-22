@@ -1,9 +1,6 @@
-"""检索公共件 —— 候选集检索上下文。
+"""检索公共件：候选集检索上下文 ``_RetrievalContext``。
 
-生产检索口径**恒为 hybrid**（BM25 + Vector + RRF 融合）；BM25 / Vector 是 hybrid 的两条内部
-路径（``index._rank_bm25`` / ``index._rank_vector``），不存在可切换的对外模式开关。
-hybrid 的融合由 ``index`` 层交给 ``QueryFusionRetriever(mode=RECIPROCAL_RANK)``，本模块不含融合实现。
-两路分数**不做量纲适配**（量纲互不可比），由后端自持。
+两路分数不做量纲适配（量纲互不可比），由后端自持。
 """
 
 from __future__ import annotations

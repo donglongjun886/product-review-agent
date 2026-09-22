@@ -1,11 +1,6 @@
-"""RAG 知识库数据包 —— Policy KB / Case KB 静态 corpus。
+"""Policy KB / Case KB 静态 corpus 加载器：读 JSON → 信封校验 → 返回 ``(records, meta)``。
 
-``schema.py`` 是数据契约 + Pydantic 强校验；``policies.json`` / ``cases.json`` 是静态数据
-（git 入库、可评审，由 ``scripts/build_rag_corpus.py`` 确定性生成/重建）；本模块是加载器 ——
-读 JSON → 信封校验 → 返回 ``(records, meta)``。
-
-数据是**可评审的静态文件**，运行时索引（BM25 / embedding）由 ``rag/factory.py`` 在加载之上
-构建，数据文件本身不含派生索引。
+数据文件是可评审的 git 入库 JSON，schema 见 ``schema.py``。
 """
 
 from __future__ import annotations

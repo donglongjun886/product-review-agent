@@ -1,15 +1,7 @@
-"""RAG 索引装配 —— ``build_policy_index`` / ``build_case_index``。
+"""RAG 索引装配入口：``build_policy_index`` / ``build_case_index``（chroma + hybrid 检索）。
 
-语料固定取 ``rag/corpus/`` 内静态 JSON（文件缺失即抛带指引的 ``ValueError``，不静默）。
-注入点：``embedding_model``（LlamaIndex ``BaseEmbedding``，**必填、本层不代建**）；
-``config``（``ChromaConfig``：client / host / port / ephemeral / collection 前缀，缺省全取默认值）。
-索引固定走 hybrid 检索（BM25 + Vector + RRF），无模式开关。
-
-两个 builder 只在「行类型 + corpus 加载器」上有别，实现只有 ``_build_index`` 一份。
-
-检索后端只有 chroma（ChromaDB cosine + LlamaIndex 检索器 + RRF）；``pra.rag.index`` / ``chroma_store``
-在函数体内**延迟 import**，故本模块被 tools 层 import 时顶层零额外依赖；缺 ``--extra rag`` 时抛出
-带指引的 ``RuntimeError``，不静默降级。
+语料固定取 ``rag/corpus/`` 静态 JSON；``embedding_model`` **必填**、本层不代建；
+``pra.rag.index`` / ``chroma_store`` 在函数体内延迟 import，缺 ``--extra rag`` 时抛带指引的 ``RuntimeError``。
 """
 
 from __future__ import annotations
@@ -38,12 +30,9 @@ def _build_index(
     rows: Iterable[Any] | None = None,
     config: ChromaConfig | None = None,
 ) -> Any:
-    """两个公开 builder 的唯一实现；差异只在调用方传进来的 ``index_cls`` / ``loader``。
+    """两个 builder 的唯一实现；``rows`` 显式注入时优先（跳过文件 IO），否则 ``loader()`` 读缺省语料。
 
-    ``rows`` 显式注入时优先（跳过文件 IO）；否则 ``loader()`` 读缺省语料文件。
-
-    ``embedding_model`` **必填**：本层不构造任何编码器 —— 谁要 RAG，谁给编码器（``pra.tools.
-    production_embedder`` 或自备 ``BaseEmbedding``）。漏传即为 ``TypeError``，不会悄悄替你造一个。
+    ``embedding_model`` 必填：本层不构造编码器，漏传即 ``TypeError``。
     """
     if rows is None:
         record_rows, _meta = loader()
@@ -62,12 +51,9 @@ def build_policy_index(
 ) -> PolicyIndex:
     """构造 PolicyIndex（语料 = rag/corpus/policies.json）。
 
-    ``rows`` 显式注入时优先（跳过文件 IO）。``embedding_model`` **必填**（``BaseEmbedding``；
-    常用 ``pra.tools.production_embedder()``）—— 本函数不替你构造。
-    ``config`` = Chroma 连接 / collection 参数（见 :class:`~pra.rag.chroma_store.ChromaConfig`；
-    缺省 None → 全取默认值）。
+    ``rows`` 注入时优先；``embedding_model`` 必填（``BaseEmbedding``）；``config`` = Chroma 参数（None → 默认值）。
     """
-    # 延迟 import：chroma / llama_index / bm25s / jieba 仅在真正装配索引时才拉起。
+    # 延迟 import：真正装配索引时才拉起 chroma / llama_index / bm25s / jieba。
     from pra.rag.index import ChromaPolicyIndex
 
     return _build_index(

@@ -1,13 +1,7 @@
-"""RAG 知识库 Corpus Schema —— 数据契约 + 强校验。
+"""RAG corpus 数据契约（Pydantic 强校验）：``PolicyClauseRecord`` / ``CasePrecedentRecord`` 与顶层信封。
 
-``PolicyClauseRecord`` 是 Policy KB 一条**条款**（检索最小单元，字段对齐 ``PolicyClauseHit``）；
-同 policy_id 的不同 version 行共存（旧版 EXPIRED / 新版 EFFECTIVE）→ 版本有效性过滤的测试面。
-``CasePrecedentRecord`` 是 Case KB 一条**先例**（对齐 ``CaseHit`` 除 ``retrieval_score`` —— 那是
-检索期计算值，不入库）。顶层信封（``PolicyCorpus`` / ``CaseCorpus``）的 ``meta`` 承载来源/隔离
-声明等人读元数据（JSON 无注释，故用 meta 记录）。
-
-**严禁包含 eval 的 ground-truth 案**：case_id 前缀统一 ``RAG_CASE_``，与 eval 各案号无交集，
-剧情不与任何 eval 违规案一一对应（防「检索到 GT = 评测作弊」）。
+``CasePrecedentRecord`` 不含 ``retrieval_score``（检索期才计算，不入库）。
+case_id 统一 ``RAG_CASE_`` 前缀，**严禁包含 eval 的 ground-truth 案**（防「检索到 GT = 评测作弊」）。
 """
 
 from __future__ import annotations
@@ -19,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pra.domain.models import Decision, RiskLevel, RiskType
 
-# status 受控取值（与 PolicyClauseHit 同口径）
+# status 受控取值（须与 PolicyClauseHit.status 一致，勿单改）
 ClauseStatus = Literal["EFFECTIVE", "EXPIRED"]
 
 

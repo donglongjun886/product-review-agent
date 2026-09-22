@@ -1,7 +1,6 @@
-"""BM25 检索器 —— jieba 分词 + ``bm25s`` 自建索引，不使用库 ``BM25Retriever``。
+"""BM25 检索器：jieba 分词 + ``bm25s`` 自建索引（不使用库 ``BM25Retriever``）。
 
-分词不吃 ``bm25s.tokenize`` 模块级符号：语料与查询都走本模块的 ``_tokenize``，故无全局替换、
-无锁、也无调用顺序约束。
+语料与查询共用本模块 ``_tokenize``，无全局分词替换、无锁、无调用顺序约束。
 """
 
 from __future__ import annotations
@@ -19,11 +18,7 @@ _LATIN_RUN = re.compile(r"[0-9A-Za-z_]+")
 
 
 def _jieba_tokens(text: str) -> list[str]:
-    """jieba 精确模式切词（确定性；拉丁/数字串拆出并小写，中文词原样）。
-
-    不做停用词过滤/词干化（中文语料上英文词干器无意义）；单字符词保留（文档频率高、IDF 低，
-    对排序影响可忽略）。
-    """
+    """jieba 精确模式切词；拉丁/数字串拆出并小写，中文词原样。"""
     import jieba
 
     tokens: list[str] = []
@@ -39,11 +34,7 @@ def _jieba_tokens(text: str) -> list[str]:
 
 
 def _tokenize(texts: Any) -> Any:
-    """文本（单条或列表）→ token 字符串的二维列表；语料与查询共用。
-
-    词表由 ``bm25s`` 在 ``index`` / ``retrieve`` 内部按 token 字符串自建，查询侧的 OOV token
-    由库自行过滤，故调用方只需保证两侧走同一套分词口径。
-    """
+    """文本（单条或列表）→ token 二维列表；语料与查询共用同一分词口径。"""
     items = [texts] if isinstance(texts, str) else list(texts)
     return [_jieba_tokens(str(text)) for text in items]
 
@@ -57,8 +48,7 @@ def _retriever_class() -> type:
         """候选 node 上的 BM25 检索器（jieba 分词 + ``bm25s``；索引与词表随实例自持）。"""
 
         def __init__(self, nodes: list[Any], similarity_top_k: int) -> None:
-            # 索引文本 = node 的 EMBED 正文（metadata 已在 ``chroma_store._build_nodes`` 排除）。
-            # 命中节点由 ``_node_content`` 重建，与向量路同源 —— RRF 按 ``node.hash`` 合并两路。
+            # 索引文本 = node 正文（metadata 已由 chroma_store._build_nodes 排除）。
             self._corpus = [
                 llama().node_to_metadata_dict(node) | {"node_id": node.node_id} for node in nodes
             ]
