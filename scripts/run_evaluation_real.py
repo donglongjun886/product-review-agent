@@ -1,37 +1,24 @@
-"""real LLM vs scripted 对比跑分：真实 LLM 接进评测 harness。
+"""正式 Evaluation 跑分：rule（确定性初筛）vs real（真实 LLM），工具世界固定为 Eval World。
 
-把 ``pra.evaluation.harness.agent_scheme.AgentScheme(llm=...)`` 的 real 模式与确定性 scripted
-基线（``EvalScriptedLLMBackend`` 审查员桩）在同一 eval 数据 / 同一工具世界上逐案对比，输出：
-逐案一致性（scripted vs real + 差异明细）、决策业务指标（``DecisionEvaluator`` 口径：
-Accuracy/Precision/Recall/FPR/FNR + HRR/自动化率；真值含 HUMAN_REVIEW 的案自动跳过并注明）、
-``--out PATH`` 落盘的 real EvalRecord 全量 + 差异摘要，以及 overrides 归因码汇总（R5 降级 /
-R3 预算截胡 / R3+R5 混合案）—— 「整卷全 HUMAN 是链路降级」一眼可见。
+两臂：① ``RuleBaseline``（复用 ``pra.screening`` 的确定性三分流，零 LLM、零工具）；②
+``AgentScheme(llm=...)`` 接真实 LLM。同一数据集、同一 Eval World 工具、同为生产默认 Guardrail
+预算档 → 两臂差异只归因于 LLM。输出：逐案对比明细、业务指标（``DecisionEvaluator`` 两套分母）、
+工程分布、Agent 级指标、overrides 归因汇总（R5 降级 / R3 预算截胡 / R3+R5 混合 —— 「整卷全
+HUMAN 是链路降级」一眼可见），以及 ``--out`` 落盘的 real EvalRecord 全量 + 逐案 rule 决策 +
+Agent 指标 + overrides 汇总（``run_error_analysis.py`` 的输入）。
 
-CLI：``--limit N`` / ``--ids "EC_V2_0007,EC_V2_0101"`` 定向取案子集；``--data`` 给 JSONL 或目录
-（eval_data/v2 → cases_v2.jsonl）；``--world {eval,rag}`` 选工具数据源世界（rag = 真实 KB
-检索，hybrid）；``--model`` / ``--api-key`` / ``--base-url`` 配 LLM；``--out`` 写结果 JSON
-（父目录需已存在）。
+CLI：``--data`` JSONL 或目录（eval_data/v2 → cases_v2.jsonl）；``--model`` / ``--api-key`` /
+``--base-url`` 配 LLM；``--limit N`` / ``--ids "EC_V2_0007,EC_V2_0101"`` 定向取案子集；
+``--concurrency N`` 并发跑 real 臂；``--out PATH`` 写结果 JSON（父目录需已存在）。
 
-**两臂同预算**：real 与 scripted 都跑**生产默认 Guardrail 档**（LLM_CALLS=10 /
-TOOL_CALLS=15），评测不覆盖预算 —— 预算是否够用本身就是被测行为；超限按生产语义转
-HUMAN_REVIEW，报告以 R3 截胡维度呈现，不做评测侧放宽。
-
-成本与结论边界：
-
-- 真实 API 有费用、非确定性：real 侧每次运行都调真实 LLM，同 case 重跑输出可能不同（不可重
-  放）。先 ``--limit 10`` 冒烟确认链路与成本量级再跑全量；report / JSON 已如实标注，real 数字
-  只代表单次运行抽样，勿当模型固定水平。
-- scripted 结果、指标计算、JSON 结构、差异统计全程可复现（回归基线永远以 scripted =
-  ``AgentScheme()`` 默认行为为准，real 只观测对照）。
-- API key 读取顺序：``--api-key`` > 环境变量 ``DEEPSEEK_API_KEY`` > 仓库根 ``.env``（脚本开头
-  以 setdefault 语义注入）；base-url 同理（``--base-url`` > ``DEEPSEEK_BASE_URL``）。API key
-  必填 —— 缺 key 预检即报错。
-- 工具数据源 = 评测种子世界（eval / RAG，与 scripted 同一世界）→ 两臂差异只归因于 LLM。
-  EvalRecord 不含墙钟 latency；real 墙钟只进进程内进度打印，不落 JSON。
-- 预算 = 生产默认档（评测不覆盖 Guardrail）：real 臂超限转 HUMAN_REVIEW 是生产语义，
-  归因走 ``detail.budget_hit_dim``，不靠调档位回避。
-- ``pra.agent.litellm_backend`` 为延迟 import：缺失时本模块仍可 import，scripted / fake 干跑
-  可用，只有 real 运行需要它就绪。
+成本与结论边界：真实 API 有费用、非确定性（同案重跑输出可能不同，不可重放）——先
+``--limit 10`` 冒烟确认链路与成本量级再跑全量；report / JSON 已如实标注，real 数字只代表单次
+运行抽样。API key 读取顺序：``--api-key`` > 环境变量 ``DEEPSEEK_API_KEY`` > 仓库根 ``.env``
+（脚本开头以 setdefault 语义注入）；base-url 同理。API key 必填 —— 缺 key 预检即报错，避免整卷
+R5 降级后静默产出假 real 结果。EvalRecord 不含墙钟 latency（进程相关量会让跨 run 比对漂移），real
+墙钟只进进程内进度打印与报告工程区。预算恒为生产默认档（评测不覆盖 Guardrail）：real 臂超限转
+HUMAN_REVIEW 是生产语义，归因走 ``detail.budget_hit_dim``。``pra.agent.litellm_backend`` 为
+延迟 import：缺失时本模块仍可 import，只有 real 运行需要它就绪。
 """
 
 from __future__ import annotations
@@ -44,9 +31,8 @@ import re
 import sys
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from pra.agent.guardrails.gate import (  # overrides 归因码（汇总用，只读）
     R3_BUDGET_EXHAUSTED,
@@ -56,22 +42,21 @@ from pra.evaluation.dataset.loader import load_dataset, scene_stats, smoke_subse
 from pra.evaluation.dataset.schema import EvalCase
 from pra.evaluation.harness.agent_scheme import (
     EVAL_WORLD_LABEL,
-    RAG_WORLD_LABEL,
     AgentScheme,
     make_eval_world_tools,
-    make_rag_world_tools,
 )
-from pra.evaluation.harness.base import EvalContext, EvalRecord
+from pra.evaluation.harness.base import EvalRecord, SchemeRunner
+from pra.evaluation.harness.rule_scheme import RuleBaseline
 from pra.evaluation.metrics.agent import AgentMetricsBundle
-from pra.evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
+from pra.evaluation.metrics.business import DecisionEvaluator
 from pra.evaluation.metrics.engineering import EngineeringEvaluator
+from pra.evaluation.report import print_report
 from pra.evaluation.runner import expected_index
 
 DEFAULT_DATA = "eval_data/v2"
 DEFAULT_MODEL = "deepseek/deepseek-chat"
 ENV_API_KEY = "DEEPSEEK_API_KEY"
 ENV_BASE_URL = "DEEPSEEK_BASE_URL"
-WORLDS = ("eval", "rag")
 SCENES = ("normal", "violation", "boundary", "multi-signal", "evasion")
 REAL_NOTE = "real LLM 非确定性，不可重放"
 
@@ -79,7 +64,7 @@ __all__ = ["DEFAULT_DATA", "DEFAULT_MODEL", "REAL_NOTE", "_resolve_data_path", "
 
 
 # ---------------------------------------------------------------------------
-# 数据集 / 世界 / 后端装配
+# 数据集 / 后端装配
 # ---------------------------------------------------------------------------
 
 
@@ -101,40 +86,21 @@ def _resolve_data_path(raw: str) -> Path:
     raise ValueError(f"评测数据路径不存在: {p}（支持 JSONL 文件，或 eval_data/v2 目录）")
 
 
-def _world_tools(world: str):
-    """按 world 取工具列表，给 real 后端构造 ``tools`` 参数；图侧工具由
-    ``AgentScheme.run`` 按 ctx.tool_world 自行装配，两处同一世界。"""
-    if world == "rag":
-        return make_rag_world_tools()  # 检索模式固定生产口径 hybrid
-    return make_eval_world_tools()
-
-
-def _world_label(world: str) -> str:
-    return RAG_WORLD_LABEL if world == "rag" else EVAL_WORLD_LABEL
-
-
-def _build_ctx(world: str) -> EvalContext:
-    """ctx = EvalContext(tool_world=world)（RAG 世界检索模式固定 hybrid）。"""
-    return EvalContext(tool_world=world)
-
-
-def _make_real_backend(
-    *, model: str, api_key: str | None, base_url: str | None, world: str
-) -> Any:
+def _make_real_backend(*, model: str, api_key: str | None, base_url: str | None) -> object:
     """构造真实 LLM 后端（延迟 import ``pra.agent.litellm_backend``）。
 
-    按 ``LLMBackend`` Protocol 交给 ``AgentScheme(llm=...)``；tools = 与 world 相同的
-    工具列表（供后端输出 function schema / 工具提示）。
+    按 ``LLMBackend`` Protocol 交给 ``AgentScheme(llm=...)``；``tools`` = Eval World 工具列表
+    （供后端提取 function schema / 工具提示），与图侧装配的世界同一份。
     """
     try:
         from pra.agent.litellm_backend import LiteLLMBackend
     except ImportError as exc:  # 模块或 litellm 依赖缺失 → 明确报错而非半路 ImportError
         raise RuntimeError(
             "real 模式需要 pra.agent.litellm_backend（含 litellm 依赖，见 pyproject）："
-            "`uv sync` 后重试；scripted / fake 干跑不受影响"
+            "`uv sync` 后重试"
         ) from exc
     return LiteLLMBackend(
-        model=model, api_key=api_key, base_url=base_url, tools=_world_tools(world)
+        model=model, api_key=api_key, base_url=base_url, tools=make_eval_world_tools()
     )
 
 
@@ -177,14 +143,13 @@ def _load_dotenv() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 核心对比流程（scripted 可复现 + real 注入后端；两臂仅 LLM 不同）
+# 跑分流程（rule 臂确定性先行 + real 臂注入后端）
 # ---------------------------------------------------------------------------
 
 
 async def _run_scheme_records(
-    scheme: AgentScheme,
+    scheme: SchemeRunner,
     cases: list[EvalCase],
-    ctx: EvalContext,
     *,
     progress_prefix: str | None = None,
     latencies_ms: list[float] | None = None,
@@ -192,13 +157,13 @@ async def _run_scheme_records(
     """顺序串行跑一遍 scheme；progress_prefix 非 None 时逐条打印进度。
 
     ``latencies_ms`` 非 None 时逐案追加墙钟耗时 —— **只进渲染层**（real 臂的 P50/P95），
-    不写进 EvalRecord（评测 record 必须逐字节可重放，见 harness/base.py 口径）。
+    不写进 EvalRecord（跨 run 比对会因进程相关量漂移，见 harness/base.py 口径）。
     """
     records: list[EvalRecord] = []
     total = len(cases)
     for i, case in enumerate(cases, start=1):
         t0 = time.monotonic()
-        rec = await scheme.run(case, ctx)
+        rec = await scheme.run(case)
         elapsed_ms = (time.monotonic() - t0) * 1000
         if latencies_ms is not None:
             latencies_ms.append(elapsed_ms)
@@ -212,9 +177,8 @@ async def _run_scheme_records(
 
 
 async def _run_scheme_records_concurrent(
-    scheme: AgentScheme,
+    scheme: SchemeRunner,
     cases: list[EvalCase],
-    ctx: EvalContext,
     *,
     concurrency: int,
     progress_prefix: str | None = None,
@@ -234,7 +198,7 @@ async def _run_scheme_records_concurrent(
         nonlocal done
         async with sem:
             t0 = time.monotonic()
-            rec = await scheme.run(case, ctx)
+            rec = await scheme.run(case)
             elapsed_ms = (time.monotonic() - t0) * 1000
             if latencies_ms is not None:
                 latencies_ms.append(elapsed_ms)  # list.append 原子；并发下顺序不定，只影响分位渲染
@@ -252,30 +216,30 @@ async def _run_scheme_records_concurrent(
 
 def _compare_rows(
     cases: list[EvalCase],
-    scripted_records: list[EvalRecord],
+    rule_records: list[EvalRecord],
     real_records: list[EvalRecord],
     exp: dict,
 ) -> tuple[list[dict], list[dict], dict]:
     """逐案对齐（按 eval_case_id）→ 全量行 + 差异行 + 按 scene 一致性计数。"""
-    s_by_id = {r.eval_case_id: r for r in scripted_records}
-    r_by_id = {r.eval_case_id: r for r in real_records}
+    rule_by_id = {r.eval_case_id: r for r in rule_records}
+    real_by_id = {r.eval_case_id: r for r in real_records}
     rows: list[dict] = []
     disagree: list[dict] = []
     by_scene: dict[str, dict] = {}
     for case in cases:
-        s, r = s_by_id[case.eval_case_id], r_by_id[case.eval_case_id]
+        rule, real = rule_by_id[case.eval_case_id], real_by_id[case.eval_case_id]
         truth = (exp.get(case.eval_case_id) or {}).get("decision", "?")
         row = {
             "eval_case_id": case.eval_case_id,
             "scene": case.scene,
             "truth": truth,
-            "scripted_decision": s.decision,
-            "real_decision": r.decision,
-            "agree": s.decision == r.decision,
-            "real_risk_level": r.risk_level,
-            "real_risk_type": list(r.risk_type),
-            "real_decision_confidence": r.decision_confidence,
-            "real_overrides": list((r.detail or {}).get("overrides") or []),
+            "rule_decision": rule.decision,
+            "real_decision": real.decision,
+            "agree": rule.decision == real.decision,
+            "real_risk_level": real.risk_level,
+            "real_risk_type": list(real.risk_type),
+            "real_decision_confidence": real.decision_confidence,
+            "real_overrides": list((real.detail or {}).get("overrides") or []),
         }
         rows.append(row)
         counter = by_scene.setdefault(case.scene, {"total": 0, "agree": 0})
@@ -285,145 +249,6 @@ def _compare_rows(
         else:
             disagree.append(row)
     return rows, disagree, by_scene
-
-
-async def run_comparison(
-    *,
-    cases: list[EvalCase],
-    ctx: EvalContext,
-    real_backend: Any,
-    model_label: str,
-    world: str = "eval",
-    data_path: str = "",
-    real_concurrency: int = 1,
-) -> tuple[dict, dict]:
-    """核心对比：scripted（确定性桩，先行、可复现）→ real（注入后端，逐案串行）。
-
-    ``real_concurrency > 1`` 时 real 臂并发跑（scripted 臂恒串行 —— 它毫秒级完成且是
-    可复现基线，不需要并发）；并发只改**调度**，不改判定 / 指标 / 数据。
-
-    返回 ``(payload, extra)``：``payload`` 可直接落 JSON（real 侧含 REAL_NOTE）；
-    ``extra`` 是报告渲染用中间物（rows / by_scene / 两臂 DecisionMetrics /
-    scripted_records / truth_human 计数等，不进 JSON）。
-
-    两臂预算恒为生产默认档（评测不覆盖 Guardrail）；real 臂超限按生产语义转 HUMAN_REVIEW。
-    """
-    exp = expected_index(cases)
-    scripted = AgentScheme()
-    real = AgentScheme(llm=real_backend)
-
-    print("-" * 100)
-    print("① scripted（确定性审查员桩 EvalScriptedLLMBackend · 可复现基线）")
-    scripted_records = await _run_scheme_records(scripted, cases, ctx)
-    print("-" * 100)
-    real_mode = f"并发 {real_concurrency}" if real_concurrency > 1 else "逐案串行"
-    print(f"② real（{model_label} · 真实 LLM · 非确定性 · {real_mode}）")
-    real_latencies_ms: list[float] = []
-    if real_concurrency > 1:
-        real_records = await _run_scheme_records_concurrent(
-            real,
-            cases,
-            ctx,
-            concurrency=real_concurrency,
-            progress_prefix="real",
-            latencies_ms=real_latencies_ms,
-        )
-    else:
-        real_records = await _run_scheme_records(
-            real, cases, ctx, progress_prefix="real", latencies_ms=real_latencies_ms
-        )
-
-    rows, disagree, by_scene = _compare_rows(cases, scripted_records, real_records, exp)
-    scripted_metrics = DecisionEvaluator.evaluate(scripted_records, exp)
-    real_metrics = DecisionEvaluator.evaluate(real_records, exp)
-    truth_human = sum(1 for e in exp.values() if e.get("decision") == "HUMAN_REVIEW")
-    # Agent 级指标（两臂同口径）：只读统计，不改判定 / 不进任何既有指标分母。
-    # real 臂的 tool_calls / evidence / tool_history 由真实 LLM 决策产生 → 本区是
-    # 「真实 LLM 的工具选择与证据链行为」唯一入口。
-    scripted_agent_metrics = AgentMetricsBundle.evaluate(scripted_records, exp)
-    real_agent_metrics = AgentMetricsBundle.evaluate(real_records, exp)
-
-    payload = {
-        "data": data_path,
-        "model": model_label,
-        "world": world,
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "count": len(cases),
-        "real_concurrency": real_concurrency,
-        "agree": len(rows) - len(disagree),
-        "disagree": disagree,
-        "real_records": [r.model_dump() for r in real_records],
-        "scripted_decisions": [
-            {
-                "eval_case_id": r.eval_case_id,
-                "decision": r.decision,
-                "risk_level": r.risk_level,
-                "risk_type": list(r.risk_type),
-                "decision_confidence": r.decision_confidence,
-            }
-            for r in scripted_records
-        ],
-        # Agent 级指标（两臂）：JSON 侧与 Console 报告同数，供事后审计/复算
-        "agent_metrics": {
-            "real": real_agent_metrics.model_dump(),
-            "scripted": scripted_agent_metrics.model_dump(),
-        },
-        # overrides 汇总：R5 降级 / R3 截胡 / 混合案 —— 「整卷全 HUMAN = 链路降级」
-        # 在 JSON 里也一眼可见，不只在 Console 报告。
-        "overrides_summary": {
-            "real": _overrides_summary(real_records),
-            "scripted": _overrides_summary(scripted_records),
-        },
-        "note": REAL_NOTE,
-    }
-    extra = {
-        "rows": rows,
-        "by_scene": by_scene,
-        "scripted_metrics": scripted_metrics,
-        "real_metrics": real_metrics,
-        "scripted_records": scripted_records,
-        "truth_human": truth_human,
-        "scene_stats": scene_stats(cases),
-        "scripted_cost": _cost_summary(scripted_records),
-        "real_cost": _cost_summary(real_records),
-        "scripted_agent_metrics": scripted_agent_metrics,
-        "real_agent_metrics": real_agent_metrics,
-        "real_overrides": _overrides_summary(real_records),  # 渲染用
-        "scripted_overrides": _overrides_summary(scripted_records),
-        # 工程指标：scripted 臂 token 恒 0（桩不烧 token）；延迟只在 real 臂有
-        # （进程内墙钟，不落 record —— 见 _run_scheme_records docstring）
-        "scripted_engineering": EngineeringEvaluator.evaluate(scripted_records),
-        "real_engineering": EngineeringEvaluator.evaluate(
-            real_records, latency_ms=real_latencies_ms
-        ),
-    }
-    return payload, extra
-
-
-# ---------------------------------------------------------------------------
-# 报告渲染（纯文本中文，report.py 风格：口径注记 + 一致性 + 逐案差异 + 总体指标）
-# ---------------------------------------------------------------------------
-
-
-def _fmt(v) -> str:
-    return "-" if v is None else f"{v:.3f}"
-
-
-def _fmt0(v) -> str:
-    """分布数值格式化（均值/P50/P95；None → "-"）。"""
-    return "-" if v is None else f"{v:g}"
-
-
-def _cost_summary(records: list[EvalRecord]) -> dict:
-    """成本均值摘要（确定性；无 case 时全 0）—— 与 runner._cost_summary 同口径。"""
-    n = len(records)
-    if n == 0:
-        return {"llm_calls": 0.0, "tool_calls": 0.0, "tokens": 0.0}
-    return {
-        "llm_calls": round(sum(r.cost.get("llm_calls") or 0 for r in records) / n, 2),
-        "tool_calls": round(sum(r.cost.get("tool_calls") or 0 for r in records) / n, 2),
-        "tokens": round(sum(r.cost.get("tokens") or 0 for r in records) / n, 2),
-    }
 
 
 def _overrides_summary(records: list[EvalRecord]) -> dict:
@@ -463,297 +288,94 @@ def _overrides_summary(records: list[EvalRecord]) -> dict:
     }
 
 
-def _metrics_line(label: str, m: DecisionMetrics, cost: dict) -> str:
-    return "  ".join(
-        [
-            f"{label:<14}",
-            _fmt(m.accuracy),
-            _fmt(m.precision),
-            _fmt(m.recall),
-            _fmt(m.fpr),
-            _fmt(m.fnr),
-            _fmt(m.human_rate),
-            _fmt(m.automation),
-            f"{m.tp}/{m.fp}/{m.tn}/{m.fn}",
-            f"llm={cost.get('llm_calls')} tool={cost.get('tool_calls')} tok={cost.get('tokens')}",
-        ]
-    )
+async def run_comparison(
+    *,
+    cases: list[EvalCase],
+    real_backend: object,
+    model_label: str,
+    data_path: str = "",
+    real_concurrency: int = 1,
+) -> tuple[dict, dict]:
+    """核心跑分：rule（确定性零成本，先行）→ real（注入后端）。
 
+    ``real_concurrency > 1`` 时 real 臂并发跑（rule 臂恒串行 —— 无 LLM 调用且是确定性
+    基线，不需要并发）；并发只改**调度**，不改判定 / 指标 / 数据。
 
-def _risk_cell(row: dict) -> str:
-    types = ",".join(row["real_risk_type"]) or "-"
-    conf = "-" if row["real_decision_confidence"] is None else f"{row['real_decision_confidence']:.2f}"
-    return f"{row['real_risk_level'] or '-'}/{types}/conf={conf}"
+    返回 ``(payload, extra)``：``payload`` 可直接落 JSON（含 REAL_NOTE）；``extra`` 是报告
+    渲染中间物（逐案行 / by_scene / 两臂 DecisionMetrics / EngineeringMetrics /
+    AgentMetricsBundle / overrides 汇总 / scene 统计），不进 JSON。
 
-
-def _agent_cell(triple: tuple) -> str:
-    """指标单元格：``(值, 分子, 分母)``；值 None → 未定义显示 ``-``（不填 0 冒充）。"""
-    value, numer, denom = triple
-    body = "-" if value is None else f"{value:.3f}"
-    return f"{body}（{numer}/{denom}）"
-
-
-def _add_agent_metrics_section(add, extra: dict) -> None:
-    """Agent 级指标（两臂并排）：工具选择 / 证据充分性 / 推理正确性 / 边际增益。
-
-    与 ``pra.evaluation.report`` 的 Agent 级区**同一** ``AgentMetricsBundle`` 口径（只读
-    统计，不改判定、不进任何既有指标分母）；空真值案不进分母，无法映射的期望标签与
-    被剔除案数行内显式给出（不静默丢弃）。real 臂的值来自真实 LLM 的工具调用与证据链。
+    两臂预算恒为生产默认档（评测不覆盖 Guardrail）；real 臂超限按生产语义转 HUMAN_REVIEW。
     """
-    sc, rl = extra["scripted_agent_metrics"], extra["real_agent_metrics"]
-    ts_s, es_s, rc_s, mg_s = (
-        sc.tool_selection,
-        sc.evidence_sufficiency,
-        sc.reasoning_correctness,
-        sc.marginal_gain,
-    )
-    ts_r, es_r, rc_r, mg_r = (
-        rl.tool_selection,
-        rl.evidence_sufficiency,
-        rl.reasoning_correctness,
-        rl.marginal_gain,
-    )
-    rows = [
-        (
-            "tool_selection_accuracy",
-            (ts_s.tool_selection_accuracy, ts_s.covered_cases, ts_s.cases_with_expectation),
-            (ts_r.tool_selection_accuracy, ts_r.covered_cases, ts_r.cases_with_expectation),
-        ),
-        (
-            "redundant_tool_rate",
-            (ts_s.redundant_tool_rate, ts_s.redundant_cases, ts_s.total_records),
-            (ts_r.redundant_tool_rate, ts_r.redundant_cases, ts_r.total_records),
-        ),
-        (
-            "evidence_type_coverage",
-            (es_s.evidence_type_coverage, es_s.covered_expected_types, es_s.total_expected_types),
-            (es_r.evidence_type_coverage, es_r.covered_expected_types, es_r.total_expected_types),
-        ),
-        (
-            "reject_evidence_gate_pass_rate",
-            (
-                es_s.reject_evidence_gate_pass_rate,
-                es_s.reject_cases_with_citable,
-                es_s.reject_cases_pred_reject,
-            ),
-            (
-                es_r.reject_evidence_gate_pass_rate,
-                es_r.reject_cases_with_citable,
-                es_r.reject_cases_pred_reject,
-            ),
-        ),
-        (
-            "risk_type_coverage",
-            (rc_s.risk_type_coverage, rc_s.risk_type_covered_cases, rc_s.cases_with_expected_risk_type),
-            (rc_r.risk_type_coverage, rc_r.risk_type_covered_cases, rc_r.cases_with_expected_risk_type),
-        ),
-        (
-            "risk_level_agreement",
-            (
-                rc_s.risk_level_agreement,
-                rc_s.risk_level_agreement_cases,
-                rc_s.cases_with_expected_risk_level,
-            ),
-            (
-                rc_r.risk_level_agreement,
-                rc_r.risk_level_agreement_cases,
-                rc_r.cases_with_expected_risk_level,
-            ),
-        ),
-        (
-            "evidence_gain_rate",
-            (mg_s.evidence_gain_rate, mg_s.calls_with_new_evidence, mg_s.ok_tool_calls),
-            (mg_r.evidence_gain_rate, mg_r.calls_with_new_evidence, mg_r.ok_tool_calls),
-        ),
-        (
-            "decision_changed_rate",
-            (mg_s.decision_changed_rate, mg_s.calls_decision_changed, mg_s.ok_tool_calls),
-            (mg_r.decision_changed_rate, mg_r.calls_decision_changed, mg_r.ok_tool_calls),
-        ),
-    ]
-    add("-" * 100)
-    add("Agent 级指标（两臂同口径 · 只读统计；空真值案不进分母，分子/分母行内给出）:")
-    add(f"  {'指标':<32}{'scripted':<26}{'real':<26}")
-    for name, s_triple, r_triple in rows:
-        add(f"  {name:<32}{_agent_cell(s_triple):<26}{_agent_cell(r_triple):<26}")
-    add(
-        f"  {'unmapped 期望标签':<32}"
-        f"实例 {es_s.unmapped_label_instances} / 剔除 {es_s.cases_excluded_unmapped_only} 案"
-        f"    |    实例 {es_r.unmapped_label_instances} / 剔除 {es_r.cases_excluded_unmapped_only} 案"
-    )
+    exp = expected_index(cases)
+    rule = RuleBaseline()
+    real = AgentScheme(llm=real_backend)
 
-
-def _overrides_cell(row: dict) -> str:
-    """逐案 real overrides 缩写（R3=R3_BUDGET_EXHAUSTED / R5=R5_DEGRADED_OR_FAILED_STEP）。"""
-    ovs = row.get("real_overrides") or []
-    if not ovs:
-        return "-"
-    short = {
-        R3_BUDGET_EXHAUSTED: "R3",
-        R5_DEGRADED_OR_FAILED_STEP: "R5",
-    }
-    return ",".join(short.get(c, c) for c in ovs)
-
-
-def _overrides_line(ov: dict, total: int) -> str:
-    """一行 overrides 汇总：带码案数 / R5 降级 / R3 截胡（含先撞维度）/ 混合 / 其它码。"""
-    parts = [
-        f"带 overrides {ov['cases_with_any']}/{total} 案",
-        f"R5 降级 {ov[R5_DEGRADED_OR_FAILED_STEP]} 案",
-        f"R3 预算截胡 {ov[R3_BUDGET_EXHAUSTED]} 案",
-        f"R3+R5 混合 {ov['r3_r5_mixed']} 案",
-    ]
-    if ov.get("budget_hit_dims"):
-        parts.append("R3 先撞限 " + ",".join(f"{k}={v}" for k, v in ov["budget_hit_dims"].items()))
-    if ov.get("other_codes"):
-        parts.append("其它码 " + ",".join(f"{k}={v}" for k, v in ov["other_codes"].items()))
-    return " ｜ ".join(parts)
-
-
-def render_report(payload: dict, extra: dict, *, out_path: str | None = None) -> str:
-    """渲染整份 Console Report（纯文本；real 侧非确定性如实标注）。"""
-    out: list[str] = []
-    add = out.append
-
-    add("=" * 100)
-    add("商品审核 Agent · Evaluation Phase 3 real（真实 LLM）vs scripted（确定性桩）对比")
-    add("=" * 100)
-    stats = extra["scene_stats"]
-    by_scene = stats.get("by_scene", {})
-    scene_n = {s: int(by_scene.get(s, {}).get("total", 0)) for s in SCENES}
-    dist = " | ".join(f"{s}={scene_n[s]}" for s in SCENES)
-    add(f"数据集: {payload['data']}（{payload['count']} 条）| world={payload['world']} | real 模型: {payload['model']}")
-    add(f"scene 分布: {dist}")
-
-    add("-" * 100)
-    add("结论边界 / 口径注记:")
-    add("  · scripted = EvalScriptedLLMBackend（确定性审查员桩：同 case 同 ctx → 同输出，可重放）")
-    add(f"  · real = {payload['model']}（真实 LLM —— 非确定性、不可重放、需 API key 与费用；")
-    add("    本报告 real 数字 = 单次运行抽样，不代表模型固定水平；回归基线恒以 scripted 为准）")
-    add(f"  · 工具数据源: {_world_label(payload['world'])}（两臂同一世界 → LLM 是唯一变量）")
-    conc = payload.get("real_concurrency") or 1
-    add(
-        "  · real 臂调度: "
-        + ("并发 " + str(conc) + "（只改调度；用例间天然隔离 —— 每案独立建图，LLM 后端随图"
-           "显式注入，不跨案共享）"
-           if conc > 1 else "逐案串行")
-    )
-    add("  · 一致性口径: scripted.decision == real.decision 判为一致（risk/evidence 差异不参与）")
-    add("  · 指标口径（DecisionEvaluator）: Accuracy=(TP+TN)/真值总数，预测 HUMAN_REVIEW 计为未命中")
-    add("    真值(判错，入分母不入分子)；Precision/Recall/FPR/FNR 只在自动判出(pred∈{PASS,REJECT})子集计算")
-    add("  · REJECT 为正类: Recall=TP/(TP+FN) 违规召回 / FPR=FP/(FP+TN) 误杀红线 / FNR=FN/(TP+FN) 漏放")
-    add("  · HRR=转人工率 / auto=自动化率；EvalRecord 不含墙钟 latency（real 墙钟仅进程内进度打印）")
-    add(
-        "  · cost.tokens 口径（P2-16）= usage.total_tokens：input+output 合计、含 provider"
-        " 缓存命中 token；schema 校验失败的尝试也全额累计。tokens 为观测字段，**不参与**"
-        " R3 预算截胡判定（R3 只看 llm_calls / tool_calls）；EvalRecord.detail.budget_hit_dim"
-        " 记录哪一维先撞限"
-    )
-    if extra["truth_human"]:
-        add(
-            f"  · 真值含 HUMAN_REVIEW 的案 {extra['truth_human']} 条（v2 SHOULD_ABSTAIN）："
-            "DecisionEvaluator 二值口径自动跳过，不计入上表指标 —— 如实呈现，不硬算"
+    print("-" * 100)
+    print("① rule（RuleBaseline · pra.screening 确定性初筛 · 零 LLM 零工具）")
+    rule_records = await _run_scheme_records(rule, cases)
+    print(f"  → {len(rule_records)} 案完成")
+    print("-" * 100)
+    real_mode = f"并发 {real_concurrency}" if real_concurrency > 1 else "逐案串行"
+    print(f"② real（{model_label} · 真实 LLM · 非确定性 · {real_mode}）")
+    real_latencies_ms: list[float] = []
+    if real_concurrency > 1:
+        real_records = await _run_scheme_records_concurrent(
+            real,
+            cases,
+            concurrency=real_concurrency,
+            progress_prefix="real",
+            latencies_ms=real_latencies_ms,
         )
-
-    add("-" * 100)
-    total, agree = payload["count"], payload["agree"]
-    diff_n = total - agree
-    share = f"{agree / total:.1%}" if total else "-"
-    add(f"real vs scripted 决策一致性: 一致 {agree}/{total}（{share}）· 差异 {diff_n} 条")
-    scene_parts = []
-    for s in SCENES:
-        c = extra["by_scene"].get(s)
-        if c and c["total"]:
-            scene_parts.append(f"{s}={c['agree']}/{c['total']}")
-    add("按 scene 一致数: " + (" | ".join(scene_parts) if scene_parts else "-"))
-
-    add("-" * 100)
-    if diff_n == 0:
-        add("差异 case 列表: （无 —— 两臂逐案裁决完全一致）")
     else:
-        add(f"差异 case 列表（共 {diff_n} 条 · 各行含 real risk 摘要 + overrides）:")
-        for row in payload["disagree"]:
-            ovr_s = _overrides_cell(row)
-            ovr_note = f" | real ovr: {ovr_s}" if ovr_s != "-" else ""
-            add(
-                f"  · {row['eval_case_id']} [{row['scene']}] truth={row['truth']} | "
-                f"scripted {row['scripted_decision']} → real {row['real_decision']} "
-                f"（{_risk_cell(row)}）{ovr_note}"
-            )
-
-    add("-" * 100)
-    add("逐案对比明细  case         scene         truth      scripted   real         一致  real risk/type/conf      real ovr")
-    for row in extra["rows"]:
-        mark = "是" if row["agree"] else "否"
-        add(
-            f"  {row['eval_case_id']:<11} [{row['scene']:<11}] truth={row['truth']:<6} "
-            f"{row['scripted_decision']:<9} {row['real_decision']:<12} {mark:<4} "
-            f"{_risk_cell(row):<34} {_overrides_cell(row)}"
+        real_records = await _run_scheme_records(
+            real, cases, progress_prefix="real", latencies_ms=real_latencies_ms
         )
 
-    add("-" * 100)
-    add("总体指标   acc   prec  recall  fpr   fnr   hrr   auto    TP/FP/TN/FN   成本均值(llm/tool/tok)")
-    add(_metrics_line("scripted", extra["scripted_metrics"], extra["scripted_cost"]))
-    add(_metrics_line("real", extra["real_metrics"], extra["real_cost"]))
-    if extra["truth_human"]:
-        add(
-            f"（上表两行均只覆盖二值真值案 {extra['scripted_metrics'].total} 条；"
-            f"HUMAN_REVIEW 真值 {extra['truth_human']} 条被跳过）"
-        )
+    rows, disagree, by_scene = _compare_rows(cases, rule_records, real_records, exp)
+    rule_overrides = _overrides_summary(rule_records)
+    real_overrides = _overrides_summary(real_records)
 
-    add("-" * 100)
-    add("工程指标（分布：均值/P50/P95；scripted token 恒 0 为真实值，延迟为 real 进程内墙钟、不落 record）:")
-    add("  scheme      llm_calls           tool_calls          tokens              latency_ms")
-    for label, key in (("scripted", "scripted_engineering"), ("real", "real_engineering")):
-        e = extra[key]
-
-        def _triple(d) -> str:
-            return f"{_fmt0(d.mean)}/{_fmt0(d.p50)}/{_fmt0(d.p95)}"
-
-        lat = "-" if e.latency_ms is None else f"{_fmt0(e.latency_ms.mean)}/{_fmt0(e.latency_ms.p50)}/{_fmt0(e.latency_ms.p95)}"
-        add(
-            "  ".join(
-                [
-                    f"  {label:<12}",
-                    f"{_triple(e.llm_calls):<20}",
-                    f"{_triple(e.tool_calls):<20}",
-                    f"{_triple(e.tokens):<20}",
-                    lat,
-                ]
-            )
-        )
-
-    add("-" * 100)
-    _add_agent_metrics_section(add, extra)
-
-    add("-" * 100)
-    add("overrides 汇总（审计：R5=LLM 步降级兜底转 HUMAN、R3=预算截胡 —— P1-6c）:")
-    total_cases = payload["count"]
-    add(f"  · real:     {_overrides_line(extra['real_overrides'], total_cases)}")
-    add(f"  · scripted: {_overrides_line(extra['scripted_overrides'], total_cases)}")
-    real_ov = extra["real_overrides"]
-    if real_ov[R5_DEGRADED_OR_FAILED_STEP]:
-        add(
-            f"    ⚠ real 有 {real_ov[R5_DEGRADED_OR_FAILED_STEP]} 案触发 R5 降级 —— 这些案"
-            "的 real 裁决来自降级兜底（HUMAN），**不是模型行为**；解读全卷差异/指标须扣除"
-        )
-    if total_cases and real_ov[R5_DEGRADED_OR_FAILED_STEP] == total_cases:
-        add(
-            "    ⚠⚠ real 全部案均 R5 降级：本卷 real 结果 = 100% 链路降级（典型原因：无"
-            "key/网关/base-url 配置问题或逐节点连续失败）—— 请勿把本卷 HUMAN 当模型结论"
-        )
-
-    add("-" * 100)
-    out_note = f" | JSON 已写入: {out_path}" if out_path else " | 未写文件（--out 可落盘）"
-    add(f"[OK] 对比完成: {total} 条 · 一致 {agree} · 差异 {diff_n}{out_note}")
-    add(f"[NOTE] {payload['note']} —— real 侧输出不可用于逐字节回归比对")
-    add("=" * 100)
-    return "\n".join(out)
-
-
-def print_report(payload: dict, extra: dict, *, out_path: str | None = None) -> None:
-    """打印 Console Report 到 stdout。"""
-    print(render_report(payload, extra, out_path=out_path))
+    payload = {
+        "data": data_path,
+        "model": model_label,
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "count": len(cases),
+        "real_concurrency": real_concurrency,
+        "agree": len(rows) - len(disagree),
+        "disagree": disagree,
+        # 逐案 rule 决策（Error Analysis 的决策迁移基线；只留 id + 三分类裁决）
+        "rule_decisions": [
+            {"eval_case_id": r.eval_case_id, "decision": r.decision} for r in rule_records
+        ],
+        "real_records": [r.model_dump() for r in real_records],
+        # Agent 级指标（两臂）：JSON 侧与 Console 报告同数，供事后审计/复算
+        "agent_metrics": {
+            "rule": AgentMetricsBundle.evaluate(rule_records, exp).model_dump(),
+            "real": AgentMetricsBundle.evaluate(real_records, exp).model_dump(),
+        },
+        # overrides 汇总：R5 降级 / R3 截胡 / 混合案 —— 「整卷全 HUMAN = 链路降级」
+        # 在 JSON 里也一眼可见，不只在 Console 报告。
+        "overrides_summary": {"rule": rule_overrides, "real": real_overrides},
+        "note": REAL_NOTE,
+    }
+    extra = {
+        "rows": rows,
+        "by_scene": by_scene,
+        "rule_metrics": DecisionEvaluator.evaluate(rule_records, exp),
+        "real_metrics": DecisionEvaluator.evaluate(real_records, exp),
+        "rule_engineering": EngineeringEvaluator.evaluate(rule_records),
+        # 延迟只在 real 臂有（进程内墙钟，不落 record —— 见 _run_scheme_records docstring）
+        "real_engineering": EngineeringEvaluator.evaluate(
+            real_records, latency_ms=real_latencies_ms
+        ),
+        "rule_agent_metrics": AgentMetricsBundle.evaluate(rule_records, exp),
+        "real_agent_metrics": AgentMetricsBundle.evaluate(real_records, exp),
+        "rule_overrides": rule_overrides,
+        "real_overrides": real_overrides,
+        "scene_stats": scene_stats(cases),
+    }
+    return payload, extra
 
 
 # ---------------------------------------------------------------------------
@@ -764,8 +386,8 @@ def print_report(payload: dict, extra: dict, *, out_path: str | None = None) -> 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluation Phase 3 real：agent real（真实 LLM）vs scripted（确定性桩）"
-            "对比跑分（同一数据/同一工具世界；real 非确定性且需 API key，建议先 --limit）"
+            "Evaluation 正式跑分：rule（确定性初筛）vs real（真实 LLM），同一数据同一 Eval World"
+            "（real 非确定性且需 API key，建议先 --limit 冒烟）"
         )
     )
     parser.add_argument(
@@ -796,16 +418,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ids",
         default=None,
         help=(
-            "只跑指定 eval_case_id（逗号分隔，如 \"EC_0007,EC_0101\"；定向 real smoke 用；"
+            '只跑指定 eval_case_id（逗号分隔，如 "EC_0007,EC_0101"；定向 real smoke 用；'
             "默认 None = 不按 id 过滤）。加载后按 eval_case_id 过滤，可与 --limit 叠加"
             "（先按 --ids 过滤、再按 --limit 截断）；id 不在数据集中会报错提示"
         ),
-    )
-    parser.add_argument(
-        "--world",
-        default="eval",
-        choices=list(WORLDS),
-        help="Agent 工具数据源世界（默认 eval；rag = RAG 世界真实 KB 检索，hybrid 固定）",
     )
     parser.add_argument(
         "--out",
@@ -817,12 +433,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=1,
         help=(
-            "real 臂并发度（默认 1 = 逐案串行，行为与既有跑法一致）。>1 时并发跑 real 臂："
-            "用例之间天然隔离（每案独立 build+compile 图、thread_id 唯一、工具与 LLM 后端每案"
-            "新建并显式注入），只改调度、不改判定/指标/数据；scripted 对照臂恒串行"
+            "real 臂并发度（默认 1 = 逐案串行）。>1 时并发跑 real 臂：用例之间天然隔离"
+            "（每案独立 build+compile 图、thread_id 唯一、工具与 LLM 后端每案新建并显式注入），"
+            "只改调度、不改判定/指标/数据；rule 臂恒串行"
         ),
     )
     return parser.parse_args(argv)
+
+
+def _write_payload(path: Path, payload: dict) -> None:
+    """把结果 JSON 写入 ``path``（父目录须已存在，缺失即报错）。"""
+    if not path.parent.exists():
+        raise ValueError(f"--out 父目录不存在: {path.parent}（请先创建目录）")
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
 
 
 async def _main(argv: list[str] | None = None) -> int:
@@ -846,9 +471,8 @@ async def _main(argv: list[str] | None = None) -> int:
 
     api_key = _resolve_api_key(args.api_key)
     base_url = args.base_url or os.environ.get(ENV_BASE_URL, "") or None
-    # real 后端（LiteLLMBackend）强制要求 api_key：仅给 --base-url 的本地网关模式不支持，
-    # 缺 key 预检即报错（否则会整卷 R5 降级 HUMAN、exit 0，静默产出假 real 结果）。
-    # base_url 仍可指向自定义网关端点，但必须配真实 key。
+    # real 后端（LiteLLMBackend）强制要求 api_key：缺 key 预检即报错（否则会整卷 R5 降级
+    # HUMAN、exit 0，静默产出假 real 结果）。base_url 仍可指向自定义网关端点，但必须配真实 key。
     if api_key is None:
         raise ValueError(
             f"未检测到 API key（--api-key 或环境变量 {ENV_API_KEY} / 仓库根 .env）。"
@@ -856,21 +480,17 @@ async def _main(argv: list[str] | None = None) -> int:
             "（LiteLLMBackend 强制 api_key）——请配置真实 key 后重跑"
         )
 
-    ctx = _build_ctx(args.world)
-    real_backend = _make_real_backend(
-        model=args.model, api_key=api_key, base_url=base_url, world=args.world
-    )
+    real_backend = _make_real_backend(model=args.model, api_key=api_key, base_url=base_url)
     # 头部：跑分前先亮明成本与可重放边界
     stats = scene_stats(cases)
     by_scene = stats.get("by_scene", {})
     scene_n = {s: int(by_scene.get(s, {}).get("total", 0)) for s in SCENES}
     print("=" * 100)
-    print("商品审核 Agent · Evaluation Phase 3 real 跑分（真实 LLM vs scripted 对照）")
+    print("商品审核 Agent · Evaluation 正式跑分（rule 确定性初筛 vs real 真实 LLM）")
     print("=" * 100)
-    print(f"数据集: {data_path}（{len(cases)} 条）| world={args.world} | real 模型: {args.model}")
+    print(f"数据集: {data_path}（{len(cases)} 条）| 工具世界: {EVAL_WORLD_LABEL} | real 模型: {args.model}")
     print("scene 分布: " + " | ".join(f"{s}={scene_n[s]}" for s in SCENES))
-    key_state = "已配置（--api-key / 环境变量 / .env）"
-    print(f"API key: {key_state}（值不入日志/报告/JSON）")
+    print("API key: 已配置（--api-key / 环境变量 / .env）（值不入日志/报告/JSON）")
     print(
         f"[NOTE] real 侧真实调用 LLM（有费用、非确定性、不可重放）；"
         f"建议先 --limit 10 冒烟 —— 本次跑 {len(cases)} 条"
@@ -882,10 +502,8 @@ async def _main(argv: list[str] | None = None) -> int:
 
     payload, extra = await run_comparison(
         cases=cases,
-        ctx=ctx,
         real_backend=real_backend,
         model_label=args.model,
-        world=args.world,
         data_path=str(data_path),
         real_concurrency=args.concurrency,
     )
@@ -893,13 +511,7 @@ async def _main(argv: list[str] | None = None) -> int:
     out_path: str | None = None
     if args.out:
         out_path = str(args.out)
-        # 目录需已存在；父目录缺失时明确报错
-        out_file = Path(out_path)
-        if not out_file.parent.exists():
-            raise ValueError(f"--out 父目录不存在: {out_file.parent}（请先创建目录）")
-        with out_file.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
+        _write_payload(Path(out_path), payload)
     print()
     print_report(payload, extra, out_path=out_path)
     return 0
@@ -909,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(_main(argv))
     except Exception as exc:  # 任何失败 → 非零退出（CI 可捕获）
-        print(f"[FAIL] real 跑分失败: {exc!r}", file=sys.stderr)
+        print(f"[FAIL] 跑分失败: {exc!r}", file=sys.stderr)
         raise
 
 

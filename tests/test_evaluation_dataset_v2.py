@@ -1,9 +1,11 @@
-"""v2 数据集（320 案）完整性：只锁数据 / schema / 生成器契约，不跑评估器。
+"""v2 数据集（320 案）数据契约：只锁数据 / schema / 生成器契约，不跑评估器。
 
-1. 规模 ≥300、五类 scene 分布容差 ±5pp、manifest 与实际 JSONL 分布一致；
-2. ``abstain_label`` 与 ``decision`` 100% 一致；AUTO 为主、SHOULD_ABSTAIN 集中在
-   boundary/evasion/multi-signal；
-3. 每条 input 经 ProductReviewCase 强解析、schema_version=2、lineage 完整、REJECT 案有可引用政策依据；
+1. 规模 ≥300、五类 scene 分布容差 ±5pp；manifest 只校验最小契约
+   （``schema_version`` / ``total`` / ``file``）；
+2. ``abstain_label`` 与 ``decision`` 100% 一致；AUTO 为主、SHOULD_ABSTAIN 约占一成且集中在
+   boundary/evasion/multi-signal（按 ``expected.abstain_label`` 就地统计）；
+3. 每条 input 经 ProductReviewCase 强解析、``schema_version=2``、
+   ``lineage.seed_case_id`` 为合法种子、REJECT 案 ``risk_level=HIGH``、图片 url 中性无类别语义；
 4. 同 seed 生成两遍逐字节一致；
 5. 老格式 JSONL（无 abstain_label / 无 lineage）照常读入且 None 等价 AUTO_DECIDABLE。
 """
@@ -15,7 +17,7 @@ import json
 from pathlib import Path
 
 from pra.domain.models import ProductReviewCase
-from pra.evaluation.dataset.loader import abstain_stats, load_dataset, scene_stats
+from pra.evaluation.dataset.loader import load_dataset, scene_stats
 from pra.evaluation.dataset.schema import EvalCase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +28,8 @@ GEN_SCRIPT = REPO_ROOT / "scripts" / "eval_dataset_gen.py"
 _SCENE_PCT = {"normal": 0.20, "violation": 0.20, "boundary": 0.30,
               "multi-signal": 0.20, "evasion": 0.10}
 _ABSTAIN_FOCUS_SCENES = {"boundary", "evasion", "multi-signal"}
+# abstention 三桶：两个标签 + 未标注（v1 老数据 / v2 缺字段）
+_ABSTAIN_BUCKETS = ("AUTO_DECIDABLE", "SHOULD_ABSTAIN", "UNLABELED")
 
 
 def _load_gen_module():
@@ -36,7 +40,27 @@ def _load_gen_module():
     return mod
 
 
-# --- 1) 规模 + 五类分布 + manifest 一致性
+def _abstain_buckets(cases: list[EvalCase]) -> dict:
+    """就地按 ``expected.abstain_label`` 统计三桶计数与各 scene 计数。
+
+    ``abstain_label is None`` 记入 ``UNLABELED``（v1 老数据，语义等价 AUTO_DECIDABLE）。
+
+    :return: ``{"counts": {桶: n}, "by_scene": {scene: {桶: n}}}``
+    """
+    counts: dict[str, int] = dict.fromkeys(_ABSTAIN_BUCKETS, 0)
+    by_scene: dict[str, dict[str, int]] = {
+        s: dict.fromkeys(_ABSTAIN_BUCKETS, 0) for s in _SCENE_PCT
+    }
+    for c in cases:
+        label = c.expected.abstain_label
+        bucket = label if label is not None else "UNLABELED"
+        counts[bucket] += 1
+        if c.scene in by_scene:
+            by_scene[c.scene][bucket] += 1
+    return {"counts": counts, "by_scene": by_scene}
+
+
+# --- 1) 规模 + 五类分布 + manifest 最小契约
 
 
 def test_v2_dataset_scale_and_scene_distribution() -> None:
@@ -54,9 +78,7 @@ def test_v2_dataset_scale_and_scene_distribution() -> None:
     manifest = json.loads(V2_MANIFEST.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 2
     assert manifest["total"] == total
-    assert manifest["scene_distribution"] == {
-        s: ss["by_scene"][s]["total"] for s in _SCENE_PCT
-    }
+    assert Path(manifest["file"]).name == "cases_v2.jsonl"
 
 
 # --- 2) 真值 × abstention 一致性 + 分布口径
@@ -70,21 +92,27 @@ def test_v2_truth_abstain_consistency() -> None:
             assert exp.abstain_label == "SHOULD_ABSTAIN", c.eval_case_id
         else:
             assert exp.abstain_label == "AUTO_DECIDABLE", c.eval_case_id
-    aa = abstain_stats(cases)
-    assert aa["LEGACY_UNLABELED"] == 0, "v2 正式集不允许未标注 abstain_label 的行"
+
+    total = len(cases)
+    buckets = _abstain_buckets(cases)
+    assert buckets["counts"]["UNLABELED"] == 0, "v2 正式集不允许未标注 abstain_label 的行"
     # AUTO 为主、SHOULD_ABSTAIN 占一成上下（30-50 条）
-    assert 0.80 <= aa["auto_share"] <= 0.92
-    assert 0.08 <= aa["abstain_share"] <= 0.18
-    assert 30 <= aa["SHOULD_ABSTAIN"] <= 50
+    auto_share = buckets["counts"]["AUTO_DECIDABLE"] / total
+    abstain_share = buckets["counts"]["SHOULD_ABSTAIN"] / total
+    assert 0.80 <= auto_share <= 0.92
+    assert 0.08 <= abstain_share <= 0.18
+    assert 30 <= buckets["counts"]["SHOULD_ABSTAIN"] <= 50
     # SHOULD_ABSTAIN 全部集中在 boundary/evasion/multi-signal
-    focus = sum(aa["by_scene"][s]["SHOULD_ABSTAIN"] for s in _ABSTAIN_FOCUS_SCENES)
-    assert focus == aa["SHOULD_ABSTAIN"], "SHOULD_ABSTAIN 应集中在 boundary/evasion/multi-signal"
-    # 每类 SHOULD_ABSTAIN 出现的 scene 都有 ≥1 条（abstention 指标可 scene 分层）
+    focus = sum(buckets["by_scene"][s]["SHOULD_ABSTAIN"] for s in _ABSTAIN_FOCUS_SCENES)
+    assert focus == buckets["counts"]["SHOULD_ABSTAIN"], (
+        "SHOULD_ABSTAIN 应集中在 boundary/evasion/multi-signal"
+    )
+    # 每类 SHOULD_ABSTAIN 出现的 scene 都有 ≥1 条（两套分母在各 scene 都可分层）
     for s in _ABSTAIN_FOCUS_SCENES:
-        assert aa["by_scene"][s]["SHOULD_ABSTAIN"] >= 1, f"scene={s} 缺少 SHOULD_ABSTAIN 案"
+        assert buckets["by_scene"][s]["SHOULD_ABSTAIN"] >= 1, f"scene={s} 缺少 SHOULD_ABSTAIN 案"
 
 
-# --- 3) 行结构：ProductReviewCase 可解析 / schema_version / id 隔离 / lineage / 政策依据
+# --- 3) 行结构：ProductReviewCase 可解析 / schema_version / id 隔离 / lineage / 案例标签
 
 
 def test_v2_rows_are_valid_product_review_cases() -> None:
@@ -94,15 +122,12 @@ def test_v2_rows_are_valid_product_review_cases() -> None:
         parsed = ProductReviewCase.model_validate(c.input.model_dump())
         assert parsed.product.title and parsed.merchant_id
         # lineage seed 为语义种子（SEED_V2_*）或模板案标识（EC_*）
-        assert c.lineage is not None and c.lineage.seed_case_id and c.lineage.mutation
+        assert c.lineage is not None and c.lineage.seed_case_id
         seed = c.lineage.seed_case_id
         assert seed.startswith(("EC_", "SEED_V2_")), (
             f"{c.eval_case_id} lineage.seed_case_id 非法: {seed}"
         )
         if c.expected.decision == "REJECT":
-            assert c.expected.applicable_policy, (
-                f"REJECT 案 {c.eval_case_id} 缺可引用政策依据（REJECT Gate 前置）"
-            )
             assert c.expected.risk_level == "HIGH"
         for img in c.input.product.images:
             assert img.url.startswith("https://cdn.example.com/")
@@ -120,27 +145,13 @@ def test_eval_image_urls_carry_no_class_semantics() -> None:
         for img in c.input.product.images:
             name = img.url.rsplit("/", 1)[-1].lower()
             segment = img.url.rsplit("/", 2)[-2].lower()
-            assert segment.startswith("asset-") or segment.startswith("p_"), (
+            assert segment.startswith(("asset-", "p_")), (
                 f"{c.eval_case_id} 的图片 url 资源段非中性: {img.url}"
             )
             for token in leaked:
                 assert token not in segment and token not in name, (
                     f"{c.eval_case_id} 的图片 url 含类别语义 {token!r}: {img.url}"
                 )
-
-
-def test_v2_families_cover_all_intended_shapes() -> None:
-    cases = load_dataset(V2_PATH)
-    fams = {c.annotation["family"] for c in cases if c.annotation}
-    expected_fams = {
-        "clean_own", "text_evasion", "ocr_brand_dirty", "blackbrand_field",
-        "brand_missing_verify", "cat_missing_verify", "weak_sim_own", "neutral_clean",
-        "styleword_own", "adapter_brandword", "brand_missing_unverifiable",
-        "weak_sim_noinfo", "ssim_dirty", "wsim_dirty", "own_adversarial",
-        "logo_dirty", "pair_hide", "dirty_brand_missing_cleanimg",
-        "ssim_cleanmerchant_bm", "multi_weak_abstain",
-    }
-    assert expected_fams <= fams, f"缺 family: {sorted(expected_fams - fams)}"
 
 
 # --- 4) 生成器确定性（同 seed 两遍 → 逐字节一致）
@@ -190,7 +201,8 @@ def test_legacy_rows_without_abstain_label(tmp_path: Path) -> None:
     assert c.expected.abstain_label is None, "老数据缺 abstain_label 应读成 None"
     assert c.expected.decision in {"PASS", "REJECT"}
     assert c.lineage is None, "老数据无 lineage"
-    aa = abstain_stats(cases)
-    assert aa["LEGACY_UNLABELED"] == 1  # None 等价 AUTO_DECIDABLE
-    assert aa["auto_decidable_equivalent"] == 1
+    buckets = _abstain_buckets(cases)
+    assert buckets["counts"]["UNLABELED"] == 1  # None 等价 AUTO_DECIDABLE
+    auto_equivalent = buckets["counts"]["AUTO_DECIDABLE"] + buckets["counts"]["UNLABELED"]
+    assert auto_equivalent == 1
     EvalCase.model_validate(c.model_dump())

@@ -13,6 +13,8 @@ loader 校验 = 线上 DTO 校验）。
 
 ``schema_version`` 由数据文件自声明：v1 = 1，v2 = 2。
 
+``lineage.seed_case_id`` 是变异溯源锚点（RAG 语料防泄漏守卫按该 JSON 路径读取它）。
+
 风险类型 / 证据标签是开放性字符串标签，不做枚举约束；映射到运行时 RiskType
 枚举留给未实现的 EvidenceEvaluator。
 """
@@ -28,9 +30,6 @@ from pra.domain.models import ProductReviewCase
 # 五类 scene
 SceneName = Literal["normal", "violation", "boundary", "multi-signal", "evasion"]
 
-# 数据来源三分类
-SourceType = Literal["SYNTHETIC", "REAL_DESENSITIZED", "VARIANT"]
-
 # 真值三分类：v1 只用前两者；HUMAN_REVIEW 只出现在 SHOULD_ABSTAIN 案
 # （decision 与 abstain_label 的一致性由 EvalExpected 校验器保证）。
 TruthDecision = Literal["PASS", "REJECT", "HUMAN_REVIEW"]
@@ -40,17 +39,14 @@ AbstainLabel = Literal["AUTO_DECIDABLE", "SHOULD_ABSTAIN"]
 
 
 class EvalLineage(BaseModel):
-    """程序化变异的溯源（变异生成数据必备）。
+    """程序化变异的溯源锚点。
 
-    ``seed_case_id`` 指向模板/种子案（v1 老案 EC_xxxx 或本文件手工种子）；
-    ``mutation`` 为人类可读的变异摘要（如 ``similarity:0.72→0.91; title:加规避词``），
-    供评审追溯"这条数据从哪来、改了哪些维度"。
+    ``seed_case_id`` 指向模板/种子案（v1 老案 EC_xxxx 或 v2 语义种子 SEED_V2_*）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     seed_case_id: str = Field(description="种子/模板案的 eval_case_id（溯源锚点）")
-    mutation: str = Field(description="变异摘要（确定性描述本次字段变异与真值调整口径）")
 
 
 class EvalExpected(BaseModel):
@@ -58,8 +54,7 @@ class EvalExpected(BaseModel):
 
     v1 只有二值真值（无 abstain_label → None 等价 AUTO_DECIDABLE）；v2 引入三值
     真值与 abstention 标签（一致性约束见模块 docstring）。risk_level / risk_type /
-    evidence / expected_tools / applicable_policy 是标签完整性字段 —— 供人工评审与
-    指标层使用。
+    evidence / expected_tools 是标签完整性字段 —— 供人工评审与指标层使用。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -84,7 +79,6 @@ class EvalExpected(BaseModel):
         default_factory=list,
         description="Agent 应调用的工具集合（Phase 2 Tool Selection 真值）；空列表 = 未标注工具期望的干净案，不计入 Tool Selection 分母 —— 不得解读为「应调用 0 个工具」",
     )
-    applicable_policy: list[str] = Field(default_factory=list, description="REJECT 案的政策依据（条款 ID 列表）")
 
     @model_validator(mode="after")
     def _abstain_consistency(self) -> EvalExpected:
@@ -127,18 +121,12 @@ class EvalCase(BaseModel):
     eval_case_id: str = Field(description="评测案唯一 ID，如 EC_0001（与业务 case_id 解耦）")
     schema_version: int = Field(default=1, description="评测 schema 版本（v1 数据 = 1，Phase 2 v2 = 2）")
     scene: SceneName = Field(description="五类场景标签之一")
-    source_type: SourceType = Field(default="SYNTHETIC", description="数据来源（SYNTHETIC/REAL_DESENSITIZED/VARIANT）")
     lineage: EvalLineage | None = Field(
         default=None,
         description="程序化变异溯源（v1 手工数据无此字段 → None）",
     )
-    hard_case: bool = Field(default=False, description="是否入选 Hard Case")
     input: ProductReviewCase = Field(description="商品事实快照（线上 DTO 同型）")
     expected: EvalExpected = Field(description="标注期望（真值 + abstention 标签 + 标签字段）")
-    annotation: dict | None = Field(
-        default=None,
-        description="人工标注记录（{labelers, agreed, notes}；notes 记录本案设计意图/三方案预期）",
-    )
 
 
 __all__ = [
@@ -147,6 +135,5 @@ __all__ = [
     "EvalExpected",
     "EvalLineage",
     "SceneName",
-    "SourceType",
     "TruthDecision",
 ]

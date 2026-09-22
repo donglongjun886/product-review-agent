@@ -4,8 +4,7 @@
 - corpus loader / schema 校验：Policy/Case KB 规模与唯一性、≥2 条 EXPIRED、meta 隔离声明；
 - **隔离红线**：Case KB 的 case_id 与 eval_data v2 全部 case 标识（含 InMemory 种子先例）无交集，
   防评测作弊；
-- ``build_tools()`` 默认世界仍是 6 个 InMemory 工具；
-- 默认评测路径（``tool_world="eval"``）全量 agent 决策序列 == 入库基线（回归不破）。
+- ``build_tools()`` 默认世界仍是 6 个 InMemory 工具。
 
 **chroma 真实检索的离线验收用例已整体移除**：它们靠一个测试自持的假编码器（词面 sha256 特征）
 离线跑，验的是管道而非检索质量；假编码器及其用例一并删除后，chroma 检索只剩
@@ -22,17 +21,13 @@ from pathlib import Path
 
 from helpers import tool_by_name
 
-from pra.evaluation.dataset.loader import load_dataset
-from pra.evaluation.harness.agent_scheme import EVAL_PRECEDENTS, AgentScheme
-from pra.evaluation.harness.base import EvalContext
-from pra.evaluation.regression import compute_current_snapshot
+from pra.evaluation.harness.agent_scheme import EVAL_PRECEDENTS
 from pra.rag.corpus import load_cases, load_policies
 from pra.tools import build_tools
 from pra.tools.policy_search.tool import InMemoryPolicyIndex
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_V2 = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
-BASELINE_FILE = REPO_ROOT / "eval_data" / "v2" / "regression_baseline.json"
 
 
 def _eval_case_ids() -> set[str]:
@@ -102,22 +97,3 @@ def test_build_tools_default_world_is_inmemory() -> None:
     # 默认世界的两个检索工具注入 InMemory 索引（确定性可重放的种子）
     assert type(tool_by_name(tools, "CaseSearchTool")._index).__name__ == "InMemoryCaseIndex"
     assert isinstance(tool_by_name(tools, "PolicySearchTool")._index, InMemoryPolicyIndex)
-
-
-async def test_default_eval_path_regression_intact() -> None:
-    # (a) 默认路径（tool_world="eval"）回归：全量 agent 决策序列 == 入库基线
-    baseline = json.loads(BASELINE_FILE.read_text(encoding="utf-8"))
-    assert baseline.get("format_version") == 1
-    snap = await compute_current_snapshot(EVAL_V2, schemes=("agent",))
-    assert snap["decisions"]["agent"] == baseline["decisions"]["agent"], (
-        "默认 InMemory 评测路径回归失败：agent 决策序列与基线不一致"
-    )
-
-    # (b) 显式 EvalContext(tool_world="eval") 与默认 ctx 等价（回归不破坏）
-    scheme = AgentScheme()
-    smoke = [c for c in load_dataset(EVAL_V2) if c.expected.decision == "REJECT"][:4]
-    ctx_default = EvalContext()
-    assert ctx_default.tool_world == "eval"
-    default_recs = [await scheme.run(c, ctx_default) for c in smoke]
-    eval_recs = [await scheme.run(c, EvalContext(tool_world="eval")) for c in smoke]
-    assert [r.decision for r in default_recs] == [r.decision for r in eval_recs]

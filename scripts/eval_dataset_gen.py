@@ -3,41 +3,41 @@
 以旧手工种子案（EC_*，35 条，已随 eval_data/v1 退役） + 少量新增语义种子为模板做确定性字段变异（固定随机种子），
 产出 ``eval_data/v2/cases_v2.jsonl`` + ``manifest.json``；命令
 ``uv run python scripts/eval_dataset_gen.py --out eval_data/v2/ --count 320 --seed 42``。
-不联网、不调 LLM；同 (count, seed) → 产物逐字节一致（可重放，进 Regression）。
+不联网、不调 LLM；同 (count, seed) → 产物逐字节一致（可重放，测试守住）。
 
 变异维度（**变异后真值必须仍自洽** —— expected 的 decision/abstain_label 按该案在
-Rule / Single-call / Agent 下的真实语义重标，非机械复制模板真值）：
+Rule / Agent 下的真实语义重标，非机械复制模板真值）：
 - 标题词：换品牌 / 换品类核心词 / 加规避词 / 加品牌词 / 加风格词，严格受控词表（避免干净案
   变异出意外词命中，也避免风险案变异成表面干净）；
 - 图片相似度：世界种子只有 强 0.85+ / 弱 0.70~0.85 / 干净 / Logo 四档，按 URL 选择；
 - 商家历史：removals 0~7（M_3307/M_9904 干净、M_6602 中性 1、M_5512/M_8801 脏）；
-- OCR 文本：含 / 不含品牌词（仅对 Single-call/Agent 可见的表面信号）；
+- OCR 文本：含 / 不含品牌词（表面信号）；
 - category / brand：明确 / 空缺 / 黑名单字段 / 高危或普通类目。
 
 真值标注规则：明确违规（文本明示 高仿/复刻/1:1/同款/原单、brand 命中知名黑名单、强相似且
 无授权证据）→ REJECT + AUTO_DECIDABLE；明确正常（brand 明确、无风险词、无规避、无强相似）
 → PASS + AUTO_DECIDABLE；边界（单弱信号 0.7~0.8 且无其它可查信息、brand/category 空缺、
-文本含品牌词但可能是适配/风格描述）→ HUMAN_REVIEW + SHOULD_ABSTAIN；特例（有意构造，
-annotation.notes 注明）是**需调查才能判的 AUTO_DECIDABLE 案** —— Rule/Single 因缺工具会
-COMPLEX/HUMAN（brand 空缺、仅 OCR 品牌词、需商家历史交叉），但 Agent 用评测世界工具
-（EVAL_* 种子）能查到证据判对。
+文本含品牌词但可能是适配/风格描述）→ HUMAN_REVIEW + SHOULD_ABSTAIN；特例（有意构造）是
+**需调查才能判的 AUTO_DECIDABLE 案** —— Rule 因缺工具会 COMPLEX/HUMAN（brand 空缺、
+仅 OCR 品牌词、需商家历史交叉），但 Agent 用评测世界工具（EVAL_* 种子）能查到证据判对。
 
 目标分布（容差 ±5pp）：normal 20% / violation 20% / boundary 30% / multi-signal 20% /
 evasion 10%；AUTO_DECIDABLE 为主（~85-90%），SHOULD_ABSTAIN ~10-15%，集中在
-boundary/evasion/multi-signal 以保证 abstention 指标有统计意义。
+boundary/evasion/multi-signal，使 SHOULD_ABSTAIN 在各 scene 都有分布（全量与 AUTO_DECIDABLE
+两套分母可分层对比）。
 
 去重与 ``expected_tools`` 语义：**可见输入不出现重复案** —— 标题词池相对 (类目, 品牌, 商家,
 事件, 图片) 组合偏小，两次抽样可能命中同一组合（只差自增的 version / listing_time），这类行
 由 ``_dedupe_visible_rows`` 换用未占用的干净后缀，避免同一条案在指标里重复计权。
-``expected_tools`` **空列表 = 未标注该案的调查工具期望**（干净案、三方案一致 PASS；不计入
+``expected_tools`` **空列表 = 未标注该案的调查工具期望**（干净案、两臂一致 PASS；不计入
 Tool Selection 指标分母），**不得解读为「应调用 0 个工具」**；「需调查才能判」的 AUTO 案必须
 给非空期望（brand / category 空缺核验 = ProductTool + MerchantTool）。
 
 世界事实锚点与 ``pra.evaluation.harness.agent_scheme`` 的 EVAL_* 种子同一份（生成器 import
 该常量集），保证每条 input 的 product_id / merchant_id / image URL / category 在 Agent 评测
 世界里可查到与标注一致的事实；真 RAG/商家库接入需扩 EVAL_* 种子并重新生成（manifest 记录
-世界标签与生成命令，防口径漂移）。每条 JSONL 行 = EvalCase schema（schema_version=2，含
-lineage 溯源与 annotation.family 标签）。
+生成命令与 seed，防口径漂移）。每条 JSONL 行 = EvalCase schema（schema_version=2，含 lineage
+溯源锚点 seed_case_id）。
 """
 
 from __future__ import annotations
@@ -47,7 +47,16 @@ import json
 import random
 from pathlib import Path
 
-from pra.evaluation.dataset.loader import abstain_stats, scene_stats
+from pra.evaluation.dataset.schema import EvalCase
+
+# 世界事实单一来源：与 B 面 agent_scheme（Agent 评测世界）同一份 EVAL_* 种子。
+# import 失败 → 生成器显式失败，拒绝「手抄世界」漂移。
+from pra.evaluation.harness.agent_scheme import (
+    EVAL_CATEGORIES,
+    EVAL_IMAGE_MATCHES,
+    EVAL_MERCHANTS,
+    EVAL_PRODUCTS,
+)
 
 # 品牌词表单一来源：blackbrand_field 家族的 brand 字段必须取真实黑名单成员（命中 R-101 直判
 # REJECT），且生成器的干净文本守卫必须取同一份品牌词/规避词（命中 R-102 → COMPLEX），均不得
@@ -56,18 +65,6 @@ from pra.screening.rule_engine.terms import (
     BLACKLISTED_BRANDS,
     BRAND_TERMS,
     EVASION_TERMS,
-)
-
-# 世界事实单一来源：与 B 面 agent_scheme（Agent 评测世界）同一份 EVAL_* 种子。
-# import 失败 → 生成器显式失败，拒绝「手抄世界」漂移。
-from pra.evaluation.harness.agent_scheme import (
-    EVAL_CATEGORIES,
-    EVAL_IMAGE_MATCHES,
-    EVAL_MERCHANTS,
-    EVAL_POLICY_CLAUSES,
-    EVAL_PRECEDENTS,
-    EVAL_PRODUCTS,
-    EVAL_WORLD_LABEL,
 )
 
 # ---------------------------------------------------------------------------
@@ -148,8 +145,6 @@ _CLEAN_OWN_ANCHORS: dict[str, list[dict]] = {
     for cat, anchors in _OWN_ANCHORS.items()
 }
 
-_POLICY_BY_CAT = {row["category"]: row["policy_id"] for row in EVAL_POLICY_CLAUSES}
-
 # ---------------------------------------------------------------------------
 # 受控词表（与 screening terms / agent 表面信号同语义；此处只管生成文本不出界）
 # ---------------------------------------------------------------------------
@@ -202,7 +197,7 @@ _OCR_BRAND_WORDS = ["GUCCI", "NIKE", "LOUIS VUITTON", "ADIDAS"]
 _BLACK_BRANDS_ORDERED = sorted(BLACKLISTED_BRANDS)
 _BLACK_BRAND_BY_CAT = {cat: _BLACK_BRANDS_ORDERED for cat in EVAL_CATEGORIES}
 
-# 溯源种子：v1 老案按（family, cat）映射；无直接 v1 模板的用 SEED_V2_ 语义种子标记。
+# 溯源种子：v1 老案按（形态, cat）映射；无直接 v1 模板的用 SEED_V2_ 语义种子标记。
 _V1_SEED: dict[str, dict[str, list[str]]] = {
     "clean_own": {"女鞋/运动鞋": ["EC_0001", "EC_0002", "EC_0005", "EC_0007"],
                   "箱包/女包": ["EC_0003", "EC_0006"],
@@ -292,15 +287,15 @@ def _listing(seq: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Builder 语义口径 —— 每个 family 一个函数：产出 Row（input 字段 + 真值标签）。
+# Builder 语义口径 —— 每个形态一个函数：产出 Row（input 字段 + 真值标签）。
 # 签名统一 (rng, seq, scene)；只在单个 scene 用的 builder 忽略 scene 参数。
 # ---------------------------------------------------------------------------
 
 
 def _row_base(*, seq, pid, mid, cat, brand, title, desc, images, event,
-              scene, family, decision, abstain, src, hard, reason, note,
-              risk_level, risk_type, evidence, tools, policy, seed_id, mutation) -> dict:
-    """公共装配：input JSON + expected + annotation + lineage。"""
+              scene, decision, abstain,
+              risk_level, risk_type, evidence, tools, seed_id) -> dict:
+    """公共装配：input JSON + expected + lineage。"""
     input_json = {
         "case_id": f"CASE_EC_V2_{seq:04d}",
         "product": {
@@ -325,21 +320,14 @@ def _row_base(*, seq, pid, mid, cat, brand, title, desc, images, event,
         "risk_type": list(risk_type),
         "evidence": list(evidence),
         "expected_tools": list(tools),
-        "applicable_policy": list(policy),
     }
-    annotation = {"labelers": ["eval-phase2"], "agreed": True, "notes": note, "family": family}
-    if hard and reason:
-        annotation["hard_reason"] = list(reason)
     return {
         "eval_case_id": f"EC_V2_{seq:04d}",
         "schema_version": 2,
         "scene": scene,
-        "source_type": src,
-        "lineage": {"seed_case_id": seed_id, "mutation": mutation},
-        "hard_case": hard,
+        "lineage": {"seed_case_id": seed_id},
         "input": input_json,
         "expected": expected,
-        "annotation": annotation,
     }
 
 
@@ -356,13 +344,9 @@ def b_clean_own(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=a["brand"],
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)), event=event,
-        scene="normal", family="clean_own", decision="PASS", abstain="AUTO_DECIDABLE",
-        src="VARIANT", hard=False, reason=[], note=(
-            f"干净自有品牌（{a['brand']}，在库可查；{a['mid']} {_MERCHANT_TIER[a['mid']]}"
-            "商家；图无命中；文本无风险词）；Rule/Single/Agent 三方案一致 PASS。"),
-        risk_level="NONE", risk_type=[], evidence=[], tools=[], policy=[],
+        scene="normal", decision="PASS", abstain="AUTO_DECIDABLE",
+        risk_level="NONE", risk_type=[], evidence=[], tools=[],
         seed_id=_pick(rng, _V1_SEED["clean_own"][cat]),
-        mutation="title词/事件变异（在库自有品牌 anchor 不变）；真值保持 PASS/AUTO",
     )
 
 
@@ -388,15 +372,11 @@ def v_text_evasion(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=None,
         title=title, desc=desc, images=_images((img, None)), event="NEW_LISTING",
-        scene="violation", family="text_evasion", decision="REJECT",
-        abstain="AUTO_DECIDABLE", src="VARIANT", hard=True,
-        reason=["rule_cannot_judge"],
-        note=(f"文本明示规避词（{phrase}）+ brand 空缺 + 脏商家 {a['mid']} → REJECT。"
-              "Rule: R-302/R-301 COMPLEX→HUMAN；Single: 文本自证 REJECT；Agent: REJECT。"),
+        scene="violation", decision="REJECT",
+        abstain="AUTO_DECIDABLE",
         risk_level="HIGH", risk_type=risk_types, evidence=ev,
-        tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT[cat]],
+        tools=_TOOLS_ALL,
         seed_id=_pick(rng, _V1_SEED["text_evasion"][cat]),
-        mutation=f"标题加规避词 {phrase!r}（anchor/商家/图档位变异）；真值 REJECT/AUTO",
     )
 
 
@@ -415,16 +395,11 @@ def v_ocr_brand_dirty(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, ocr)),
-        event="NEW_LISTING", scene="violation", family="ocr_brand_dirty",
-        decision="REJECT", abstain="AUTO_DECIDABLE", src="VARIANT", hard=True,
-        reason=["agent_can_discover"],
-        note=(f"标题干净但图片 OCR 含品牌词 {ocr} + 强视觉 + 脏商家 {a['mid']} —— OCR "
-              "为表面信号、Rule/Single 看不到图证据 → HUMAN；Agent 图×商家交叉 REJECT "
-              "（需调查才能判的 AUTO 案）。"),
+        event="NEW_LISTING", scene="violation",
+        decision="REJECT", abstain="AUTO_DECIDABLE",
         risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"], evidence=ev,
-        tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT[cat]],
+        tools=_TOOLS_ALL,
         seed_id=_pick(rng, _V1_SEED["ocr_brand_dirty"].get(cat, ["EC_0102"])),
-        mutation=f"图片 OCR 加品牌词 {ocr}（标题保持干净）；真值 REJECT/AUTO（需调查）",
     )
 
 
@@ -437,18 +412,12 @@ def v_blackbrand_field(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=brand,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="violation", family="blackbrand_field",
-        decision="REJECT", abstain="AUTO_DECIDABLE", src="SYNTHETIC", hard=False,
-        reason=[],
-        note=(f"product.brand={brand} ∈ terms.BLACKLISTED_BRANDS（黑名单字段语义）→ "
-              "Rule R-101 直判 REJECT（硬规则命中 = 确定性终裁）；脏商家 + 强相似图仅为同向"
-              "对照信号。Rule/Agent 均 REJECT；Single 无确定性黑名单输入（§3.3 表面字段口径）"
-              "仍 PASS。硬规则可直接裁决 → 不满足 00 §13.1 Hard 三选一，未入选 Hard。"),
+        event="NEW_LISTING", scene="violation",
+        decision="REJECT", abstain="AUTO_DECIDABLE",
         risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
         evidence=[_merchant_evidence(a["mid"]), "image_similarity>=0.85"],
-        tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT[cat]],
+        tools=_TOOLS_ALL,
         seed_id=_pick(rng, _V1_SEED["blackbrand_field"].get(cat, ["EC_0102"])),
-        mutation=f"case.brand→{brand}（黑名单字段语义）；真值 REJECT/AUTO",
     )
 
 
@@ -463,15 +432,10 @@ def b_brand_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="boundary", family="brand_missing_verify",
-        decision="PASS", abstain="AUTO_DECIDABLE", src="VARIANT", hard=True,
-        reason=["agent_can_discover"],
-        note=("brand 空缺（Rule R-301/Single 均→HUMAN）但在库自有品牌可查 + "
-              f"{_MERCHANT_TIER[a['mid']]}商家 → Agent 核验后 PASS —— 需调查才能判的 "
-              "AUTO 案（评测核心观察对象）。"),
-        risk_level="NONE", risk_type=[], evidence=[], tools=["ProductTool", "MerchantTool"], policy=[],
+        event="NEW_LISTING", scene="boundary",
+        decision="PASS", abstain="AUTO_DECIDABLE",
+        risk_level="NONE", risk_type=[], evidence=[], tools=["ProductTool", "MerchantTool"],
         seed_id=_pick(rng, _V1_SEED["brand_missing_verify"].get(cat, ["EC_0201"])),
-        mutation="case.brand→None（在库 brand 可查）；Rule/Single COMPLEX→HUMAN，Agent 核验 PASS —— 需调查 AUTO 案",
     )
 
 
@@ -484,14 +448,10 @@ def b_cat_missing_verify(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat="", brand=a["brand"],
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="boundary", family="cat_missing_verify",
-        decision="PASS", abstain="AUTO_DECIDABLE", src="VARIANT", hard=True,
-        reason=["agent_can_discover"],
-        note=("category 空缺（Rule R-301/Single 均→HUMAN）但在库可核验 → Agent 核验 "
-              "商品/商家后 PASS —— 需调查才能判的 AUTO 案。"),
-        risk_level="NONE", risk_type=[], evidence=[], tools=["ProductTool", "MerchantTool"], policy=[],
+        event="NEW_LISTING", scene="boundary",
+        decision="PASS", abstain="AUTO_DECIDABLE",
+        risk_level="NONE", risk_type=[], evidence=[], tools=["ProductTool", "MerchantTool"],
         seed_id=_pick(rng, _V1_SEED["cat_missing_verify"].get(cat, ["EC_0204"])),
-        mutation="case.category→空串（在库可查）；Rule/Single→HUMAN，Agent 核验 PASS —— 需调查 AUTO 案",
     )
 
 
@@ -504,13 +464,10 @@ def b_weak_sim_own(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=a["brand"],
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="boundary", family="weak_sim_own",
-        decision="PASS", abstain="AUTO_DECIDABLE", src="VARIANT", hard=False,
-        reason=[], note=("单弱信号（相似 0.70~0.85）+ 自有品牌 + 干净/中性商家：有其它 "
-                         "信息可证正常 → PASS（三方案一致）。"),
+        event="NEW_LISTING", scene="boundary",
+        decision="PASS", abstain="AUTO_DECIDABLE",
         risk_level="LOW", risk_type=[], evidence=["image_similarity 0.70~0.85"], tools=[],
-        policy=[], seed_id=_pick(rng, _V1_SEED["weak_sim_own"][cat]),
-        mutation="图片→弱相似(0.70~0.85)；自有品牌+干净商家 → PASS/AUTO（全部方案可判）",
+        seed_id=_pick(rng, _V1_SEED["weak_sim_own"][cat]),
     )
 
 
@@ -522,13 +479,10 @@ def b_neutral_clean(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat="服装/卫衣", brand=a["brand"],
         title=title, desc=_GEN_DESC["服装/卫衣"], images=_images((img, None)),
-        event="NEW_LISTING", scene="boundary", family="neutral_clean",
-        decision="PASS", abstain="AUTO_DECIDABLE", src="VARIANT", hard=False,
-        reason=[], note=("中性商家（1 次下架 < 系统性阈值）+ 自有品牌干净案 → PASS "
-                         "（Agent：中性历史证伪'系统性'主张）。"),
-        risk_level="NONE", risk_type=[], evidence=[], tools=[], policy=[],
+        event="NEW_LISTING", scene="boundary",
+        decision="PASS", abstain="AUTO_DECIDABLE",
+        risk_level="NONE", risk_type=[], evidence=[], tools=[],
         seed_id=_pick(rng, _V1_SEED["neutral_clean"]["服装/卫衣"]),
-        mutation="anchor=M_6602 中性商家自有品牌（山野卫衣）；真值保持 PASS/AUTO",
     )
 
 
@@ -541,14 +495,10 @@ def b_styleword_own(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=a["brand"],
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="boundary", family="styleword_own",
-        decision="PASS", abstain="AUTO_DECIDABLE", src="SYNTHETIC", hard=False,
-        reason=[], note=("风格词标题 + 自有品牌 + 干净图：真值 PASS（在库可证伪、风格词非"
-                         "违规证据）；Rule/Single 直判 PASS，Agent 因视觉未确证保守 HUMAN "
-                         "—— AUTO 案上过度 abstention 观测案。"),
-        risk_level="NONE", risk_type=[], evidence=[], tools=[], policy=[],
+        event="NEW_LISTING", scene="boundary",
+        decision="PASS", abstain="AUTO_DECIDABLE",
+        risk_level="NONE", risk_type=[], evidence=[], tools=[],
         seed_id=_SEED_V2["styleword_own"],
-        mutation="标题加风格词（自有品牌/干净图不变）；真值 PASS/AUTO（Agent 过度 abstention 观测）",
     )
 
 
@@ -564,14 +514,10 @@ def b_adapter_brandword(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=a["brand"],
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="boundary", family="adapter_brandword",
-        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN", src="SYNTHETIC",
-        hard=False, reason=[], note=(f"文本含品牌词 {word} 但可能是适配/风格描述（无规避"
-                                     "词、无授权信息可查）→ Rule R-102 / Single / Agent "
-                                     "均无法核验授权与真伪 → SHOULD_ABSTAIN。"),
+        event="NEW_LISTING", scene="boundary",
+        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN",
         risk_level="MEDIUM", risk_type=[], evidence=[f"text_brand_word_{word}(未核验授权)"],
-        tools=_TOOLS_ABSTAIN, policy=[], seed_id=_SEED_V2["adapter_brandword"],
-        mutation="标题加品牌词（适配/风格语境、无规避词）；真值 HUMAN/SHOULD_ABSTAIN",
+        tools=_TOOLS_ABSTAIN, seed_id=_SEED_V2["adapter_brandword"],
     )
 
 
@@ -584,14 +530,10 @@ def b_brand_missing_unverifiable(rng: random.Random, seq: int, scene: str) -> di
     return _row_base(
         seq=seq, pid=pid, mid=mid, cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="boundary", family="brand_missing_unverifiable",
-        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN", src="SYNTHETIC",
-        hard=False, reason=[], note=("brand 空缺且商品不在库可查（虚构 pid）、商家干净/中性"
-                                     "、图无命中 → 疑似规避但无确证 → Rule R-301 / Single "
-                                     "/ Agent 一致转人工，不硬判 PASS。"),
+        event="NEW_LISTING", scene="boundary",
+        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN",
         risk_level="LOW", risk_type=[], evidence=["brand_missing", _merchant_evidence(mid)],
-        tools=_TOOLS_ABSTAIN, policy=[], seed_id=_SEED_V2["brand_missing_unverifiable"],
-        mutation="case.brand→None + pid 虚构（在库不可查）；真值 HUMAN/SHOULD_ABSTAIN",
+        tools=_TOOLS_ABSTAIN, seed_id=_SEED_V2["brand_missing_unverifiable"],
     )
 
 
@@ -604,14 +546,10 @@ def b_weak_sim_noinfo(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=pid, mid=mid, cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="boundary", family="weak_sim_noinfo",
-        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN", src="SYNTHETIC",
-        hard=False, reason=[], note=("单弱信号（相似 0.70~0.85）且无其它可查信息（brand "
-                                     "空缺、虚构 pid、商家干净/中性）→ Rule/Agent 无法确定"
-                                     "是否模仿 → SHOULD_ABSTAIN。"),
+        event="NEW_LISTING", scene="boundary",
+        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN",
         risk_level="LOW", risk_type=[], evidence=["image_similarity 0.70~0.85", "brand_missing"],
-        tools=_TOOLS_ABSTAIN, policy=[], seed_id=_SEED_V2["weak_sim_noinfo"],
-        mutation="单弱信号弱相似 + brand 空缺 + 无在库/商家信息；真值 HUMAN/SHOULD_ABSTAIN",
+        tools=_TOOLS_ABSTAIN, seed_id=_SEED_V2["weak_sim_noinfo"],
     )
 
 
@@ -632,16 +570,11 @@ def m_ssim_dirty(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)), event=event,
-        scene=scene, family="ssim_dirty", decision="REJECT", abstain="AUTO_DECIDABLE",
-        src="VARIANT", hard=True, reason=["agent_can_discover"],
-        note=(f"强相似图(>=0.85)+脏商家 {a['mid']}，无文本明示 → 需图×商家交叉；Rule/"
-              "Single 无图证据 → HUMAN，Agent REJECT"
-              + ("（风格词包装 + 改图/改标题事件掩盖的对抗形态）。" if scene == "evasion" else "。")),
+        scene=scene, decision="REJECT", abstain="AUTO_DECIDABLE",
         risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
         evidence=[_merchant_evidence(a["mid"]), "image_similarity>=0.85"],
-        tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT[cat]],
+        tools=_TOOLS_ALL,
         seed_id=_pick(rng, _V1_SEED["ssim_dirty"][cat]),
-        mutation="强相似(>=0.85)+脏商家（无文本明示）；真值 REJECT/AUTO（需调查）",
     )
 
 
@@ -653,16 +586,12 @@ def m_wsim_dirty(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="multi-signal", family="wsim_dirty",
-        decision="REJECT", abstain="AUTO_DECIDABLE", src="VARIANT", hard=True,
-        reason=["agent_can_discover"],
-        note=(f"弱相似(0.70~0.85)+脏商家 {a['mid']}：单弱信号不足、商家系统性历史交叉后 "
-              "Agent REJECT；Rule/Single 看不到 → HUMAN（需调查才能判的 AUTO 案）。"),
+        event="NEW_LISTING", scene="multi-signal",
+        decision="REJECT", abstain="AUTO_DECIDABLE",
         risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
         evidence=[_merchant_evidence(a["mid"]), "image_similarity 0.70~0.85"],
-        tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT[cat]],
+        tools=_TOOLS_ALL,
         seed_id=_pick(rng, _V1_SEED["wsim_dirty"].get(cat, ["EC_0303"])),
-        mutation="弱相似(0.70~0.85)+脏商家交叉；真值 REJECT/AUTO（需调查）",
     )
 
 
@@ -675,16 +604,12 @@ def m_own_adversarial(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=a["brand"],
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene=scene, family="own_adversarial",
-        decision="REJECT", abstain="AUTO_DECIDABLE", src="SYNTHETIC", hard=True,
-        reason=["agent_can_discover"],
-        note=("自有品牌(潮动)表面干净 + 强相似图 + 脏商家 M_5512 → Rule 直漏 PASS / "
-              "Single 漏放 PASS（缺陷观测），Agent 图×商家 REJECT（对抗旗舰形态）。"),
+        event="NEW_LISTING", scene=scene,
+        decision="REJECT", abstain="AUTO_DECIDABLE",
         risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
         evidence=[_merchant_evidence(a["mid"]), "image_similarity>=0.85"],
-        tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT[cat]],
+        tools=_TOOLS_ALL,
         seed_id=_pick(rng, _V1_SEED["own_adversarial"]["女鞋/运动鞋"]),
-        mutation="自有品牌 anchor(潮动)+强相似+脏商家；真值 REJECT/AUTO",
     )
 
 
@@ -695,16 +620,12 @@ def m_logo_dirty(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat="箱包/女包", brand=None,
         title=title, desc=_GEN_DESC["箱包/女包"], images=_images((img, None)),
-        event="NEW_LISTING", scene="multi-signal", family="logo_dirty",
-        decision="REJECT", abstain="AUTO_DECIDABLE", src="VARIANT", hard=True,
-        reason=["agent_can_discover"],
-        note=(f"图片 Logo 检测命中(GUCCI 0.90) + 脏商家 {a['mid']}，无文本品牌词 → 仅工具"
-              "可得 → Agent REJECT；Rule/Single HUMAN（需调查才能判的 AUTO 案）。"),
+        event="NEW_LISTING", scene="multi-signal",
+        decision="REJECT", abstain="AUTO_DECIDABLE",
         risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
         evidence=[_merchant_evidence(a["mid"]), "image_logo_detected"],
-        tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT["箱包/女包"]],
+        tools=_TOOLS_ALL,
         seed_id=_pick(rng, _V1_SEED["logo_dirty"]["箱包/女包"]),
-        mutation="图片→Logo 命中(GUCCI 0.90)+脏商家；真值 REJECT/AUTO（需调查）",
     )
 
 
@@ -717,16 +638,12 @@ def m_pair_hide(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((main, None), (alt, None)),
-        event="UPDATE_IMAGE", scene=scene, family="pair_hide",
-        decision="REJECT", abstain="AUTO_DECIDABLE", src="VARIANT", hard=True,
-        reason=["agent_can_discover"],
-        note=(f"双图：主图干净 + 附图强相似 + 脏商家 {a['mid']}（改图事件规避抽查）→ "
-              "Agent 对全图取 max 相似 REJECT；Rule/Single 无图比对能力 → HUMAN。"),
+        event="UPDATE_IMAGE", scene=scene,
+        decision="REJECT", abstain="AUTO_DECIDABLE",
         risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
         evidence=[_merchant_evidence(a["mid"]), "image_similarity>=0.85"],
-        tools=_TOOLS_ALL, policy=[_POLICY_BY_CAT[cat]],
+        tools=_TOOLS_ALL,
         seed_id=_pick(rng, _V1_SEED["pair_hide"][cat]),
-        mutation="主图干净+附图强相似（改图事件）；真值 REJECT/AUTO（需调查）",
     )
 
 
@@ -739,15 +656,11 @@ def e_dirty_brand_missing_cleanimg(rng: random.Random, seq: int, scene: str) -> 
     return _row_base(
         seq=seq, pid=a["pid"], mid=a["mid"], cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)), event=event,
-        scene="evasion", family="dirty_brand_missing_cleanimg",
-        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN", src="SYNTHETIC",
-        hard=False, reason=[], note=(f"疑似规避（brand 空缺+脏商家 {a['mid']} + {event}）"
-                                     f"但图/文本无确证（查不实）→ Rule R-301 / Single / "
-                                     "Agent 均克制转人工，不硬判。"),
+        scene="evasion",
+        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN",
         risk_level="MEDIUM", risk_type=[],
         evidence=["brand_missing", _merchant_evidence(a["mid"])],
-        tools=_TOOLS_ABSTAIN, policy=[], seed_id=_SEED_V2["dirty_brand_missing_cleanimg"],
-        mutation="brand 空缺+脏商家+规避事件但图/文本无确证；真值 HUMAN/SHOULD_ABSTAIN",
+        tools=_TOOLS_ABSTAIN, seed_id=_SEED_V2["dirty_brand_missing_cleanimg"],
     )
 
 
@@ -760,15 +673,11 @@ def e_ssim_cleanmerchant_bm(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=pid, mid=mid, cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="evasion", family="ssim_cleanmerchant_bm",
-        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN", src="SYNTHETIC",
-        hard=False, reason=[], note=("强相似图 + 干净商家 + brand 空缺（虚构 pid 在库查无）"
-                                     "：视觉强但无商家/在库佐证 → Rule R-301 / Single / "
-                                     "Agent 一致克制转人工（无授权证据时外观高度模仿需人工审核）。"),
+        event="NEW_LISTING", scene="evasion",
+        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN",
         risk_level="MEDIUM", risk_type=[],
         evidence=["image_similarity>=0.85", "brand_missing", _merchant_evidence(mid)],
-        tools=_TOOLS_ABSTAIN, policy=[], seed_id=_SEED_V2["ssim_cleanmerchant_bm"],
-        mutation="强相似+干净商家+brand 空缺（虚构 pid）；真值 HUMAN/SHOULD_ABSTAIN",
+        tools=_TOOLS_ABSTAIN, seed_id=_SEED_V2["ssim_cleanmerchant_bm"],
     )
 
 
@@ -781,15 +690,11 @@ def m_multi_weak_abstain(rng: random.Random, seq: int, scene: str) -> dict:
     return _row_base(
         seq=seq, pid=pid, mid=mid, cat=cat, brand=None,
         title=title, desc=_GEN_DESC[cat], images=_images((img, None)),
-        event="NEW_LISTING", scene="multi-signal", family="multi_weak_abstain",
-        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN", src="SYNTHETIC",
-        hard=False, reason=[], note=("多弱信号（弱相似 + 中性/干净商家 + brand 空缺虚构 "
-                                     "pid）交叉后仍无定论 → Rule R-301 / Single / Agent "
-                                     "一致克制转人工。"),
+        event="NEW_LISTING", scene="multi-signal",
+        decision="HUMAN_REVIEW", abstain="SHOULD_ABSTAIN",
         risk_level="LOW", risk_type=[],
         evidence=["image_similarity 0.70~0.85", "brand_missing", _merchant_evidence(mid)],
-        tools=_TOOLS_ABSTAIN, policy=[], seed_id=_SEED_V2["multi_weak_abstain"],
-        mutation="多弱信号（弱相似+中性商家+brand 空缺）交叉无定论；真值 HUMAN/SHOULD_ABSTAIN",
+        tools=_TOOLS_ABSTAIN, seed_id=_SEED_V2["multi_weak_abstain"],
     )
 
 
@@ -993,19 +898,8 @@ def _write_dataset(rows: list[dict], out_dir: Path) -> None:
 
 
 def _build_manifest(rows: list[dict], out_dir: Path, count: int, seed: int) -> dict:
-    """manifest：分布统计（loader 同口径取数）+ 口径快照 + 生成命令与 seed。"""
-    from pra.evaluation.dataset.schema import EvalCase
-
+    """manifest 最小契约：数据文件标识 + 生成命令与 seed + 规模。"""
     cases = [EvalCase.model_validate(r) for r in rows]  # loader 同款强校验（schema v2）
-    ss = scene_stats(cases)
-    aa = abstain_stats(cases)
-    dec_dist: dict = {}
-    for c in cases:
-        dec_dist[c.expected.decision] = dec_dist.get(c.expected.decision, 0) + 1
-    hard_n = sum(1 for c in cases if c.hard_case)
-    src_dist: dict = {}
-    for c in cases:
-        src_dist[c.source_type] = src_dist.get(c.source_type, 0) + 1
     return {
         "schema_version": 2,
         "dataset_version": "v2",
@@ -1016,45 +910,6 @@ def _build_manifest(rows: list[dict], out_dir: Path, count: int, seed: int) -> d
         ),
         "seed": seed,
         "total": len(cases),
-        "scene_distribution": {s: ss["by_scene"][s]["total"] for s in _SCENES},
-        "expected_decision_distribution": dec_dist,
-        "abstain_distribution": {
-            "AUTO_DECIDABLE": aa["AUTO_DECIDABLE"],
-            "SHOULD_ABSTAIN": aa["SHOULD_ABSTAIN"],
-            "LEGACY_UNLABELED": aa["LEGACY_UNLABELED"],
-            "auto_decidable_equivalent": aa["auto_decidable_equivalent"],
-            "auto_share": aa["auto_share"],
-            "abstain_share": aa["abstain_share"],
-        },
-        "abstain_by_scene": {
-            s: {k: aa["by_scene"][s][k] for k in ("total", "AUTO_DECIDABLE", "SHOULD_ABSTAIN")}
-            for s in _SCENES
-        },
-        "hard_case": {"count": hard_n, "share": round(hard_n / len(cases), 2)},
-        "source_type_distribution": src_dist,
-        "world": {
-            "label": EVAL_WORLD_LABEL,
-            "products": len(EVAL_PRODUCTS),
-            "merchants": len(EVAL_MERCHANTS),
-            "image_urls": len(EVAL_IMAGE_MATCHES),
-            "precedents": len(EVAL_PRECEDENTS),
-            "policy_clauses": len(EVAL_POLICY_CLAUSES),
-        },
-        "threshold_snapshot": {
-            "EVIDENCE_MIN_SIM": 0.7,
-            "EVIDENCE_STRONG": 0.85,
-            "CONFIDENCE_ABSTAIN_THRESHOLD": 0.7,
-        },
-        "annotation_notes": (
-            "Phase 2 正式集：以 v1 35 条为模板的程序化确定性变异（seed 固定、可重放）；"
-            "真值三值语义与 abstention 口径见 scripts/eval_dataset_gen.py 模块 docstring："
-            "明确违规→REJECT/AUTO，明确正常→PASS/AUTO，单弱信号/brand·类目"
-            "空缺/品牌词可能为适配描述→HUMAN_REVIEW/SHOULD_ABSTAIN；'需调查才能判'的 AUTO "
-            "案（Rule/Single 会 COMPLEX/HUMAN、Agent 经 EVAL_* 世界工具可判对）在 "
-            "annotation.notes 注明设计意图；标注阈值口径与 EvalContext 运行时一致"
-            "（EVIDENCE_MIN_SIM=0.7 / EVIDENCE_STRONG=0.85 / CONFIDENCE_ABSTAIN_THRESHOLD=0.7）。"
-        ),
-        "lineage_notes": "每条 lineage 记录 seed_case_id（v1 老案 EC_xxxx 或 SEED_V2_* 语义种子）与 mutation 摘要。",
     }
 
 
@@ -1073,13 +928,6 @@ def _main(argv: list[str] | None = None) -> int:
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     print(f"写入 {out_dir / 'cases_v2.jsonl'}：{len(rows)} 条（seed={args.seed}）")
-    print(json.dumps({
-        "scene": manifest["scene_distribution"],
-        "decision": manifest["expected_decision_distribution"],
-        "abstain": {k: manifest["abstain_distribution"][k]
-                    for k in ("AUTO_DECIDABLE", "SHOULD_ABSTAIN", "auto_share", "abstain_share")},
-        "hard": manifest["hard_case"],
-    }, ensure_ascii=False, indent=2))
     return 0
 
 

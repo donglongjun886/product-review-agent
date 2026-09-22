@@ -1,13 +1,12 @@
-"""Agent 级指标：工具选择 / 证据充分性 / 推理正确性 / 边际证据增益。
+"""Agent 级指标：工具选择 / 推理正确性 / 边际证据增益。
 
 只消费 ``EvalRecord`` × ``expected`` 真值（指标层唯一输入），**不参与任何判定** —— Agent
 决策、Gate 与工具调度零依赖本模块。
 
 三条口径不变量：
 
-- **空真值不进分母**：``expected_tools=[]``（未标注工具期望）/ ``expected.evidence=[]``
-  （干净案）/ ``expected.risk_type=[]`` 一律排除，并在计数里显式给出被排除的案数 —— 避免把
-  「未标注」读成「应调 0 个工具 / 不需要证据」；
+- **空真值不进分母**：``expected_tools=[]``（未标注工具期望）/ ``expected.risk_type=[]``
+  一律排除，并在计数里显式给出被排除的案数 —— 避免把「未标注」读成「应调 0 个工具」；
 - **不引入人为权重**：边际增益只做可核对的计数与比率，不做「新增证据数 × 翻转权重」这类
   合成分（权重无法自证，越合成越不可解释）；
 - **分母为 0 的比率返回 None**（报告显示 "-"），不硬造 0/∞。
@@ -22,13 +21,10 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, Field
 
-from pra.domain.measurement import CITABLE_TYPES as _CITABLE_TYPES
 from pra.evaluation.harness.base import EvalRecord
 
 __all__ = [
     "AgentMetricsBundle",
-    "EvidenceSufficiencyEvaluator",
-    "EvidenceSufficiencyMetrics",
     "MarginalEvidenceGainEvaluator",
     "MarginalEvidenceGainMetrics",
     "ReasoningCorrectnessEvaluator",
@@ -37,31 +33,9 @@ __all__ = [
     "ToolSelectionMetrics",
 ]
 
-# expected.evidence 标签 → 实际证据类型。只映射**语义无歧义**的前缀；其余标签计入
-# unmapped（显式暴露缺口），不从"看起来能对上"硬猜 —— 猜出来的覆盖率不可解释。
-_EXPECTED_EVIDENCE_TYPE_PREFIXES: tuple[tuple[str, str], ...] = (
-    ("image_similarity", "IMAGE_SIMILARITY"),
-    ("merchant_history", "MERCHANT_HISTORY"),
-    ("image_logo_detected", "IMAGE_LOGO"),
-    ("image_logo", "IMAGE_LOGO"),
-    ("product_fact", "PRODUCT_FACT"),
-    ("policy_ref", "POLICY_REF"),
-    ("case_precedent", "CASE_PRECEDENT"),
-    ("ocr_text", "OCR_TEXT"),
-)
-
 
 def _ratio(numer: int, denom: int) -> float | None:
     return numer / denom if denom else None
-
-
-def _map_expected_evidence_label(label: str) -> str | None:
-    """期望证据标签 → 证据类型（前缀匹配；无映射返回 None）。"""
-    text = label.strip().lower()
-    for prefix, ev_type in _EXPECTED_EVIDENCE_TYPE_PREFIXES:
-        if text.startswith(prefix):
-            return ev_type
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -122,95 +96,7 @@ class ToolSelectionEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# 2. Evidence Sufficiency
-# ---------------------------------------------------------------------------
-
-
-class EvidenceSufficiencyMetrics(BaseModel):
-    """证据充分性：证据类型覆盖率 + REJECT 依据前置通过率（两栏分开，不合成一个数）。
-
-    覆盖率口径为 **micro**（Σ命中类型 / Σ期望类型）；``expected.evidence=[]`` 的干净案不进
-    分母；只有无法映射标签的案单独计数并从分母剔除，``unmapped_label_instances`` 如实暴露
-    缺口。REJECT 侧只做 Gate 的**前置条件近似**（有可引用依据），不含矛盾检测。
-    """
-
-    total_records: int = Field(description="纳入统计的 record 数")
-    cases_with_expected_evidence: int = Field(description="≥1 个可映射期望标签的案数（覆盖分母）")
-    covered_expected_types: int = Field(description="期望类型中被实际证据命中的类型数")
-    total_expected_types: int = Field(description="可映射的期望类型总数")
-    fully_covered_cases: int = Field(description="全部期望类型都被命中的案数")
-    cases_excluded_unmapped_only: int = Field(description="标签全部无法映射 → 剔除出分母的案数")
-    unmapped_label_instances: int = Field(description="无法映射的期望标签实例数（缺口显式化）")
-    evidence_type_coverage: float | None = None
-
-    reject_cases_pred_reject: int = Field(description="预测 REJECT 的案数（REJECT 侧分母）")
-    reject_cases_with_citable: int = Field(description="其中带可引用依据的案数")
-    reject_evidence_gate_pass_rate: float | None = None
-
-
-class EvidenceSufficiencyEvaluator:
-    @staticmethod
-    def evaluate(records: list[EvalRecord], expected: Mapping[str, Mapping]) -> EvidenceSufficiencyMetrics:
-        total = with_exp = cov_types = all_types = full_cases = 0
-        unmapped_only = unmapped_labels = 0
-        pred_reject = with_citable = 0
-        for rec in records:
-            exp = expected.get(rec.eval_case_id)
-            if exp is None:
-                continue
-            total += 1
-
-            actual_types = {str(e.get("type")) for e in rec.evidence if isinstance(e, dict)}
-            hit = miss = unmapped = 0
-            for label in exp.get("evidence") or []:
-                ev_type = _map_expected_evidence_label(str(label))
-                if ev_type is None:
-                    unmapped += 1
-                    continue
-                if ev_type in actual_types:
-                    hit += 1
-                else:
-                    miss += 1
-            unmapped_labels += unmapped
-            if hit + miss == 0:
-                if unmapped:
-                    unmapped_only += 1
-            else:
-                with_exp += 1
-                cov_types += hit
-                all_types += hit + miss
-                if miss == 0:
-                    full_cases += 1
-
-            # REJECT 依据前置与期望证据标签无关：只要预测 REJECT 就核可引用依据
-            if rec.decision == "REJECT":
-                pred_reject += 1
-                has_citable = bool(rec.policy) or any(
-                    isinstance(e, dict)
-                    and e.get("type") in _CITABLE_TYPES
-                    and e.get("ref_id")
-                    for e in rec.evidence
-                )
-                if has_citable:
-                    with_citable += 1
-
-        return EvidenceSufficiencyMetrics(
-            total_records=total,
-            cases_with_expected_evidence=with_exp,
-            covered_expected_types=cov_types,
-            total_expected_types=all_types,
-            fully_covered_cases=full_cases,
-            cases_excluded_unmapped_only=unmapped_only,
-            unmapped_label_instances=unmapped_labels,
-            evidence_type_coverage=_ratio(cov_types, all_types),
-            reject_cases_pred_reject=pred_reject,
-            reject_cases_with_citable=with_citable,
-            reject_evidence_gate_pass_rate=_ratio(with_citable, pred_reject),
-        )
-
-
-# ---------------------------------------------------------------------------
-# 3. Reasoning Correctness（自动代理）
+# 2. Reasoning Correctness（自动代理）
 # ---------------------------------------------------------------------------
 
 
@@ -261,7 +147,7 @@ class ReasoningCorrectnessEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# 4. Marginal Evidence Gain
+# 3. Marginal Evidence Gain
 # ---------------------------------------------------------------------------
 
 
@@ -330,10 +216,9 @@ class MarginalEvidenceGainEvaluator:
 
 
 class AgentMetricsBundle(BaseModel):
-    """Agent 级指标四件套（仅 agent scheme 适用；其余方案为 None）。"""
+    """Agent 级指标三件套（仅 agent scheme 适用；其余方案为 None）。"""
 
     tool_selection: ToolSelectionMetrics
-    evidence_sufficiency: EvidenceSufficiencyMetrics
     reasoning_correctness: ReasoningCorrectnessMetrics
     marginal_gain: MarginalEvidenceGainMetrics
 
@@ -343,7 +228,6 @@ class AgentMetricsBundle(BaseModel):
     ) -> AgentMetricsBundle:
         return AgentMetricsBundle(
             tool_selection=ToolSelectionEvaluator.evaluate(records, expected),
-            evidence_sufficiency=EvidenceSufficiencyEvaluator.evaluate(records, expected),
             reasoning_correctness=ReasoningCorrectnessEvaluator.evaluate(records, expected),
             marginal_gain=MarginalEvidenceGainEvaluator.evaluate(records),
         )

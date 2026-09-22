@@ -1,39 +1,22 @@
-"""System 3：完整调查 Agent（走真实图 + eval 世界 + 确定性审查员桩）。
+"""System 3：完整调查 Agent（走真实图 + 固定 Eval World + 调用方注入的 LLM）。
 
-走 ``build_agent_graph``（hypothesize→plan→tools→reevaluate→decide，预算
-LLM_CALLS=10 / TOOL_CALLS=15），终态以确定性 overlay 后的 ``ReviewDecision`` 为评测真值。
-不落 DB；每 case 独立 build + compile 一个图，每次 ``ainvoke`` 都从
-``build_initial_state`` 起算 → 天然隔离、可用桩重放。
-**scripted（CI 可跑）**：注入确定性 ``EvalScriptedLLMBackend``，工具用与 eval_data/v2
-同一份 InMemory 种子世界 —— Agent 经工具拿到 Single-call / Rule 看不到的证据。
-**real**：``AgentScheme(llm=<对象>)`` 直接把该对象交给 ``build_agent_graph``；
-**非确定性、不可重放**、需 API key，仅作观测对照，不进确定性回归基线。
-**结论边界（报告必标注）**：默认工具为 InMemory 种子、LLM 为桩 —— 种子里查不到的
-先例/规避史会低估 Agent 上限；另提供 RAG 世界（``tool_world="rag"``）。
+``AgentScheme.run`` 每 case 独立 ``build_agent_graph`` + ``build_initial_state`` 后
+``ainvoke``，终态 ``ReviewDecision`` 经 ``_transcribe`` 转成 ``EvalRecord``；不落 DB。
+预算恒为**生产默认档**（LLM_CALLS=10 / TOOL_CALLS=15）—— 评测不覆盖 Guardrail 档位，
+预算是否够用本身就是被测行为，超限由生产 Gate 收口。
 
-确定性"审查员模型"（细则见各方法 docstring）：
-- hypothesize 按**表面信号**建假设，prior 由信号确定性给定；
-- plan 按证据类型缺口补五类取证（外观→商品→商家→先例/政策）；
-- reevaluate：相似>=0.85 / Logo>=0.7 → 外观支持；弱相似(0.70~0.85) → 弱支持；商家
-  removals>=3 或改标题>=3 → 系统性支持；在库干净 → 证伪"系统性"；缺证据 →
-  UNRESOLVED（"没查到 ≠ 证伪"）。LLM 消息只带 hypotheses+evidence，表面事实经
-  hypothesize 固化进假设，本层不自造事实。**已知边界**：品牌维度只判"在库品牌非空"
-  （``_product_brand_nonnull``），**不比对案件品牌与在库品牌是否一致** —— 二者不一致
-  （漂移/冒名）会被当作"核验通过"证伪；"案件 brand 在案 + 虚构 pid 查无"只产低先验
-  （prior 0.2 < 0.3）UNRESOLVED，不挡 PASS；
-- decide：**无受支持的"高优先"风险（prior>=0.3）且高优先假设均已证伪 → PASS**；
-  受支持的文本仿冒 / 强视觉 / （弱视觉且商家系统性）→ REJECT（再经 REJECT Gate 校验
-  可引用依据）；其余 → HUMAN。低先验 SUPPORTED 与 PASS 相容是刻意行为：交叉判据
-  用"假设是否成立"而非"先验"。Gate / abstention overlay 仍做最终收口。
+工具世界固定为 ``make_eval_world_tools()``（与 ``eval_data/v2`` 同一份 InMemory 种子事实）；
+``llm`` 由调用方必填注入并直接交给 ``build_agent_graph``，须实现
+``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol（``name`` 属性 +
+``async complete(*, node, state, json_schema, feedback=None)``）。
 
-确定性约束：纯函数 + 异步包装；不读 expected、不读外部配置；阈值常量取单一来源
-pra.domain.measurement；同 (node, state) → 同 payload。
+**结论边界（报告必标注 ``EVAL_WORLD_LABEL``）**：真实 LLM 非确定、不可重放（同数据重跑
+结果可不同）且需 API key；工具世界是种子而非生产 KB —— 种子里查不到的先例/规避史会低估
+Agent 上限。
 """
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -43,24 +26,16 @@ from pra.agent.graph import build_agent_graph
 from pra.agent.guardrails.budget import (
     budget_exceeded,  # 预算超限维度判定（P2-16 记录侧复用，单一实现）
 )
-from pra.agent.guardrails.llm_shell import LLMResponse
-from pra.agent.scripted_llm import _citation  # 证据引用串格式
 from pra.agent.state import build_initial_state
-
-# 相似度下限 / 强相似分界 / 商家系统性阈值：单一来源 pra.domain.measurement。
-from pra.domain.measurement import EVIDENCE_MIN_SIM as _SIM_MIN
-from pra.domain.measurement import EVIDENCE_STRONG as _SIM_STRONG
-from pra.domain.measurement import MERCHANT_DIRTY_MIN as _MERCHANT_DIRTY
 from pra.domain.models import ReviewDecision
 from pra.evaluation.dataset.schema import EvalCase
-from pra.evaluation.harness.base import EvalContext, EvalRecord, SchemeRunner
+from pra.evaluation.harness.base import EvalRecord, SchemeRunner
 from pra.observability.tracing import (
     TraceContext,
     experiment_name,
     get_tracer,
     session_id,
 )
-from pra.screening.rule_engine.terms import BRAND_TERMS, EVASION_TERMS
 
 __all__ = [
     "EVAL_CATEGORIES",
@@ -70,16 +45,12 @@ __all__ = [
     "EVAL_PRECEDENTS",
     "EVAL_PRODUCTS",
     "EVAL_WORLD_LABEL",
-    "RAG_WORLD_LABEL",
     "AgentScheme",
-    "EvalScriptedLLMBackend",
     "make_eval_world_tools",
-    "make_rag_world_tools",
 ]
 
 # 评测种子世界（与 eval_data/v2 同一份"事实知识"；默认演示种子同源扩展）
-# 三方案公平性：Rule / Single-call 只用基础输入（case 快照），本世界知识只能经
-# Agent 的 5 个 InMemory 工具获得 —— 多信号/对抗类案需要调查才能发现。
+# 本世界知识只能经 Agent 的 5 个 InMemory 工具获得 —— 多信号/对抗类案需要调查才能发现。
 
 EVAL_CATEGORIES: tuple[str, ...] = ("女鞋/运动鞋", "箱包/女包", "服装/卫衣")
 
@@ -357,24 +328,16 @@ EVAL_POLICY_CLAUSES: list[dict[str, Any]] = [
 
 # 评测世界标识（报告"结论边界"标注用）
 EVAL_WORLD_LABEL = "InMemory 种子世界 v1（含 P_88231/M_5512 演示种子扩展）"
-# RAG 世界标识：真实 Policy KB / Case KB + 生产 BGE 编码器 + hybrid（BM25 + 余弦）
-RAG_WORLD_LABEL = "RAG 世界（真实 Policy/Case KB · 生产 BGE 编码器 · hybrid 检索）"
 
 
-def make_eval_world_tools(*, case_index=None, policy_index=None):
-    """构造评测世界的 5 个 InMemory 工具（比 ``pra.tools.build_tools`` 少一个 ``OCRTool``）。
+def make_eval_world_tools():
+    """构造 Eval World 的 5 个 InMemory 工具（Product / Image / Merchant / CaseSearch / PolicySearch）。
 
-    **刻意不补 OCRTool**：评测集把 OCR 文本当基础输入（``input.product.images[].ocr_text``）
-    直接消费 —— 案件虽都带图片，但没有一条期望 ``OCRTool``（机审 OCR 文本近乎全空），补进来
-    只会多一个拿不到数据的工具。工具清单与生产各自维护（生产是 6 个），**不存在"同构"约束**，
-    对标时以本函数为准。
+    比 ``pra.tools.build_tools`` 少一个 ``OCRTool``：评测集把 OCR 文本当基础输入
+    （``input.product.images[].ocr_text``）直接消费。检索索引固定为本模块 ``EVAL_*`` 种子 ——
+    与 ``eval_data/v2`` 同一份事实。
 
-    默认注入本模块评测种子（默认演示种子 P_88231 / M_5512 / POLICY_3.2 / CASE_1832 已并入
-    EVAL_* 常量）—— 数据源与 eval_data/v2 同一份事实，杜绝"评测集与工具世界漂移"。
-
-    :param case_index: CaseSearchTool 的检索索引；None → 评测种子 ``InMemoryCaseIndex``
-        （RAG 世界由 ``make_rag_world_tools`` 显式注入真实索引）。
-    :param policy_index: PolicySearchTool 的检索索引；None → 评测种子 ``InMemoryPolicyIndex``。
+    :return: 5 个工具实例，顺序固定。
     """
     # 延迟 import：避免 evaluation 包导入期拉起全部工具子包（防环/省启动）
     from pra.tools.base import Tool
@@ -391,608 +354,30 @@ def make_eval_world_tools(*, case_index=None, policy_index=None):
         ProductTool(repo=InMemoryProductRepository(EVAL_PRODUCTS)),
         ImageAnalysisTool(provider=MockImageAnalysisProvider(EVAL_IMAGE_MATCHES)),
         MerchantTool(repo=InMemoryMerchantRepository(EVAL_MERCHANTS)),
-        CaseSearchTool(
-            index=case_index if case_index is not None else InMemoryCaseIndex(EVAL_PRECEDENTS)
-        ),
-        PolicySearchTool(
-            index=(
-                policy_index
-                if policy_index is not None
-                else InMemoryPolicyIndex(EVAL_POLICY_CLAUSES)
-            )
-        ),
+        CaseSearchTool(index=InMemoryCaseIndex(EVAL_PRECEDENTS)),
+        PolicySearchTool(index=InMemoryPolicyIndex(EVAL_POLICY_CLAUSES)),
     ]
     return tools
 
 
-def make_rag_world_tools():
-    """构造 RAG 世界的 Agent 工具（先例/政策检索走真实 RAG 索引）。
-
-    复用 ``make_eval_world_tools()`` 的 5 件工具（Product / Image / Merchant 沿用 eval 世界
-    种子，事实锚点两世界共用），把 CaseSearchTool / PolicySearchTool 的索引换成**真实 RAG
-    索引** —— 输出仍恰好 5 件、无 OCR。检索口径固定为**生产口径 hybrid**：索引层没有模式开关，
-    评测不做 BM25 / Vector 单路对照。
-    """
-    # 延迟 import：避免 evaluation 包导入期拉起 pra.rag（防环/省启动）
-    from pra.rag.factory import build_case_index, build_policy_index
-    from pra.tools import production_embedder
-
-    # RAG 世界的编码器必须显式给出（factory 不再代为构造）：只读本地缓存的 BGE 编码器，
-    # 两个索引共用同一实例 —— 这里就是"决定用 RAG 世界"的那一层。
-    embedder = production_embedder()
-    # 事实三件沿用 eval 世界种子，两个检索工具**构造时**注入真实 RAG 索引。
-    return make_eval_world_tools(
-        case_index=build_case_index(embedding_model=embedder),
-        policy_index=build_policy_index(embedding_model=embedder),
-    )
-
-
-# 表面信号 / 证据统计辅助（纯函数）
-
-_STYLE_WORDS = frozenset({"复古", "经典", "潮流", "同款", "ins风", "韩版"})
-
-_T_IMAGE_SIM = "IMAGE_SIMILARITY"
-_T_IMAGE_LOGO = "IMAGE_LOGO"
-_T_PRODUCT = "PRODUCT_FACT"
-_T_MERCHANT = "MERCHANT_HISTORY"
-_T_CASE = "CASE_PRECEDENT"
-_T_POLICY = "POLICY_REF"
-
-_LOGO_CONF = 0.70  # Logo 视为强视觉信号的置信下限
-_HIGH_PRIOR = 0.3  # 评测审查员桩的假设门槛（SUPPORTED/PENDING+UNRESOLVED 且 prior>=0.3 才算关注）
-
-# 假设 statement 标记（hypothesize 写、reevaluate/decide 读 —— 表面事实经它跨节点传递）
-_MARK_VISUAL = "外观模仿风险"
-_MARK_BRAND_MISSING = "案件品牌空缺"
-_MARK_BRAND = "品牌规避风险"
-_MARK_MERCHANT = "商家行为风险"
-_MARK_TEXT = "仿冒词明示风险"
-
-_ASCII_LATIN = re.compile(r"[a-z ]+\Z")
-
-
-def _fold_text(text: str) -> str:
-    return (text or "").lower().replace("：", ":")
-
-
-def _hits_in(text: str, terms: frozenset[str]) -> list[str]:
-    """词表命中（纯拉丁词边界 / 中文子串；与 screening rules 同口径）。"""
-    folded = _fold_text(text)
-    matched: list[str] = []
-    for term in terms:
-        tf = _fold_text(term)
-        if _ASCII_LATIN.fullmatch(tf):
-            pat = re.compile(rf"(?<![a-z0-9_]){re.escape(tf)}(?![a-z0-9_])")
-        else:
-            pat = re.compile(re.escape(tf))
-        if pat.search(folded):
-            matched.append(term)
-    return sorted(matched)
-
-
-def _case_surface(case: dict) -> dict:
-    """case（JSON 形状）→ 表面信号（hypothesize 用；与 Single-call mock 同源口径）。"""
-    product = case.get("product") or {}
-    title = str(product.get("title") or "")
-    desc = str(product.get("description") or "")
-    text = f"{title}\n{desc}"
-    ocr_parts = [
-        img.get("ocr_text")
-        for img in product.get("images") or []
-        if isinstance(img, dict) and isinstance(img.get("ocr_text"), str) and img["ocr_text"].strip()
-    ]
-    ocr_hay = "\n".join(ocr_parts)
-    brand = product.get("brand")
-    brand_missing = brand is None or (isinstance(brand, str) and not brand.strip())
-    urls = [
-        i["url"]
-        for i in (product.get("images") or [])
-        if isinstance(i, dict) and isinstance(i.get("url"), str) and i["url"]
-    ]
-    return {
-        "brand_missing": brand_missing,
-        "text_evasion": _hits_in(text, EVASION_TERMS),
-        "ocr_evasion": _hits_in(ocr_hay, EVASION_TERMS),
-        "text_brand": _hits_in(text, BRAND_TERMS),
-        "ocr_brand": _hits_in(ocr_hay, BRAND_TERMS),
-        "style_words": [w for w in sorted(_STYLE_WORDS) if w in _fold_text(text)],
-        "image_urls": urls,
-    }
-
-
-def _evidence_list(state: dict) -> list[dict]:
-    return [e for e in (state.get("evidence") or []) if isinstance(e, dict)]
-
-
-def _hypothesis_list(state: dict) -> list[dict]:
-    return [h for h in (state.get("hypotheses") or []) if isinstance(h, dict)]
-
-
-def _ev_types(evs: list[dict]) -> set:
-    return {e.get("type") for e in evs if isinstance(e.get("type"), str)}
-
-
-def _visible_sim_evidence(evs: list[dict], *, min_sim: float = _SIM_MIN) -> list[dict]:
-    """审查员"看得见"的 IMAGE_SIMILARITY 证据（仅相似度证据，weight >= min_sim）。
-
-    只返回 IMAGE_SIMILARITY 类型条目（相似度分档/证据引用只针对相似度证据）；下限取
-    ``pra.domain.measurement.EVIDENCE_MIN_SIM``（与真实图 tools_node 的 quality_filter 同源）。
-    """
-    return [
-        e for e in evs
-        if e.get("type") == _T_IMAGE_SIM and float(e.get("weight") or 0.0) >= min_sim
-    ]
-
-
-def _sim_stats(evs: list[dict]) -> tuple[float, bool, bool]:
-    """(sim_max, sim_strong, any_sim)；similarity 即 IMAGE_SIMILARITY.weight。
-
-    sim_strong = 可见强相似中 sim_max >= ``EVIDENCE_STRONG``；any_sim = 可见证据里存在相似命中。
-    """
-    sims = [float(e.get("weight") or 0.0) for e in _visible_sim_evidence(evs)]
-    sim_max = max(sims) if sims else 0.0
-    return sim_max, sim_max >= _SIM_STRONG, bool(sims)
-
-
-def _logo_conf(evs: list[dict]) -> float:
-    confs = [float(e.get("weight") or 0.0) for e in evs if e.get("type") == _T_IMAGE_LOGO]
-    return max(confs) if confs else 0.0
-
-
-def _merchant_flags(evs: list[dict]) -> tuple[bool, bool, bool]:
-    """MERCHANT_HISTORY → (dirty, clean, known)。dirty=removals>=3 或 title>=3。"""
-    for e in evs:
-        if e.get("type") != _T_MERCHANT:
-            continue
-        extra = e.get("extra") or {}
-        removals = int(extra.get("removals") or 0)
-        title = int(extra.get("title") or 0)
-        dirty = removals >= _MERCHANT_DIRTY or title >= _MERCHANT_DIRTY
-        clean = removals == 0 and title == 0
-        return dirty, clean, True
-    return False, False, False
-
-
-def _product_found(evs: list[dict]) -> bool:
-    return any(e.get("type") == _T_PRODUCT for e in evs)
-
-
-def _product_brand_nonnull(evs: list[dict]) -> bool:
-    """PRODUCT_FACT 表明在库品牌非空（value 形如 brand=云步, version=… / brand=null, …）。
-
-    **已知边界**：只判"在库品牌非空"，**不比对案件品牌与在库品牌是否一致** ——
-    二者不一致（漂移/冒名）时 reevaluate 的 BRAND 分支会按"在库可查 → 案件空缺/存疑
-    被证伪"（REFUTED）放行。当前 v2 数据不可达（虚构 pid 案全是 brand 空缺）；
-    real/扩展数据可达。要比对一致性须另立规则 + 新 family，本模块不加。
-    """
-    for e in evs:
-        if e.get("type") == _T_PRODUCT and re.search(
-            r"brand=(?!null\b)\S+", str(e.get("value") or "")
-        ):
-            return True
-    return False
-
-
-def _has_citable(evs: list[dict]) -> bool:
-    return any(e.get("type") in {_T_CASE, _T_POLICY} and e.get("ref_id") for e in evs)
-
-
-def _risk_filters(category) -> dict:
-    """先例/政策检索的元数据过滤：类目（有则带）+ 风险类型词表。"""
-    filters: dict = {}
-    if category:
-        filters["category"] = category
-    filters["risk_type"] = ["POTENTIAL_IP_RISK"]
-    return filters
-
-
-def _dim_of(statement: str) -> str:
-    if _MARK_TEXT in statement:
-        return "TEXT"
-    if _MARK_VISUAL in statement:
-        return "VISUAL"
-    if _MARK_BRAND in statement:
-        return "BRAND"
-    if _MARK_MERCHANT in statement:
-        return "MERCHANT"
-    return "OTHER"
-
-
-# EvalScriptedLLMBackend —— 确定性"审查员模型"（LLMBackend 协议）
-
-
-class EvalScriptedLLMBackend:
-    """确定性审查员模型：同 (node, state) → 同输出（tokens=0，可重放）。
-
-    要点：reevaluate / decide 的 state 只含 hypotheses + evidence（节点契约不带
-    case）→ 本层不自造事实，只消费假设标记与证据；hypothesize 阶段已把表面信号固化
-    进假设 prior/statement。``feedback`` 为壳侧 schema 修正提示，桩恒产出可校验内容，
-    故忽略。
-    """
-
-    name = "eval-scripted-reviewer"
-
-    async def complete(
-        self,
-        *,
-        node: str,
-        state: dict,
-        json_schema: dict,
-        feedback: list[str] | None = None,
-    ) -> LLMResponse:
-        from pra.agent.guardrails.llm_shell import LLMBackendError
-
-        if node == "hypothesize":
-            payload = self._hypothesize(state)
-        elif node == "plan":
-            payload = self._plan(state)
-        elif node == "reevaluate":
-            payload = self._reevaluate(state)
-        elif node == "decide":
-            payload = self._decide(state)
-        else:
-            raise LLMBackendError(f"unknown node: {node}")
-        return LLMResponse(content=json.dumps(payload, ensure_ascii=False), tokens=0)
-
-    # hypothesize：按表面信号生成假设（prior = 信号强度的确定性映射）
-
-    def _hypothesize(self, state: dict) -> dict:
-        case = state.get("case")
-        surface = _case_surface(case if isinstance(case, dict) else {})
-        hyps: list[dict] = []
-
-        # ① 外观模仿（有图才建；有风格词嫌疑才高先验 —— 避免对干净商品无谓高怀疑）
-        if surface["image_urls"]:
-            if surface["text_evasion"]:
-                p_vis = 0.85
-            elif surface["text_brand"] or surface["ocr_brand"]:
-                p_vis = 0.65
-            elif surface["style_words"]:
-                p_vis = 0.45
-            else:
-                p_vis = 0.22
-            hyps.append(
-                {
-                    "statement": "商品外观高度模仿某知名品牌款（外观模仿风险，需图片比对确认）",
-                    "prior": p_vis,
-                    "evidence_hint": ["IMAGE_SIMILARITY", "IMAGE_LOGO"],
-                }
-            )
-
-        # ② 品牌核验（案件 brand 空缺 → 高先验 + statement 标记「案件品牌空缺」）
-        if surface["brand_missing"]:
-            stmt_brand = "案件品牌空缺，涉嫌刻意规避品牌识别（品牌规避风险）"
-            p_brand = 0.65
-        else:
-            stmt_brand = "商品品牌真实性与在库一致性核验（品牌规避风险）"
-            p_brand = 0.2
-        hyps.append({"statement": stmt_brand, "prior": p_brand, "evidence_hint": ["PRODUCT_FACT"]})
-
-        # ③ 商家行为（恒建；0.35 默认先验）
-        hyps.append(
-            {
-                "statement": "商家存在系统性违规上架/改标题重上架历史（商家行为风险）",
-                "prior": 0.35,
-                "evidence_hint": ["MERCHANT_HISTORY"],
-            }
-        )
-
-        # ④ 文本明示仿冒（标题/描述/OCR 命中才建）
-        if surface["text_evasion"] or surface["ocr_evasion"]:
-            hyps.append(
-                {
-                    "statement": "标题/描述/OCR 含仿冒词，明示仿冒意图（仿冒词明示风险）",
-                    "prior": 0.85,
-                    "evidence_hint": [],
-                }
-            )
-
-        return {
-            "hypotheses": hyps,
-            "rationale": "按案件表面信号（品牌空缺/文本词/图片存在性）确定性生成待验证假设。",
-        }
-
-    # plan：缺口驱动取证计划（每轮 ≤3 条；重复的 (tool,args) 由 dedup 过滤）
-
-    def _plan(self, state: dict) -> dict:
-        case = state.get("case")
-        case = case if isinstance(case, dict) else {}
-        product = case.get("product")
-        product = product if isinstance(product, dict) else {}
-        evs = _evidence_list(state)
-        types = _ev_types(evs)
-        urls = [
-            img["url"]
-            for img in (product.get("images") or [])
-            if isinstance(img, dict) and isinstance(img.get("url"), str) and img["url"]
-        ]
-        product_id = product.get("product_id")
-        merchant_id = case.get("merchant_id")
-        category = product.get("category")
-
-        # 有序候选：外观 → 在库商品 → 商家历史 → 先例 → 政策。商品/商家证据齐后才
-        # 排先例/政策（REJECT 可引用依据属于"确认风险后"的取证）；已执行成功的
-        # 同 (tool,args) 由确定性 dedup 兜底过滤 —— 干净图（IA 无命中）不会让计划
-        # 卡死在反复重排 ImageAnalysis，下一轮会自动补先例/政策并收敛。
-        facts_ready = _T_PRODUCT in types and _T_MERCHANT in types
-        candidates: list[dict] = []
-        if urls and _T_IMAGE_SIM not in types and _T_IMAGE_LOGO not in types:
-            candidates.append(
-                {"tool": "ImageAnalysisTool", "args": {"image_urls": urls},
-                 "reason": "验证外观是否对应知名品牌款", "priority": 1}
-            )
-        if product_id and _T_PRODUCT not in types:
-            candidates.append(
-                {"tool": "ProductTool", "args": {"product_id": product_id},
-                 "reason": "核对商品在库事实（品牌真实性/版本漂移）", "priority": 2}
-            )
-        if merchant_id and _T_MERCHANT not in types:
-            candidates.append(
-                {"tool": "MerchantTool", "args": {"merchant_id": merchant_id, "window_days": 90},
-                 "reason": "核查商家系统性上架/下架历史", "priority": 3}
-            )
-        if facts_ready and _T_CASE not in types:
-            candidates.append(
-                {"tool": "CaseSearchTool",
-                 "args": {"query": "外观高度模仿+商家多次重上架",
-                          "filters": _risk_filters(category), "top_k": 5},
-                 "reason": "检索同类外观模仿+多次重上架的裁决先例", "priority": 4}
-            )
-        if facts_ready and _T_POLICY not in types:
-            candidates.append(
-                {"tool": "PolicySearchTool",
-                 "args": {"query": "外观高度模仿品牌设计",
-                          "filters": _risk_filters(category), "top_k": 5, "effective_only": True},
-                 "reason": "检索外观高度模仿品牌设计的政策条款", "priority": 5}
-            )
-
-        if not candidates:
-            # 已无新证据可补（商品/商家缺失的畸形案由上面条件自然收尾）
-            return {
-                "next_action": "conclude",
-                "tools": [],
-                "rationale": "当前证据缺口无对应工具可补（商品/商家标识缺失或证据已齐备），收尾。",
-            }
-        return {
-            "next_action": "call_tools",
-            "tools": candidates[:3],  # 每轮 ≤3 条
-            "rationale": "按证据缺口排本轮取证（外观/在库/商家/先例/政策）。",
-        }
-
-    # reevaluate：证据 → 假设状态（确定性；只列变化项，幂等）
-
-    def _reevaluate(self, state: dict) -> dict:
-        evs = _evidence_list(state)
-        hyps = _hypothesis_list(state)
-        sim_max, sim_strong, any_sim = _sim_stats(evs)
-        logo = _logo_conf(evs)
-        merch_dirty, merch_clean, merch_known = _merchant_flags(evs)
-        prod_found = _product_found(evs)
-        prod_brand_ok = _product_brand_nonnull(evs)
-        has_citable = _has_citable(evs)
-
-        updates: list[dict] = []
-        for h in hyps:
-            dim = _dim_of(str(h.get("statement") or ""))
-            current_status = h.get("status")
-            current_posterior = h.get("posterior")
-            target: tuple | None = None  # (status, posterior, evidence_for, evidence_against)
-
-            if dim == "VISUAL":
-                if sim_strong or logo >= _LOGO_CONF:
-                    posterior = max(sim_max, logo)
-                    refs = [
-                        self._citation(e) for e in _visible_sim_evidence(evs)
-                    ] + [
-                        self._citation(e) for e in evs if e["type"] == _T_IMAGE_LOGO
-                    ]
-                    target = ("SUPPORTED", round(posterior, 2), refs, [])
-                elif any_sim:  # 弱相似(0.70~0.85)：弱支持（不构成"高度模仿"确证）
-                    refs = [
-                        self._citation(e) for e in _visible_sim_evidence(evs)
-                    ]
-                    target = ("SUPPORTED", round(sim_max, 2), refs, [])
-                else:
-                    target = ("UNRESOLVED", None, [], [])  # 无命中/无可比 → 查无结论
-            elif dim == "BRAND":
-                case_missing = _MARK_BRAND_MISSING in str(h.get("statement") or "")
-                # 已知边界（P2-3）：prod_brand_ok 只证"在库品牌非空"，不比对案件品牌
-                # 与在库品牌是否一致 —— 漂移/冒名（不一致）也会走 REFUTED"核验通过"。
-                # v2 无 family 覆盖（不可达）；real/扩展数据可达。加比对规则需新 family
-                # + 设计拍板，此处仅标注。
-                if not prod_found:
-                    # 在库未核验 → 不臆断；"案件 brand 在案 + 虚构 pid 查无"走这里 →
-                    # UNRESOLVED 且 prior 0.2(<0.3) → 不挡 PASS（低优先 unresolved
-                    # 不触发 HUMAN）—— 同上，属已知边界，不在此扩张规则。
-                    target = ("UNRESOLVED", None, [], [])  # 在库未核验 → 不臆断
-                elif prod_brand_ok:
-                    # 在库品牌可查 → 案件"空缺/存疑"被证伪（快照字段缺失 ≠ 规避）
-                    refs = [self._citation(e) for e in evs if e["type"] == _T_PRODUCT]
-                    target = ("REFUTED", 0.1, [], refs)
-                elif case_missing:
-                    # 在库亦空缺 → 规避嫌疑成立
-                    refs = [self._citation(e) for e in evs if e["type"] == _T_PRODUCT]
-                    target = ("SUPPORTED", 0.7, refs, [])
-                else:
-                    # 案件品牌声明存在但在库无法佐证（虚构/漂移嫌疑）→ 存疑转人工
-                    target = ("UNRESOLVED", None, [], [])
-            elif dim == "MERCHANT":
-                if merch_known and merch_dirty:
-                    refs = [self._citation(e) for e in evs if e["type"] == _T_MERCHANT]
-                    target = ("SUPPORTED", 0.85, refs, [])
-                elif merch_known:
-                    # 干净(0/0)或中性(0<removals<3)：未达"系统性"阈值 → 证伪"系统性"主张
-                    posterior = 0.1 if merch_clean else 0.25
-                    refs = [self._citation(e) for e in evs if e["type"] == _T_MERCHANT]
-                    target = ("REFUTED", posterior, [], refs)
-                else:
-                    target = ("UNRESOLVED", None, [], [])  # 商家查无 → 无法结论
-            elif dim == "TEXT":
-                # 文本自证仿冒 + 支撑证据（先例/政策/视觉/商家任一同证即充分）
-                refs = [
-                    self._citation(e)
-                    for e in evs
-                    if e["type"] in {_T_CASE, _T_POLICY, _T_IMAGE_SIM, _T_MERCHANT, _T_PRODUCT}
-                ]
-                if has_citable or refs:
-                    target = ("SUPPORTED", 0.9, refs, [])
-                else:
-                    target = ("UNRESOLVED", None, [], [])
-
-            if target is None:
-                continue  # 未知维度（防御：非本后端生成的假设不动）
-            status, posterior, ev_for, ev_against = target
-            # ReevaluateOutput.HypothesisUpdate.posterior 为必填 float → UNRESOLVED 给 0.0
-            # 占位（"未证实也未证伪"无后验语义；gate/decide 不消费 UNRESOLVED 的 posterior）
-            posterior = 0.0 if posterior is None else posterior
-            if status == current_status and posterior == current_posterior:
-                continue  # 幂等：无变化不产出（防无限翻转）
-            updates.append(
-                {
-                    "id": h.get("id"),
-                    "status": status,
-                    "posterior": posterior,
-                    "evidence_for": list(ev_for),
-                    "evidence_against": list(ev_against),
-                }
-            )
-
-        return {
-            "hypothesis_updates": updates,
-            "new_hypotheses": [],
-            "evidence_sufficiency": "SUFFICIENT" if has_citable else "INSUFFICIENT",
-            "conflicts": [],
-            "rationale": "按当前证据确定性综合假设；证据不足一律 UNRESOLVED，不把'没查到'当'证伪'。",
-        }
-
-    # decide：由假设终态 + 证据推提案（overlay/Gate 仍做最终收口）
-
-    def _decide(self, state: dict) -> dict:
-        evs = _evidence_list(state)
-        hyps = _hypothesis_list(state)
-        _sim_max, sim_strong, _ = _sim_stats(evs)
-        logo = _logo_conf(evs)
-        merch_dirty, _, _ = _merchant_flags(evs)
-        has_citable = _has_citable(evs)
-        visible_sim = _visible_sim_evidence(evs)
-
-        def _pri(h: dict) -> float:
-            try:
-                return float(h.get("prior") or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-
-        supported_high = [
-            h for h in hyps if h.get("status") == "SUPPORTED" and _pri(h) >= _HIGH_PRIOR
-        ]
-        # 全部 SUPPORTED 假设（含低先验弱视觉 —— 交叉判据用"是否成立"而非"先验"）
-        visual_supported = any(
-            _dim_of(str(h.get("statement") or "")) == "VISUAL" and h.get("status") == "SUPPORTED"
-            for h in hyps
-        )
-        text_flag = any(_dim_of(str(h.get("statement") or "")) == "TEXT" for h in supported_high)
-        merchant_supported = any(
-            _dim_of(str(h.get("statement") or "")) == "MERCHANT" for h in supported_high
-        )
-        visual_strong = sim_strong or logo >= _LOGO_CONF
-
-        risk_types: list[str] = []
-        # 视觉风险类型按"审查员可见证据视图"派生
-        if visible_sim or any(e.get("type") == _T_IMAGE_LOGO for e in evs):
-            risk_types.append("POTENTIAL_IP_RISK")
-        if merch_dirty:
-            risk_types.append("EVASION_PATTERN")
-
-        # auto_reject 判定：原第 4 子句 (V∧B∧M) 被第 3 子句 (V∧M) 蕴含、恒死，已删
-        # —— 行为零变化。
-        auto_reject = (
-            text_flag
-            or visual_strong
-            or (visual_supported and merchant_supported)
-        )
-        if supported_high:
-            if auto_reject:
-                if has_citable:
-                    return {
-                        "decision": "REJECT",
-                        "risk_level": "HIGH",
-                        "risk_type": list(dict.fromkeys(risk_types)),
-                        "confidence": 0.9,
-                        "evidence_ids": [self._citation(e) for e in evs],
-                        "policy": [
-                            str(e.get("extra", {}).get("policy_id"))
-                            for e in evs
-                            if e["type"] == _T_POLICY and (e.get("extra") or {}).get("policy_id")
-                        ],
-                        "rationale": "高优先风险假设获证据支持且政策/先例可引用，确定性提议拒绝。",
-                    }
-                return {
-                    "decision": "HUMAN_REVIEW",
-                    "risk_level": "HIGH",
-                    "risk_type": list(dict.fromkeys(risk_types)),
-                    "confidence": 0.6,
-                    "evidence_ids": [self._citation(e) for e in evs],
-                    "policy": [],
-                    "rationale": "存在受支持的风险假设但政策依据缺失，克制转人工。",
-                }
-            return {
-                "decision": "HUMAN_REVIEW",
-                "risk_level": "MEDIUM",
-                "risk_type": list(dict.fromkeys(risk_types)),
-                "confidence": 0.5,
-                "evidence_ids": [self._citation(e) for e in evs],
-                "policy": [],
-                "rationale": "存在未决风险关注但未达自动拒绝门槛，转人工复核。",
-            }
-
-        unresolved_high = [
-            h for h in hyps
-            if h.get("status") in ("PENDING", "UNRESOLVED") and _pri(h) >= _HIGH_PRIOR
-        ]
-        if unresolved_high:
-            return {
-                "decision": "HUMAN_REVIEW",
-                "risk_level": "LOW",
-                "risk_type": [],
-                "confidence": 0.4,
-                "evidence_ids": [self._citation(e) for e in evs],
-                "policy": [],
-                "rationale": "高优先假设仍未证实或证伪，证据不足转人工。",
-            }
-        return {
-            "decision": "PASS",
-            "risk_level": "NONE",
-            "risk_type": [],
-            "confidence": 0.8,
-            "evidence_ids": [self._citation(e) for e in evs],
-            "policy": [],
-            "rationale": "无受支持的风险假设且高优先假设均已证伪，确定性提议放行。",
-        }
-
-    @staticmethod
-    def _citation(ev: dict) -> str:
-        return _citation(ev)
-
-
-# SchemeRunner：走真实图（build_agent_graph + eval 世界 + eval 审查员后端）
+# SchemeRunner：走真实图（build_agent_graph + 固定 Eval World + 注入的 LLM 后端）
 
 
 def _root_trace_context(
-    case: EvalCase, ctx: EvalContext, initial_state: dict, *, backend_name: str = "unknown"
+    case: EvalCase, initial_state: dict, *, backend_name: str = "unknown"
 ) -> TraceContext:
     """按确定性规则包装评测路径的 root trace（每案一条）。
 
     ``trace_id = uuid5(NAMESPACE_URL, f"{experiment}:{eval_case_id}:agent:{backend_name}")``
-    —— **确定性**：同 experiment + 同案 + 同方案 + **同 LLM 后端**重跑落同一条 trace。
-
-    **为什么把 ``backend_name`` 纳入 trace_id**：``run_evaluation_real.py`` 会在同一
-    进程里对同一批 case 跑 scripted 对照臂 + real 臂（两臂 experiment 相同）—— 若
-    trace_id 不含后端名，两臂会落进同一条 trace（实测每 trace 出现 2 个 root
-    observation、real/scripted generation 交织，按 trace 汇总 token 会混入 0-token 的
-    桩 generation）。纳入后端名后两臂各自成 trace，scripted 臂的确定性不变。
+    —— 同 experiment + 同案 + 同后端重跑落同一条 trace；后端名进 trace_id 使不同 LLM 后端
+    各自成 trace，按 trace 汇总 token 时不互相混入。
 
     ``session_id`` 取 ``PRA_LANGFUSE_SESSION``（一次评测 run 一个值）；``version`` =
     experiment 名。只读：不写 state、不参与任何判定。
+
+    :param case: 评测案（读 ``input.case_id`` / ``eval_case_id`` / ``scene``）。
+    :param initial_state: 图初始状态（读 ``budget.limits`` 记入 metadata）。
+    :param backend_name: LLM 后端名，进 trace_id 与 ``metadata.llm_backend``。
     """
     experiment = experiment_name()
     metadata: dict[str, Any] = {
@@ -1002,7 +387,7 @@ def _root_trace_context(
         "scheme": "agent",
         "experiment": experiment,
         "llm_backend": backend_name,
-        "tool_world": ctx.tool_world,
+        "tool_world": "eval",
         "source": "evaluation",
     }
     limits = getattr(initial_state.get("budget"), "limits", None)
@@ -1013,9 +398,8 @@ def _root_trace_context(
         "scheme:agent",
         f"experiment:{experiment}",
         "source:evaluation",
+        "tool_world:eval",
     ]
-    if ctx.tool_world:
-        tags.append(f"tool_world:{ctx.tool_world}")
     return TraceContext(
         trace_id=uuid5(
             NAMESPACE_URL, f"{experiment}:{case.eval_case_id}:agent:{backend_name}"
@@ -1030,63 +414,35 @@ def _root_trace_context(
 
 
 class AgentScheme(SchemeRunner):
-    """System 3 —— 完整调查 Agent（scripted 模式：eval 世界 + eval 审查员桩）。
+    """System 3 —— 完整调查 Agent（真实图 + 固定 Eval World + 注入的 LLM 后端）。
 
     每 case 独立 build + compile 一个图（不落 checkpoint），每次 ``ainvoke`` 都由
-    ``build_initial_state`` 起算 → 天然隔离；LLM 后端每案**显式注入** ``build_agent_graph(llm=...)``，
-    不碰任何进程级全局、无需收尾复位。
-
-    - ``ctx.tool_world`` == "rag"：CaseSearch/PolicySearch 注入真实 RAG 索引（hybrid），
-      其余事实工具沿用 eval 世界；
-    - ``llm``：**real 模式注入** —— 非 None 时 ``run()`` 直接把它当 LLMBackend 交给
-      ``build_agent_graph``（跳过确定性桩）；须实现
-      ``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol（``name`` 属性 +
-      ``async complete(*, node, state, json_schema, feedback=None)``）。real 非确定性 /
-      不可重放 / 需 API key。
+    ``build_initial_state`` 起算 → 天然隔离；LLM 后端每案经 ``build_agent_graph(llm=...)``
+    显式注入，不碰任何进程级全局、无需收尾复位。
 
     预算恒为**生产默认**（LLM_CALLS=10 / TOOL_CALLS=15）—— 评测不覆盖 Guardrail 档位：
     预算是否够用本身就是被测行为，超限 → HUMAN_REVIEW 由生产 Gate 收口。
+
+    :param llm: LLM 后端（必填），交给 ``build_agent_graph``；须实现
+        ``pra.agent.guardrails.llm_shell.LLMBackend`` Protocol。
     """
 
     name = "agent"
 
-    def __init__(
-        self,
-        *,
-        llm: object | None = None,  # real 模式：注入 LLMBackend（None=确定性桩）
-    ) -> None:
-        # 每次 run 统一经 build_agent_graph(llm=...) 显式注入（无进程级全局、无收尾复位）。
-        self._llm: object | None = llm
+    def __init__(self, *, llm: object) -> None:
+        self._llm: object = llm
 
-    async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
-        if ctx.tool_world == "eval":
-            tools = make_eval_world_tools()
-        elif ctx.tool_world == "rag":
-            # RAG 世界：先例/政策检索注入真实 RAG 索引（生产口径 hybrid）；
-            # 评测默认路径（tool_world="eval"）不动。
-            tools = make_rag_world_tools()
-        else:  # "default" = 仓库默认演示种子（InMemory）—— 显式装配，不依赖图侧缺省回落
-            from pra.tools import build_tools
-
-            tools = build_tools()
-        if self._llm is not None:
-            # real 模式：调用方注入对象即为 LLM 后端（构造与 tools 配置由调用方负责，
-            # 本层不额外处理）；工具仍按 ctx.tool_world 装配（同上）。
-            backend = self._llm
-        else:
-            # 确定性审查员桩（默认；同 case 同 ctx → 同输出，可重放）
-            backend = EvalScriptedLLMBackend()
+    async def run(self, case: EvalCase) -> EvalRecord:
+        tools = make_eval_world_tools()
         graph: CompiledStateGraph = build_agent_graph(
             tools=tools,
-            llm=backend,
+            llm=self._llm,
         )
         initial_state = build_initial_state(case.input)
-        # Root trace：每案一条，trace_id 确定性 uuid5
-        # （含 LLM 后端名 —— scripted 对照臂与 real 臂各自成 trace）；
-        # **不 per-case flush**（320 次太慢）—— 由评测入口整轮结束后
-        # ``tracing.flush_tracer()`` 统一刷出（S5 CLI 收尾调用）。
+        # Root trace：每案一条，trace_id 确定性 uuid5（含 LLM 后端名）；不 per-case flush，
+        # 由评测入口整轮结束后 ``tracing.flush_tracer()`` 统一刷出。
         root_ctx = _root_trace_context(
-            case, ctx, initial_state, backend_name=getattr(backend, "name", "unknown")
+            case, initial_state, backend_name=getattr(self._llm, "name", "unknown")
         )
         with get_tracer().trace_root(root_ctx) as root:
             # 不挂 checkpointer：图无恢复/续跑需求，终态由 ainvoke 直接返回。thread_id 仍传 ——

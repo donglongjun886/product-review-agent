@@ -62,11 +62,12 @@ curl http://127.0.0.1:8000/api/v1/health   # {"status":"ok"}
 ## 评测
 
 ```bash
-uv run python scripts/run_evaluation.py                  # 三个方案对比：规则 / 单次模型 / Agent
-uv run python scripts/run_regression.py                  # 和基线比对，确认结论没变
-uv run python scripts/run_evaluation_real.py --limit 10   # 用真实模型跑：要密钥、有费用
+uv run python scripts/run_evaluation_real.py --limit 10 --out /tmp/real.json  # 用真实模型跑：要 API key、有费用
+uv run python scripts/run_error_analysis.py --from /tmp/real.json             # 对该产物做归因：只读 JSON，不调模型
 ```
 
+评测只跑真实模型（规则 baseline 与 Agent 共用同一份数据）：需要 `DEEPSEEK_API_KEY`，会产生费用，
+结果不确定、不可重放，不进 CI。归因脚本只读那一次跑分的产物 JSON，不重跑 Agent、不需要 key。
 评测怎么做、最近一次结果是什么，见 [docs/02-evaluation.md](docs/02-evaluation.md)。
 
 ## 目录
@@ -77,7 +78,7 @@ src/pra/
   tools/        六个取证工具：商品 / 商家 / 图片 / OCR / 案例 / 政策
   screening/    规则初筛与三分流
   rag/          政策库与案例库检索
-  evaluation/   评测
+  evaluation/   评测：数据集、真实评测、指标
   api/  infra/  domain/  observability/
 docs/  migrations/  scripts/  tests/  deploy/
 ```

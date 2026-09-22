@@ -5,10 +5,7 @@
   保证）。向后兼容：v1 老 JSONL（无 abstain_label、decision ∈ {PASS, REJECT}）读入后
   abstain_label=None（等价 AUTO_DECIDABLE）。解析失败抛带行号的 ``ValueError`` ——
   评测集损坏不该被静默跳过。
-- ``scene_stats(cases)``：按 scene 分层的计数（含 expected.decision 分布），
-  供 manifest 生成与报告声明分布。
-- ``abstain_stats(cases)``：abstention 标签（AUTO_DECIDABLE / SHOULD_ABSTAIN /
-  老数据 None）计数 —— manifest 与 AbstentionEvaluator 前置口径的单一取数点。
+- ``scene_stats(cases)``：按 scene 分层的计数（含 expected.decision 分布），供报告声明分布。
 - ``smoke_subset(cases, limit)``：确定性取前 ``limit`` 条（不随机；文件行序即稳定序）。
 
 行号从 1 起，异常信息含行号与 eval_case_id（若可解析）。
@@ -18,17 +15,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pra.evaluation.dataset.schema import AbstainLabel, EvalCase
+from pra.evaluation.dataset.schema import EvalCase
 
 __all__ = [
-    "abstain_stats",
     "load_dataset",
     "scene_stats",
     "smoke_subset",
 ]
 
 _SCENES = ("normal", "violation", "boundary", "multi-signal", "evasion")
-_ABSTAIN_LABELS: tuple[AbstainLabel, ...] = ("AUTO_DECIDABLE", "SHOULD_ABSTAIN")
 
 
 def load_dataset(path: str | Path) -> list[EvalCase]:
@@ -58,7 +53,7 @@ def load_dataset(path: str | Path) -> list[EvalCase]:
 
 
 def scene_stats(cases: list[EvalCase]) -> dict:
-    """按 scene × expected.decision 分层的计数统计（manifest / 报告用）。
+    """按 scene × expected.decision 分层的计数统计（报告用）。
 
     返回 ``{"total": N, "by_scene": {scene: {total, PASS, REJECT, HUMAN_REVIEW,
     share}} }``；share 保留 2 位小数（纯展示）。v1 数据无 HUMAN_REVIEW 真值 →
@@ -83,58 +78,6 @@ def scene_stats(cases: list[EvalCase]) -> dict:
         "total": sum(1 for c in cases if c.scene not in _SCENES)
     }
     return {"total": total, "by_scene": by_scene}
-
-
-def abstain_stats(cases: list[EvalCase]) -> dict:
-    """abstention 语义标签计数（manifest / 测试 / 指标层共用口径）。
-
-    返回::
-
-        {
-          "total": N,
-          "AUTO_DECIDABLE": n,        # 显式标 AUTO_DECIDABLE（decision∈{PASS,REJECT}）
-          "SHOULD_ABSTAIN": n,        # decision==HUMAN_REVIEW 案
-          "LEGACY_UNLABELED": n,      # abstain_label=None（v1 老数据；等价 AUTO_DECIDABLE）
-          "auto_decidable_equivalent": n,  # AUTO_DECIDABLE + LEGACY_UNLABELED
-          "auto_share": float,        # auto_decidable_equivalent / total（2 位小数）
-          "abstain_share": float,     # SHOULD_ABSTAIN / total（2 位小数）
-          "by_scene": {scene: {"total", "AUTO_DECIDABLE", "SHOULD_ABSTAIN", "LEGACY_UNLABELED"}},
-        }
-
-    None 在语义上等价 AUTO_DECIDABLE，但单独计数以便区分老数据与显式标注。
-    """
-    total = len(cases)
-    counts = {label: 0 for label in _ABSTAIN_LABELS}
-    legacy = 0
-    for c in cases:
-        label = c.expected.abstain_label
-        if label is None:
-            legacy += 1
-        else:
-            counts[label] += 1
-    auto_equiv = counts["AUTO_DECIDABLE"] + legacy
-    by_scene: dict = {}
-    for scene in _SCENES:
-        rows = [c for c in cases if c.scene == scene]
-        sc: dict = {"total": len(rows), "AUTO_DECIDABLE": 0, "SHOULD_ABSTAIN": 0, "LEGACY_UNLABELED": 0}
-        for c in rows:
-            label = c.expected.abstain_label
-            key = "LEGACY_UNLABELED" if label is None else str(label)
-            sc[key] += 1
-        by_scene[scene] = sc
-    by_scene["_unknown_scene"] = {
-        "total": sum(1 for c in cases if c.scene not in _SCENES)
-    }
-    return {
-        "total": total,
-        "AUTO_DECIDABLE": counts["AUTO_DECIDABLE"],
-        "SHOULD_ABSTAIN": counts["SHOULD_ABSTAIN"],
-        "LEGACY_UNLABELED": legacy,
-        "auto_decidable_equivalent": auto_equiv,
-        "auto_share": round(auto_equiv / total, 2) if total else 0.0,
-        "abstain_share": round(counts["SHOULD_ABSTAIN"] / total, 2) if total else 0.0,
-        "by_scene": by_scene,
-    }
 
 
 def smoke_subset(cases: list[EvalCase], limit: int = 10) -> list[EvalCase]:

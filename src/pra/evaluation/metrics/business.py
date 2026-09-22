@@ -1,18 +1,23 @@
-"""决策业务指标：DecisionEvaluator —— 三方案可比口径。
+"""决策业务指标：DecisionEvaluator —— 全量分母与 AUTO_DECIDABLE 分母一次遍历同算。
 
-只统计 **expected.decision ∈ {PASS, REJECT}** 的案，REJECT 为**正类**。
-pred HUMAN_REVIEW 记为该案未自动判（见下），另用 human_rate / automation 观察。
+真值子集由 expected 的 (decision, abstain_label) 推导：``abstain_label`` 优先；缺失时
+``decision == HUMAN_REVIEW`` → SHOULD_ABSTAIN，其余 → AUTO_DECIDABLE。
 
-- 二分类混淆（只计 pred ∈ {PASS, REJECT} 的案）：
-  TP=truth REJECT ∧ pred REJECT；FP=truth PASS ∧ pred REJECT；
-  TN=truth PASS ∧ pred PASS；FN=truth REJECT ∧ pred PASS；
-- Precision = TP/(TP+FP)；Recall = TP/(TP+FN)；
-- FPR = FP/(FP+TN) —— **误杀红线**；FNR = FN/(TP+FN) —— 漏放；
-- Accuracy = (TP+TN) / 全部真值案 —— **pred HUMAN_REVIEW 计为判错**：不入分子
-  但入分母，故对保守转人工的方案更严格（避免"全转人工刷高 Precision"的假象）；
-- human_rate = pred HUMAN / 全部；automation = 1 − human_rate；
-- reject_unhandled = (truth REJECT ∧ pred HUMAN) / truth REJECT 数（漏放的上限视角）；
-  pass_unhandled 同理。
+指标口径（REJECT 为正类）：
+
+- 全量分母（全部案，含 HUMAN_REVIEW 真值）：
+  ``automation_coverage`` = pred ∈ {PASS,REJECT} / total；
+  ``human_review_rate`` = pred HUMAN_REVIEW / total；
+- AUTO_DECIDABLE 分母（本可自动判的案）：
+  ``accuracy`` = (tp+tn) / auto_decidable_total（pred HUMAN 入分母、不入分子）；
+  ``precision`` = tp/(tp+fp)；
+  ``wrong_auto_decision_rate`` = (fp+fn)/(tp+fp+tn+fn)（pred HUMAN 不入该分母）；
+- 真值 REJECT 分母（全部真违规案）：
+  ``recall`` = tp / reject_truth（pred HUMAN_REVIEW 记为该真违规未被自动拦下，入分母不入 TP/FN）；
+  ``reject_unhandled`` = reject_human / reject_truth。
+
+真值 REJECT 案被 ``tp`` / ``reject_human`` / ``fn`` 三个互斥桶完全划分，故恒有
+``recall + reject_unhandled + fn/reject_truth = 1`` —— 缺口据此区分"安全转人工"与"漏放"。
 
 分母为 0 的比率返回 None（报告显示 "-"，不硬造 0/∞）。
 """
@@ -27,110 +32,109 @@ from pra.evaluation.harness.base import EvalRecord
 
 __all__ = ["DecisionEvaluator", "DecisionMetrics"]
 
-_BINARY = {"PASS", "REJECT"}
+_AUTO = "AUTO_DECIDABLE"
+_SHOULD = "SHOULD_ABSTAIN"
 
 
 class DecisionMetrics(BaseModel):
-    """一组二分类业务指标 + 覆盖率口径（None = 分母为 0，未定义）。
+    """两套分母的业务指标 + 各自分子分母计数（None = 分母为 0，未定义）。"""
 
-    按 scene 分层由 ``evaluate_grouped`` 复用同一实现（scene 取自调用方传入的
-    expected 索引）。
-    """
-
-    total: int = Field(description="真值案总数（expected ∈ {PASS, REJECT}）")
-    auto_decided: int = Field(description="自动判出案数（pred ∈ {PASS, REJECT}）")
-    human_pred: int = Field(description="输出 HUMAN_REVIEW 的案数（未自动判）")
-    human_reject: int = Field(default=0, description="truth REJECT ∧ pred HUMAN（该转拒却转人工）")
-    human_pass: int = Field(default=0, description="truth PASS ∧ pred HUMAN（该放行却转人工）")
+    total: int = Field(description="全部案数（全量分母）")
+    human_pred_total: int = Field(description="pred HUMAN_REVIEW 的案数（human_review_rate 分子）")
+    auto_decidable_total: int = Field(description="AUTO_DECIDABLE 案数（accuracy 分母）")
     tp: int = 0
     fp: int = 0
     tn: int = 0
     fn: int = 0
-    accuracy: float | None = None  # (TP+TN)/total（HUMAN 判错口径，见模块 docstring）
-    precision: float | None = None  # TP/(TP+FP)
-    recall: float | None = None  # TP/(TP+FN) —— 违规召回（自动判子集）
-    fpr: float | None = None  # FP/(FP+TN) —— 误杀红线
-    fnr: float | None = None  # FN/(TP+FN) —— 漏放（自动判子集）
-    human_rate: float | None = None  # human_pred / total
-    automation: float | None = None  # auto_decided / total
-    reject_unhandled: float | None = None  # (truth REJECT ∧ pred HUMAN)/truth REJECT
-    pass_unhandled: float | None = None  # (truth PASS ∧ pred HUMAN)/truth PASS
+    reject_truth: int = Field(default=0, description="truth REJECT 案数（recall 与 reject_unhandled 分母）")
+    reject_human: int = Field(default=0, description="truth REJECT ∧ pred HUMAN（reject_unhandled 分子）")
+
+    automation_coverage: float | None = None  # (total − human_pred_total) / total
+    human_review_rate: float | None = None  # human_pred_total / total
+    accuracy: float | None = None  # (tp+tn) / auto_decidable_total
+    precision: float | None = None  # tp / (tp+fp)
+    recall: float | None = None  # tp / reject_truth（转人工入分母、不入 TP/FN）
+    wrong_auto_decision_rate: float | None = None  # (fp+fn) / (tp+fp+tn+fn)
+    reject_unhandled: float | None = None  # reject_human / reject_truth
 
 
 def _ratio(numer: int, denom: int) -> float | None:
     return numer / denom if denom else None
 
 
-class DecisionEvaluator:
-    """DecisionEvaluator —— 只吃 EvalRecord.decision × expected.decision。
+def _abstain_subset_of(expected: Mapping) -> str:
+    """由 expected 的 (decision, abstain_label) 推导真值子集（AUTO_DECIDABLE / SHOULD_ABSTAIN）。
 
-    expected 索引由调用方构造：``{eval_case_id: {"decision": ..., "scene": ...}}``。
+    :param expected: ``{"decision": ..., "abstain_label": ...}``；abstain_label 可为 None。
+    """
+    label = expected.get("abstain_label")
+    if label == _SHOULD:
+        return _SHOULD
+    if label == _AUTO:
+        return _AUTO
+    if expected.get("decision") == "HUMAN_REVIEW":
+        return _SHOULD
+    return _AUTO
+
+
+class DecisionEvaluator:
+    """DecisionEvaluator —— 只吃 EvalRecord.decision × expected 真值。
+
+    expected 索引由调用方构造：``{eval_case_id: {"decision": ..., "abstain_label": ...}}``。
     """
 
     @staticmethod
     def evaluate(records: list[EvalRecord], expected: Mapping[str, Mapping]) -> DecisionMetrics:
-        truth = {cid: exp.get("decision") for cid, exp in expected.items()}
-        total = tp = fp = tn = fn = human = 0
-        reject_truth = pass_truth = 0
-        reject_human = pass_human = 0
-        for rec in records:
-            exp_decision = truth.get(rec.eval_case_id)
-            if exp_decision not in _BINARY:
-                continue  # 防御：非二值真值不计（Phase 1 全量真值均二值）
-            total += 1
-            if exp_decision == "REJECT":
-                reject_truth += 1
-            else:
-                pass_truth += 1
-            pred = rec.decision
-            if pred not in _BINARY:  # HUMAN_REVIEW → 未自动判
-                human += 1
-                if exp_decision == "REJECT":
-                    reject_human += 1
-                else:
-                    pass_human += 1
-                continue
-            if exp_decision == "REJECT" and pred == "REJECT":
-                tp += 1
-            elif exp_decision == "PASS" and pred == "REJECT":
-                fp += 1
-            elif exp_decision == "PASS" and pred == "PASS":
-                tn += 1
-            else:  # exp REJECT ∧ pred PASS
-                fn += 1
+        """统计一组 EvalRecord 的决策指标。
 
-        auto_decided = tp + fp + tn + fn
+        :param records: 同一 scheme 的记录；eval_case_id 不在 expected 中的记录跳过。
+        :param expected: 真值索引。SHOULD_ABSTAIN 案只进全量分母，不进 AUTO_DECIDABLE 分母。
+        """
+        total = human_pred = auto_decidable_total = 0
+        tp = fp = tn = fn = 0
+        reject_truth = reject_human = 0
+        for rec in records:
+            exp = expected.get(rec.eval_case_id)
+            if exp is None:
+                continue
+            pred = rec.decision
+            truth = exp.get("decision")
+            total += 1
+            if pred == "HUMAN_REVIEW":
+                human_pred += 1
+            if truth == "REJECT":
+                reject_truth += 1
+                if pred == "HUMAN_REVIEW":
+                    reject_human += 1
+            if _abstain_subset_of(exp) == _SHOULD:
+                continue
+            auto_decidable_total += 1
+            if pred == "REJECT":
+                if truth == "REJECT":
+                    tp += 1
+                else:
+                    fp += 1
+            elif pred == "PASS":
+                if truth == "PASS":
+                    tn += 1
+                else:
+                    fn += 1
+
         return DecisionMetrics(
             total=total,
-            auto_decided=auto_decided,
-            human_pred=human,
-            human_reject=reject_human,
-            human_pass=pass_human,
+            human_pred_total=human_pred,
+            auto_decidable_total=auto_decidable_total,
             tp=tp,
             fp=fp,
             tn=tn,
             fn=fn,
-            accuracy=_ratio(tp + tn, total),
+            reject_truth=reject_truth,
+            reject_human=reject_human,
+            automation_coverage=_ratio(total - human_pred, total),
+            human_review_rate=_ratio(human_pred, total),
+            accuracy=_ratio(tp + tn, auto_decidable_total),
             precision=_ratio(tp, tp + fp),
-            recall=_ratio(tp, tp + fn),
-            fpr=_ratio(fp, fp + tn),
-            fnr=_ratio(fn, tp + fn),
-            human_rate=_ratio(human, total),
-            automation=_ratio(auto_decided, total),
+            recall=_ratio(tp, reject_truth),
+            wrong_auto_decision_rate=_ratio(fp + fn, tp + fp + tn + fn),
             reject_unhandled=_ratio(reject_human, reject_truth),
-            pass_unhandled=_ratio(pass_human, pass_truth),
         )
-
-    @staticmethod
-    def evaluate_grouped(
-        records: list[EvalRecord], expected: Mapping[str, Mapping]
-    ) -> dict[str, DecisionMetrics]:
-        """按 scene 分层（normal/violation/boundary/multi-signal/evasion）复用同口径。"""
-        by_scene: dict[str, list[EvalRecord]] = {}
-        for rec in records:
-            scene = expected.get(rec.eval_case_id, {}).get("scene")
-            by_scene.setdefault(scene if isinstance(scene, str) else "_unknown", []).append(rec)
-        grouped: dict[str, DecisionMetrics] = {}
-        for scene, group in sorted(by_scene.items()):
-            grouped[scene] = DecisionEvaluator.evaluate(group, expected)
-        return grouped

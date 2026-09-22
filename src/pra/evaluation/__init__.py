@@ -1,25 +1,16 @@
-# 评测包：三方案对比闭环 + 能力扩展；不落 DB、确定性、可重放。
-#
-# 模块分工（接口细节见各模块 docstring，此处只列职责）：
-#   dataset/schema.py   EvalCase / EvalExpected 契约（真值三值 + abstain 标签）
-#   dataset/loader.py   JSONL 读取 + 分层统计 + 确定性 smoke 子集
-#   harness/base.py     EvalContext（配置注入点）/ SchemeRunner / EvalRecord（指标层唯一输入）
-#   harness/rule_scheme.py          RuleBaseline（复用 pra.screening 三分流）
-#   harness/single_call_scheme.py   SingleCallScheme（单次调用 + 置信后处理）
-#   harness/agent_scheme.py         AgentScheme（图 + eval 世界 + 确定性桩）
-#   metrics/business.py      DecisionEvaluator（二分类五指标 + human_rate/automation）
-#   metrics/abstention.py    AbstentionEvaluator（human_review_rate / automation_coverage /
-#                            abstention_rate / abstention_recall / wrong_auto_decision_rate）
-#   metrics/agent.py         AgentMetricsBundle（Tool Selection 覆盖口径 / Evidence Sufficiency
-#                            两栏 / Reasoning Correctness 自动代理 / 边际证据增益；只读统计）
-#   metrics/engineering.py   EngineeringEvaluator（llm_calls / tool_calls / tokens 均值·P50·P95）
-#   report.py                Console Report（总体 + 按 scene 分层）
-#   runner.py                EvaluationRunner 编排（load → N scheme → metrics → report）
-#   regression.py            Regression（三方案决策序列 hash vs 基线快照）
-#
-# 未实现：Budget Utilization（EvalRecord 不含预算上限，硬算失真）、Agent 级按 scene 分层分布、
-# 单案成本折算（需价目表）、语义理由人工复核（无第二标注者）。真 LLM 臂
-# （scripts/run_evaluation_real.py）、v2 320 案正式集、可选 DB 落库路径均已落地。
-from pra.evaluation.runner import ALL_SCHEMES, EvaluationResult, EvaluationRunner
+"""评测包：真实数据 × 真实 LLM × 固定 Eval World 的正式评测闭环；不落 DB。
 
-__all__ = ["ALL_SCHEMES", "EvaluationResult", "EvaluationRunner"]
+模块分工（接口细节见各模块 docstring，此处只列职责）：
+  dataset/schema.py   EvalCase / EvalExpected 契约（真值三值 + abstain 标签）
+  dataset/loader.py   JSONL 读取 + 分层统计 + 确定性 smoke 子集
+  harness/base.py     SchemeRunner / EvalRecord（指标层唯一输入）
+  harness/rule_scheme.py          RuleBaseline（复用 pra.screening 三分流）
+  harness/agent_scheme.py         AgentScheme（真实 LLM + 固定 Eval World）
+  metrics/business.py      DecisionEvaluator（全量 + AUTO_DECIDABLE 两套分母）
+  metrics/agent.py         AgentMetricsBundle（工具选择 / 推理正确性 / 边际证据增益）
+  metrics/engineering.py   EngineeringEvaluator（llm_calls / tool_calls / tokens / latency_ms 分布）
+  report.py                Console Report（两臂指标 + 逐案对比 + overrides 归因）
+  runner.py                expected_index（数据集真值索引的唯一读取入口）
+"""
+
+__all__: list[str] = []

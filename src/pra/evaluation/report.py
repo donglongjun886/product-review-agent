@@ -1,350 +1,323 @@
-"""Console Report：总体 + 按 scene 分层的纯文本报告。
+"""Console Report 渲染：两臂业务指标 / 工程分布 / Agent 级指标 / overrides 归因 / 逐案明细。
 
-只做格式化（无文件 IO；``print_report`` 打印 stdout）。口径说明随报告输出：
-数据集分布（实际分布由 loader 统计，防 manifest 漂移）；工具数据源 = InMemory 种子、
-LLM = 确定性桩；输出空间对齐：Rule COMPLEX→HUMAN_REVIEW、Single-call conf<门槛的
-REJECT→HUMAN。
+``render_report(payload, extra, *, out_path=None)`` 返回整份纯文本报告，``print_report`` 打印到
+stdout。``payload`` = ``run_evaluation_real.py --out`` 落盘的 JSON（数据集路径 / 模型 / count /
+逐案 real 记录 / overrides 汇总）；``extra`` = 渲染中间物（``rows`` 逐案对比行、``by_scene``
+一致计数、两臂 ``*_metrics`` / ``*_engineering`` / ``*_agent_metrics`` / ``*_overrides``、
+``scene_stats``）；``out_path`` 非 None 时末行提示 JSON 落盘路径。
 
-**分母口径随数据版本分叉（透明化，不改计算）**：v2（真值含 HUMAN_REVIEW /
-SHOULD_ABSTAIN）时决策指标行取二值真值（PASS+REJECT）分母，abstention 五指标行取全量
-分母，头行同步列出三值分布与两套分母；v1（无 abstain 标签）两套分母重合，abstention 区
-不渲染。Accuracy：pred HUMAN_REVIEW 记为判错（入分母不入 (TP+TN) 分子）；
-Precision/Recall/FPR/FNR 只在自动判出子集上计算。
-
-词表现状：``BLACKLISTED_BRANDS`` 是内置固定 demo 词表（``{"某违禁品牌", "山寨"}``）—— v2 的
-``blackbrand_field`` 家族 brand 即取自其中 → Rule 经 R-101 直判 REJECT（v1 无黑名单品牌）；品牌词
-（R-102）/规避词（R-302）/空缺（R-301）仍 COMPLEX→HUMAN，如实呈现，非缺陷。Single-call 为表面
-字段口径、**不拥有**确定性黑名单输入（§3.3）→ 黑名单案仍 PASS，属方案设计差异。结论边界块含
-「标注-审查员同口径耦合」声明（同口径耦合高估一致性、工具覆盖有限低估真实上限）。
+两臂为 rule（``RuleBaseline`` 确定性初筛）与 real（真实 LLM，非确定性、不可重放）。业务指标
+同时用两套分母（AUTO_DECIDABLE 与全量），表下注记逐项写清，勿混读。
 """
 
 from __future__ import annotations
 
-from pra.evaluation.metrics.abstention import abstain_subset_of
+from pra.agent.guardrails.gate import (
+    R3_BUDGET_EXHAUSTED,
+    R5_DEGRADED_OR_FAILED_STEP,
+)
+from pra.evaluation.harness.agent_scheme import EVAL_WORLD_LABEL
 from pra.evaluation.metrics.business import DecisionMetrics
-from pra.evaluation.runner import ALL_SCHEMES, EvaluationResult
+from pra.evaluation.metrics.engineering import DistributionMetrics, EngineeringMetrics
 
 __all__ = ["print_report", "render_report"]
 
-_SCENES = ("normal", "violation", "boundary", "multi-signal", "evasion")
-_DECISIONS = ("PASS", "REJECT", "HUMAN_REVIEW")
+SCENES = ("normal", "violation", "boundary", "multi-signal", "evasion")
 
 
-def _fmt(v) -> str:
-    if v is None:
+def _fmt(v: float | None) -> str:
+    """比率单元格：None（分母为 0，未定义）→ ``-``，否则 3 位小数。"""
+    return "-" if v is None else f"{v:.3f}"
+
+
+def _fmt0(v: float | None) -> str:
+    """分布单元格：None → ``-``，否则紧凑数值。"""
+    return "-" if v is None else f"{v:g}"
+
+
+def _triple(d: DistributionMetrics) -> str:
+    """分布三元组 ``mean/p50/p95``。"""
+    return f"{_fmt0(d.mean)}/{_fmt0(d.p50)}/{_fmt0(d.p95)}"
+
+
+def _table(headers: list[str], rows: list[list[str]], *, indent: str = "  ") -> list[str]:
+    """渲染左对齐文本表：列宽 = 该列最大单元格宽度，按传入顺序输出表头与数据行。"""
+    widths = [
+        max([len(head), *(len(row[i]) for row in rows)]) for i, head in enumerate(headers)
+    ]
+    lines = [indent + "  ".join(head.ljust(w) for head, w in zip(headers, widths))]
+    lines.extend(indent + "  ".join(cell.ljust(w) for cell, w in zip(row, widths)) for row in rows)
+    return lines
+
+
+def _metrics_row(label: str, m: DecisionMetrics, eng: EngineeringMetrics) -> list[str]:
+    """业务指标一行的单元格：三项 AUTO_DECIDABLE 分母比率 + 真值 REJECT 分母比率 + 全量分母比率
+    + ``TP/FP/TN/FN`` + 成本均值（取 ``EngineeringMetrics.*.mean``）。"""
+    return [
+        label,
+        _fmt(m.accuracy),
+        _fmt(m.precision),
+        _fmt(m.recall),
+        _fmt(m.wrong_auto_decision_rate),
+        _fmt(m.reject_unhandled),
+        _fmt(m.human_review_rate),
+        _fmt(m.automation_coverage),
+        f"{m.tp}/{m.fp}/{m.tn}/{m.fn}",
+        f"llm={_fmt0(eng.llm_calls.mean)} tool={_fmt0(eng.tool_calls.mean)} tok={_fmt0(eng.tokens.mean)}",
+    ]
+
+
+def _risk_cell(row: dict) -> str:
+    """逐案 real 风险摘要 ``level/types/conf``（缺值 → ``-``）。"""
+    types = ",".join(row["real_risk_type"]) or "-"
+    conf = "-" if row["real_decision_confidence"] is None else f"{row['real_decision_confidence']:.2f}"
+    return f"{row['real_risk_level'] or '-'}/{types}/conf={conf}"
+
+
+def _agent_cell(triple: tuple) -> str:
+    """Agent 指标单元格 ``(值, 分子, 分母)``；值 None → 未定义显示 ``-``（不填 0 冒充）。"""
+    value, numer, denom = triple
+    body = "-" if value is None else f"{value:.3f}"
+    return f"{body}({numer}/{denom})"
+
+
+def _agent_metrics_lines(extra: dict) -> list[str]:
+    """Agent 级指标区（两臂并排 · 只读统计；空真值案不进分母，分子/分母行内给出）。"""
+    ts_rule = extra["rule_agent_metrics"].tool_selection
+    rc_rule = extra["rule_agent_metrics"].reasoning_correctness
+    mg_rule = extra["rule_agent_metrics"].marginal_gain
+    ts_real = extra["real_agent_metrics"].tool_selection
+    rc_real = extra["real_agent_metrics"].reasoning_correctness
+    mg_real = extra["real_agent_metrics"].marginal_gain
+    rows = [
+        [
+            "tool_selection_accuracy",
+            _agent_cell((ts_rule.tool_selection_accuracy, ts_rule.covered_cases, ts_rule.cases_with_expectation)),
+            _agent_cell((ts_real.tool_selection_accuracy, ts_real.covered_cases, ts_real.cases_with_expectation)),
+        ],
+        [
+            "redundant_tool_rate",
+            _agent_cell((ts_rule.redundant_tool_rate, ts_rule.redundant_cases, ts_rule.cases_with_expectation)),
+            _agent_cell((ts_real.redundant_tool_rate, ts_real.redundant_cases, ts_real.cases_with_expectation)),
+        ],
+        [
+            "risk_type_coverage",
+            _agent_cell((rc_rule.risk_type_coverage, rc_rule.risk_type_covered_cases, rc_rule.cases_with_expected_risk_type)),
+            _agent_cell((rc_real.risk_type_coverage, rc_real.risk_type_covered_cases, rc_real.cases_with_expected_risk_type)),
+        ],
+        [
+            "risk_level_agreement",
+            _agent_cell((rc_rule.risk_level_agreement, rc_rule.risk_level_agreement_cases, rc_rule.cases_with_expected_risk_level)),
+            _agent_cell((rc_real.risk_level_agreement, rc_real.risk_level_agreement_cases, rc_real.cases_with_expected_risk_level)),
+        ],
+        [
+            "evidence_gain_rate",
+            _agent_cell((mg_rule.evidence_gain_rate, mg_rule.calls_with_new_evidence, mg_rule.ok_tool_calls)),
+            _agent_cell((mg_real.evidence_gain_rate, mg_real.calls_with_new_evidence, mg_real.ok_tool_calls)),
+        ],
+        [
+            "decision_changed_rate",
+            _agent_cell((mg_rule.decision_changed_rate, mg_rule.calls_decision_changed, mg_rule.ok_tool_calls)),
+            _agent_cell((mg_real.decision_changed_rate, mg_real.calls_decision_changed, mg_real.ok_tool_calls)),
+        ],
+    ]
+    return [
+        "Agent 级指标（两臂同口径 · 只读统计；空真值案不进分母，分子/分母行内给出）:",
+        *_table(["metric", "rule(num/den)", "real(num/den)"], rows),
+    ]
+
+
+def _overrides_cell(row: dict) -> str:
+    """逐案 real overrides 缩写（R3=预算截胡 / R5=LLM 步降级兜底）。"""
+    ovs = row.get("real_overrides") or []
+    if not ovs:
         return "-"
-    if isinstance(v, float):
-        return f"{v:.3f}"
-    return str(v)
+    short = {R3_BUDGET_EXHAUSTED: "R3", R5_DEGRADED_OR_FAILED_STEP: "R5"}
+    return ",".join(short.get(code, code) for code in ovs)
 
 
-def _overall_row(scheme: str, m: DecisionMetrics, cost: dict) -> str:
-    return "  ".join(
-        [
-            f"{scheme:<16}",
-            _fmt(m.accuracy),
-            _fmt(m.precision),
-            _fmt(m.recall),
-            _fmt(m.fpr),
-            _fmt(m.fnr),
-            _fmt(m.human_rate),
-            _fmt(m.automation),
-            f"{m.tp}/{m.fp}/{m.tn}/{m.fn}",
-            f"llm={cost.get('llm_calls')} tool={cost.get('tool_calls')} tok={cost.get('tokens')}",
-        ]
-    )
+def _overrides_line(ov: dict, total: int) -> str:
+    """一行 overrides 汇总：带码案数 / R5 降级 / R3 截胡（含先撞维度）/ 混合 / 其它码。"""
+    parts = [
+        f"带 overrides {ov['cases_with_any']}/{total} 案",
+        f"R5 降级 {ov[R5_DEGRADED_OR_FAILED_STEP]} 案",
+        f"R3 预算截胡 {ov[R3_BUDGET_EXHAUSTED]} 案",
+        f"R3+R5 混合 {ov['r3_r5_mixed']} 案",
+    ]
+    if ov.get("budget_hit_dims"):
+        parts.append("R3 先撞限 " + ",".join(f"{k}={v}" for k, v in ov["budget_hit_dims"].items()))
+    if ov.get("other_codes"):
+        parts.append("其它码 " + ",".join(f"{k}={v}" for k, v in ov["other_codes"].items()))
+    return " ｜ ".join(parts)
 
 
-def _scene_row(scheme: str, m: DecisionMetrics) -> str:
-    return "  ".join(
-        [
-            f"{scheme:<16}",
-            _fmt(m.accuracy),
-            _fmt(m.precision),
-            _fmt(m.recall),
-            _fmt(m.fpr),
-            _fmt(m.fnr),
-            _fmt(m.human_rate),
-            _fmt(m.automation),
-            f"{m.tp}/{m.fp}/{m.tn}/{m.fn}",
-        ]
-    )
-
-
-def _scene_truth_parts(entry: dict) -> str:
-    """单 scene 三值真值分布的人读片段（仅列非零桶；P/R/H=真值 PASS/REJECT/HUMAN_REVIEW）。"""
-    total = int(entry.get("total", 0))
-    buckets = []
-    for key, tag in (("PASS", "P"), ("REJECT", "R"), ("HUMAN_REVIEW", "H")):
-        n = int(entry.get(key, 0))
-        if n:
-            buckets.append(f"{tag}{n}")
-    return f"{total}" + (f"({'/'.join(buckets)})" if buckets else "")
-
-
-def render_report(result: EvaluationResult) -> str:
-    """渲染整份 Console Report（纯文本；行内口径说明见模块 docstring）。"""
+def render_report(payload: dict, extra: dict, *, out_path: str | None = None) -> str:
+    """渲染整份 Console Report（纯文本；real 臂非确定性如实标注）。"""
     out: list[str] = []
     add = out.append
 
-    add("=" * 100)
-    add("商品审核 Agent · Evaluation 三方案对比 Console Report")
-    add("=" * 100)
-    src = result.data_path or "(外部注入 cases)"
-    add(f"数据集: {src}" + ("   [smoke 冒烟子集]" if result.smoke else ""))
-    stats = result.scene_stats
+    stats = extra["scene_stats"]
     by_scene = stats.get("by_scene", {})
-    total = int(stats.get("total", 0))
-    pass_n = sum(int(s.get("PASS", 0)) for s in by_scene.values() if isinstance(s, dict))
-    reject_n = sum(int(s.get("REJECT", 0)) for s in by_scene.values() if isinstance(s, dict))
-    human_n = sum(int(s.get("HUMAN_REVIEW", 0)) for s in by_scene.values() if isinstance(s, dict))
-    binary = pass_n + reject_n
+    scene_n = {scene: int(by_scene.get(scene, {}).get("total", 0)) for scene in SCENES}
+    truth_n = {
+        label: sum(int(by_scene.get(scene, {}).get(label, 0)) for scene in SCENES)
+        for label in ("PASS", "REJECT", "HUMAN_REVIEW")
+    }
+    rule_metrics: DecisionMetrics = extra["rule_metrics"]
+    total, agree = payload["count"], payload["agree"]
+    diff_n = total - agree
+    truth_human = rule_metrics.total - rule_metrics.auto_decidable_total
 
-    # 三值真值分布 + 两套分母（P1-2/P2-4：46 条 SHOULD/HUMAN 真值不再隐身）
-    if result.has_should_abstain:
-        auto_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "AUTO_DECIDABLE")
-        should_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "SHOULD_ABSTAIN")
-        add(f"真值口径: Phase 2 三值（含 HUMAN_REVIEW/SHOULD_ABSTAIN 真值）→ 决策指标分母=二值真值 "
-            f"{binary}，abstention 五指标分母=全量 {total}")
-        add(f"真值案: 共 {total} 条（PASS={pass_n} / REJECT={reject_n} / HUMAN_REVIEW={human_n}）")
-        add(f"分母注记: 决策指标行（acc/prec/recall/fpr/fnr/hrr/auto）只计二值真值 {binary} 案 "
-            f"（AUTO_DECIDABLE={auto_n}；HUMAN 真值不计入其分母）；")
-        add(f"          abstention 五指标行分母 = 全量 {total}（AUTO_DECIDABLE={auto_n} / "
-            f"SHOULD_ABSTAIN={should_n}，human_review_rate 为全量分母，见下节）")
-    else:
-        add(f"真值口径: Phase 1 二值（v1 无 abstain 标签/HUMAN 真值）→ 决策指标分母=全量 {total}；"
-            f"abstention 五指标不适用")
-        add(f"真值案: 共 {total} 条（PASS={pass_n} / REJECT={reject_n} / HUMAN_REVIEW={human_n}）")
-    dist = " | ".join(
-        f"{scene}={int(by_scene.get(scene, {}).get('total', 0))}" for scene in _SCENES
-    )
-    add(f"scene 分布(全量): {dist}")
-    if human_n:
-        add("scene 真值三值(P/R/H，仅列非零): " + " | ".join(
-            f"{scene}={_scene_truth_parts(by_scene.get(scene, {}) or {})}" for scene in _SCENES
-        ))
+    add("=" * 100)
+    add("商品审核 Agent · Evaluation 正式跑分：rule（确定性初筛）vs real（真实 LLM）")
+    add("=" * 100)
+    add(f"数据集: {payload['data']}（{payload['count']} 条）| real 模型: {payload['model']}")
+    add("scene 分布: " + " | ".join(f"{scene}={scene_n[scene]}" for scene in SCENES))
+    add("真值分布: " + " / ".join(f"{label}={n}" for label, n in truth_n.items()))
 
     add("-" * 100)
     add("结论边界 / 口径注记:")
-    add("  · 工具数据源: InMemory 种子世界 v1（与 eval_data/v2 同一份；仅 Agent 经工具取证可见）")
-    add("  · LLM: 确定性桩（rule=无 / single_call=single-call-mock-v1 / agent=eval-scripted-reviewer）")
-    add("  · 输出空间对齐: Rule COMPLEX→HUMAN_REVIEW（评测语义：不可自动判）；Single-call confidence<0.7 的 REJECT→HUMAN")
-    add("  · Accuracy=(TP+TN)/真值总数，预测 HUMAN_REVIEW 计为未命中真值(判错，入分母不入分子)；")
-    add("    Precision/Recall/FPR/FNR 只在自动判出(pred∈{PASS,REJECT})子集上计算")
-    add("  · REJECT 为正类: Recall=TP/(TP+FN) 违规召回 / FPR=FP/(FP+TN) 误杀红线 / FNR=FN/(TP+FN) 漏放")
-    add("  · HRR=转人工率 / auto=自动化率；reject_unhandled=该 REJECT 却转人工占比（保守度观测）")
-    add("  · screening R-101 黑名单直判 REJECT：brand ∈ BLACKLISTED_BRANDS（内置 demo 词表）即自动 REJECT；品牌词/规避词/空缺一律 COMPLEX→HUMAN")
-    add("  · Single-call 为表面字段口径（§3.3：不拥有 BLACKLISTED_BRANDS 等确定性规则输入）→ 黑名单案仍 PASS，属方案设计差异，非缺陷")
-    if not result.has_should_abstain:
-        add("  · abstention: v1 无 abstain 标签 → Phase 1 兼容口径（全案等价 AUTO_DECIDABLE，"
-            "五指标区不渲染；如需五指标请用 v2 数据集）")
-    add("  · 结论边界（双向，勿单向解读）:")
-    add("    - 低估侧: 工具 = InMemory 种子 + LLM = 桩（覆盖有限，缺真实先例/完整规避史）→ 可能低估 Agent 真实上限")
-    add("    - 高估侧: 本集真值由生成器按「与审查员同源 EVAL_* 世界 + 同语义规则」程序化标注（单标注者、"
-        "SHOULD 无负例）")
-    add("      → scripted 高分含「标注-审查员同口径」耦合，主要衡量实现一致性而非调查能力；")
-    add("      不可外推为真实 LLM 能力（理由见上一行同口径耦合）")
+    add("  · rule = RuleBaseline（pra.screening 确定性三分流；零 LLM、零工具，COMPLEX → HUMAN_REVIEW）")
+    add(f"  · real = {payload['model']}（真实 LLM —— 非确定性、不可重放、需 API key 与费用；")
+    add("    本报告 real 数字 = 单次运行抽样，不代表模型固定水平）")
+    add(f"  · 工具数据源: {EVAL_WORLD_LABEL}（世界固定为 Eval World；两臂同一数据 → LLM 是唯一变量）")
+    conc = payload.get("real_concurrency") or 1
+    add(
+        "  · real 臂调度: "
+        + (
+            "并发 " + str(conc) + "（只改调度；用例间天然隔离 —— 每案独立建图，LLM 后端随图"
+            "显式注入，不跨案共享）"
+            if conc > 1
+            else "逐案串行"
+        )
+    )
+    add("  · 一致性口径: rule.decision == real.decision 判为一致（risk/evidence 差异不参与）")
+    add("  · 指标口径（DecisionEvaluator）: accuracy=(TP+TN)/AUTO_DECIDABLE 案数，pred HUMAN_REVIEW 计为判错")
+    add("    （入分母不入分子）；precision/wrong_auto_decision_rate 与 TP/FP/TN/FN 只在 AUTO_DECIDABLE 案上计算")
+    add("  · REJECT 为正类: recall=TP/真值 REJECT 数（转人工算未拦下）/ wrong_auto_decision_rate=(FP+FN)/(TP+FP+TN+FN) /")
+    add("    reject_unhandled = 真值 REJECT 中 pred HUMAN_REVIEW 占比；三者恒等: recall + reject_unhandled + 漏放率 = 1")
+    add("  · cost.tokens 口径 = usage.total_tokens：input+output 合计、含 provider 缓存命中 token；schema 校验")
+    add("    失败的尝试也全额累计。tokens 为观测字段，**不参与** R3 预算截胡判定（R3 只看 llm_calls /")
+    add("    tool_calls）；EvalRecord.detail.budget_hit_dim 记录哪一维先撞限")
+    if truth_human:
+        add(
+            f"  · 真值含 HUMAN_REVIEW 的案 {truth_human} 条（SHOULD_ABSTAIN）：只进全量分母，"
+            "不进 AUTO_DECIDABLE 分母 —— 如实呈现，不硬算"
+        )
 
     add("-" * 100)
-    add("总体指标   acc   prec  recall  fpr   fnr   hrr   auto    TP/FP/TN/FN   成本均值(llm/tool/tok)")
-    for scheme in ALL_SCHEMES:
-        m = result.overall.get(scheme)
-        if m is None:
-            continue
-        add(_overall_row(scheme, m, result.cost_summary.get(scheme, {})))
-    if result.has_should_abstain and result.abstention:
-        _render_abstention_section(add, result)
-    if result.agent_metrics is not None:
-        _render_agent_metrics_section(add, result)
-    if result.engineering:
-        _render_engineering_section(add, result)
+    share = f"{agree / total:.1%}" if total else "-"
+    add(f"rule vs real 决策一致性: 一致 {agree}/{total}（{share}）· 差异 {diff_n} 条")
+    scene_parts = []
+    for scene in SCENES:
+        counter = extra["by_scene"].get(scene)
+        if counter and counter["total"]:
+            scene_parts.append(f"{scene}={counter['agree']}/{counter['total']}")
+    add("按 scene 一致数: " + (" | ".join(scene_parts) if scene_parts else "-"))
 
     add("-" * 100)
-    add("按 scene 分层  acc   prec  recall  fpr   fnr   hrr   auto    TP/FP/TN/FN")
-    scene_n = {s: int(by_scene.get(s, {}).get("total", 0)) for s in _SCENES}
-    # P2-4：分层分母 = 该 scene 二值真值案数；scene 含 HUMAN 真值时标注（仅标注，不改计算）
-    parts = []
-    for s in _SCENES:
-        entry = by_scene.get(s, {}) or {}
-        tot = int(entry.get("total", 0))
-        bin_n = int(entry.get("PASS", 0)) + int(entry.get("REJECT", 0))
-        parts.append(f"{s}={tot}" if bin_n == tot else f"{s}={tot}(二值{bin_n})")
-    add("  " + "  ".join(parts))
-    if human_n:
-        add("  （注: 分层行分母=该 scene 二值真值数 PASS+REJECT；HUMAN 真值案不计入下列 acc/prec/recall 数字）")
-    for scene in _SCENES:
-        if scene_n[scene] == 0:
-            continue
-        add(f"[{scene}]")
-        for scheme in ALL_SCHEMES:
-            m = (result.grouped.get(scheme) or {}).get(scene)
-            if m is not None:
-                add(_scene_row(scheme, m))
-
-    add("-" * 100)
-    add("决策分布审计（pred→truth 列计数；truth 仅 PASS/REJECT（二值真值），HUMAN 真值案不计入本矩阵）")
-    add("  scheme           pred         →truth PASS →truth REJECT")
-    for scheme in ALL_SCHEMES:
-        matrix = _decision_matrix(result, scheme)
-        for pred in _DECISIONS:
-            cells = matrix[pred]
+    disagree = payload.get("disagree") or []
+    if not disagree:
+        add("差异 case 列表: （无 —— 两臂逐案裁决完全一致）")
+    else:
+        add(f"差异 case 列表（共 {len(disagree)} 条 · 各行含 real risk 摘要 + overrides）:")
+        for row in disagree:
+            ovr = _overrides_cell(row)
+            ovr_note = f" | real ovr: {ovr}" if ovr != "-" else ""
             add(
-                "  " + "  ".join(
-                    [f"{scheme if pred == 'PASS' else '':<16}", f"{pred:<13}",
-                     str(cells["PASS"]), str(cells["REJECT"])]
-                )
+                f"  · {row['eval_case_id']} [{row['scene']}] truth={row['truth']} | "
+                f"rule {row['rule_decision']} → real {row['real_decision']} （{_risk_cell(row)}）{ovr_note}"
             )
+
+    add("-" * 100)
+    add("逐案对比明细:")
+    out.extend(
+        _table(
+            ["case", "scene", "truth", "rule", "real", "agree", "real risk/type/conf", "real ovr"],
+            [
+                [
+                    row["eval_case_id"],
+                    row["scene"],
+                    row["truth"],
+                    row["rule_decision"],
+                    row["real_decision"],
+                    "是" if row["agree"] else "否",
+                    _risk_cell(row),
+                    _overrides_cell(row),
+                ]
+                for row in extra["rows"]
+            ],
+        )
+    )
+
+    add("-" * 100)
+    add("业务指标（两臂同口径 · DecisionEvaluator）:")
+    out.extend(
+        _table(
+            [
+                "arm",
+                "accuracy",
+                "precision",
+                "recall",
+                "wrong_auto_decision_rate",
+                "reject_unhandled",
+                "human_review_rate",
+                "automation_coverage",
+                "TP/FP/TN/FN",
+                "成本均值(llm/tool/tok)",
+            ],
+            [
+                _metrics_row("rule", extra["rule_metrics"], extra["rule_engineering"]),
+                _metrics_row("real", extra["real_metrics"], extra["real_engineering"]),
+            ],
+        )
+    )
+    add(
+        f"  分母注记: accuracy/precision/wrong_auto_decision_rate 与 TP/FP/TN/FN 的分母 = "
+        f"AUTO_DECIDABLE 案 {rule_metrics.auto_decidable_total}（真值 PASS/REJECT）；"
+        f"recall/reject_unhandled 分母 = 真值 REJECT 案 {rule_metrics.reject_truth}；"
+        f"human_review_rate/automation_coverage 分母 = 全量 {rule_metrics.total} —— 三组分母不同，勿混读"
+    )
+
+    add("-" * 100)
+    add("工程指标（分布：均值/P50/P95；rule 无 LLM/工具调用 → 恒 0；latency_ms 仅 real 臂进程内墙钟、不落 record）:")
+    out.extend(
+        _table(
+            ["arm", "llm_calls", "tool_calls", "tokens", "latency_ms"],
+            [
+                [label, _triple(eng.llm_calls), _triple(eng.tool_calls), _triple(eng.tokens), _triple(eng.latency_ms) if eng.latency_ms else "-"]
+                for label, eng in (("rule", extra["rule_engineering"]), ("real", extra["real_engineering"]))
+            ],
+        )
+    )
+
+    add("-" * 100)
+    out.extend(_agent_metrics_lines(extra))
+
+    add("-" * 100)
+    add("overrides 汇总（审计：R5=LLM 步降级兜底转 HUMAN、R3=预算截胡）:")
+    add(f"  · real: {_overrides_line(extra['real_overrides'], total)}")
+    add(f"  · rule: {_overrides_line(extra['rule_overrides'], total)}")
+    real_ov = extra["real_overrides"]
+    if real_ov[R5_DEGRADED_OR_FAILED_STEP]:
+        add(
+            f"    ⚠ real 有 {real_ov[R5_DEGRADED_OR_FAILED_STEP]} 案触发 R5 降级 —— 这些案的 real 裁决"
+            "来自降级兜底（HUMAN），**不是模型行为**；解读全卷差异/指标须扣除"
+        )
+    if total and real_ov[R5_DEGRADED_OR_FAILED_STEP] == total:
+        add(
+            "    ⚠⚠ real 全部案均 R5 降级：本卷 real 结果 = 100% 链路降级（典型原因：无 key/网关/"
+            "base-url 配置问题或逐节点连续失败）—— 请勿把本卷 HUMAN 当模型结论"
+        )
+
+    add("-" * 100)
+    out_note = f" | JSON 已写入: {out_path}" if out_path else " | 未写文件（--out 可落盘）"
+    add(f"[OK] 跑分完成: {total} 条 · 一致 {agree} · 差异 {diff_n}{out_note}")
+    add(f"[NOTE] {payload['note']} —— real 侧输出不可用于逐字节回归比对")
     add("=" * 100)
     return "\n".join(out)
 
 
-def _render_abstention_section(add, result: EvaluationResult) -> None:
-    """abstention 五指标渲染区（仅数据集含 SHOULD_ABSTAIN 真值时）。
-
-    分母 = 全量：``human_review_rate`` = pred HUMAN / 全部；``automation_coverage`` =
-    1 − human_review_rate；``abstention_rate`` = AUTO_DECIDABLE 案中 pred HUMAN
-    （过度保守）；``abstention_recall`` = SHOULD_ABSTAIN 案中 pred HUMAN（越高越克制）；
-    ``wrong_auto_decision_rate`` = AUTO_DECIDABLE 自动终裁中的错误占比。
-    与决策指标行的区别：决策行的 hrr/auto 以二值真值为分母（见上节分母注记）。
-    """
-    auto_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "AUTO_DECIDABLE")
-    should_n = sum(1 for v in result.expected.values() if abstain_subset_of(v) == "SHOULD_ABSTAIN")
-    binary_n = sum(
-        int(s.get("PASS", 0)) + int(s.get("REJECT", 0))
-        for s in result.scene_stats.get("by_scene", {}).values()
-        if isinstance(s, dict)
-    )
-    add("-" * 100)
-    add("abstention 五指标（分母=全量: AUTO_DECIDABLE=%d / SHOULD_ABSTAIN=%d）" % (auto_n, should_n))
-    add("  行含义: hrr/autom=human_review_rate/automation_coverage(全量分母) | "
-        "abst_r=abstention_rate(AUTO 中过度转人工) / abst_rl=abstention_recall(SHOULD 正确转人工) / "
-        "w_auto=wrong_auto_decision_rate(AUTO 自动终裁错误率)")
-    add("  scheme           hrr    autom  abst_r abst_rl w_auto   计数(AUTO/SHOULD；pred H/A)")
-    for scheme in ALL_SCHEMES:
-        a = result.abstention.get(scheme)
-        if a is None:
-            continue
-        add(
-            "  ".join(
-                [
-                    f"{scheme:<16}",
-                    _fmt(a.human_review_rate),
-                    _fmt(a.automation_coverage),
-                    _fmt(a.abstention_rate),
-                    _fmt(a.abstention_recall),
-                    _fmt(a.wrong_auto_decision_rate),
-                    f"{a.auto_decidable_total}/{a.should_abstain_total}; {a.human_pred_total}/{a.auto_pred_total}",
-                ]
-            )
-        )
-    add("  （注: 决策指标行 hrr/auto 分母=二值真值 %d，与本区 hrr/autom 全量分母不同，勿混读）"
-        % binary_n)
-
-
-def _render_agent_metrics_section(add, result: EvaluationResult) -> None:
-    """Agent 级指标渲染区（工具选择 / 证据充分性 / 推理正确性 / 边际增益）。
-
-    全部为**只读统计**：不改判定、不进任何既有指标分母。空真值案（未标注工具期望 /
-    干净案无期望证据 / 无期望 risk_type）一律不进分母，被排除的案数与无法映射的标签数
-    在行内显式给出（不静默丢弃）。推理正确性为**自动代理**（risk_type + risk_level），
-    不含人工复核理由。
-    """
-    am = result.agent_metrics
-    if am is None:  # 调用方已判空；本函数只做渲染
-        return
-    ts, es, rc, mg = am.tool_selection, am.evidence_sufficiency, am.reasoning_correctness, am.marginal_gain
-    add("-" * 100)
-    add("Agent 级指标（仅 agent；空真值案不进分母，被排除的案数行内显式给出）")
-    add("  工具选择: 覆盖口径 expected_tools ⊆ actual_tools（不把「调用少」混进准确性）")
-    add(
-        f"  tool_selection_accuracy = {_fmt(ts.tool_selection_accuracy)}   "
-        f"（{ts.covered_cases}/{ts.cases_with_expectation} 案；"
-        f"期望外调用案 {ts.redundant_cases}，期望外工具数 {ts.redundant_tool_calls}/{ts.actual_tool_calls}）"
-    )
-    add(
-        f"  redundant_tool_rate      = {_fmt(ts.redundant_tool_rate)}   "
-        "（有期望外调用的案占比；工具名去重口径）"
-    )
-    add("  证据充分性: 两栏分开（类型覆盖率 micro + REJECT 依据前置），不合成一个数")
-    add(
-        f"  evidence_type_coverage   = {_fmt(es.evidence_type_coverage)}   "
-        f"（{es.covered_expected_types}/{es.total_expected_types} 期望类型被命中；"
-        f"全命中案 {es.fully_covered_cases}/{es.cases_with_expected_evidence}）"
-    )
-    add(
-        f"  unmapped 期望标签 {es.unmapped_label_instances} 个实例、"
-        f"仅含未映射标签被剔除的案 {es.cases_excluded_unmapped_only}（缺口显式化，不硬猜映射）"
-    )
-    add(
-        f"  reject_evidence_gate_pass_rate = {_fmt(es.reject_evidence_gate_pass_rate)}   "
-        f"（预测 REJECT {es.reject_cases_pred_reject} 案中 {es.reject_cases_with_citable} 案"
-        "有可引用依据 = Gate 前置近似）"
-    )
-    add("  推理正确性（自动代理，不含人工复核理由）:")
-    add(
-        f"  risk_type_coverage       = {_fmt(rc.risk_type_coverage)}   "
-        f"（{rc.risk_type_covered_cases}/{rc.cases_with_expected_risk_type} 案 expected.risk_type ⊆ 输出）"
-    )
-    add(
-        f"  risk_level_agreement     = {_fmt(rc.risk_level_agreement)}   "
-        f"（{rc.risk_level_agreement_cases}/{rc.cases_with_expected_risk_level} 案 risk_level 与真值一致）"
-    )
-    add("  边际证据增益（无加权合成；只计 status==ok 的调用）:")
-    add(
-        f"  evidence_gain_rate       = {_fmt(mg.evidence_gain_rate)}   "
-        f"（{mg.calls_with_new_evidence}/{mg.ok_tool_calls} 调用带来新增证据；无增益调用 {mg.no_gain_calls}）"
-    )
-    add(
-        f"  decision_changed_rate    = {_fmt(mg.decision_changed_rate)}   "
-        f"（{mg.calls_decision_changed}/{mg.ok_tool_calls} 调用触发 Gate 判定翻转；"
-        f"新增证据引用合计 {mg.evidence_added_total}）"
-    )
-
-
-def _render_engineering_section(add, result: EvaluationResult) -> None:
-    """工程指标渲染区：各方案 调用次数 / token / 延迟 的均值与 P50/P95。
-
-    scripted 路径 ``tokens=0`` 是真实情况（桩不烧 token），如实显示；墙钟延迟**不落
-    EvalRecord**，只有 real 臂在进程内计时后传入（本节在主报告里通常为 "-"）。
-    """
-    add("-" * 100)
-    add("工程指标（分布；脚本路径 token 恒 0 为真实值，不伪造）")
-    add("  scheme           llm mean/p50/p95    tool mean/p50/p95    tok mean/p50/p95    latency(p50/p95)")
-    for scheme in ALL_SCHEMES:
-        e = result.engineering.get(scheme)
-        if e is None:
-            continue
-
-        def _triple(d):
-            return f"{_fmt(d.mean)}/{_fmt(d.p50)}/{_fmt(d.p95)}"
-
-        lat = "-" if e.latency_ms is None else f"{_fmt(e.latency_ms.p50)}/{_fmt(e.latency_ms.p95)}"
-        add(
-            "  ".join(
-                [
-                    f"{scheme:<16}",
-                    f"{_triple(e.llm_calls):<17}",
-                    f"{_triple(e.tool_calls):<20}",
-                    f"{_triple(e.tokens):<19}",
-                    lat,
-                ]
-            )
-        )
-    add("  （注: P50/P95 为 nearest-rank；延迟为 real 臂进程内墙钟，scripted 无此项）")
-
-
-def _decision_matrix(result: EvaluationResult, scheme: str) -> dict:
-    """pred(行) × truth(列 PASS/REJECT) 计数（由 records × expected 直接重建，确定性）。"""
-    matrix = {pred: {"PASS": 0, "REJECT": 0} for pred in _DECISIONS}
-    expected = result.expected
-    for rec in result.records.get(scheme) or []:
-        truth = (expected.get(rec.eval_case_id) or {}).get("decision")
-        if truth not in ("PASS", "REJECT"):
-            continue
-        matrix[rec.decision][truth] += 1
-    return matrix
-
-
-def print_report(result: EvaluationResult) -> None:
+def print_report(payload: dict, extra: dict, *, out_path: str | None = None) -> None:
     """打印 Console Report 到 stdout。"""
-    print(render_report(result))
+    print(render_report(payload, extra, out_path=out_path))

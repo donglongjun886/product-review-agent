@@ -21,7 +21,7 @@ REJECT（Rule 唯一的自动 REJECT 路径）；v1 无黑名单品牌案。R-10
 from __future__ import annotations
 
 from pra.evaluation.dataset.schema import EvalCase
-from pra.evaluation.harness.base import EvalContext, EvalRecord, SchemeRunner
+from pra.evaluation.harness.base import EvalRecord, SchemeRunner
 from pra.screening.engine import Verdict, triage
 
 __all__ = ["VERDICT_TO_DECISION", "RuleBaseline"]
@@ -39,7 +39,7 @@ class RuleBaseline(SchemeRunner):
 
     name = "rule"
 
-    async def run(self, case: EvalCase, ctx: EvalContext) -> EvalRecord:
+    async def run(self, case: EvalCase) -> EvalRecord:
         result = triage(case.input)  # DEFAULT_RULES（R-101/102/301/302）；空规则集会抛 ValueError
         hits = [
             {

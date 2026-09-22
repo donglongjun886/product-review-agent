@@ -1,4 +1,4 @@
-"""埋点测试：5 个 Node span、三处 Root trace、``gate`` 子 span。
+"""埋点测试：Node span、Root trace、``gate`` 子 span。
 
 用**假 tracer** 经 ``pra.observability.tracing.set_tracer`` 注入 —— 不联网、不 import
 ``langfuse`` SDK、不依赖凭据；每个测试结束 ``set_tracer(None)`` 复原。
@@ -6,13 +6,12 @@
   root 结束写回终裁摘要；5 个 node span 都出现，``gate`` 是 ``decide`` 的**子** span。
 - ``trace_id_from_run_id``：32-hex 原样 / 非 hex → uuid5（确定性）/ 空串·None 不抛；非 hex 时
   metadata.run_id 保留原始值。评测路径 trace_id = uuid5(experiment:case:agent:后端名)，
-  **必须含 LLM 后端名**，否则 scripted 臂会污染 real trace。
+  **必须含 LLM 后端名**，否则同进程的不同后端臂会落进同一条 trace。
 - **默认路径**决策与注入 tracer 时完全一致，且 ``langfuse`` 不进 ``sys.modules``。
 """
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 from pathlib import Path
@@ -25,8 +24,6 @@ from helpers import make_case
 from pra.api.service import run_review
 from pra.domain.models import Decision
 from pra.evaluation.dataset.loader import load_dataset
-from pra.evaluation.harness.agent_scheme import AgentScheme, EvalScriptedLLMBackend
-from pra.evaluation.harness.base import EvalContext, EvalRecord
 from pra.observability import flush_tracer as pkg_flush_tracer
 from pra.observability import tracing as T
 
@@ -317,48 +314,7 @@ def test_flush_tracer_is_noop_and_returns_none_with_null_tracer(monkeypatch) -> 
     assert pkg_flush_tracer() is None
 
 
-# 3. 评测 root trace（AgentScheme.run）
-
-
-async def test_agent_scheme_root_metadata_and_deterministic_uuid5(fake_tracer, monkeypatch) -> None:
-    """评测路径 root：trace_id 确定性 uuid5、同案两次同值、埋点不改判定、不 per-case flush。"""
-    monkeypatch.delenv("PRA_LANGFUSE_EXPERIMENT", raising=False)
-    monkeypatch.delenv("PRA_LANGFUSE_SESSION", raising=False)
-    case = _v2_case()
-    ctx = EvalContext(tool_world="eval")
-
-    first: EvalRecord = await AgentScheme().run(case, ctx)
-    second: EvalRecord = await AgentScheme().run(case, ctx)
-
-    assert len(fake_tracer.roots) == 2
-    root_ctx = fake_tracer.roots[0]
-    assert root_ctx.name == "review"
-    expected_trace_id = uuid5(
-        NAMESPACE_URL, f"baseline:{case.eval_case_id}:agent:eval-scripted-reviewer"
-    ).hex
-    assert root_ctx.trace_id == expected_trace_id
-    assert fake_tracer.roots[1].trace_id == expected_trace_id  # 重跑落同一条 trace
-    # root output 写回终裁
-    assert fake_tracer.root_obs[0].last_output() == {
-        "decision": first.decision,
-        "risk_level": first.risk_level,
-    }
-    # 评测确定性：两次 EvalRecord 完全一致（埋点不改判定）
-    assert first == second
-    # **不 per-case flush**（320 次太慢）—— 由整轮收尾统一 flush
-    assert fake_tracer.flushes == 0
-
-    # experiment 参与 trace_id（多实验可区分；两臂隔离的组成部分）
-    monkeypatch.setenv("PRA_LANGFUSE_EXPERIMENT", "prompt-v2")
-    monkeypatch.setenv("PRA_LANGFUSE_SESSION", "eval-run-1")
-    await AgentScheme().run(case, ctx)
-    third = fake_tracer.roots[2]
-    assert third.trace_id == uuid5(
-        NAMESPACE_URL, f"prompt-v2:{case.eval_case_id}:agent:eval-scripted-reviewer"
-    ).hex
-
-
-# 3b. 落库路径 root trace（pra.infra.persist_service.run_and_persist，假 session 不连库）
+# 3. 落库路径 root trace（pra.infra.persist_service.run_and_persist，假 session 不连库）
 
 
 class _FakeSession:
@@ -442,15 +398,12 @@ async def test_default_path_behaves_identically_and_never_imports_sdk(monkeypatc
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
     monkeypatch.delenv("PRA_LANGFUSE_ENABLED", raising=False)
     case = make_case()
-    v2_case = _v2_case()
-    ctx = EvalContext(tool_world="eval")
 
     # 注入假 tracer 的臂
     tracer = _FakeTracer()
     T.set_tracer(tracer)
     try:
         traced = await run_review(case, run_id="RUN_CASE_TRACED")
-        traced_record = await AgentScheme().run(v2_case, ctx)
     finally:
         T.set_tracer(None)
 
@@ -458,14 +411,11 @@ async def test_default_path_behaves_identically_and_never_imports_sdk(monkeypatc
     T.set_tracer(None)
     assert isinstance(T.get_tracer(), T.NullTracer)
     plain = await run_review(case, run_id="RUN_CASE_PLAIN")
-    plain_record = await AgentScheme().run(v2_case, ctx)
 
-    # 决策 / 评测记录完全一致（埋点旁路，不改 AgentState / 路由 / 决策序列）
+    # 决策完全一致（埋点旁路，不改 AgentState / 路由 / 决策序列）
     assert traced.review_decision.decision == plain.review_decision.decision
     assert traced.review_decision.risk_level == plain.review_decision.risk_level
     assert traced.review_decision.overrides == plain.review_decision.overrides
-    assert traced_record == plain_record
-    assert traced_record.decision in {"PASS", "REJECT", "HUMAN_REVIEW"}
 
     # 默认路径不拉起 SDK（惰性 import 契约）
     assert "langfuse" not in sys.modules
@@ -488,65 +438,38 @@ async def test_run_review_with_llm_pinned_to_stub_decision_is_unchanged(monkeypa
 
 
 # --------------------------------------------------------------------------------------
-# 3c. 两臂隔离：同 experiment + 同案 + 不同 LLM 后端 → 不同 trace
-#     （修 run_evaluation_real.py 的 scripted 对照臂与 real 臂同 trace_id 的实测缺陷）
+# 5. 评测 root trace：同 experiment + 同案 + 不同 LLM 后端 → 不同 trace
 # --------------------------------------------------------------------------------------
 
 
-def test_root_trace_id_is_scoped_by_llm_backend() -> None:
-    """trace_id 必须含 LLM 后端名 —— 否则 scripted 对照臂会污染 real trace。
+def test_root_trace_id_is_scoped_by_llm_backend(monkeypatch) -> None:
+    """trace_id 必须含 LLM 后端名 —— 否则同进程的不同后端臂会落进同一条 trace。
 
-    `run_evaluation_real.py` 同进程跑 scripted + real 两臂、experiment 相同；旧公式
-    `uuid5(experiment:case:agent)` 让两臂落进**同一条 trace**（每 trace 2 个 root、generation
-    交织，按 trace 汇总 token 会混入 0-token 的桩 generation）。
+    同一 experiment 下不同 LLM 后端（对照臂 vs 真实臂）若共用旧公式
+    ``uuid5(experiment:case:agent)``，两臂落进**同一条 trace**（每 trace 2 个 root、
+    generation 交织，按 trace 汇总 token 会混入另一臂的 generation）。
     """
+    monkeypatch.delenv("PRA_LANGFUSE_EXPERIMENT", raising=False)
     from pra.agent.state import build_initial_state
     from pra.evaluation.harness.agent_scheme import _root_trace_context
 
     case = _v2_case()
-    ctx = EvalContext(tool_world="eval")
     state = build_initial_state(case.input)
+    experiment = T.experiment_name()
 
-    scripted = _root_trace_context(
-        case, ctx, state, backend_name="eval-scripted-reviewer"
-    )
-    real = _root_trace_context(
-        case, ctx, state, backend_name="litellm-deepseek/deepseek-chat"
-    )
+    scripted = _root_trace_context(case, state, backend_name="eval-scripted-reviewer")
+    real = _root_trace_context(case, state, backend_name="litellm-deepseek/deepseek-chat")
 
     assert scripted.trace_id != real.trace_id  # 两臂不混
-    assert scripted.metadata["llm_backend"] == "eval-scripted-reviewer"
-    assert real.metadata["llm_backend"] == "litellm-deepseek/deepseek-chat"
+    for backend, ctx in (
+        ("eval-scripted-reviewer", scripted),
+        ("litellm-deepseek/deepseek-chat", real),
+    ):
+        assert ctx.trace_id == uuid5(
+            NAMESPACE_URL, f"{experiment}:{case.eval_case_id}:agent:{backend}"
+        ).hex, "trace_id 须由 uuid5(experiment:case:agent:后端名) 确定"
+        assert ctx.metadata["llm_backend"] == backend
     # 除 trace_id / llm_backend 外，其余关联信息一致（同一批 case 可横向对比）
     assert {k: v for k, v in scripted.metadata.items() if k != "llm_backend"} == {
         k: v for k, v in real.metadata.items() if k != "llm_backend"
     }
-
-
-# --------------------------------------------------------------------------------------
-# 3d. 评测审查员桩：结构化 state 直传 + 队列已删（回归守护）
-# --------------------------------------------------------------------------------------
-
-
-async def test_eval_stub_takes_structured_state_and_emits_no_queue() -> None:
-    """桩经 ``state=`` 入参（不再解析 ``__STATE__``），且 payload 不再产调查队列。
-
-    state 直传：``complete`` 只接受 ``state``（``messages`` 已随文本协议删除）；
-    队列删除：hypothesize 无 ``investigation_queue``、reevaluate 无 ``queue_updates``。
-    """
-    stub = EvalScriptedLLMBackend()
-    hyp = json.loads(
-        (
-            await stub.complete(
-                node="hypothesize",
-                state={"case": {"product": {"title": "复古跑鞋", "images": []}}},
-                json_schema={},
-            )
-        ).content
-    )
-    assert "investigation_queue" not in hyp
-
-    reev = json.loads(
-        (await stub.complete(node="reevaluate", state={}, json_schema={})).content
-    )
-    assert "queue_updates" not in reev
