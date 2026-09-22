@@ -6,17 +6,18 @@
 ``evidence_for`` / 提案里的 ``confidence``。``proposal`` 只决定"要走哪道 Gate"
 （PASS 提案走 PASS Gate、REJECT 提案走 REJECT Gate）以及非判定性的展示字段。
 
-顺序：① 硬规则命中 → REJECT/HIGH/1.0，LLM 不可覆盖；② 重算 ``decision_confidence``（事实侧）；
-③ 弃权清单（预算/冲突/**关键测量缺口**/不可测维度/降级）任一命中 → HUMAN_REVIEW
-+ 归因码；④ 无提案且无码 → 补 ``R5``；⑤ 提案 PASS 不过 PASS Gate → ``+R4``、提案 REJECT 不过
-REJECT Gate → ``+R2``；⑥ 采纳：decision 用提案、confidence 用重算值、overrides=[]。
+顺序：① 硬规则命中 → REJECT/HIGH，LLM 不可覆盖；② 弃权清单（预算/冲突/**关键测量缺口**/
+不可测维度/降级）任一命中 → HUMAN_REVIEW + 归因码；③ 无提案且无码 → 补 ``R5``；
+④ 提案 PASS 不过 PASS Gate → ``+R4``、提案 REJECT 不过 REJECT Gate → ``+R2``；
+⑤ 采纳：decision 用提案、overrides=[]。
 
 PASS Gate（全满足才放行）：无维度匹配的**阳性证据** ∧ 无**规则侧阳性**（R-102/R-302 命中）
 ∧ 本案 required 维度**全部覆盖**（无 NOT_MEASURED、无 UNMEASURABLE）∧ 无证据冲突。
 
 REJECT Gate（全满足才自动拒绝）：∃ **真实证据链中、与风险维度匹配的硬阳性**（强相似 ≥0.85 /
-Logo / 商家达阈值 / 显式 ``MEASUREMENT=POSITIVE``）∧ ∃ 带 ``ref_id`` 的可引用依据 ∧ ``dc>=0.7``
-∧ 无证据冲突。**弱相似 0.70~0.85 不是硬阳性** —— 它要靠"商品事实"维度交叉，不能单独撑起自动拒绝。
+Logo / 商家达阈值 / 显式 ``MEASUREMENT=POSITIVE``）**或** R-302 规避词命中 ∧ ∃ 带 ``ref_id``
+的可引用依据 ∧ 无证据冲突。**弱相似 0.70~0.85 不是硬阳性** —— 它要靠"商品事实"维度交叉，
+不能单独撑起自动拒绝。
 
 不变量：``risk_level`` / ``risk_type`` 不参与判定（仅供人工队列排序）；``policy`` 只从
 ``POLICY_REF`` 证据的 ``extra["policy_id"]`` 读，不采信提案。本模块**不含任何读 ``prior``
@@ -28,10 +29,11 @@ from __future__ import annotations
 from pra.agent.guardrails.budget import budget_exceeded, snapshot_budget
 from pra.agent.guardrails.hard_rules import hard_rule_hit
 from pra.agent.guardrails.measurements import (
-    ALWAYS_COVERED_DIMENSIONS,
+    RULE_BRAND_WORD,
+    RULE_EVASION_WORD,
     CoverageReport,
     coverage_report,
-    text_evasion_hit,
+    rule_hit_ids,
 )
 from pra.domain.measurement import (
     CITABLE_TYPES,
@@ -49,17 +51,8 @@ from pra.domain.models import (
     RiskType,
 )
 
-# 常量：本地声明，不与其它模块共享可变状态。
-
-CONFIDENCE_ABSTAIN_THRESHOLD = 0.7  # REJECT Gate 安全门槛（decision_confidence）
-
-# dc 公式的结构系数（覆盖主项 / 证据强度次项 / 引用 / 基线 / 冲突惩罚）。
-# **结构性给定，不用任何数据集拟合**；阈值 CONFIDENCE_ABSTAIN_THRESHOLD 保持不变。
-DC_W_COVERAGE = 0.40
-DC_W_STRENGTH = 0.30
-DC_W_CITATION = 0.20
-DC_BASE = 0.10
-DC_CONFLICT_PENALTY = 0.20
+# 确定性链产出的裁决一律记 1.0（与 screening 直判同口径）；本字段不参与任何判定分支。
+DECISION_CONFIDENCE = 1.0
 
 # overrides 原因码（写进 ReviewDecision.overrides）
 R1_HARD_RULE = "R1_HARD_RULE"
@@ -71,6 +64,7 @@ R3_DIMENSION_UNMEASURABLE = "R3_DIMENSION_UNMEASURABLE"
 R3_POSITIVE_INSUFFICIENT = "R3_POSITIVE_INSUFFICIENT"
 R4_PASS_GATE_FAIL = "R4_PASS_GATE_FAIL"
 R5_DEGRADED_OR_FAILED_STEP = "R5_DEGRADED_OR_FAILED_STEP"
+
 
 def _has_citable(evidence) -> bool:
     """是否存在带 ``ref_id`` 的可引用依据（POLICY_REF / CASE_PRECEDENT）。"""
@@ -126,13 +120,15 @@ def _rule_positive_dims(case) -> frozenset[str]:
     """规则侧阳性维度：平台规则命中（R-102 品牌词 / R-302 规避词）→ ``text_compliance``。
 
     规则命中**阻塞 PASS**，但**不单独授权 REJECT**（R-102 的既定语义是"交 Agent 上下文调查"，
-    官方店/适配词/授权产品场景会被误杀）—— REJECT 仍需证据链里的硬阳性。
+    官方店/适配词/授权产品场景会被误杀）—— REJECT 仍需证据链里的硬阳性（R-302 例外，见
+    ``reject_gate``）。
     """
-    from pra.agent.guardrails.measurements import text_compliance_positive
-
-    if case is None:
-        return frozenset()
-    return frozenset({DIM_TEXT_COMPLIANCE}) if text_compliance_positive(case) else frozenset()
+    hits = rule_hit_ids(case)
+    return (
+        frozenset({DIM_TEXT_COMPLIANCE})
+        if hits & {RULE_BRAND_WORD, RULE_EVASION_WORD}
+        else frozenset()
+    )
 
 
 def pass_gate(state) -> bool:
@@ -156,67 +152,28 @@ def pass_gate(state) -> bool:
     return not contradiction_detect(state)
 
 
-def reject_gate(state, dc: float) -> bool:
+def reject_gate(state) -> bool:
     """REJECT Gate：四项全满足才自动拒绝。
 
     ① ∃ **足以授权自动拒绝的阳性**：证据链中与本 listing 直接相关的硬阳性
     （``cov.reject_positive``：强相似/Logo；商家行为维度还需本 listing 外观信号佐证），
     **或**平台规则层命中规避词（R-302，文本自证）；
-    ② ∃ 带 ``ref_id`` 的可引用依据；③ ``dc >= 0.7``；④ 无证据冲突。
+    ② ∃ 带 ``ref_id`` 的可引用依据；③ 无证据冲突。
     **不读 LLM 的 ``SUPPORTED`` / ``evidence_for`` / ``posterior``。**
 
     刻意**不**把"仅商家历史脏"当作授权：商家行为是**针对该商家**的画像，不能单独作为
     本 listing 违规的确证（reviewer 语义：疑似规避但图/文本无确证 → 克制转人工）。
+
+    空 state 防御：``case`` 缺失 ⇒ 不得产出任何自动裁决（与 ``pass_gate`` 对称）。
     """
+    if state.get("case") is None:
+        return False
     cov = coverage_of(state)
-    if not (cov.reject_positive or text_evasion_hit(state.get("case"))):
+    if not (cov.reject_positive or RULE_EVASION_WORD in rule_hit_ids(state.get("case"))):
         return False
     if not _has_citable(state.get("evidence") or []):
         return False
-    if dc < CONFIDENCE_ABSTAIN_THRESHOLD:
-        return False
     return not contradiction_detect(state)
-
-
-def finalize_decision_confidence(state) -> float:
-    """确定性重算 ``decision_confidence``（「自动终裁的把握」，非违规概率）。
-
-    ``coverage = |required ∩ covered| / |required|``；
-    ``strength = mean(该维度决定性证据强度)``（有阳性取阳性最大、否则取阴性测量可信度）；
-    ``citation = 1.0 if ∃ 带 ref_id 的可引用依据 else 0.0``；
-    ``conflict = 1.0 if contradiction_detect else 0.0``；
-    ``c = 0.40*coverage + 0.30*strength + 0.20*citation + 0.10 - 0.20*conflict``，clip 到 0..1。
-
-    ``required`` 为空（无 case 等异常态）→ 退化到 0.10 基线。**不读 LLM 的 posterior。**
-    """
-    cov = coverage_of(state)
-    return _dc_from(cov, citation=_has_citable(state.get("evidence") or []),
-                    conflict=contradiction_detect(state))
-
-
-def _dc_from(cov: CoverageReport, *, citation: bool, conflict: bool) -> float:
-    """dc 的纯函数核心（供 overlay 复用同一次覆盖计算，避免重复求值）。
-
-    维度强度缺省：**恒覆盖的确定性规则维度**（如 text_compliance，由纯函数即时求值、
-    无命中即在构造上确定）给 1.0；其余缺省 0.0（未测维度不该贡献把握）。
-    """
-    if not cov.required:
-        return round(max(DC_BASE - (DC_CONFLICT_PENALTY if conflict else 0.0), 0.0), 2)
-    covered_req = [d for d in cov.required if d in cov.covered]
-    coverage = len(covered_req) / len(cov.required)
-    strengths = [
-        float(cov.strength.get(d, 1.0 if d in ALWAYS_COVERED_DIMENSIONS else 0.0))
-        for d in covered_req
-    ]
-    strength = sum(strengths) / len(strengths) if strengths else 0.0
-    c = (
-        DC_W_COVERAGE * coverage
-        + DC_W_STRENGTH * strength
-        + DC_W_CITATION * (1.0 if citation else 0.0)
-        + DC_BASE
-        - (DC_CONFLICT_PENALTY if conflict else 0.0)
-    )
-    return round(min(max(c, 0.0), 1.0), 2)
 
 
 def _finalize_risk_level(state, proposal) -> RiskLevel:
@@ -268,14 +225,13 @@ def _build_decision(
     decision: Decision,
     risk_level: RiskLevel,
     risk_type: list,
-    decision_confidence: float,
     overrides: list,
 ) -> ReviewDecision:
     """组装 ``ReviewDecision``，取值全部来自确定性参数与 state 的事实通道。
 
     evidence / hypothesis_trace 直接引用 state 的同型对象列表（浅拷贝容器、元素同一实例；
     后者仅供审计/展示，不参与判定）；policy 取排序去重的 POLICY_REF ``extra["policy_id"]``；
-    budget_used 为 ``snapshot_budget`` 快照。
+    budget_used 为 ``snapshot_budget`` 快照；decision_confidence 恒为直判口径常量。
     """
     evidence = list(state.get("evidence") or [])
     policy = sorted(
@@ -291,7 +247,7 @@ def _build_decision(
         decision=decision,
         risk_level=risk_level,
         risk_type=list(risk_type),
-        decision_confidence=decision_confidence,
+        decision_confidence=DECISION_CONFIDENCE,
         evidence=evidence,
         policy=policy,
         hypothesis_trace=list(state.get("hypotheses") or []),
@@ -321,14 +277,13 @@ def abstention_codes(state, cov: CoverageReport) -> list:
     return codes
 
 
-def _human_review(state, proposal, dc: float, overrides: list) -> ReviewDecision:
-    """转人工的统一组装：risk/risk_type 用 ``_finalize_risk_*``（展示），confidence 用 dc。"""
+def _human_review(state, proposal, overrides: list) -> ReviewDecision:
+    """转人工的统一组装：risk/risk_type 用 ``_finalize_risk_*``（展示），confidence 用常量。"""
     return _build_decision(
         state,
         decision=Decision.HUMAN_REVIEW,
         risk_level=_finalize_risk_level(state, proposal),
         risk_type=_finalize_risk_type(state, proposal),
-        decision_confidence=dc,
         overrides=overrides,
     )
 
@@ -346,53 +301,42 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
             decision=Decision.REJECT,
             risk_level=RiskLevel.HIGH,
             risk_type=list(hit.risk_types),
-            decision_confidence=1.0,
             overrides=[R1_HARD_RULE],
         )
 
-    # 2) 事实侧覆盖 + 确定性重算 decision_confidence（LLM confidence 仅参考）
+    # 2) 事实侧覆盖 + 弃权清单（命中码全量写入 overrides）
     cov = coverage_of(state)
-    dc = _dc_from(
-        cov,
-        citation=_has_citable(state.get("evidence") or []),
-        conflict=contradiction_detect(state),
-    )
-
-    # 3) 弃权清单（命中码全量写入 overrides）
     overrides = abstention_codes(state, cov)
 
-    # 4) proposal None 兜底：无弃权码时补 R5
+    # 3) proposal None 兜底：无弃权码时补 R5
     if proposal is None and not overrides:
         overrides.append(R5_DEGRADED_OR_FAILED_STEP)
 
     if overrides:
-        return _human_review(state, proposal, dc, overrides)
+        return _human_review(state, proposal, overrides)
 
-    # 5) PASS / REJECT Gate：校验 LLM 提案（判据全部来自事实通道）
-    evs = state.get("evidence") or []
+    # 4) PASS / REJECT Gate：校验 LLM 提案（判据全部来自事实通道）
     if proposal.decision == "PASS" and not pass_gate(state):
-        return _human_review(state, proposal, dc, [R4_PASS_GATE_FAIL])
-    if proposal.decision == "REJECT" and not reject_gate(state, dc):
+        return _human_review(state, proposal, [R4_PASS_GATE_FAIL])
+    if proposal.decision == "REJECT" and not reject_gate(state):
         codes = [R2_REJECT_GATE_FAIL]
         # 阳性信号存在但不足以自动拒绝（仅商家画像 / 弱相似 / 无可引用依据）→ 显式归因
-        if weak_similarity(evs) or cov.positive:
+        if weak_similarity(state.get("evidence") or []) or cov.positive:
             codes.append(R3_POSITIVE_INSUFFICIENT)
-        return _human_review(state, proposal, dc, codes)
+        return _human_review(state, proposal, codes)
 
-    # 6) 采纳：HUMAN 提案或 Gate 通过
+    # 5) 采纳：HUMAN 提案或 Gate 通过
     return _build_decision(
         state,
         decision=Decision(proposal.decision),
         risk_level=RiskLevel(proposal.risk_level),
         risk_type=list(proposal.risk_type),
-        decision_confidence=dc,
         overrides=[],
     )
 
 
 __all__ = [
-    # 对外契约 = 阈值 + 归因码 + 判定入口；组装/派生辅助（`_` 前缀）不导出。
-    "CONFIDENCE_ABSTAIN_THRESHOLD",
+    # 对外契约 = 归因码 + 判定入口；组装/派生辅助（`_` 前缀）不导出。
     "R1_HARD_RULE",
     "R2_REJECT_GATE_FAIL",
     "R3_BUDGET_EXHAUSTED",
@@ -405,7 +349,6 @@ __all__ = [
     "abstention_codes",
     "contradiction_detect",
     "coverage_of",
-    "finalize_decision_confidence",
     "pass_gate",
     "reject_gate",
     "run_decision_overlay",

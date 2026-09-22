@@ -15,6 +15,7 @@ from typing import Any, Mapping, Protocol
 from pydantic import BaseModel, Field
 
 from ...domain.measurement import (
+    DEFAULT_EVIDENCE_WEIGHT,
     DIM_LISTING_REGISTRY,
     VERDICT_NEGATIVE,
     make_measurement,
@@ -22,9 +23,8 @@ from ...domain.measurement import (
 from ...domain.models import Evidence
 from ..base import ToolArgs, ToolContext, ToolResult
 
-# ---- 受控证据类型 & 默认证据强度 ----
+# ---- 受控证据类型 ----
 PRODUCT_FACT_TYPE = "PRODUCT_FACT"  # EvidenceType 词表
-PRODUCT_FACT_WEIGHT = 0.6  # 默认权重（暂定默认，可调）
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ class ProductTool:
                 type=PRODUCT_FACT_TYPE,
                 source=self.name,
                 value=value,
-                weight=PRODUCT_FACT_WEIGHT,
+                weight=DEFAULT_EVIDENCE_WEIGHT,
                 ref_id=p.product_id,
             ),
             make_measurement(
@@ -161,7 +161,7 @@ class ProductTool:
                 source=self.name,
                 source_ref=p.product_id,
                 verdict=VERDICT_NEGATIVE,
-                weight=PRODUCT_FACT_WEIGHT,
+                weight=DEFAULT_EVIDENCE_WEIGHT,
                 value=f"商品事实已在库核验：brand={brand_repr}, category={p.category}",
             ),
         ]

@@ -32,9 +32,8 @@ DecisionLabel = Literal["PASS", "REJECT", "HUMAN_REVIEW"]
 class EvalContext(BaseModel):
     """一次评测运行的配置注入（不动判定逻辑）。
 
-    - ``abstain_confidence_threshold``：Single-call 的 REJECT 候选置信门槛 ——
-      confidence < 门槛的 REJECT 候选确定性改记 HUMAN_REVIEW（与
-      ``gate.CONFIDENCE_ABSTAIN_THRESHOLD=0.7`` 同口径）；
+    - ``abstain_confidence_threshold``：Single-call 的 REJECT 候选置信门槛 —— 本 context
+      自有字段（默认 0.7），confidence < 门槛的 REJECT 候选确定性改记 HUMAN_REVIEW；
     - ``tool_world``：Agent 的工具数据源 —— "eval" = 与 eval_data/v2 同一份种子世界
       （公平性：Rule/Single-call 只用基础输入，Agent 经工具取"基础输入之外"的证据）；
       "default" = 仓库默认演示种子；"rag" = RAG 世界（CaseSearch / PolicySearch 注入

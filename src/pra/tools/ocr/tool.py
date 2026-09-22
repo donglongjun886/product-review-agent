@@ -15,12 +15,12 @@ from typing import Any, Mapping, Protocol
 
 from pydantic import BaseModel, Field
 
+from ...domain.measurement import DEFAULT_EVIDENCE_WEIGHT
 from ...domain.models import Evidence
 from ..base import ToolArgs, ToolContext, ToolResult
 
 # ---- 受控证据类型 ----
 OCR_TEXT_TYPE = "OCR_TEXT"
-OCR_TEXT_WEIGHT = 0.5  # 默认权重（暂定默认，可调）
 OCR_VALUE_MAX_CHARS = 500  # value 内嵌 full_text 的截断上限（完整文本进结构化负载/审计）
 
 
@@ -143,7 +143,7 @@ class OCRTool:
                 type=OCR_TEXT_TYPE,
                 source=self.name,
                 value=truncated,
-                weight=OCR_TEXT_WEIGHT,
+                weight=DEFAULT_EVIDENCE_WEIGHT,
                 ref_id=result.image or None,
             )
         ]

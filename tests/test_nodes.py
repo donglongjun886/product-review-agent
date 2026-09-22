@@ -12,34 +12,35 @@ decide 采用「注入坏后端 + 最小确定性 state」，不 stub overlay。
 
 from __future__ import annotations
 
-from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, STEP_HYPOTHESIZE
-from pra.agent.nodes import decide as decide_mod
-from pra.agent.nodes import hypothesize as hypothesize_mod
-from pra.agent.nodes import plan as plan_mod
-from pra.agent.nodes.decide import decide_node
-from pra.agent.nodes.hypothesize import hypothesize_node
-from pra.agent.nodes.plan import plan_node
-from pra.agent.nodes import reevaluate as reevaluate_mod
-from pra.agent.nodes.reevaluate import reevaluate_node
-from pra.agent.guardrails.schemas import (
-    HypothesizeOutput,
-    HypothesisProposal,
-    HypothesisUpdate,
-    ReevaluateOutput,
-)
-from pra.domain.models import Budget, Decision, HypothesisStatus, RiskLevel, RiskType
 from helpers import (
     AlwaysRaiseBackend,
     NodePayloadBackend,
     SequenceBackend,
     budget_exhausted_state,
-    dc_anchor_state,
     decide_reject_json,
-    hypothesize_json,
     hp,
+    hypothesize_json,
     make_case,
     reevaluate_json,
+    risk_anchor_state,
 )
+
+from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, STEP_HYPOTHESIZE
+from pra.agent.guardrails.schemas import (
+    HypothesisProposal,
+    HypothesisUpdate,
+    HypothesizeOutput,
+    ReevaluateOutput,
+)
+from pra.agent.nodes import decide as decide_mod
+from pra.agent.nodes import hypothesize as hypothesize_mod
+from pra.agent.nodes import plan as plan_mod
+from pra.agent.nodes import reevaluate as reevaluate_mod
+from pra.agent.nodes.decide import decide_node
+from pra.agent.nodes.hypothesize import hypothesize_node
+from pra.agent.nodes.plan import plan_node
+from pra.agent.nodes.reevaluate import reevaluate_node
+from pra.domain.models import Budget, Decision, HypothesisStatus, RiskLevel, RiskType
 
 _CONFIG: dict = {}
 
@@ -66,12 +67,11 @@ def _payload_state() -> dict:
     }
 
 
-def test_hypothesize_state_payload_is_case_plus_signals():
+def test_hypothesize_state_payload_is_case_only():
     payload = hypothesize_mod._state_payload(_payload_state())
-    assert set(payload) == {"case", "screening_signals"}
-    # case 为 JSON 形状的全量 dump（screening_signals 独立注入）
+    assert set(payload) == {"case"}
+    # case 为 JSON 形状的全量 dump（机审信号通道已删）
     assert payload["case"] == _payload_state()["case"].model_dump(mode="json")
-    assert [s["name"] for s in payload["screening_signals"]] == ["KEYWORD", "LOGO_DETECT"]
 
 
 def test_plan_state_payload_passes_full_case():
@@ -289,7 +289,7 @@ async def test_decide_budget_exceeded_does_not_call_llm():
 
 async def test_decide_degraded_short_circuit_no_llm():
     backend = _raise_backend()
-    st = dc_anchor_state()
+    st = risk_anchor_state()
     st["degraded"] = True
     out = await decide_node(st, _CONFIG, llm=backend)
     assert backend.calls == 0
@@ -304,7 +304,7 @@ async def test_decide_llm_failure_r5_override():
     """decide 自身 LLM 失败 → 注入 degraded + critical failure 到 overlay state，R5 落
     overrides；节点仍返回 degraded=False，两次尝试都记账。"""
     backend = _raise_backend()
-    st = dc_anchor_state()
+    st = risk_anchor_state()
     st["degraded"] = False
     out = await decide_node(st, _CONFIG, llm=backend)
     assert backend.calls == 2  # 两次尝试都失败
@@ -320,16 +320,16 @@ async def test_decide_llm_failure_r5_override():
 
 
 async def test_decide_success_path_adopts_reject():
-    """成功路径：REJECT 提案过 Gate → 采纳（overrides=[]、dc=0.95）、failures=[]。"""
+    """成功路径：REJECT 提案过 Gate → 采纳（overrides=[]、confidence=1.0）、failures=[]。"""
     backend = NodePayloadBackend(payloads={"decide": decide_reject_json()})
-    st = dc_anchor_state()
+    st = risk_anchor_state()
     st["degraded"] = False
     out = await decide_node(st, _CONFIG, llm=backend)
     assert backend.calls == ["decide"]
     decision = out["decision"]
     assert decision.decision == Decision.REJECT
     assert decision.overrides == []
-    assert decision.decision_confidence == 0.95
+    assert decision.decision_confidence == 1.0
     assert decision.risk_level == RiskLevel.HIGH
     assert decision.risk_type == [RiskType.POTENTIAL_IP_RISK]
     assert decision.policy == ["POLICY_3.2"]

@@ -2,8 +2,8 @@
 
 逐条走：预算截断 → ``parse_args`` 校验 → before 边际探针 → 工具执行（infra 失败重试
 1 次）→ 记账 → ``to_evidence`` → 质量过滤 → 去重合并（只写回本 visit 新增）
-→ after 边际探针 → 审计 record（ok 含边际增益 4 字段：before_confidence /
-after_confidence / evidence_added / decision_changed，JSON 承载、不进 DB 列）。
+→ after 边际探针 → 审计 record（ok 含边际增益字段：evidence_added / decision_changed，
+JSON 承载、不进 DB 列）。
 
 确定性口径：全程纯 Python，不调 LLM；工具失败一律 ``severity=warn``（warn 只进审计与
 trace，不触发转人工 —— 只有 critical 才触发）。预算语义：args 校验失败不计 tool_calls、
@@ -89,7 +89,7 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
     # 延迟 import：evidence/metrics 到"图构建"这一刻才真正需要，
     # 且避免模块导入期就拉起这两处依赖。
     from pra.agent.guardrails.evidence import quality_filter
-    from pra.agent.guardrails.metrics import decision_conf_probe, gate_probe
+    from pra.agent.guardrails.metrics import gate_probe
 
     async def tools_node(state: dict, config) -> dict:
         """执行本 visit 的 pending_tool_calls（确定性编排）。"""
@@ -160,7 +160,6 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
 
             # ③ before 边际探针（working 快照；只进审计，不驱动路由）
             snap_before = _snapshot()
-            before_conf = decision_conf_probe(snap_before)
             before_gate = gate_probe(snap_before)
 
             ctx = ToolContext(run_id=run_id, case_id=case_id, budget=budget_w)
@@ -214,9 +213,8 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
                 working_evidence = merge_evidence(working_evidence, added)
                 added_all.extend(added)
 
-                # ⑥ after 边际探针 + ok record（含边际增益 4 字段）
+                # ⑥ after 边际探针 + ok record（含边际增益字段）
                 snap_after = _snapshot()
-                after_conf = decision_conf_probe(snap_after)
                 after_gate = gate_probe(snap_after)
                 refs = [_ref_str(e) for e in added]
                 # 观测：成功 —— output = 本 visit 新增证据引用串
@@ -234,8 +232,6 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
                         "latency_ms": latency_ms,
                         "tokens": 0,
                         "status": "ok",
-                        "before_confidence": before_conf,
-                        "after_confidence": after_conf,
                         "evidence_added": refs,
                         "decision_changed": before_gate != after_gate,
                     }

@@ -40,7 +40,7 @@ async def run_review(
 ) -> ReviewRunResult:
     """执行一次完整风险调查 —— 纯执行、不落库（无 DB 场景与测试/演示用）。
 
-    :param case: 审核案件（domain 输入 DTO：商品快照/商家/事件类型/机审信号）。
+    :param case: 审核案件（domain 输入 DTO：商品快照/商家/事件类型）。
     :param run_id: 本次运行 ID（= LangGraph thread_id）；None → 自动 ``uuid4().hex``。
     :return: ``ReviewRunResult{run_id, review_decision}``，review_decision 为图终态 decision
         （三分类 + 风险等级/类型 + 置信度 + 证据链 + 假设轨迹 + 预算快照）。

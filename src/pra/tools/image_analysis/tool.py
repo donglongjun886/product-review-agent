@@ -164,13 +164,17 @@ class ImageAnalysisTool:
         return ImageAnalysisResult(items=items)
 
     def to_evidence(self, result: ImageAnalysisResult) -> list[Evidence]:
-        """结果 → Evidence：命中 → 阳性类型；每张图**必产 1 条** ``MEASUREMENT``。
+        """结果 → Evidence：命中 → 阳性类型；``measurement_available`` 为 True 时每张图另产
+        1 条 ``MEASUREMENT``。
 
         weight 分别取 ``similarity`` / ``confidence``。**不套 EVIDENCE_MIN_SIM 下限**，下游按
         上述常量做证据质量过滤。``ref_id=item.image_url``（源图片为稳定业务
         标识，去重 key 以它为准 —— 同一品牌多图命中不会因 ref=None 互相吞并）；
         ``extra`` 从结构化命中直接写入（``similarity`` / ``strong`` / ``logo_brand`` /
         ``confidence``），不反向解析 value。
+
+        ``measurement_available`` 为 False（本部署测不出外观）时**不产任何 ``MEASUREMENT``**
+        —— 只保留原始命中证据，未测 ≠ 测过且阴性。
 
         ``MEASUREMENT`` 的 verdict 相对 ``EVIDENCE_STRONG`` **硬阈值**判定：
         有 ``similarity >= EVIDENCE_STRONG`` 或任一 Logo → ``POSITIVE``；否则 ``NEGATIVE``。
@@ -212,6 +216,8 @@ class ImageAnalysisTool:
                         },
                     )
                 )
+            if not self.measurement_available:
+                continue
             top = max((m.similarity for m in item.top_similar), default=0.0)
             evidences.append(
                 make_measurement(

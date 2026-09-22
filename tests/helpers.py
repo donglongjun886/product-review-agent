@@ -27,7 +27,6 @@ from pra.domain.models import (
     ProductImage,
     ProductInfo,
     ProductReviewCase,
-    ScreeningSignal,
     SkuInfo,
 )
 from pra.tools import BGE_MODEL as BGE_DEFAULT_MODEL
@@ -135,16 +134,11 @@ def make_case(
         listing_time=datetime(2024, 9, 6, 14, 0, 0),  # naive datetime（DB DATETIME 口径）
         version=version,
     )
-    signals = [
-        ScreeningSignal(name="KEYWORD", result="PASS", score=0.8),
-        ScreeningSignal(name="LOGO_DETECT", result="PASS", score=0.2),
-    ]
     return ProductReviewCase(
         case_id=case_id,
         product=product,
         merchant_id=merchant_id,
         event_type="NEW_LISTING",
-        screening_signals=signals,
     )
 
 
@@ -213,11 +207,11 @@ def covered_evidence(
     return evs
 
 
-def dc_anchor_state() -> dict:
+def risk_anchor_state() -> dict:
     """锚点 state：覆盖完整的证据链 + 强相似 0.91 + 商家脏 + 可引用依据。
 
-    相对于旧锚点（5 条证据 / posterior=0.91），本锚点改为**事实侧锚点**：
-    required 四维全覆盖 + 两个维度阳性 + 带 ref_id 的 POLICY_REF/CASE_PRECEDENT。
+    required 四维全覆盖 + 两个维度阳性 + 带 ref_id 的 POLICY_REF/CASE_PRECEDENT
+    ⇒ 硬规则不命中、弃权清单全空、REJECT Gate 四项全满足。
     """
     hypotheses = [
         hp("H1", prior=0.5, status=HypothesisStatus.REFUTED, posterior=0.05,

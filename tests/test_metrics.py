@@ -1,22 +1,21 @@
 """边际增益审计探针（guardrails/metrics.py）单测：钉死 gate_probe 与 overlay 语义。
 
-``decision_conf_probe`` 恒等于 ``gate.finalize_decision_confidence``；``gate_probe``
-是 ``run_decision_overlay``（无提案输入）的轻量代理，顺序一致：R1 → abstention 清单
-→ PASS/REJECT Gate → UNDECIDED。探针只供审计、不驱动路由。
+``gate_probe`` 是 ``run_decision_overlay``（无提案输入）的轻量代理，顺序一致：
+R1 → abstention 清单 → PASS/REJECT Gate → UNDECIDED。探针只供审计、不驱动路由。
 """
 
 from __future__ import annotations
 
-from pra.agent.guardrails import gate
-from pra.agent.guardrails.metrics import decision_conf_probe, gate_probe
-from pra.domain.models import Budget
 from helpers import (
     all_measureable_caps,
     budget_exhausted_state,
     covered_evidence,
-    dc_anchor_state,
     make_case,
+    risk_anchor_state,
 )
+
+from pra.agent.guardrails.metrics import gate_probe
+from pra.domain.models import Budget
 
 
 def _clean_pass_state() -> dict:
@@ -50,13 +49,6 @@ def _risk_no_policy_state() -> dict:
     }
 
 
-def test_decision_conf_probe_equals_gate_finalize():
-    assert decision_conf_probe(dc_anchor_state()) == gate.finalize_decision_confidence(
-        dc_anchor_state()
-    )
-    assert decision_conf_probe({}) == gate.finalize_decision_confidence({}) == 0.10
-
-
 def test_gate_probe_empty_state_undecided():
     """空态（证据不足，无自动 Gate 通过）→ UNDECIDED。"""
     assert gate_probe({}) == "UNDECIDED"
@@ -69,7 +61,7 @@ def test_gate_probe_budget_exceeded_human():
 
 
 def test_gate_probe_degraded_human():
-    st = dc_anchor_state()
+    st = risk_anchor_state()
     st["degraded"] = True
     assert gate_probe(st) == "HUMAN"
 
@@ -87,7 +79,7 @@ def test_gate_probe_r1_hard_rule_reject():
 
 
 def test_gate_probe_agrees_with_overlay_outcome():
-    """probe 与真实 overlay 结论一致（clean→PASS；风险无政策→HUMAN；dc anchor→REJECT）。"""
+    """probe 与真实 overlay 结论一致（clean→PASS；风险无政策→HUMAN；risk anchor→REJECT）。"""
     from pra.agent.guardrails.gate import run_decision_overlay
     from pra.agent.guardrails.schemas import DecisionProposal
 
@@ -104,5 +96,5 @@ def test_gate_probe_agrees_with_overlay_outcome():
     # 无提案时探针只能给"待定"（是否转人工取决于提案走哪道 Gate）
     assert gate_probe(risk) == "UNDECIDED"
 
-    assert run_decision_overlay(dc_anchor_state(), reject_prop).decision.value == "REJECT"
-    assert gate_probe(dc_anchor_state()) == "REJECT"
+    assert run_decision_overlay(risk_anchor_state(), reject_prop).decision.value == "REJECT"
+    assert gate_probe(risk_anchor_state()) == "REJECT"

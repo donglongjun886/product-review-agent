@@ -33,7 +33,6 @@ from pra.domain.models import (
     ProductReviewCase,
     RiskLevel,
     RiskType,
-    ScreeningSignal,
     SkuInfo,
 )
 
@@ -62,18 +61,11 @@ def build_demo_case() -> ProductReviewCase:
         listing_time=datetime(2024, 9, 6, 14, 0, 0),  # naive datetime（DB DATETIME 口径）
         version=3,
     )
-    signals = [
-        ScreeningSignal(name="KEYWORD", result="PASS", score=0.80),
-        ScreeningSignal(name="LOGO_DETECT", result="PASS", score=0.20),
-        ScreeningSignal(name="CATEGORY_RULE", result="PASS", score=0.95),
-        ScreeningSignal(name="DUPLICATE_CHECK", result="PASS", score=0.10),
-    ]
     return ProductReviewCase(
         case_id="CASE_20240907_001",
         product=product,
         merchant_id="M_5512",
         event_type="NEW_LISTING",
-        screening_signals=signals,
     )
 
 
@@ -117,8 +109,6 @@ def _print_tools(update: dict) -> None:
             added_refs = r.get("evidence_added") or []
             print(
                 f"    seq={r.get('seq')} {tool} ok | 边际增益: "
-                f"before_confidence={r.get('before_confidence')} "
-                f"after_confidence={r.get('after_confidence')} "
                 f"evidence_added={len(added_refs)} 条 "
                 f"decision_changed={r.get('decision_changed')} "
                 f"| latency_ms={r.get('latency_ms')}"
@@ -367,7 +357,6 @@ async def main() -> None:
         f"  图片: {[i.url for i in case.product.images]} "
         f"| sku: {[s.sku_id for s in case.product.sku_list]}"
     )
-    print(f"  机审信号: {[(s.name, s.result) for s in case.screening_signals]}")
     print("=" * 76)
 
     app = _build_app()

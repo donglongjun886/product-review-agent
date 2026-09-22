@@ -1,6 +1,6 @@
 """hypothesize 节点 —— 初始风险假设生成（LLM 语义步）。
 
-把输入 ``ProductReviewCase``（商品快照 + 商家 + 机审信号）转化为**初始待验证假设集**
+把输入 ``ProductReviewCase``（商品快照 + 商家）转化为**初始待验证假设集**
 （每条带 ``prior`` 先验 = 未经调查的怀疑度 0..1，不归一化、不要求和为 1），
 交给 plan → tools → reevaluate 循环逐条验证。
 
@@ -11,8 +11,8 @@
 - 其余为确定性 apply：``id`` 按序编号 H1..Hn、``status=PENDING``、``posterior=None``、
   ``evidence_for/against=[]``。LLM 的 ``rationale`` 在 AgentState 中无 channel，apply
   时直接丢弃。
-- ``_state_payload`` 以结构化 dict 注入 state 子集（case 全量 + screening_signals，
-  domain 对象经 ``model_dump(mode="json")`` 转 JSON 形状）—— 后端按 ``state=`` 接收，
+- ``_state_payload`` 以结构化 dict 注入 state 子集（case 全量，domain 对象经
+  ``model_dump(mode="json")`` 转 JSON 形状）—— 后端按 ``state=`` 接收，
   不再有 ``__STATE__`` 文本协议。
 """
 
@@ -31,15 +31,9 @@ _DEGRADE_REASON = "schema 校验重试仍失败"
 
 
 def _state_payload(state: dict) -> dict:
-    """LLM 入参 state 子集：case 全量 + screening_signals（domain 对象已
-    ``model_dump(mode="json")``）。"""
+    """LLM 入参 state 子集：仅 case 全量（domain 对象已 ``model_dump(mode="json")``）。"""
     case = state["case"]
-    return {
-        "case": case.model_dump(mode="json"),
-        "screening_signals": [
-            s.model_dump(mode="json") for s in (case.screening_signals or [])
-        ],
-    }
+    return {"case": case.model_dump(mode="json")}
 
 
 def _apply_hypotheses(out: HypothesizeOutput) -> list[Hypothesis]:

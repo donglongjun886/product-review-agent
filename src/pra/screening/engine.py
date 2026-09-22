@@ -10,7 +10,7 @@ COMPLEX；都无命中 → PASS（brand/类目空缺已由 R-301 兜成 COMPLEX�
 放行）。同轮多命中**都收集**（hits 按 ``DEFAULT_RULES`` 声明序）。
 
 ``rule_evidence`` 只**构造** Evidence（type=RULE_HIT / source=ScreeningRuleEngine /
-weight=1.0 / extra={"rule_id"}），落库由 persist 层做（review_evidence.run_id NOT NULL ——
+weight=DEFAULT_EVIDENCE_WEIGHT / extra={"rule_id"}），落库由 persist 层做（review_evidence.run_id NOT NULL ——
 直判 run 也建行，保证 result → run → evidence 审计链统一成立）。
 """
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from pra.domain.measurement import DEFAULT_EVIDENCE_WEIGHT
 from pra.domain.models import Evidence, ProductReviewCase
 from pra.screening.rule_engine.rules import DEFAULT_RULES
 
@@ -27,7 +28,6 @@ Verdict = Literal["PASS", "REJECT", "COMPLEX"]
 # RULE_HIT 证据常量（screening 规则命中的统一证据来源；source_tool 落库同名）。
 RULE_EVIDENCE_TYPE = "RULE_HIT"
 RULE_EVIDENCE_SOURCE = "ScreeningRuleEngine"
-RULE_EVIDENCE_WEIGHT = 1.0  # 确定性规则命中 → 满权重
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,7 @@ def rule_evidence(hit: RuleHit) -> Evidence:
         type=RULE_EVIDENCE_TYPE,
         source=RULE_EVIDENCE_SOURCE,
         value=f"{hit.rule_id} {hit.name}: {hit.detail}",
-        weight=RULE_EVIDENCE_WEIGHT,
+        weight=DEFAULT_EVIDENCE_WEIGHT,
         ref_id=None,
         extra={"rule_id": hit.rule_id},
     )
@@ -92,7 +92,6 @@ def rule_evidence(hit: RuleHit) -> Evidence:
 __all__ = [
     "RULE_EVIDENCE_SOURCE",
     "RULE_EVIDENCE_TYPE",
-    "RULE_EVIDENCE_WEIGHT",
     "RuleHit",
     "TriageResult",
     "Verdict",

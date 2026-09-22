@@ -23,7 +23,7 @@ LLM_CALLS=10 / TOOL_CALLS=15），终态以确定性 overlay 后的 ``ReviewDeci
   （prior 0.2 < 0.3）UNRESOLVED，不挡 PASS；
 - decide：**无受支持的"高优先"风险（prior>=0.3）且高优先假设均已证伪 → PASS**；
   受支持的文本仿冒 / 强视觉 / （弱视觉且商家系统性）→ REJECT（再经 REJECT Gate 校验
-  可引用依据与 dc）；其余 → HUMAN。低先验 SUPPORTED 与 PASS 相容是刻意行为：交叉判据
+  可引用依据）；其余 → HUMAN。低先验 SUPPORTED 与 PASS 相容是刻意行为：交叉判据
   用"假设是否成立"而非"先验"。Gate / abstention overlay 仍做最终收口。
 
 确定性约束：纯函数 + 异步包装；不读 expected、不读外部配置；阈值常量取单一来源

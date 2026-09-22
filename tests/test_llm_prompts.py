@@ -37,7 +37,7 @@ _SCHEMA = {
     "required": ["decision"],
 }
 
-# 带既有假设清单的 hypothesize state：case + screening_signals 与节点 state 同构，
+# 带既有假设清单的 hypothesize state：case 与节点 state 同构，
 # 另带 hypotheses（UNRESOLVED / REFUTED / 已新增并存）验证去重清单渲染。
 _HYP_WITH_EXISTING = {
     "case": {
@@ -53,7 +53,6 @@ _HYP_WITH_EXISTING = {
             "images": [{"url": "https://cdn/img1.jpg", "source": "主图"}],
         },
     },
-    "screening_signals": [{"name": "KEYWORD", "result": "HIT", "score": 0.6}],
     "hypotheses": [
         {
             "id": "H1",
@@ -101,7 +100,6 @@ def test_hypothesize_user_prompt_renders_existing_hypotheses():
     assert "商家历史干净无违规记录" in text
     assert "H3" in text and "PENDING" in text
     assert "运行中新发现的品牌字段核验维度" in text
-    assert "KEYWORD" in text  # 机审信号照常渲染（不因假设清单回退）
     assert "输出格式要求" in text  # Schema 要点分节恒在
     assert "__STATE__" not in text  # 不泄漏 __STATE__ 标记
 
@@ -111,7 +109,7 @@ def test_hypothesize_user_prompt_omits_section_when_no_existing():
         node="hypothesize", state=_HYP_WITHOUT_EXISTING, json_schema=_SCHEMA
     )
     assert "既有假设清单" not in text
-    assert "KEYWORD" in text  # 机审信号照常渲染
+    assert "云步百搭小白鞋" in text  # case 事实照常渲染
 
 
 def test_output_schema_contracts_unchanged():
@@ -166,7 +164,6 @@ def test_four_node_prompt_render_smoke_walkthrough():
                 "images": [{"url": "https://cdn/img1.jpg", "source": "主图"}],
             },
         },
-        "screening_signals": [{"name": "KEYWORD", "result": "HIT", "score": 0.9}],
         "hypotheses": [
             {
                 "id": "H1",

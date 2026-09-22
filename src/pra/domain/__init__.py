@@ -13,7 +13,6 @@ from .models import (
     ReviewDecision,
     RiskLevel,
     RiskType,
-    ScreeningSignal,
     SkuInfo,
 )
 
@@ -30,6 +29,5 @@ __all__ = [
     "ReviewDecision",
     "RiskLevel",
     "RiskType",
-    "ScreeningSignal",
     "SkuInfo",
 ]

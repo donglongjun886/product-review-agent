@@ -3,9 +3,9 @@
 本次语义重构后的核心不变量（本文件的主要目的）：
 
 1. **终裁不读任何 LLM 生成量** —— 篡改 ``prior`` / ``posterior`` / ``status`` /
-   ``evidence_for`` 后 ``pass_gate`` / ``reject_gate`` / ``dc`` 结果必须逐字不变；
+   ``evidence_for`` 后 ``pass_gate`` / ``reject_gate`` 结果必须逐字不变；
 2. PASS = 无阳性 ∧ 无规则阳性 ∧ required 全覆盖 ∧ 无关键失败 ∧ 无冲突；
-3. REJECT = 维度匹配的**硬阳性** ∧ 可引用依据 ∧ dc>=0.7 ∧ 无冲突（弱相似单独不成立）；
+3. REJECT = 维度匹配的**硬阳性** ∨ R-302 规避词 ∧ 可引用依据 ∧ 无冲突（弱相似单独不成立）；
 4. HUMAN 归因区分：关键测量未取（可补救） / 维度不可测（环境缺失） / 阳性不足 / 证据冲突。
 """
 
@@ -16,10 +16,10 @@ from helpers import (
     all_measureable_caps,
     budget_exhausted_state,
     covered_evidence,
-    dc_anchor_state,
     ev,
     hp,
     make_case,
+    risk_anchor_state,
 )
 
 from pra.agent.guardrails import gate
@@ -35,7 +35,6 @@ from pra.agent.guardrails.gate import (
     R4_PASS_GATE_FAIL,
     R5_DEGRADED_OR_FAILED_STEP,
     contradiction_detect,
-    finalize_decision_confidence,
     pass_gate,
     reject_gate,
     run_decision_overlay,
@@ -84,40 +83,6 @@ def _proposal(
         policy=[],
         rationale="test",
     )
-
-
-# ---- dc（事实侧公式） ----
-
-
-def test_dc_anchor_state_is_fact_side_high():
-    """锚点：required 四维全覆盖 + 两个阳性 + 可引用 ⇒ coverage/strength/citation 三项拉满。"""
-    # coverage=1.0(0.40) + strength=mean(0.91,0.85,0.6,1.0)=0.84(0.252) + citation(0.20) + 0.10
-    assert finalize_decision_confidence(dc_anchor_state()) == 0.95
-
-
-def test_dc_empty_state_is_base_line():
-    assert finalize_decision_confidence({"evidence": [], "failures": []}) == 0.10
-
-
-def test_dc_counts_only_covered_required_dimensions():
-    """少一个 required 测量 ⇒ coverage 3/4，强度项只按已覆盖维度平均。"""
-    st = _pass_ready_state()
-    st["evidence"] = [
-        e for e in st["evidence"]
-        if not (e.type == "MEASUREMENT" and e.ref_id.startswith(DIM_IMAGE_APPEARANCE))
-    ]
-    # coverage=3/4(0.30) + strength=mean(0.6,0.85,1.0)=0.8167(0.245) + 0 + 0.10 = 0.645 → 0.65
-    assert finalize_decision_confidence(st) == 0.65
-
-
-def test_dc_penalizes_conflict_and_clips():
-    st = _pass_ready_state()
-    st["evidence"] = [
-        *covered_evidence(merchant_removals=0),
-        ev("IMAGE_SIMILARITY", weight=0.93,
-           ref_id="https://cdn.example.com/products/P_TEST/img1.jpg"),
-    ]
-    assert contradiction_detect(st) is True
 
 
 # ---- 谓词：证据冲突 / 高优先展示 ----
@@ -196,8 +161,8 @@ def test_pass_gate_false_on_conflict():
 
 
 def test_reject_gate_true_with_hard_positive_and_citation():
-    st = dc_anchor_state()
-    assert reject_gate(st, finalize_decision_confidence(st)) is True
+    st = risk_anchor_state()
+    assert reject_gate(st) is True
 
 
 def test_reject_gate_false_on_weak_similarity_only():
@@ -210,7 +175,7 @@ def test_reject_gate_false_on_weak_similarity_only():
     ]
     assert gate.weak_similarity(st["evidence"]) is True
     assert not gate.coverage_of(st).positive
-    assert reject_gate(st, finalize_decision_confidence(st)) is False
+    assert reject_gate(st) is False
 
 
 def test_reject_gate_false_without_citable():
@@ -219,11 +184,14 @@ def test_reject_gate_false_without_citable():
         e for e in st["evidence"] if e.type not in {"POLICY_REF", "CASE_PRECEDENT"}
     ]
     st["evidence"] = [*st["evidence"], ev("IMAGE_SIMILARITY", weight=0.93, ref_id="img")]
-    assert reject_gate(st, 0.99) is False
+    assert reject_gate(st) is False
 
 
-def test_reject_gate_false_below_confidence_threshold():
-    assert reject_gate(dc_anchor_state(), 0.69) is False
+def test_reject_gate_false_without_case():
+    """空 state 防御：无 case 时即便有硬阳性 + 可引用依据，也不得自动拒绝。"""
+    st = risk_anchor_state()
+    st["case"] = None
+    assert reject_gate(st) is False
 
 
 def test_reject_gate_false_on_conflict():
@@ -232,7 +200,7 @@ def test_reject_gate_false_on_conflict():
         *covered_evidence(merchant_removals=0, similarity=0.93),
         ev("POLICY_REF", value="p", weight=0.9, ref_id="c1", extra={"policy_id": "POLICY_3.2"}),
     ]
-    assert reject_gate(st, 0.99) is False
+    assert reject_gate(st) is False
 
 
 # ---- 核心不变量：终裁不读 LLM 生成量 ----
@@ -253,31 +221,22 @@ def test_reject_gate_false_on_conflict():
     ],
 )
 def test_gate_is_invariant_to_llm_hypothesis_fields(mutation):
-    """篡改假设的 prior/posterior/status/evidence_for 后，三道事实侧判定必须逐字不变。"""
-    base = dc_anchor_state()
-    before = (
-        pass_gate(base),
-        reject_gate(base, finalize_decision_confidence(base)),
-        finalize_decision_confidence(base),
-    )
-    mutated = dc_anchor_state()
+    """篡改假设的 prior/posterior/status/evidence_for 后，两道事实侧判定必须逐字不变。"""
+    base = risk_anchor_state()
+    before = (pass_gate(base), reject_gate(base))
+    mutated = risk_anchor_state()
     for key, value in mutation.items():
         setattr(mutated["hypotheses"][1], key, value)
-    after = (
-        pass_gate(mutated),
-        reject_gate(mutated, finalize_decision_confidence(mutated)),
-        finalize_decision_confidence(mutated),
-    )
+    after = (pass_gate(mutated), reject_gate(mutated))
     assert before == after
 
 
 def test_gate_is_invariant_to_hypotheses_being_removed_entirely():
-    base = dc_anchor_state()
-    stripped = dc_anchor_state()
+    base = risk_anchor_state()
+    stripped = risk_anchor_state()
     stripped["hypotheses"] = []
     assert pass_gate(base) == pass_gate(stripped)
-    assert reject_gate(base, 0.9) == reject_gate(stripped, 0.9)
-    assert finalize_decision_confidence(base) == finalize_decision_confidence(stripped)
+    assert reject_gate(base) == reject_gate(stripped)
 
 
 # ---- overlay：归因码 ----
@@ -290,12 +249,12 @@ def test_overlay_pass_accepted_on_clean_case():
 
 def test_overlay_reject_accepted_when_gate_passes():
     final = run_decision_overlay(
-        dc_anchor_state(),
+        risk_anchor_state(),
         _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"]),
     )
     assert final.decision is Decision.REJECT and final.overrides == []
     assert final.policy == ["POLICY_3.2"]  # 只从 POLICY_REF 证据读，不采信提案
-    assert final.decision_confidence == 0.95
+    assert final.decision_confidence == 1.0
 
 
 def test_overlay_pass_gate_fail_gets_r4():
@@ -429,4 +388,4 @@ def test_predicates_safe_on_empty_state(state):
     cov = gate.coverage_of(state)
     gate.abstention_codes(state, cov)
     assert pass_gate(state) is False
-    assert reject_gate(state, 1.0) is False
+    assert reject_gate(state) is False

@@ -70,9 +70,6 @@ _PRODUCT_STATE = {
             "listing_time": "2024-09-06T14:00:00",
         },
     },
-    "screening_signals": [
-        {"name": "KEYWORD", "result": "HIT", "score": 0.9},
-    ],
 }
 
 # plan 最小 state：无假设/无证据 → plan 渲染走"无可用取证工具 → conclude"兜底分支。
@@ -283,7 +280,6 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
     assert msgs[0]["content"] == build_system_prompt("hypothesize")
     user = msgs[1]["content"]
     assert "P_MOCK_99" in user  # state 里的商品事实被渲染出来（值而非裸 JSON）
-    assert "KEYWORD" in user  # 机审信号入上下文
     assert "decision" in user and "HUMAN_REVIEW" in user  # schema 要点（字段/枚举值）入 user
 
 
@@ -496,7 +492,7 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
 # B. llm_prompts 渲染纯测
 
 def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
-    """hypothesize user prompt：分节中文上下文含商品事实/图片/信号值。"""
+    """hypothesize user prompt：分节中文上下文含商品事实/图片/OCR 文本。"""
     text = build_user_prompt(
         node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
     )
@@ -504,7 +500,6 @@ def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
     assert "复古跑鞋（高仿嫌疑样）" in text  # 商品标题值入上下文
     assert "https://cdn.example.com/img1.jpg" in text  # 图片 url 入上下文（比对素材起点）
     assert "疑似品牌 LOGO 图案" in text  # 机审 OCR 信息入上下文
-    assert "KEYWORD" in text  # 机审信号入上下文
     assert "decision" in text and "HUMAN_REVIEW" in text  # schema 要点（字段/枚举值）渲染
 
 

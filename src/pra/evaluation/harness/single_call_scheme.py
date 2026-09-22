@@ -1,6 +1,6 @@
 """Baseline 2：单次 LLM 调用（确定性 mock，可注入 llm_fn）。
 
-一次调用 = 基础输入全量（商品快照 + 机审 OCR 文本 + screening_signals）→ 结构化决策
+一次调用 = 基础输入全量（商品快照 + 机审 OCR 文本）→ 结构化决策
 JSON。**不给商家历史 / 案例库 / 政策库** —— 那是 Agent 经工具调查才拿到的证据，给了
 等于作弊。输出是 ReviewDecision 形状子集（decision / risk_level / risk_type /
 decision_confidence / policy）；``budget_used / overrides / hypothesis_trace`` 不适用。
@@ -11,7 +11,7 @@ decision_confidence / policy）；``budget_used / overrides / hypothesis_trace``
 2. 仅图片 OCR 含仿冒词 → REJECT 候选 conf 0.60（证据弱，后处理转 HUMAN）；
 3. 含知名品牌词但无仿冒词 → HUMAN（授权/真伪单次调用无法核验）；
 4. brand 或 category 空缺 → HUMAN（关键事实缺失，与 R-301 同口径）；
-5. 机审信号非 PASS → HUMAN；6. 否则 → PASS（conf 0.78）。
+5. 否则 → PASS（conf 0.78）。
 后处理：``decision_confidence < ctx.abstain_confidence_threshold``（默认 0.7）的
 REJECT 候选确定性改记 HUMAN_REVIEW。
 
@@ -119,14 +119,6 @@ def _surface_predict(case_json: dict) -> dict:
         "category_missing": cat_missing,
     }
 
-    # 机审信号（screening_signals）是否有非 PASS 项
-    flagged = [
-        s.get("name")
-        for s in (case_json.get("screening_signals") or [])
-        if (s or {}).get("result") != "PASS"
-    ]
-    signals["signal_flagged"] = flagged
-
     def _out(
         decision: str,
         confidence: float,
@@ -176,13 +168,7 @@ def _surface_predict(case_json: dict) -> dict:
             "品牌或类目关键字段空缺，单次调用无法判断是否刻意规避，转人工。",
             [f"关键字段空缺: {', '.join(missing)}（需在库/商家信息核验）"],
         )
-    if flagged:  # ⑤ 机审已标非 PASS —— 已有确定性风险信号
-        return _out(
-            "HUMAN_REVIEW", 0.45, "MEDIUM", [],
-            "机审信号已非 PASS，单次调用难以复核，转人工。",
-            [f"机审信号非 PASS: {', '.join(flagged)}"],
-        )
-    # ⑥ 表面干净 → PASS（单次调用视角可放行）
+    # ⑤ 表面干净 → PASS（单次调用视角可放行）
     return _out(
         "PASS", 0.78, "NONE", [],
         "标题/描述/品牌/类目表面干净，无已知风险信号，单次调用视角放行。",

@@ -10,7 +10,7 @@ from __future__ import annotations
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-# msgpack 扩展类型白名单：允许完整 (de)serialize 的 domain 模型（全量 14 个，与
+# msgpack 扩展类型白名单：允许完整 (de)serialize 的 domain 模型（全量 13 个，与
 # src/pra/domain/models.py 类名逐字对齐），元素一律 ("pra.domain.models", "<类名>")；
 # 只放 AgentState 直接承载的模型，嵌套子模型随父模型字段级递归处理。
 ALLOWED_MSG_PACK_MODULES: list[tuple[str, str]] = [
@@ -26,7 +26,6 @@ ALLOWED_MSG_PACK_MODULES: list[tuple[str, str]] = [
     ("pra.domain.models", "ProductInfo"),
     ("pra.domain.models", "ProductImage"),
     ("pra.domain.models", "SkuInfo"),
-    ("pra.domain.models", "ScreeningSignal"),
     ("pra.domain.models", "ReviewDecision"),
 ]
 

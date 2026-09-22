@@ -28,6 +28,7 @@ from .models import Evidence
 __all__ = [
     "ALL_DIMENSIONS",
     "CITABLE_TYPES",
+    "DEFAULT_EVIDENCE_WEIGHT",
     "DIM_IMAGE_APPEARANCE",
     "DIM_LISTING_REGISTRY",
     "DIM_MERCHANT_PROFILE",
@@ -78,6 +79,9 @@ MEASUREMENT_TYPE = "MEASUREMENT"
 # 产 IMAGE_SIMILARITY 证据的相似度下限 / 「高相似」处置分界。
 EVIDENCE_MIN_SIM = 0.70
 EVIDENCE_STRONG = 0.85
+
+# 无风险量纲证据类型的默认权重（PRODUCT_FACT / OCR_TEXT / POLICY_REF / RULE_HIT）；不被任何决策读取。
+DEFAULT_EVIDENCE_WEIGHT = 0.5
 
 # 商家历史「系统性规避行为」阈值：removals 或 title-relisting 达到该值即成立。
 MERCHANT_DIRTY_MIN = 3

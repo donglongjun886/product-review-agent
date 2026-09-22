@@ -21,6 +21,7 @@ from sqlalchemy import text
 
 from pra import wiring
 from pra.domain.measurement import (
+    DEFAULT_EVIDENCE_WEIGHT,
     DIM_LISTING_REGISTRY,
     MEASUREMENT_TYPE,
     VERDICT_NEGATIVE,
@@ -39,7 +40,6 @@ from pra.tools.product.mysql_repo import (
 from pra.tools.product.tool import (
     _DEFAULT_PRODUCTS,
     PRODUCT_FACT_TYPE,
-    PRODUCT_FACT_WEIGHT,
     InMemoryProductRepository,
     ProductArgs,
     ProductResult,
@@ -325,7 +325,7 @@ async def test_mysql_product_repository_roundtrip_against_real_db():
         facts = [e for e in evs if e.type == PRODUCT_FACT_TYPE]
         assert len(facts) == 1
         assert facts[0].ref_id == product_id
-        assert facts[0].weight == PRODUCT_FACT_WEIGHT
+        assert facts[0].weight == DEFAULT_EVIDENCE_WEIGHT
         assert facts[0].source == "ProductTool"
         measurements = [e for e in evs if e.type == MEASUREMENT_TYPE]
         assert len(measurements) == 1

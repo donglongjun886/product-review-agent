@@ -24,7 +24,6 @@ from pra.domain.models import (
     ProductImage,
     ProductInfo,
     ProductReviewCase,
-    ScreeningSignal,
     SkuInfo,
 )
 
@@ -45,18 +44,11 @@ def build_demo_case() -> ProductReviewCase:
         listing_time=datetime(2024, 9, 6, 14, 0, 0),  # naive datetime（DB DATETIME 口径）
         version=3,
     )
-    signals = [
-        ScreeningSignal(name="KEYWORD", result="PASS", score=0.80),
-        ScreeningSignal(name="LOGO_DETECT", result="PASS", score=0.20),
-        ScreeningSignal(name="CATEGORY_RULE", result="PASS", score=0.95),
-        ScreeningSignal(name="DUPLICATE_CHECK", result="PASS", score=0.10),
-    ]
     return ProductReviewCase(
         case_id="CASE_20240907_001",
         product=product,
         merchant_id="M_5512",
         event_type="NEW_LISTING",
-        screening_signals=signals,
     )
 
 

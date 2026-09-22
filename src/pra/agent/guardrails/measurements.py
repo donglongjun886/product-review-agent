@@ -36,7 +36,6 @@ from pra.domain.measurement import (
     EVIDENCE_STRONG,
     MEASUREMENT_TYPE,
     MERCHANT_DIRTY_MIN,
-    VERDICT_NEGATIVE,
     VERDICT_POSITIVE,
     VERDICTS,
     measurement_dimension,
@@ -48,23 +47,26 @@ from pra.tools.merchant.tool import MERCHANT_HISTORY_TYPE
 
 __all__ = [
     "ALWAYS_COVERED_DIMENSIONS",
+    "RULE_BRAND_WORD",
+    "RULE_EVASION_WORD",
     "CoverageReport",
     "capabilities_from_tools",
     "coverage_report",
-    "dimension_strength",
     "listing_signal_present",
     "positive_dimensions",
     "reject_positive_dims",
     "required_dimensions",
-    "required_dimensions_for_reject",
-    "text_brand_word_hit",
-    "text_compliance_positive",
-    "text_evasion_hit",
+    "rule_hit_ids",
 ]
 
 # 由**确定性纯函数**直接求值的维度：不需要任何工具/数据源参与 ⇒ 覆盖恒成立。
-# ``text_compliance`` 由 screening 规则层在 gate 内即时求值（见 ``text_compliance_positive``）。
+# ``text_compliance`` 由 screening 规则层在 gate 内即时求值（见 ``rule_hit_ids``）。
 ALWAYS_COVERED_DIMENSIONS: frozenset[str] = frozenset({DIM_TEXT_COMPLIANCE})
+
+# 平台规则层两个既定档位：R-102 品牌词命中只阻塞 PASS、不授权 REJECT（官方店/适配词/
+# 授权产品会被误杀）；R-302 规避词命中是本 listing 文本自证，可授权 REJECT。
+RULE_BRAND_WORD = "R-102"
+RULE_EVASION_WORD = "R-302"
 
 # 提供"可引用依据"的工具名（决定 policy_citation 维度在本环境是否可测）。
 _CITATION_TOOLS: frozenset[str] = frozenset({"CaseSearchTool", "PolicySearchTool"})
@@ -140,7 +142,7 @@ def reject_positive_dims(evidence: Iterable[Evidence]) -> frozenset[str]:
       "商家脏 + 弱相似"（``wsim_dirty``）或"商家脏 + 强相似"则成立。
 
     ``text_compliance`` 的规则级命中不在这里 —— 它由 gate 侧对确定性规则求值
-    （``text_evasion_hit`` 授权 REJECT、``text_brand_word_hit`` 只阻塞 PASS）。
+    （``RULE_EVASION_WORD`` 授权 REJECT、``RULE_BRAND_WORD`` 只阻塞 PASS）。
     """
     dims = set(positive_dimensions(evidence))
     out: set[str] = set()
@@ -151,33 +153,6 @@ def reject_positive_dims(evidence: Iterable[Evidence]) -> frozenset[str]:
     return frozenset(out)
 
 
-def _negative_strengths(evidence: Iterable[Evidence]) -> dict[str, float]:
-    """维度 → 阴性测量的可信度（同维度多条取最大；非测量证据不参与）。"""
-    out: dict[str, float] = {}
-    for e in evidence or []:
-        if e.type != MEASUREMENT_TYPE or measurement_verdict(e) != VERDICT_NEGATIVE:
-            continue
-        dim = measurement_dimension(e)
-        if dim:
-            out[dim] = max(out.get(dim, 0.0), float(e.weight or 0.0))
-    return out
-
-
-def dimension_strength(evidence: Iterable[Evidence]) -> dict[str, float]:
-    """维度 → 该维度**决定性证据**的强度（有阳性取阳性最大，否则取阴性测量可信度）。
-
-    供 ``finalize_decision_confidence`` 使用 —— 置信度的主项来自真实证据强度，
-    而不是 LLM 的 posterior。
-    """
-    evs = list(evidence or [])
-    pos = positive_dimensions(evs)
-    neg = _negative_strengths(evs)
-    strength: dict[str, float] = dict(neg)
-    for dim, items in pos.items():
-        strength[dim] = max(float(e.weight or 0.0) for e in items)
-    return strength
-
-
 def required_dimensions(case: Any) -> tuple[str, ...]:
     """本案 PASS 前**必须完成**的关键测量维度（可观测事实导出）。
 
@@ -185,8 +160,8 @@ def required_dimensions(case: Any) -> tuple[str, ...]:
     - ``text_compliance``：恒必需（确定性规则层，无需数据源，覆盖恒成立）；
     - ``image_appearance``：**仅当案件带图时**必需（无图案件不存在外观风险面）。
 
-    ``policy_citation`` **不在 PASS 必需集内** —— 它是 REJECT 候选的必要条件
-    （见 ``required_dimensions_for_reject``），与"证明无风险"无关。
+    ``policy_citation`` **不在 PASS 必需集内** —— 它是「可引用依据可得」的 REJECT 候选
+    条件，与"证明无风险"无关。
 
     ``case`` 缺失（空 state 防御）→ 返回空元组：**不臆断任何必需维度**，由 gate 侧
     的"无 case 不得 PASS"守住不 vacuous 放行。
@@ -198,11 +173,6 @@ def required_dimensions(case: Any) -> tuple[str, ...]:
     if product.images:
         dims.append(DIM_IMAGE_APPEARANCE)
     return tuple(dims)
-
-
-def required_dimensions_for_reject(case: Any) -> tuple[str, ...]:
-    """REJECT 候选额外要求的维度：可引用依据必须可得。"""
-    return (*required_dimensions(case), DIM_POLICY_CITATION)
 
 
 def capabilities_from_tools(tools: Sequence[Any]) -> dict[str, bool]:
@@ -225,7 +195,7 @@ def capabilities_from_tools(tools: Sequence[Any]) -> dict[str, bool]:
 
 @dataclass(frozen=True)
 class CoverageReport:
-    """一次判定所需的全部事实侧输入（gate 只消费本对象 + dc + 规则命中）。
+    """一次判定所需的全部事实侧输入（gate 只消费本对象 + 规则命中）。
 
     ``positive`` 与 ``reject_positive`` 是**两个不同强度的概念**，不可混用：
 
@@ -241,23 +211,7 @@ class CoverageReport:
     unmeasurable: tuple[str, ...]  # required ∧ 未覆盖 ∧ 本环境不可测 → UNMEASURABLE
     positive: Mapping[str, list[Evidence]]
     reject_positive: frozenset[str]
-    strength: Mapping[str, float]
     capabilities: Mapping[str, bool]
-
-    @property
-    def complete(self) -> bool:
-        """required 全部覆盖（无论阴性/阳性）。"""
-        return not self.missing and not self.unmeasurable
-
-    @property
-    def negative_only(self) -> bool:
-        """required 全部覆盖且**无阳性** —— PASS 的事实前提。"""
-        return self.complete and not self.positive
-
-    @property
-    def negative_dims(self) -> frozenset[str]:
-        """已覆盖且结论为阴性的维度。"""
-        return frozenset(d for d in self.covered if d not in self.positive)
 
 
 def coverage_report(
@@ -287,45 +241,18 @@ def coverage_report(
         unmeasurable=unmeasurable,
         positive=positive_dimensions(evs),
         reject_positive=reject_positive_dims(evs),
-        strength=dimension_strength(evs),
         capabilities=caps,
     )
 
 
-def text_compliance_positive(case: Any) -> bool:
-    """文本合规维度的**阳性**判定：平台规则层命中品牌词（R-102）或规避词（R-302）。
+def rule_hit_ids(case: Any) -> frozenset[str]:
+    """平台规则层命中集合（``triage(case).hits`` 的 rule_id；纯函数，一次求值）。
 
-    刻意**不含 R-301（brand/category 空缺）**：那是"关键事实缺失 ⇒ 需核验"的
-    **可核验性**信号，由 required set 的 ``listing_registry`` 承担（在库可查即核验通过），
-    若把它当文本阳性，会把"品牌空缺但在库可验证"的正常案一并挡死。
+    ``case`` 缺失 → 空集。gate 据 ``RULE_EVASION_WORD``（R-302）授权 REJECT、
+    据 ``RULE_BRAND_WORD``（R-102）阻塞 PASS —— 两者语义不同档，见模块常量注释。
     """
+    if case is None:
+        return frozenset()
     from pra.screening.engine import triage  # 延迟 import：避免模块导入期拉起筛选层
 
-    result = triage(_coerce_case(case))
-    return any(hit.rule_id in ("R-102", "R-302") for hit in result.hits)
-
-
-def text_evasion_hit(case: Any) -> bool:
-    """平台规则层命中**规避词**（R-302）—— 本 listing 文本自证，可直接授权 REJECT。
-
-    R-302（同款/复刻/高仿/1:1/原单）是平台既定的违规信号（与 R-301/R-102 的
-    "COMPLEX → 交调查"不同档），故它与"证据链里的硬阳性"并列，构成 REJECT 的事实依据。
-    """
-    if case is None:
-        return False
-    from pra.screening.engine import triage
-
-    return any(hit.rule_id == "R-302" for hit in triage(_coerce_case(case)).hits)
-
-
-def text_brand_word_hit(case: Any) -> bool:
-    """平台规则层命中**第三方品牌词**（R-102）—— 只**阻塞 PASS**，不授权 REJECT。
-
-    R-102 的既定语义是"交 Agent 上下文调查"（官方店/适配词/授权产品会被误杀），
-    故它不能单独撑起自动拒绝（GT 家族 ``adapter_brandword`` 即此）。
-    """
-    if case is None:
-        return False
-    from pra.screening.engine import triage
-
-    return any(hit.rule_id == "R-102" for hit in triage(_coerce_case(case)).hits)
+    return frozenset(hit.rule_id for hit in triage(_coerce_case(case)).hits)

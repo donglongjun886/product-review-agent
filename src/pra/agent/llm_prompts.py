@@ -1,13 +1,13 @@
 """四个 LLM 节点的「完整 prompt」渲染（纯函数、无 IO；供真实后端组装消息）。
 
 节点把结构化 state 子集以 ``state=`` 传给后端（scripted 桩据此做确定性决策）。本模块把
-这些 state 渲染成结构化人读中文上下文（商品事实 / 图片 / 机审信号 / 假设仪表盘 /
+这些 state 渲染成结构化人读中文上下文（商品事实 / 图片 / 假设仪表盘 /
 证据链 / 预算 / 工具目录）+ 输出 Schema 要点：system = 角色 + 完整约束中文指令
 （``SYSTEM_PROMPTS``），user = 人读上下文 + Schema 要点；不把裸 JSON dump 当 user 正文。
 scripted 桩与节点本身都不依赖本模块。
 
 各 node 的 state 键（字段均为 ``model_dump(mode="json")`` 的可序列化形状）：
-- hypothesize: ``{"case": 全量, "screening_signals": [...]}``，续跑场景额外带
+- hypothesize: ``{"case": 全量}``，续跑场景额外带
   ``hypotheses``（渲染为去重参考）；
 - plan: ``{"hypotheses", "evidence", "case"（全量）}``；
 - reevaluate: ``{"hypotheses", "evidence", "pending_tool_calls": [{tool,priority,reason}]}``；
@@ -81,7 +81,7 @@ def _section(title: str, body: str) -> str:
 SYSTEM_PROMPTS: dict[str, str] = {
     "hypothesize": (
         "你是电商商品上架审核的「初始风险假设生成器」。本轮输入是一起待审核案件的完整"
-        "商品事实（商品快照、商家、事件类型、机审信号）。你的任务：建立**待验证的风险"
+        "商品事实（商品快照、商家、事件类型）。你的任务：建立**待验证的风险"
         "假设集**，交给后续的调查取证循环（plan → tools → "
         "reevaluate）逐条验证。\n"
         "关键定位：你只做「初始假设生成」，绝不据此下最终结论（终判由收敛后的 decide "
@@ -93,9 +93,9 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "让调查方向保持平衡；**它不参与终裁**（放行与否由证据侧的关键测量覆盖决定，不看假设的"
         "状态或先验）；\n"
         "3. prior = 未经任何调查时的先验怀疑度（0..1），**不要求归一化、不要求总和为 "
-        "1**；对上下文中的可疑信号（如品牌字段空缺、类目与标题不符、机审命中）给更高"
+        "1**；对上下文中的可疑信号（如品牌字段空缺、类目与标题不符）给更高"
         "先验；\n"
-        "4. 只依据 user 上下文中给出的商品事实与机审信号，**禁止臆造上下文没有的事实/"
+        "4. 只依据 user 上下文中给出的商品事实，**禁止臆造上下文没有的事实/"
         "数值/来源**；\n"
         "5. **禁止重复提出假设**：user 上下文若给出「既有假设清单」（含 UNRESOLVED / "
         "REFUTED / 此前轮次已新增的假设），只提出清单之外的**新风险维度**；与清单内"
@@ -205,8 +205,7 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "2. evidence_ids 必须引用上下文中真实存在的证据，引用串格式 \"type value\"；\n"
         "3. policy 只能填上下文中 POLICY_REF 证据里真实出现的条款号/政策 ID，禁止"
         "臆造；\n"
-        "4. confidence ∈ [0,1] 仅表示「自动判定出错风险低」的把握（参考值，确定性 "
-        "overlay 会重算为 decision_confidence）；\n"
+        "4. confidence ∈ [0,1] 是提案自评的把握（参考值，确定性 overlay 既不读也不据它判定）；\n"
         "5. 只输出符合 DecisionProposal JSON Schema 的 JSON，不要输出解释文字。"
     ),
 }
@@ -308,25 +307,6 @@ def _image_lines(images: list) -> list[str]:
         lines.append(f"- 图{idx}{source_txt}：{url_txt}")
         lines.append(f"    OCR：{ocr_txt}")
     return lines or ["（无图片）"]
-
-
-def _signal_lines(state: dict) -> list[str]:
-    """机审信号行（hypothesize 专用；state 或 case 的 screening_signals）。"""
-    signals = state.get("screening_signals")
-    case = state.get("case")
-    case = case if isinstance(case, dict) else {}
-    if not isinstance(signals, list):
-        signals = case.get("screening_signals")
-    if not isinstance(signals, list):
-        signals = []
-    lines: list[str] = []
-    for sig in signals:
-        if not isinstance(sig, dict):
-            continue
-        score = sig.get("score")
-        score_txt = f"（score={_num(score)}）" if score is not None else ""
-        lines.append(f"- {_text(sig.get('name'))}：{_text(sig.get('result'))}{score_txt}")
-    return lines or ["（无机审信号 —— 该案未命中确定性机审，直接进复杂调查）"]
 
 
 def _hypothesis_lines(hypotheses: Any) -> list[str]:
@@ -672,13 +652,12 @@ def build_user_prompt(
     if node == "hypothesize":
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
         parts.append(_section("二、商品图片（含机审 OCR 结果）", "\n".join(_image_lines(_images_from_state(state)))))
-        parts.append(_section("三、机审信号", "\n".join(_signal_lines(state))))
         # 续跑场景下若 state 带了既有假设，渲染成精简清单供去重（无则整节省略）。
         existing = state.get("hypotheses")
         if isinstance(existing, list) and existing:
             parts.append(
                 _section(
-                    "四、既有假设清单（去重参考 —— 禁止重复提出同维度/同表述的假设）",
+                    "三、既有假设清单（去重参考 —— 禁止重复提出同维度/同表述的假设）",
                     "\n".join(_hypothesis_short_lines(existing)),
                 )
             )

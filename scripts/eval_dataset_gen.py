@@ -317,7 +317,6 @@ def _row_base(*, seq, pid, mid, cat, brand, title, desc, images, event,
         },
         "merchant_id": mid,
         "event_type": event,
-        "screening_signals": [],
     }
     expected = {
         "decision": decision,

@@ -109,14 +109,14 @@ class ReevaluateOutput(BaseModel):
 class DecisionProposal(BaseModel):
     """decide 节点 LLM 提案 —— 只产**提案**，Gate 校验/改写后才是终值。
 
-    ``confidence`` 是参考值，落库终值由 overlay 重算；``policy`` 只能填证据中真实
-    出现的 policy_id/条款。
+    ``confidence`` 是提案自评参考值，overlay 既不读它、也不据它判定（终裁只看事实通道）；
+    ``policy`` 只能填证据中真实出现的 policy_id/条款。
     """
 
     decision: Literal["PASS", "REJECT", "HUMAN_REVIEW"]
     risk_level: Literal["NONE", "LOW", "MEDIUM", "HIGH"]
     risk_type: list[RiskType] = Field(default_factory=list)
-    confidence: float = Field(ge=0.0, le=1.0, description="decision_confidence 提案值（overlay 重算为准）")
+    confidence: float = Field(ge=0.0, le=1.0, description="提案自评把握（参考值；Gate 不读，仅观测）")
     evidence_ids: list[str] = Field(default_factory=list, description="支撑证据引用/摘要（提示存在性由 prompt 约束）")
     policy: list[str] = Field(default_factory=list, description="policy_id / clause 引用")
     rationale: str = Field(default="")

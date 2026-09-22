@@ -1,7 +1,7 @@
 """领域模型 —— 复杂风险调查 Agent 的数据契约层。
 
 三类业务对象：输入事实快照（``ProductReviewCase`` → ``ProductInfo`` / ``SkuInfo`` /
-``ProductImage`` / ``ScreeningSignal``）、运行中状态（``Hypothesis`` / ``Evidence`` /
+``ProductImage``）、运行中状态（``Hypothesis`` / ``Evidence`` /
 ``Budget`` / ``BudgetLimits``）、输出裁决（``ReviewDecision``：三分类 + 证据链 + 假设轨迹 +
 预算快照）。
 
@@ -107,14 +107,6 @@ class ProductInfo(_StrictModel):
     version: int = Field(description="商品乐观锁版本号（同一 product_id+version 幂等只审一次）")
 
 
-class ScreeningSignal(_StrictModel):
-    """传统机审信号（DB ``review_signal``）—— Agent 的起点信息，避免重复劳动；``name`` 如 KEYWORD / LOGO_DETECT。"""
-
-    name: str = Field(description="信号器名称，如 KEYWORD / LOGO_DETECT / CATEGORY_RULE")
-    result: str = Field(description="信号器结果（文本语义由信号器定义，示例为 PASS）")
-    score: float = Field(description="信号分；量纲由具体机审模型定义（示例为 0~1 概率类）")
-
-
 class ProductReviewCase(_StrictModel):
     """审核案件 —— Agent 的输入 DTO（DB ``review_case``）：一次上架/改标题/改属性/改图片事件 = 一个案件。"""
 
@@ -122,7 +114,6 @@ class ProductReviewCase(_StrictModel):
     product: ProductInfo = Field(description="商品事实快照（可含空 brand 等缺口，恰是调查对象）")
     merchant_id: str = Field(description="商家 ID，如 M_5512")
     event_type: str = Field(description="触发审核的事件类型，如 NEW_LISTING / UPDATE_TITLE / UPDATE_IMAGE")
-    screening_signals: list[ScreeningSignal] = Field(default_factory=list, description="机审信号起点，可为空（直接命中复杂队列）")
 
 
 # ---- 运行中状态对象 ----
@@ -209,8 +200,8 @@ class ReviewDecision(_StrictModel):
     decision_confidence: float = Field(
         ge=0.0,
         le=1.0,
-        description="decision_confidence —— 自动决策安全门槛（确定性重算值，非模型真实概率/非违规概率；"
-        "只回答'如果自动判，判错风险够不够低'；已由 confidence 改名）",
+        description="确定性直判口径的固定值 1.0（非模型概率、非违规概率，也不参与任何判定分支）；"
+        "保留本字段只为落库/API 契约兼容，终裁依据见 decision/overrides/evidence",
     )
     evidence: list[Evidence] = Field(default_factory=list, description="支撑本裁决的证据链（与运行期 evidence 同型）")
     policy: list[str] = Field(default_factory=list, description="引用的政策条款 ID，如 POLICY_3.2（REJECT 必须有可引用依据）")

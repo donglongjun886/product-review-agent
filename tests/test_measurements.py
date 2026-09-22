@@ -20,17 +20,15 @@ from helpers import all_measureable_caps, covered_evidence, ev, make_case, measu
 
 from pra.agent.guardrails.measurements import (
     ALWAYS_COVERED_DIMENSIONS,
+    RULE_BRAND_WORD,
+    RULE_EVASION_WORD,
     capabilities_from_tools,
     coverage_report,
-    dimension_strength,
     listing_signal_present,
     positive_dimensions,
     reject_positive_dims,
     required_dimensions,
-    required_dimensions_for_reject,
-    text_brand_word_hit,
-    text_compliance_positive,
-    text_evasion_hit,
+    rule_hit_ids,
 )
 from pra.domain.measurement import (
     ALL_DIMENSIONS,
@@ -164,17 +162,19 @@ def test_text_rules_split_by_platform_severity():
     """R-302 规避词 = 本 listing 文本自证 → 授权 REJECT；R-102 品牌词 = 需调查 → 只阻塞 PASS。"""
     evasion = make_case()
     evasion.product.title = "高仿 1:1 复古跑鞋"
-    assert text_evasion_hit(evasion) is True and text_brand_word_hit(evasion) is False
+    assert RULE_EVASION_WORD in rule_hit_ids(evasion)
+    assert RULE_BRAND_WORD not in rule_hit_ids(evasion)
 
     brand = make_case()
     brand.product.title = "NIKE 联名风格宽松卫衣"
-    assert text_evasion_hit(brand) is False and text_brand_word_hit(brand) is True
-    assert text_compliance_positive(brand) is True
+    assert RULE_BRAND_WORD in rule_hit_ids(brand)
+    assert RULE_EVASION_WORD not in rule_hit_ids(brand)
 
 
 def test_brand_missing_is_neither_evasion_nor_brand_word():
     case = make_case(brand=None)  # R-301 命中
-    assert text_evasion_hit(case) is False and text_brand_word_hit(case) is False
+    hits = rule_hit_ids(case)
+    assert RULE_EVASION_WORD not in hits and RULE_BRAND_WORD not in hits
 
 
 # ---- 三态 ----
@@ -186,9 +186,8 @@ def test_all_required_covered_negative_is_complete_and_has_no_missing():
     assert set(cov.required) == {
         DIM_LISTING_REGISTRY, DIM_MERCHANT_PROFILE, DIM_TEXT_COMPLIANCE, DIM_IMAGE_APPEARANCE,
     }
-    assert cov.complete and cov.negative_only
     assert cov.missing == () and cov.unmeasurable == ()
-    assert cov.negative_dims >= {DIM_LISTING_REGISTRY, DIM_IMAGE_APPEARANCE}
+    assert not cov.positive
 
 
 def test_merchant_all_zero_is_measured_negative_not_missing():
@@ -240,10 +239,9 @@ def test_required_dimensions_follow_observable_facts():
     assert DIM_LISTING_REGISTRY in required_dimensions(no_image)  # 恒必需
 
 
-def test_policy_citation_is_reject_only_not_pass_required():
-    case = make_case()
-    assert DIM_POLICY_CITATION not in required_dimensions(case)
-    assert DIM_POLICY_CITATION in required_dimensions_for_reject(case)
+def test_policy_citation_is_not_pass_required():
+    """``policy_citation`` 不进 PASS 必需集（它是「可引用依据可得」，与证明无风险无关）。"""
+    assert DIM_POLICY_CITATION not in required_dimensions(make_case())
 
 
 def test_text_compliance_is_always_covered():
@@ -255,20 +253,20 @@ def test_text_compliance_is_always_covered():
 def test_missing_case_requires_nothing():
     assert required_dimensions(None) == ()
     cov = coverage_report(None, [], None)
-    assert cov.required == () and cov.complete
+    assert cov.required == () and cov.missing == () and cov.unmeasurable == ()
 
 
 # ---- 文本规则维度 ----
 
 
 def test_text_rule_brand_word_and_evasion_word_are_positive():
-    assert text_compliance_positive(make_case()) is False
+    assert rule_hit_ids(make_case()) == frozenset({"R-301"})
     brand = make_case()
     brand.product.title = "NIKE 联名风格宽松卫衣"
-    assert text_compliance_positive(brand) is True
+    assert rule_hit_ids(brand) & {RULE_BRAND_WORD, RULE_EVASION_WORD}
     evasion = make_case()
     evasion.product.title = "高仿 1:1 复古跑鞋"
-    assert text_compliance_positive(evasion) is True
+    assert rule_hit_ids(evasion) & {RULE_BRAND_WORD, RULE_EVASION_WORD}
 
 
 def test_brand_missing_alone_is_not_text_positive():
@@ -277,7 +275,7 @@ def test_brand_missing_alone_is_not_text_positive():
     否则"品牌空缺但在库可验证"的正常案会被一并挡死。
     """
     case = make_case(brand=None)
-    assert text_compliance_positive(case) is False
+    assert not (rule_hit_ids(case) & {RULE_BRAND_WORD, RULE_EVASION_WORD})
 
 
 # ---- 环境能力 ----
@@ -327,16 +325,6 @@ async def test_graph_writes_tool_derived_capabilities_into_state():
     assert (await _final_caps(True))[DIM_IMAGE_APPEARANCE] is True
 
 
-# ---- 强度（dc 的事实侧输入） ----
-
-
-def test_dimension_strength_prefers_positive_then_negative_measurement():
-    evs = covered_evidence(similarity=0.93)
-    strength = dimension_strength(evs)
-    assert strength[DIM_IMAGE_APPEARANCE] == pytest.approx(0.93)
-    assert strength[DIM_LISTING_REGISTRY] == pytest.approx(0.6)
-
-
 # ---- 来源守卫：required set 不得读真值 ----
 
 
@@ -361,9 +349,8 @@ def test_required_dimension_sources_do_not_reference_ground_truth():
 
 
 def test_all_declared_dimensions_have_a_requiredness_source():
-    """新增维度必须能被 required 派生识别，防"声明了但没人用"的悬空词表。"""
+    """新增维度必须能被 required 派生或能力表识别，防"声明了但没人用"的悬空词表。"""
     case = make_case()
-    used = set(required_dimensions(case)) | {DIM_POLICY_CITATION}  # PASS 必需 ∪ REJECT 候选
-    assert used == set(ALL_DIMENSIONS)
-    assert DIM_POLICY_CITATION not in required_dimensions(case)
-    assert DIM_POLICY_CITATION in required_dimensions_for_reject(case)
+    required = set(required_dimensions(case))
+    assert required | {DIM_POLICY_CITATION} == set(ALL_DIMENSIONS)
+    assert DIM_POLICY_CITATION not in required

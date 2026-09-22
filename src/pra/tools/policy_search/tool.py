@@ -11,12 +11,12 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from ...domain.measurement import DEFAULT_EVIDENCE_WEIGHT
 from ...domain.models import Evidence, RiskType
 from ..base import ToolArgs, ToolContext, ToolResult
 
-# ---- 受控证据类型 & 默认证据强度 ----
+# ---- 受控证据类型 ----
 POLICY_REF_TYPE = "POLICY_REF"
-POLICY_REF_WEIGHT = 0.9  # 默认权重
 POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限（全文在 Result）
 
 
@@ -155,7 +155,7 @@ class PolicySearchTool:
                     type=POLICY_REF_TYPE,
                     source=self.name,
                     value=f"{h.policy_id} v{h.version} 条款：{text}",
-                    weight=POLICY_REF_WEIGHT,
+                    weight=DEFAULT_EVIDENCE_WEIGHT,
                     ref_id=h.clause_id,
                     extra={"policy_id": h.policy_id, "policy_version": h.version},
                 )

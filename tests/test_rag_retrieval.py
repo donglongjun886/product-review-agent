@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 from helpers import bge_model_cached
 
+from pra.domain.measurement import DEFAULT_EVIDENCE_WEIGHT
 from pra.tools.base import ToolContext
 from pra.tools.case_search.tool import (
     CaseSearchArgs,
@@ -575,9 +576,9 @@ async def test_policy_search_tool_produces_policy_ref_evidence(policy_hybrid: An
     """Policy 两层：``ChromaPolicyIndex.search`` → ``PolicyClauseHit``；工具 → ``POLICY_REF``。
 
     断言：注入真索引的 ``PolicySearchTool.call`` 拿到 ≥1 个 ``PolicyClauseHit``；``to_evidence``
-    每条证据 type=``POLICY_REF``、source=``PolicySearchTool``、weight==0.9、ref_id==命中条款的
-    clause_id。意义：「RAG 怎么检索」与「Evidence 怎么产生」是两个层次，本用例同时钉住命中类型与
-    证据映射（可追溯引用 = ref_id 必填、政策依据 = 强权重 0.9）。
+    每条证据 type=``POLICY_REF``、source=``PolicySearchTool``、weight==DEFAULT_EVIDENCE_WEIGHT、
+    ref_id==命中条款的 clause_id。意义：「RAG 怎么检索」与「Evidence 怎么产生」是两个层次，本用例
+    同时钉住命中类型与证据映射（可追溯引用 = ref_id 必填、政策依据 = 统一默认权重）。
     """
     tool = PolicySearchTool(index=policy_hybrid)
     result = await tool.call(
@@ -591,7 +592,7 @@ async def test_policy_search_tool_produces_policy_ref_evidence(policy_hybrid: An
     for ev, hit in zip(evidences, result.hits):
         assert ev.type == "POLICY_REF"
         assert ev.source == "PolicySearchTool"
-        assert ev.weight == 0.9
+        assert ev.weight == DEFAULT_EVIDENCE_WEIGHT
         assert ev.ref_id == hit.clause_id
 
 
