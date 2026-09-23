@@ -16,7 +16,6 @@ from pra.observability.tracing import (
     flush_tracer,
     get_tracer,
     make_tracer,
-    set_tracer,
     should_sample,
 )
 
@@ -28,6 +27,5 @@ __all__ = [
     "flush_tracer",
     "get_tracer",
     "make_tracer",
-    "set_tracer",
     "should_sample",
 ]

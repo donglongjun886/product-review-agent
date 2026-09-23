@@ -26,7 +26,7 @@ from typing import Any
 
 __all__ = ["SYSTEM_PROMPTS", "build_system_prompt", "build_user_prompt"]
 
-# 常量（与 domain/models.py / scripted_llm 对齐，供 decide 分区渲染）
+# 常量（与 domain/models.py 对齐，供 decide 分区渲染）
 
 _POLICY_REF = "POLICY_REF"  # 政策条款证据类型（REJECT 的可引用条款来源）
 _CASE_PRECEDENT = "CASE_PRECEDENT"  # 人工先例证据类型（REJECT 的可引用先例来源）
@@ -57,14 +57,6 @@ def _num(value: Any) -> str:
     if f != f:  # NaN
         return "NaN"
     return f"{f:.3f}".rstrip("0").rstrip(".")
-
-
-def _citation(ev: dict) -> str:
-    """证据引用串：``f"{type} {value}"``。"""
-    ev_type = ev.get("type")
-    ev_type = ev_type if isinstance(ev_type, str) and ev_type else "?"
-    value = _text(ev.get("value"))
-    return f"{ev_type} {value}"
 
 
 def _join(items: Any, empty: str = "（无）") -> str:

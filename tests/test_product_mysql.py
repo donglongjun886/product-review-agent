@@ -371,7 +371,7 @@ def test_single_source_assembly_feeds_the_production_world(monkeypatch):
     """装配唯一处守护：生产图只在组合根 ``pra.wiring.get_production_graph`` 组装一次。
 
     单点 patch 接缝（``pra.wiring.build_agent_graph``）+ 单份单例重置（``pra.wiring._graph``）即可
-    覆盖全部生产入口；两个入口模块**不得**再自带装配/单例 —— 重复装配一旦复现，这里立刻变红。
+    覆盖全部生产入口；落库入口**不得**再自带装配/单例 —— 重复装配一旦复现，这里立刻变红。
     """
     captured: dict = {}
 
@@ -384,13 +384,10 @@ def test_single_source_assembly_feeds_the_production_world(monkeypatch):
     monkeypatch.setattr(wiring, "build_agent_graph", fake_build_agent_graph)
     monkeypatch.setattr(wiring, "_graph", None)
 
-    from pra.api import service as api_service
-
     wiring.get_production_graph()
     assert captured.pop("tools") is sentinel, "组合根未把生产工具世界注入图装配"
 
-    # 回退反证：任一入口重新自建装配/单例，以下断言即变红。
-    assert not hasattr(api_service, "get_graph"), "HTTP 执行器又自建了装配入口"
+    # 回退反证：落库入口重新自建装配/单例，以下断言即变红。
     assert not hasattr(ps, "_get_graph"), "落库编排又自建了装配入口"
     assert not hasattr(ps, "_compiled_graph"), "落库编排又自带了图单例"
 

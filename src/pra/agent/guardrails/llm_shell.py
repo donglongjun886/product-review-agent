@@ -31,7 +31,7 @@ from pra.observability.tracing import Observation, get_tracer
 class LLMBackendError(RuntimeError):
     """LLM 后端调用失败（超时/网络/未知 node 等）。
 
-    供 ``pra.agent.scripted_llm`` import —— scripted 桩对未知 node 抛本异常。
+    供测试侧 ``tests/stub_llm.ScriptedLLMBackend`` import —— 该桩对未知 node 抛本异常。
     """
 
 

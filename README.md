@@ -32,7 +32,6 @@
 ```bash
 uv sync                                     # 装依赖
 uv run pytest -q                            # 跑测试：不需要网络，也不需要密钥
-uv run python scripts/demo_walkthrough.py   # 离线跑通一次完整调查
 ```
 
 要真实检索或 Langfuse 观测时，再装可选依赖（两个 `--extra` 要同时写）：
@@ -44,21 +43,15 @@ uv sync --extra rag --extra observability
 ## 跑一次真实的调查
 
 ```bash
-cp .env.example .env      # 填 DATABASE_URL（MySQL）和 DEEPSEEK_API_KEY（模型网关）
-uv run python scripts/demo_api.py
-```
-
-它会打印一份裁决摘要：结论、风险等级与类型、置信度、证据条数，以及这次用掉的模型调用数和 token。
-
-也可以起 HTTP 服务：
-
-```bash
+cp .env.example .env                       # 填 DATABASE_URL（MySQL）和 DEEPSEEK_API_KEY（模型网关）
 uv run uvicorn pra.api.app:app --reload    # http://127.0.0.1:8000
 curl http://127.0.0.1:8000/api/v1/health   # {"status":"ok"}
 ```
 
-`POST /api/v1/reviews` 的请求体是一条商品案件：商品快照 + 商家 + 事件类型 + 机审结果。
-字段定义见 [`src/pra/domain/models.py`](src/pra/domain/models.py)。
+`POST /api/v1/reviews` 受理一条商品案件并同步跑完整个调查，返回
+`{"run_id": ..., "review_decision": {...}}`：结论、风险等级与类型、置信度与证据链。
+请求体 = 商品快照 + 商家 + 事件类型 + 机审结果，字段定义见
+[`src/pra/domain/models.py`](src/pra/domain/models.py)。
 
 ## 评测
 

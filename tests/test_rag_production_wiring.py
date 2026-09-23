@@ -233,7 +233,7 @@ def _delete_prefix(prefix: str) -> None:
 
 
 def _demo_case():
-    """走查案件（与 ``scripts/demo_api.build_demo_case`` 同口径）。
+    """走查案件（复古运动鞋 P_88231 / 商家 M_5512，品牌空缺）。
 
     scripted plan 先从商品在库事实 / 商家行为取证，再落到 CaseSearch / PolicySearch。
     """
@@ -248,8 +248,9 @@ def _demo_case():
 
 
 async def _run_graph(tools) -> dict:
+    from stub_llm import ScriptedLLMBackend
+
     from pra.agent.graph import build_agent_graph
-    from pra.agent.scripted_llm import ScriptedLLMBackend
     from pra.agent.state import build_initial_state
 
     graph = build_agent_graph(

@@ -224,8 +224,9 @@ async def test_graph_writes_tool_derived_capabilities_into_state():
     ⇒ 生产环境的"测不出"被误判成"可测却没测"（NOT_MEASURED，可补救），而不是
     UNMEASURABLE（环境缺失，重跑无用）。
     """
+    from stub_llm import ScriptedLLMBackend
+
     from pra.agent.graph import build_agent_graph
-    from pra.agent.scripted_llm import ScriptedLLMBackend
     from pra.agent.state import build_initial_state
     from pra.tools import build_tools
 

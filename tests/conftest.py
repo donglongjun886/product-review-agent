@@ -2,7 +2,7 @@
 
 asyncio 由 pyproject 的 asyncio_mode="auto" 驱动。
 ``_disable_langfuse_tracing`` 保证测试永不联网、观测为 no-op（见下）。
-``_production_tools_use_inmemory_world`` / ``_production_entry_uses_scripted_llm`` 把生产入口
+``_production_tools_use_inmemory_world`` / ``_production_entry_uses_stub_llm`` 把生产入口
 的工具与 LLM 装配钉回确定性桩世界（见下）—— LLM 后端**不再有进程级全局**，注入一律经
 ``build_agent_graph(llm=...)``，故测试之间无需还原任何全局状态。
 """
@@ -18,8 +18,8 @@ def _disable_langfuse_tracing():
 
     ``get_tracer()`` 是进程级单例且配置来源含仓库根 ``.env``；实现是**预置单例为
     NullTracer**，不设环境变量（设 ``PRA_LANGFUSE_ENABLED`` 会污染 ``Settings``
-    用例，真实环境变量优先级高于 .env）。需要观测行为的用例自行用
-    ``pra.observability.tracing.set_tracer(...)`` 注入假实现。
+    用例，真实环境变量优先级高于 .env）。需要观测行为的用例自行改
+    ``pra.observability.tracing._tracer`` 注入假实现。
     """
     from pra.observability import tracing as _tracing
 
@@ -47,7 +47,7 @@ def _production_tools_use_inmemory_world(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _production_entry_uses_scripted_llm(monkeypatch):
+def _production_entry_uses_stub_llm(monkeypatch):
     """单测/CI 不调真实模型：把生产入口的 LLM 装配钉回 ``ScriptedLLMBackend``。
 
     生产入口唯一装配处 ``pra.wiring.get_production_graph`` 按设计调
@@ -55,7 +55,7 @@ def _production_entry_uses_scripted_llm(monkeypatch):
     入口的用例会真的联网调模型：结果不确定、按量计费，CI 上没有凭据还会直接报错。故把该装配
     函数替换为构造确定性桩的替身（签名吃 ``tools=`` 关键字）。
     """
-    from pra.agent.scripted_llm import ScriptedLLMBackend
+    from stub_llm import ScriptedLLMBackend
 
     monkeypatch.setattr(
         "pra.wiring.build_llm_backend",

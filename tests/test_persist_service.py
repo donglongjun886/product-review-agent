@@ -2,7 +2,7 @@
 
 ``_enum_value`` / ``_token_count`` / ``_json_cap`` / ``_hypothesis_summary`` /
 ``_node_output_summary``（各节点 trace output_json 形状，即落库 review_trace 列的
-确定性契约）。真库冒烟路径由 scripts/demo_api.py 覆盖。
+确定性契约）。真库冒烟路径由 ``tests/test_api_routes.py`` 与 ``test_product_mysql.py`` 覆盖。
 """
 
 from __future__ import annotations

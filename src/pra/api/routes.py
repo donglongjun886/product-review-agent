@@ -11,8 +11,7 @@ review_trace / review_evidence / review_result；直判路径无 review_trace �
 堆栈** —— 防 SQLAlchemy 等内部异常把 SQL/表列名/绑定值外泄；完整异常与堆栈只进
 ``logger.exception``。
 
-``GET /api/v1/health`` 存活探针返回 ``{"status": "ok"}``；``service.run_review``（纯执行、
-不落库）保留供无 DB 场景与单测复用。
+``GET /api/v1/health`` 存活探针返回 ``{"status": "ok"}``。
 """
 
 from __future__ import annotations

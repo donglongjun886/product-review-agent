@@ -30,7 +30,6 @@ __all__ = [
     "get_tracer",
     "make_tracer",
     "session_id",
-    "set_tracer",
     "should_sample",
     "trace_id_from_run_id",
 ]
@@ -252,12 +251,6 @@ def flush_tracer() -> None:
 # ---- 进程级单例（默认从环境变量装配）----
 
 _tracer: Tracer | None = None
-
-
-def set_tracer(tracer: Tracer | None) -> None:
-    """注入/重置进程级 tracer（测试与显式装配用；``None`` → 下次 ``get_tracer`` 重建）。"""
-    global _tracer
-    _tracer = tracer
 
 
 def get_tracer() -> Tracer:

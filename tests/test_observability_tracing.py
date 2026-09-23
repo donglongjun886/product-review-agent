@@ -6,7 +6,7 @@
 3. `NullTracer` 四类埋点全可用、无副作用；
 4. 采样确定性（同 key 同结果）与边界（≤0 关 / ≥1 开）；
 5. `LangfuseTracer` 的 trace_context、as_type、update/record_error、采样抑制、异常吞掉；
-6. 进程级单例 `get_tracer` / `set_tracer`。
+6. 进程级单例 `get_tracer`（懒装配 + 缓存，直改模块单例即重置）。
 """
 
 from __future__ import annotations
@@ -251,21 +251,26 @@ def test_build_langfuse_tracer_without_sdk_returns_null_tracer() -> None:
     assert "SDK" in tracer.reason or "not installed" in tracer.reason
 
 
-def test_get_tracer_caches_and_set_tracer_resets(monkeypatch) -> None:
-    """`get_tracer` 懒装配并缓存；`set_tracer` 可注入/重置（测试与显式装配用）。"""
+def test_get_tracer_caches_and_direct_reset_rebuilds(monkeypatch) -> None:
+    """`get_tracer` 懒装配并缓存；直改模块单例即生效，置空后下次重建。"""
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
-    T.set_tracer(None)
+    T._tracer = None
 
     first = T.get_tracer()
     assert first is T.get_tracer()
     assert isinstance(first, T.NullTracer)
 
     fake = T.NullTracer("injected")
-    T.set_tracer(fake)
+    T._tracer = fake
     assert T.get_tracer() is fake
 
-    T.set_tracer(None)  # 复原，避免影响其他测试
+    T._tracer = None  # 置空 → 下次 `get_tracer` 重建
+    rebuilt = T.get_tracer()
+    assert rebuilt is not fake
+    assert isinstance(rebuilt, T.NullTracer)
+
+    T._tracer = None  # 复原，避免影响其他测试
 
 
 class _BadExitCM:

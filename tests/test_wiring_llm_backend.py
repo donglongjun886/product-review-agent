@@ -11,8 +11,8 @@
    立刻变红）。
 
 **为什么不用 ``wiring.build_llm_backend`` 而是导入期捕获的真函数**：``tests/conftest.py`` 的
-autouse fixture ``_production_entry_uses_scripted_llm`` 会把 ``pra.wiring.build_llm_backend`` 钉成
-返回 ``ScriptedLLMBackend()`` 的桩（生产图用例需要无凭据可跑）。fixture 只在用例执行前后生效，
+autouse fixture ``_production_entry_uses_stub_llm`` 会把 ``pra.wiring.build_llm_backend`` 钉成
+返回 ``stub_llm.ScriptedLLMBackend()`` 的桩（生产图用例需要无凭据可跑）。fixture 只在用例执行前后生效，
 **模块导入（collection 期）早于它**，故此处捕获到的是真实现 ``REAL_BUILD_LLM_BACKEND``；用例里
 再 monkeypatch 回真身（第 4 条反过来钉成自己的假函数）。
 
@@ -26,13 +26,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from helpers import make_case
 
 from pra import wiring
-from pra.agent.guardrails.llm_shell import LLMResponse
 from pra.agent.litellm_backend import LiteLLMBackend
-from pra.agent.scripted_llm import ScriptedLLMBackend
-from pra.api.service import run_review
 from pra.infra import db as infra_db
 from pra.infra.db import Settings as RealSettings
 from pra.tools import build_tools
@@ -160,35 +156,3 @@ def test_production_graph_injects_backend_and_same_tools(monkeypatch):
     factory_tools = factory_calls.get("tools")
     assert isinstance(factory_tools, list) and factory_tools, "LLM 工厂未收到非空工具列表"
     assert graph_kwargs["tools"] is factory_tools
-
-
-async def test_production_graph_runs_on_injected_backend(monkeypatch):
-    """行为守护：生产图**运行时**真的经注入后端调 LLM —— 删 ``llm=`` 或节点读不到注入后端即变红。
-
-    与上一条的区别：上一条只锁 ``build_agent_graph`` 收到的 kwargs。本用例真的跑一遍生产图
-    （InMemory 工具世界 + 记录调用的桩后端），断言注入的后端被调用过。
-    """
-    nodes: list[str] = []
-
-    class _RecordingStub(ScriptedLLMBackend):
-        async def complete(
-            self,
-            *,
-            node: str,
-            state: dict,
-            json_schema: dict,
-            feedback: list[str] | None = None,
-        ) -> LLMResponse:
-            nodes.append(node)
-            return await super().complete(
-                node=node, state=state, json_schema=json_schema, feedback=feedback
-            )
-
-    recorder = _RecordingStub()
-    monkeypatch.setattr(wiring, "build_llm_backend", lambda *, tools=None: recorder)
-    monkeypatch.setattr(wiring, "_graph", None)
-
-    result = await run_review(make_case(case_id="CASE_S1_BEHAVIOR"))
-
-    assert result.review_decision is not None
-    assert nodes, "生产图运行时没有调用注入的后端 —— 装配丢了 llm=，或节点读的不是注入的后端"

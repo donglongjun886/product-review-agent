@@ -1,4 +1,4 @@
-"""LLM generation / tool span 埋点的逐次记录测试：假 tracer 经 ``set_tracer`` 注入。
+"""LLM generation / tool span 埋点的逐次记录测试：假 tracer 经 ``tracing._tracer`` 直接注入。
 
 断言 7 组行为：成功调用 → 1 个 generation（model/input/output/latency_ms）；
 schema 校验失败重试 → 2 个 generation（**最关键**：埋点在内层 ``backend.complete``
@@ -7,7 +7,7 @@ schema 校验失败重试 → 2 个 generation（**最关键**：埋点在内层
 1 个 tool span，latency 复用审计 record 的值；无 tracer 注入 → ``NullTracer`` 行为不变；
 usage 透出（每次 generation 记**本次** ``usage_details``、litellm 提取三键、scripted 桩不伪造）。
 
-隔离：用到 tracer 的测试经 ``_fake_tracer`` 注入并在结束时 ``set_tracer(None)``
+隔离：用到 tracer 的测试经 ``_fake_tracer`` 注入并在结束时把 ``_tracer`` 置回 ``None``
 复原；LLM 后端一律经 ``call_structured_llm(llm=...)`` 显式注入（无进程级全局）。全程不联网。
 """
 
@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 from helpers import AlwaysRaiseBackend, SequenceBackend, ev, plan_conclude_json
+from stub_llm import ScriptedLLMBackend
 
 from pra.agent.guardrails.llm_shell import (
     LLMBackendError,
@@ -28,7 +29,6 @@ from pra.agent.guardrails.llm_shell import (
     call_structured_llm,
 )
 from pra.agent.guardrails.schemas import PlanOutput
-from pra.agent.scripted_llm import ScriptedLLMBackend
 from pra.agent.tools_node import make_tools_node
 from pra.domain.models import Budget
 from pra.observability import tracing as T
@@ -128,11 +128,11 @@ class _FakeTracer:
 def fake_tracer() -> Any:
     """注入假 tracer；测试结束复原（避免污染其他测试的默认 NullTracer 路径）。"""
     tracer = _FakeTracer()
-    T.set_tracer(tracer)
+    T._tracer = tracer
     try:
         yield tracer
     finally:
-        T.set_tracer(None)
+        T._tracer = None
 
 
 # 假 Tool（协议：name/description/args_model/call；tools_node 另需 to_evidence）
@@ -386,7 +386,7 @@ async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) 
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
     monkeypatch.delenv("PRA_LANGFUSE_ENABLED", raising=False)
-    T.set_tracer(None)  # 默认路径
+    T._tracer = None  # 默认路径
     try:
         assert isinstance(T.get_tracer(), T.NullTracer)
 
@@ -407,7 +407,7 @@ async def test_default_path_uses_null_tracer_and_behaves_unchanged(monkeypatch) 
         # 默认路径不拉起 SDK
         assert "langfuse" not in sys.modules
     finally:
-        T.set_tracer(None)
+        T._tracer = None
 
 
 class _UsageBackend:

@@ -46,12 +46,12 @@ def _load_smoke_module():
 @pytest.fixture()
 def smoke():
     """每个用例独立加载 + 前后重置进程级 tracer（避免被其他用例污染）。"""
-    tracing.set_tracer(None)
+    tracing._tracer = None
     mod = _load_smoke_module()
     try:
         yield mod
     finally:
-        tracing.set_tracer(None)
+        tracing._tracer = None
 
 
 @pytest.fixture()
@@ -483,7 +483,7 @@ def fake_enabled(monkeypatch: pytest.MonkeyPatch):
     tracer = _FakeTracer()
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
-    tracing.set_tracer(tracer)
+    tracing._tracer = tracer
     return tracer
 
 

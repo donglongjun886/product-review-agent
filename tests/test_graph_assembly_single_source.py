@@ -1,16 +1,16 @@
 """装配唯一处契约：生产图只在组合根 ``pra.wiring`` 组装一次。
 
 生产图必须只在组合根 ``pra.wiring.get_production_graph`` 组装一次：入口模块
-（``pra.api.service`` / ``pra.infra.persist_service``）不得各写一份装配、各持一个模块级单例。
+（``pra.infra.persist_service``）不得自写一份装配、自持一个模块级单例。
 本模块把「装配只有一处」变成**可执行契约**：
 
 - (a) 单例同一性：进程内 ``get_production_graph()`` 恒返回同一实例。
-- (b) 命名空间：两个入口模块不再自带 ``get_graph`` / ``_get_graph`` / ``_graph`` /
+- (b) 命名空间：入口模块不再自带 ``get_graph`` / ``_get_graph`` / ``_graph`` /
   ``_compiled_graph`` / ``build_agent_graph``。
 - (c) 结构：AST 扫 ``src/pra/**/*.py`` 的 ``build_agent_graph(...)`` 调用点，生产装配调用点
   集合必须恰为 ``{src/pra/wiring.py}``（评测跑分脚本在 ``scripts/`` 下，不属于 ``src/pra``）。
 
-任一回退（删 ``pra/wiring.py`` 或某入口重新自建单例/装配）→ 对应断言立刻变红。
+任一回退（删 ``pra/wiring.py`` 或入口重新自建单例/装配）→ 对应断言立刻变红。
 """
 
 from __future__ import annotations
@@ -21,13 +21,12 @@ from pathlib import Path
 import pytest
 
 from pra import wiring
-from pra.api import service as api_service
 from pra.infra import persist_service as ps
 
 # 生产装配调用点 —— 有且仅有组合根一处。
 _PRODUCTION_ASSEMBLY_SITES = {"src/pra/wiring.py"}
 
-# 两个入口模块不得再自带的装配 / 单例件（出现任一即「重复装配」回退）。
+# 入口模块不得再自带的装配 / 单例件（出现任一即「重复装配」回退）。
 _FORBIDDEN_ENTRY_ATTRS = (
     "get_graph",
     "_get_graph",
@@ -42,9 +41,7 @@ def test_get_production_graph_is_a_process_singleton():
     assert wiring.get_production_graph() is wiring.get_production_graph()
 
 
-@pytest.mark.parametrize(
-    "module", [api_service, ps], ids=["api.service", "infra.persist_service"]
-)
+@pytest.mark.parametrize("module", [ps], ids=["infra.persist_service"])
 def test_entry_modules_do_not_self_assemble(module):
     """(b) 命名空间：入口模块不再自带装配入口 / 图单例 / 顶层 ``build_agent_graph``。"""
     leftover = [name for name in _FORBIDDEN_ENTRY_ATTRS if hasattr(module, name)]
