@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import types
+from typing import Any
 
 import pytest
 from helpers import plan_conclude_json  # 既有测试替身 JSON（tests/helpers.py）
@@ -158,6 +159,29 @@ def _patch_acompletion(monkeypatch, contents: list, tokens: int = 7, finish_reas
     return fake
 
 
+def _patch_acompletion_with_usage(monkeypatch, usage: Any):
+    """按**任意** ``usage`` 对象 patch acompletion（`_patch_acompletion` 只造 total_tokens 口径）。"""
+    import litellm
+
+    calls: list = []
+
+    async def fake(**kwargs):
+        if calls:
+            pytest.fail("litellm.acompletion 被多调用了一次 —— 有未被 mock 的真实调用泄漏？")
+        calls.append(kwargs)
+        return types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='{"a": 1}'), finish_reason="stop"
+                )
+            ],
+            usage=usage,
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    return fake
+
+
 # ---------------------------------------------------------------------------
 # A. LiteLLMBackend 直接测# ---------------------------------------------------------------------------
 
@@ -281,6 +305,34 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
     user = msgs[1]["content"]
     assert "P_MOCK_99" in user  # state 里的商品事实被渲染出来（值而非裸 JSON）
     assert "decision" in user and "HUMAN_REVIEW" in user  # schema 要点（字段/枚举值）入 user
+
+
+async def test_complete_usage_details_extraction_matrix(monkeypatch):
+    """usage 拆分口径：三键齐全 / 只有 total / 缺 total / 无 usage 属性。
+
+    ``LLMResponse.usage`` 只放 provider **真给**的键 —— 缺 ``total`` 时不得填 0 冒充
+    （``tokens`` 才落 0）；无 usage 属性 → ``usage=None``。
+    """
+    cases = [
+        # 三键齐全
+        (
+            types.SimpleNamespace(prompt_tokens=10, completion_tokens=4, total_tokens=14),
+            {"input": 10, "output": 4, "total": 14},
+            14,
+        ),
+        # 只有 total（旧口径：usage 对象缺 prompt/completion）
+        (types.SimpleNamespace(total_tokens=23), {"total": 23}, 23),
+        # 缺 total：不填 0 冒充 → usage 只有 input/output、tokens=0
+        (types.SimpleNamespace(prompt_tokens=2, completion_tokens=3), {"input": 2, "output": 3}, 0),
+        # 无 usage 属性 → usage=None、tokens=0
+        (None, None, 0),
+    ]
+    backend = LiteLLMBackend(api_key="sk-test")
+    for usage_obj, expected_usage, expected_tokens in cases:
+        _patch_acompletion_with_usage(monkeypatch, usage_obj)
+        resp = await backend.complete(node="hypothesize", state={}, json_schema={})
+        assert resp.usage == expected_usage, (usage_obj, resp.usage)
+        assert resp.tokens == expected_tokens
 
 
 async def test_thinking_config_kwargs_only_when_set(monkeypatch):

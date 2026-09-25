@@ -1,376 +1,176 @@
-"""`pra.observability` 适配层测试：Null Object、确定性采样、LangfuseTracer 接线。
+"""可观测性适配层的**不变式**测试 —— 只留三条。
 
-不联网、不依赖 langfuse SDK：SDK 路径一律用假 client 验证。覆盖：
-1. 无凭据 → `NullTracer`，且不 import `langfuse`（惰性 import）；
-2. `PRA_LANGFUSE_ENABLED=0` → 有凭据也 no-op；
-3. `NullTracer` 四类埋点全可用、无副作用；
-4. 采样确定性（同 key 同结果）与边界（≤0 关 / ≥1 开）；
-5. `LangfuseTracer` 的 trace_context、as_type、update/record_error、采样抑制、异常吞掉；
-6. 进程级单例 `get_tracer`（懒装配 + 缓存，直改模块单例即重置）。
+观测是旁路，它的行为正确性不值得逐调用点铺开测试；这里只钉住两条「出错会伤到业务或度量」
+的契约（其余用例已于审计后删除）：
+
+1. 无凭据 → ``NullTracer``，且**不 import** ``langfuse``（optional extra 未装 / CI 不装
+   extra 时全量仍可跑）；
+2. 观测上下文**绝不吞业务异常**（历史上踩过 ``generator didn't stop after throw()`` 把原始
+   异常替换掉的缺陷）—— NullTracer 路径走不到这里，故必须单独守护；
+3. 评测 ``trace_id`` 含 LLM 后端名 —— 否则同一 experiment 的不同后端臂落进同一条 trace，
+   按 trace 汇总 token 会互相混入（度量失真）。
+
+不联网、不依赖 langfuse SDK：SDK 路径一律用假 client 验证。
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
+from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from pra.evaluation.dataset.loader import load_dataset
 from pra.observability import tracing as T
-from pra.observability.langfuse_backend import LangfuseTracer, build_langfuse_tracer
+from pra.observability.langfuse_backend import LangfuseTracer
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_DATA_PATH_V2 = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
+_EVAL_SCRIPT = REPO_ROOT / "scripts" / "run_evaluation.py"
+
+#: 子进程脚本：切断 `.env` 配置来源（开发机真配了 Langfuse 也不影响）后跑默认装配，
+#: 回报「是否 NullTracer」与「进程里有没有 langfuse」。
+_LAZY_IMPORT_CHILD = """
+import json, sys
+from pra.observability import tracing as T
+
+T._env_or_settings = lambda *a, **k: None
+tracer = T.make_tracer()
+print("PRA_LAZY_IMPORT_JSON:" + json.dumps({
+    "null": isinstance(tracer, T.NullTracer),
+    "enabled": tracer.enabled,
+    "reason": tracer.reason,
+    "sdk_imported": "langfuse" in sys.modules,
+}))
+"""
 
 
-def test_no_credentials_returns_null_tracer_without_importing_sdk(monkeypatch) -> None:
-    """无凭据 → NullTracer，且不 import `langfuse`。
+def test_no_credentials_returns_null_tracer_without_importing_sdk() -> None:
+    """无凭据 → NullTracer，且不 import `langfuse`（optional extra 未装也能跑全量）。
 
-    用 monkeypatch 切断 `_env_or_settings`：配置来源含仓库根 `.env`，否则开发机真配了
-    Langfuse 时本用例会看到「已配置」而非「无凭据」，与用例意图不符。
+    用**子进程**：同进程里 `sys.modules` 可能已被别的用例污染，进程内查会变成永真/永假的
+    空断言（同 `test_rag_default_path_no_extra.py` 的理由）；`del sys.modules[...]` 更不行 ——
+    顶层 import 后删条目并不会卸载模块，反而把「惰性 import」这条断言变成永真。
     """
-    monkeypatch.setattr(T, "_env_or_settings", lambda *a, **k: None)
-    monkeypatch.delitem(sys.modules, "langfuse", raising=False)
+    proc = subprocess.run(
+        [sys.executable, "-c", _LAZY_IMPORT_CHILD], capture_output=True, text=True, check=True
+    )
+    line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("PRA_LAZY_IMPORT_JSON:"))
+    payload = json.loads(line.split(":", 1)[1])
 
-    tracer = T.make_tracer()
-
-    assert isinstance(tracer, T.NullTracer)
-    assert tracer.enabled is False
-    assert "missing" in tracer.reason
-    assert "langfuse" not in sys.modules  # 惰性 import：未启用不拉 SDK
-
-
-def test_enabled_flag_off_disables_even_with_credentials(monkeypatch) -> None:
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-x")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-x")
-    monkeypatch.setenv("PRA_LANGFUSE_ENABLED", "0")
-
-    tracer = T.make_tracer()
-
-    assert isinstance(tracer, T.NullTracer)
-    assert "ENABLED" in tracer.reason
-
-
-@pytest.mark.parametrize("sample,expected", [(0.0, False), (-1.0, False), (1.0, True), (2.0, True)])
-def test_should_sample_boundaries(sample: float, expected: bool) -> None:
-    assert T.should_sample("trace-1", sample) is expected
-
-
-def test_should_sample_is_deterministic() -> None:
-    """同 key 同采样率恒同结果（评测可重放的前提）。"""
-    keys = [f"trace-{i}" for i in range(200)]
-    first = [T.should_sample(k, 0.3) for k in keys]
-    second = [T.should_sample(k, 0.3) for k in keys]
-
-    assert first == second
-    # 0.3 采样率下比例应落在合理区间（避免"恒真/恒假"退化）
-    ratio = sum(first) / len(first)
-    assert 0.15 < ratio < 0.5, ratio
+    assert payload["null"] is True
+    assert payload["enabled"] is False
+    assert "missing" in payload["reason"]
+    assert payload["sdk_imported"] is False
 
 
 class _FakeObs:
+    """假观测节点：只记账。"""
+
     def __init__(self) -> None:
         self.updates: list[dict[str, Any]] = []
 
     def update(self, **kwargs: Any) -> None:
         self.updates.append(kwargs)
 
+    def record_error(self, exc: BaseException) -> None:
+        return None
+
 
 class _FakeCM:
-    def __init__(self, obs: _FakeObs) -> None:
-        self.obs = obs
+    def __init__(self, obs: _FakeObs, *, raise_on_exit: bool = False) -> None:
+        self._obs = obs
+        self._raise_on_exit = raise_on_exit
 
     def __enter__(self) -> _FakeObs:
-        return self.obs
+        return self._obs
 
-    def __exit__(self, *exc: Any) -> bool:
+    def __exit__(self, *exc: object) -> bool:
+        if self._raise_on_exit:
+            raise RuntimeError("sdk exit failed")
         return False
 
 
-class _FakePropagate:
-    def __init__(self, sink: list[dict[str, Any]]) -> None:
-        self._sink = sink
-
-    def __call__(self, **kwargs: Any) -> Any:
-        self._sink.append(kwargs)
-
-        class _CM:
-            def __enter__(self) -> None:
-                return None
-
-            def __exit__(self, *exc: Any) -> bool:
-                return False
-
-        return _CM()
-
-
 class _FakeClient:
-    def __init__(self, *, raise_on_start: bool = False) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.observations: list[_FakeObs] = []
-        self.propagated: list[dict[str, Any]] = []
-        self.flushed = 0
-        self._raise = raise_on_start
+    """假 SDK client：`raise_on_exit` 模拟 flush/export 在退出时失败。"""
+
+    def __init__(self, *, raise_on_exit: bool = False) -> None:
+        self._raise_on_exit = raise_on_exit
 
     def start_as_current_observation(self, **kwargs: Any) -> _FakeCM:
-        if self._raise:
-            raise RuntimeError("sdk boom")
-        self.calls.append(kwargs)
-        obs = _FakeObs()
-        self.observations.append(obs)
-        return _FakeCM(obs)
-
-    def flush(self) -> None:
-        self.flushed += 1
-
-
-def _tracer(client: _FakeClient, sample: float = 1.0) -> LangfuseTracer:
-    return LangfuseTracer(
-        client=client, propagate_attributes=_FakePropagate(client.propagated), sample=sample
-    )
-
-
-def test_langfuse_tracer_maps_root_and_propagates_attributes() -> None:
-    client = _FakeClient()
-    ctx = T.TraceContext(
-        trace_id="0af7651916cd43dd8448eb211c80319c",
-        name="review",
-        session_id="eval-run-1",
-        version="baseline",
-        metadata={"case_id": "C1", "source": "evaluation"},
-        tags=["source:evaluation"],
-        input={"case_id": "C1"},
-    )
-
-    with _tracer(client).trace_root(ctx) as root:
-        root.update(output={"decision": "HUMAN_REVIEW"})
-
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call["as_type"] == "span"
-    assert call["name"] == "review"
-    assert call["trace_context"] == {"trace_id": ctx.trace_id}
-    assert call["input"] == {"case_id": "C1"}
-    assert client.propagated == [
-        {
-            "session_id": "eval-run-1",
-            "metadata": {"case_id": "C1", "source": "evaluation"},
-            "tags": ["source:evaluation"],
-            "version": "baseline",
-        }
-    ]
-    assert client.observations[0].updates == [{"output": {"decision": "HUMAN_REVIEW"}}]
-
-
-def test_langfuse_tracer_observation_types() -> None:
-    """节点=span / LLM=generation（带 model+input）/ 工具=tool。"""
-    client = _FakeClient()
-    tracer = _tracer(client)
-    with tracer.trace_root(T.TraceContext(trace_id="a" * 32)):
-        with tracer.node_span("plan", input={"n": 1}) as ns:
-            ns.update(output={"pending": []})
-        with tracer.llm_generation(
-            name="llm.plan",
-            model="scripted",
-            input=[{"role": "system", "content": "s"}],
-            model_parameters={"temperature": 0.0},
-            metadata={"node": "plan"},
-        ) as gen:
-            gen.update(output="{}", usage_details={"input": 0, "output": 0, "total": 0})
-        with tracer.tool_span(name="ProductTool", input={"args": {"product_id": "P1"}}) as ts:
-            ts.update(output={"ok": True})
-
-    kinds = [c["as_type"] for c in client.calls]
-    assert kinds == ["span", "span", "generation", "tool"]
-    gen_call = client.calls[2]
-    assert gen_call["model"] == "scripted"
-    assert gen_call["input"] == [{"role": "system", "content": "s"}]
-    assert gen_call["model_parameters"] == {"temperature": 0.0}
-    assert client.observations[2].updates[0]["usage_details"] == {
-        "input": 0,
-        "output": 0,
-        "total": 0,
-    }
-
-
-def test_langfuse_tracer_records_error_as_error_level() -> None:
-    """`record_error` → level=ERROR + status_message（不改变业务异常传播）。"""
-    client = _FakeClient()
-    tracer = _tracer(client)
-    with tracer.trace_root(T.TraceContext(trace_id="b" * 32)):
-        with tracer.llm_generation(name="llm.decide", model="scripted", input="x") as gen:
-            gen.record_error(TimeoutError("llm timeout"))
-
-    assert client.observations[1].updates == [
-        {"level": "ERROR", "status_message": "TimeoutError: llm timeout"}
-    ]
-
-
-def test_langfuse_tracer_sampling_suppresses_whole_subtree() -> None:
-    """sample=0 → 整棵子树 no-op（连 client 都不调用），保证"不采样即零开销"。"""
-    client = _FakeClient()
-    tracer = _tracer(client, sample=0.0)
-
-    with tracer.trace_root(T.TraceContext(trace_id="c" * 32)) as root:
-        root.update(output="ignored")
-        with tracer.node_span("plan") as ns:
-            ns.update(output="ignored")
-        with tracer.llm_generation(name="llm.plan", model="m", input="i") as gen:
-            gen.update(output="ignored")
-
-    assert client.calls == []
-    assert client.propagated == []
-
-
-def test_langfuse_tracer_never_raises_when_sdk_fails() -> None:
-    """SDK 内部异常被吞掉：观测失败不得影响业务（四种埋点都要覆盖）。"""
-    client = _FakeClient(raise_on_start=True)
-    tracer = _tracer(client)
-
-    with tracer.trace_root(T.TraceContext(trace_id="d" * 32)) as root:
-        root.update(output="ignored")
-        with tracer.node_span("plan") as ns:
-            ns.update(output="ignored")
-        with tracer.llm_generation(name="llm.plan", model="m", input="i") as gen:
-            gen.record_error(RuntimeError("x"))
-        with tracer.tool_span(name="ProductTool") as ts:
-            ts.update(output="ignored")
-    tracer.flush()
-
-    assert client.flushed == 1
-
-
-@pytest.mark.skipif(
-    importlib.util.find_spec("langfuse") is not None,
-    reason="本机已装 langfuse SDK（observability extra）—— 该用例只验证未安装路径",
-)
-def test_build_langfuse_tracer_without_sdk_returns_null_tracer() -> None:
-    tracer = build_langfuse_tracer(
-        public_key="pk", secret_key="sk", host="http://localhost:3000"
-    )
-
-    assert isinstance(tracer, T.NullTracer)
-    assert "SDK" in tracer.reason or "not installed" in tracer.reason
-
-
-def test_get_tracer_caches_and_direct_reset_rebuilds(monkeypatch) -> None:
-    """`get_tracer` 懒装配并缓存；直改模块单例即生效，置空后下次重建。"""
-    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
-    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
-    T._tracer = None
-
-    first = T.get_tracer()
-    assert first is T.get_tracer()
-    assert isinstance(first, T.NullTracer)
-
-    fake = T.NullTracer("injected")
-    T._tracer = fake
-    assert T.get_tracer() is fake
-
-    T._tracer = None  # 置空 → 下次 `get_tracer` 重建
-    rebuilt = T.get_tracer()
-    assert rebuilt is not fake
-    assert isinstance(rebuilt, T.NullTracer)
-
-    T._tracer = None  # 复原，避免影响其他测试
-
-
-class _BadExitCM:
-    """假 CM：进入正常、退出抛异常（模拟 SDK flush/export 失败）。"""
-
-    def __init__(self, obs: _FakeObs) -> None:
-        self.obs = obs
-
-    def __enter__(self) -> _FakeObs:
-        return self.obs
-
-    def __exit__(self, *exc: object) -> bool:
-        raise RuntimeError("sdk exit failed")
-
-
-class _BadExitClient:
-    def start_as_current_observation(self, **kwargs: Any) -> _BadExitCM:
-        return _BadExitCM(_FakeObs())
+        return _FakeCM(_FakeObs(), raise_on_exit=self._raise_on_exit)
 
     def flush(self) -> None:
         return None
 
 
-def test_trace_root_propagates_business_exception_unchanged() -> None:
-    """业务体异常必须原样抛出（不得被替换成 `generator didn't stop after throw()`）。"""
+def _tracer(client: Any) -> LangfuseTracer:
+    return LangfuseTracer(client=client, propagate_attributes=lambda **kw: _FakeCM(_FakeObs()), sample=1.0)
+
+
+def test_observability_never_swallows_business_exception() -> None:
+    """观测上下文必须让业务异常原样抛出（四类埋点 + SDK 退出失败都要覆盖）。
+
+    反证：把 `langfuse_backend._guarded` 改回「捕获业务异常后 return」→ 本用例必红。
+    """
     tracer = _tracer(_FakeClient())
 
     with pytest.raises(ValueError, match="boom"), tracer.trace_root(
-        T.TraceContext(trace_id="e" * 32)
+        T.TraceContext(trace_id="a" * 32)
     ):
         raise ValueError("boom")
+    with pytest.raises(KeyError), tracer.node_span("plan"):
+        raise KeyError("x")
+    with pytest.raises(TimeoutError), tracer.llm_generation(name="llm.plan", model="m", input="i"):
+        raise TimeoutError("y")
+    with pytest.raises(RuntimeError, match="tool failed"), tracer.tool_span(name="ProductTool"):
+        raise RuntimeError("tool failed")
 
-
-def test_trace_root_business_exception_wins_over_sdk_exit_failure() -> None:
-    """SDK 退出失败不得掩盖业务异常（观测旁路的核心不变式）。"""
-    tracer = LangfuseTracer(
-        client=_BadExitClient(), propagate_attributes=_FakePropagate([]), sample=1.0
-    )
-
-    with pytest.raises(ValueError, match="business"), tracer.trace_root(
-        T.TraceContext(trace_id="f" * 32)
+    # SDK 退出失败不得掩盖业务异常
+    bad = _tracer(_FakeClient(raise_on_exit=True))
+    with pytest.raises(ValueError, match="business"), bad.trace_root(
+        T.TraceContext(trace_id="b" * 32)
     ):
         raise ValueError("business")
 
 
-def test_node_span_and_generation_propagate_business_exception() -> None:
-    tracer = _tracer(_FakeClient())
+def _load_eval_script():
+    """按路径加载跑分脚本（它不是包）—— 取其中的评测 root trace 组装。"""
+    spec = importlib.util.spec_from_file_location("run_evaluation_mod", _EVAL_SCRIPT)
+    assert spec and spec.loader, f"无法定位脚本: {_EVAL_SCRIPT}"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-    with pytest.raises(KeyError), tracer.node_span("plan"):
-        raise KeyError("x")
 
-    with pytest.raises(TimeoutError), tracer.llm_generation(
-        name="llm.plan", model="m", input="i"
+def test_eval_root_trace_id_is_scoped_by_llm_backend() -> None:
+    """trace_id 必须含 LLM 后端名 —— 否则同进程的不同后端臂会落进同一条 trace。
+
+    反证：把 `run_evaluation._root_trace_context` 的 uuid5 key 去掉 `:{backend_name}`
+    → 本用例必红（两臂 trace 相同，按 trace 汇总 token 会混入另一臂的 generation）。
+    """
+    mod = _load_eval_script()
+    case = load_dataset(_DATA_PATH_V2)[0]
+    experiment = T.experiment_name()
+
+    scripted = mod._root_trace_context(
+        case, scheme="agent", backend_name="eval-scripted-reviewer"
+    )
+    real = mod._root_trace_context(
+        case, scheme="agent", backend_name="litellm-deepseek/deepseek-chat"
+    )
+
+    assert scripted.trace_id != real.trace_id  # 两臂不混
+    for backend, ctx in (
+        ("eval-scripted-reviewer", scripted),
+        ("litellm-deepseek/deepseek-chat", real),
     ):
-        raise TimeoutError("y")
-
-    with pytest.raises(RuntimeError, match="tool failed"), tracer.tool_span(
-        name="ProductTool"
-    ):
-        raise RuntimeError("tool failed")
-
-
-class _FakeSettings:
-    pra_langfuse_experiment = "prompt-v2"
-    pra_langfuse_session = "eval-run-1"
-    langfuse_public_key = "pk-lf-from-env-file"
-    langfuse_secret_key = "sk-lf-from-env-file"
-    langfuse_host = "http://localhost:3000"
-    pra_langfuse_enabled = None
-    pra_langfuse_sample = "0.5"
-
-
-def test_config_falls_back_to_settings_env_file(monkeypatch) -> None:
-    """`.env`（经 Settings）也能生效 —— pydantic-settings 不会把 .env 写进 os.environ。"""
-    for key in ("PRA_LANGFUSE_EXPERIMENT", "PRA_LANGFUSE_SESSION", "LANGFUSE_PUBLIC_KEY"):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr("pra.infra.db.Settings", lambda *a, **k: _FakeSettings())
-
-    assert T._env_or_settings("PRA_LANGFUSE_EXPERIMENT", "pra_langfuse_experiment") == "prompt-v2"
-    assert T.experiment_name() == "prompt-v2"
-    assert T.session_id() == "eval-run-1"
-
-
-def test_real_env_var_beats_settings(monkeypatch) -> None:
-    """真实环境变量优先级高于 `.env`（配置来源顺序）。"""
-    monkeypatch.setenv("PRA_LANGFUSE_EXPERIMENT", "rag-v1")
-    monkeypatch.setattr("pra.infra.db.Settings", lambda *a, **k: _FakeSettings())
-
-    assert T.experiment_name() == "rag-v1"
-
-
-def test_settings_failure_is_silent(monkeypatch) -> None:
-    """Settings 不可用（未装/校验失败）→ 视为无配置，绝不抛。"""
-    monkeypatch.delenv("PRA_LANGFUSE_EXPERIMENT", raising=False)
-
-    def _boom(*a, **k):
-        raise RuntimeError("settings boom")
-
-    monkeypatch.setattr("pra.infra.db.Settings", _boom)
-
-    assert T._env_or_settings("PRA_LANGFUSE_EXPERIMENT", "pra_langfuse_experiment") is None
-    assert T.experiment_name() == "baseline"
-    assert T.session_id() is None
+        assert ctx.trace_id == uuid5(
+            NAMESPACE_URL, f"{experiment}:{case.eval_case_id}:agent:{backend}"
+        ).hex, "trace_id 须由 uuid5(experiment:case:scheme:后端名) 确定"
+        assert ctx.metadata["llm_backend"] == backend
