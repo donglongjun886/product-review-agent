@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, runtime_checkable
 
-from pra.observability.tracing import Observation, get_tracer
+from pra.observability.tracing import get_tracer
 
 
 class LLMBackendError(RuntimeError):
@@ -117,22 +117,6 @@ def _elapsed_ms(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
 
 
-def _observe_update(obs: Observation, **kwargs: Any) -> None:
-    """观测旁路：``update`` 绝不抛（适配层已吞异常，此处双保险）。"""
-    try:
-        obs.update(**kwargs)
-    except Exception:  # noqa: BLE001 - 观测失败不得影响业务
-        return
-
-
-def _observe_record_error(obs: Observation, exc: BaseException) -> None:
-    """观测旁路：``record_error`` 绝不抛。"""
-    try:
-        obs.record_error(exc)
-    except Exception:  # noqa: BLE001 - 观测失败不得影响业务
-        return
-
-
 def _generation_update(resp: LLMResponse, *, attempt: int, latency_ms: int) -> dict:
     """一次成功响应的 generation 字段（``usage`` 为 None 时不传 usage_details）。"""
     kwargs: dict = {
@@ -211,11 +195,10 @@ async def call_structured_llm(
                         feedback=feedback or None,
                     )
                 except Exception as exc:  # 后端失败（LLMBackendError/网络/任何异常）
-                    _observe_record_error(obs, exc)
+                    obs.record_error(exc)
                     raise
-                _observe_update(
-                    obs,
-                    **_generation_update(resp, attempt=attempt, latency_ms=_elapsed_ms(t0)),
+                obs.update(
+                    **_generation_update(resp, attempt=attempt, latency_ms=_elapsed_ms(t0))
                 )
         except Exception as exc:  # transport/后端失败
             if resp is None:

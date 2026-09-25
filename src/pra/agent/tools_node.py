@@ -26,28 +26,13 @@ from pra.agent.guardrails.budget import bump_tool_usage
 from pra.agent.guardrails.errors import SEV_WARN, STEP_TOOL_CALL, make_failure
 from pra.agent.state import _evidence_key, merge_evidence
 from pra.domain.models import Budget, Evidence
-from pra.observability.tracing import Observation, get_tracer
+from pra.observability.tracing import get_tracer
 from pra.tools.base import Tool, ToolContext
 
 # 引用/摘要串长度上限：f"{type} {value}" 截到 200 字符
 MAX_REF_LEN = 200
 
 __all__ = ["make_tools_node"]
-
-
-# 观测旁路：update / record_error 绝不抛（适配层已吞异常，此处双保险）。
-def _observe_update(obs: Observation, **kwargs: Any) -> None:
-    try:
-        obs.update(**kwargs)
-    except Exception:  # noqa: BLE001 - 观测失败不得影响业务
-        return
-
-
-def _observe_record_error(obs: Observation, exc: BaseException) -> None:
-    try:
-        obs.record_error(exc)
-    except Exception:  # noqa: BLE001 - 观测失败不得影响业务
-        return
 
 
 def _ref_str(e: Evidence) -> str:
@@ -184,7 +169,7 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
                             make_failure(step_type=STEP_TOOL_CALL, severity=SEV_WARN,
                                          tool=tool.name, seq=seq, reason=reason)
                         )
-                        _observe_record_error(obs, exc)  # 观测：异常（原 record 不变）
+                        obs.record_error(exc)  # 观测：异常（原 record 不变）
                         seq += 1
                         continue
                 latency_ms = _elapsed_ms(t0)
@@ -199,7 +184,7 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
                                      tool=tool.name, seq=seq, reason=reason)
                     )
                     # 观测：业务失败（无异常对象，用人读 reason 构造）
-                    _observe_record_error(obs, RuntimeError(reason))
+                    obs.record_error(RuntimeError(reason))
                     seq += 1
                     continue
 
@@ -216,8 +201,7 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
                 after_gate = gate_probe(snap_after)
                 refs = [_ref_str(e) for e in added]
                 # 观测：成功 —— output = 本 visit 新增证据引用串
-                _observe_update(
-                    obs,
+                obs.update(
                     output={"evidence": refs, "status": "ok"},
                     metadata={"latency_ms": latency_ms, "seq": seq},
                 )

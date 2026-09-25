@@ -45,7 +45,7 @@ import urllib.request
 from typing import Any
 from uuid import uuid4
 
-from pra.observability.tracing import TraceContext, Tracer, get_tracer
+from pra.observability.tracing import TraceContext, Tracer, _env_or_settings, get_tracer
 
 __all__ = ["main"]
 
@@ -482,7 +482,7 @@ def _print_enable_hint(host: str) -> None:
     """打印「如何启用」提示（无凭据 / SDK 未装时都要打）。"""
     print("how to enable Langfuse tracing:")
     print("  uv sync --extra observability      # 安装 langfuse SDK（optional extra）")
-    print("  export LANGFUSE_PUBLIC_KEY=pk-lf-...")
+    print("  export LANGFUSE_PUBLIC_KEY=pk-lf-...   # 或写进仓库根 .env（见 .env.example）")
     print("  export LANGFUSE_SECRET_KEY=sk-lf-...")
     print(f"  export LANGFUSE_HOST={host}")
     print("  uv run --extra observability python scripts/langfuse_smoke.py")
@@ -533,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
     if not _HEX32.match(trace_id):
         print(f"invalid --trace-id {args.trace_id!r}: expect 32 lowercase hex chars (W3C trace id)")
         return 2
-    host = (args.host or os.environ.get("LANGFUSE_HOST") or DEFAULT_HOST).strip()
+    host = (args.host or _env_or_settings("LANGFUSE_HOST", "langfuse_host") or DEFAULT_HOST).strip()
 
     tracer = get_tracer()
     if not getattr(tracer, "enabled", False):
@@ -551,8 +551,8 @@ def main(argv: list[str] | None = None) -> int:
         print("--no-verify: skipped read-back verification")
         return 0
 
-    public_key = (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip()
-    secret_key = (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip()
+    public_key = _env_or_settings("LANGFUSE_PUBLIC_KEY", "langfuse_public_key") or ""
+    secret_key = _env_or_settings("LANGFUSE_SECRET_KEY", "langfuse_secret_key") or ""
     if not public_key or not secret_key:
         print("read-back skipped: missing LANGFUSE_PUBLIC_KEY/SECRET_KEY")
         return 0
