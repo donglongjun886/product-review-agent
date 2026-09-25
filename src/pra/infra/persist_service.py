@@ -361,8 +361,8 @@ async def run_and_persist(
         trace_rows = 0
         prev_budget_tokens = 0  # 初始 state Budget().tokens == 0
         wall_prev = time.perf_counter()  # 节点到达墙钟基线（LLM 行 latency 近似）
-        # Root trace：trace_id = run_id 映射 → Langfuse trace 与 MySQL review_run.run_id 硬
-        # 对齐；root 覆盖整个 astream 直到终态可读。常驻服务不 per-request flush。
+        # Root trace：trace_id 由 run_id 确定性派生（Langfuse 只收 32-hex，run_id 形态不定）；
+        # root 覆盖整个 astream 直到终态可读。常驻服务不 per-request flush。
         root_ctx = TraceContext(
             trace_id=trace_id_from_run_id(resolved_run_id),
             name="review",

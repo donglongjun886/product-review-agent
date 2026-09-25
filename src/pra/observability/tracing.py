@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Protocol, runtime_checkable
@@ -37,10 +36,10 @@ __all__ = [
 
 @dataclass
 class TraceContext:
-    """一次 root trace 的关联信息（trace_id 与业务主键对齐）。
+    """一次 root trace 的关联信息。
 
-    ``trace_id`` 为 W3C 32-hex：HTTP/落库路径 = ``run_id``（与 MySQL review_run.run_id 一一
-    对应）；评测路径 = uuid5(experiment:case:scheme)，确定性可重放。``input`` 放 root
+    ``trace_id`` 为 W3C 32-hex：HTTP/落库路径 = uuid5(run_id)、评测路径 =
+    uuid5(experiment:case:scheme)，两处均确定性可重放。``input`` 放 root
     observation 上（Langfuse v4 中 trace 级 input 已废弃）。
     """
 
@@ -177,25 +176,18 @@ def should_sample(key: str, sample: float) -> bool:
 
 # ---- trace_id / 实验版本 / 会话（纯函数，绝不抛）----
 
-#: W3C trace id 形状（32 位小写 hex）—— 只有这种 run_id 才原样当 trace_id。
-_TRACE_ID_HEX = re.compile(r"\A[0-9a-f]{32}\Z")
-
 #: 未设 ``PRA_LANGFUSE_EXPERIMENT`` 时的缺省实验名。
 _DEFAULT_EXPERIMENT = "baseline"
 
 
 def trace_id_from_run_id(run_id: str) -> str:
-    """把 ``run_id`` 映射为 32-hex ``trace_id``（**确定性**，绝不抛）。
+    """把 ``run_id`` 映射为 W3C 32-hex ``trace_id``（**确定性**，绝不抛）。
 
-    - 已是 32 位小写 hex（HTTP 路径的 ``uuid4().hex``）→ **原样返回**：Langfuse trace 与
-      MySQL review_run.run_id 一一对应，可直接反查审计链；
-    - 其余形态（``RUN_CASE_1``、``eval-agent-EC_0123`` …）→ ``uuid5(NAMESPACE_URL, run_id)``：
-      同一 run_id **恒同** trace_id（可重放）；
-    - 非法输入（``None`` / 空串 / 非字符串）→ 同样走 uuid5 兜底（观测旁路，不抛）。
+    ``run_id`` 形态不定（HTTP 路径的 ``uuid4().hex``、业务键派生的 ``RUN_CASE_1`` 等），
+    而 Langfuse 只接受 32 位小写 hex，故一律 ``uuid5(NAMESPACE_URL, run_id)``：同一 run_id
+    **恒同** trace_id（可重放）；非法输入（``None`` / 空串 / 非字符串）同样兜底（观测旁路，不抛）。
     """
     text = run_id if isinstance(run_id, str) else str(run_id or "")
-    if _TRACE_ID_HEX.match(text):
-        return text
     return uuid5(NAMESPACE_URL, text).hex
 
 

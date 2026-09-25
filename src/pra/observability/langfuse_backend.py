@@ -9,7 +9,7 @@ API 事实（本机 spike 实测，langfuse==4.15.1）：入口是 **client 实�
 误导）；签名含 ``trace_context`` / ``as_type`` / ``name`` / ``input`` / ``output`` /
 ``metadata`` / ``version`` / ``level`` / ``status_message`` / ``model`` /
 ``model_parameters`` / ``usage_details`` / ``cost_details`` / ``prompt``。
-``trace_context={"trace_id": <32-hex>}`` 实测生效 → 可与 MySQL ``review_run.run_id`` 硬对齐；
+``trace_context={"trace_id": <32-hex>}`` 实测生效 → 可用业务侧派生的 32-hex 作 trace id；
 子观测靠 OTel contextvar 自动嵌套，``await`` / ``asyncio.create_task`` / ``asyncio.gather``
 三种调度均继承同一 trace；trace 级属性（session_id / metadata / tags / version）经
 ``propagate_attributes(...)`` 下发（v4 中 trace 级 input/output 已废弃，整体 input/output 放
