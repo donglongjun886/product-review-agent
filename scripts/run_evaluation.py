@@ -30,8 +30,9 @@ base-url 同理。API key 必填 —— 缺 key 预检即报错，避免整卷�
 （``pra.observability.tracing``；无凭据 = NullTracer 全 no-op）。
 
 单案保护：某案抛异常只作废该案（记入该臂 failures + 报告/stderr 明细），整臂与整轮照常出数；
-失败案不产出任何 ``EvalRecord``、绝不写成 ``HUMAN_REVIEW``，也不进任何指标分母（报告与 JSON
-payload 的 ``failed`` 计数显式标记）。
+被隔离的失败案不产出任何 ``EvalRecord``、不写成 ``HUMAN_REVIEW``，也不进任何指标分母（报告与
+JSON payload 的 ``failed`` 计数显式标记）。各臂**内部**自行降级产出的记录不在此列（如 single
+臂 LLM 失败仍产带 ``detail.error`` 的 HUMAN_REVIEW 记录并计入分母）—— 那是一条记录，不是被隔离的失败。
 """
 
 import argparse
@@ -484,8 +485,8 @@ async def _run_arm(
 ) -> tuple[list[tuple[EvalRecord, float]], list["_ArmFailure"]]:
     """并发跑一臂，返回 ``(按用例原序的 (record, 进程内墙钟毫秒) 列表, 失败案列表)``。
 
-    单案异常（基础设施故障）只让该案进 failures，不产出 EvalRecord、不中断整臂：失败案
-    绝不写成 HUMAN_REVIEW（否则基础设施故障会被伪装成「克制转人工」，污染混淆矩阵与
+    单案异常（基础设施故障）只让该案进 failures，不产出 EvalRecord、不中断整臂：被隔离的
+    失败案不写成 HUMAN_REVIEW（否则基础设施故障会被伪装成「克制转人工」，污染混淆矩阵与
     human_review_rate）。用例之间天然隔离：每案由 ``build_initial_state`` 起算、thread_id
     唯一，图无 checkpointer、无跨案可变状态。墙钟**只回报告**，不写进 EvalRecord。
     """
@@ -525,8 +526,10 @@ async def _run_arm(
             return rec, elapsed_ms
 
     settled = list(await asyncio.gather(*[_one(c) for c in cases]))
-    ok = [item for item in settled if isinstance(item, tuple)]
-    failures = [item for item in settled if isinstance(item, _ArmFailure)]
+    ok: list[tuple[EvalRecord, float]] = [
+        item for item in settled if not isinstance(item, _ArmFailure)
+    ]
+    failures: list[_ArmFailure] = [item for item in settled if isinstance(item, _ArmFailure)]
     return ok, failures
 
 
