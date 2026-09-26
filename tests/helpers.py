@@ -1,10 +1,16 @@
-"""共享测试构造件：领域对象工厂 + LLMBackend 测试替身 + 常用 state 骨架 + 真模型缓存探测。"""
+"""共享测试构造件：领域对象工厂 + LLMBackend 测试替身 + 常用 state 骨架 + 真模型缓存探测
++ 脚本按路径加载与真库可达性探测。"""
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import socket
+import sys
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
+from urllib.parse import urlparse
 
 from pra.agent.guardrails.llm_shell import LLMBackendError, LLMResponse
 from pra.domain.measurement import (
@@ -25,10 +31,46 @@ from pra.domain.models import (
     ProductReviewCase,
     SkuInfo,
 )
+from pra.infra.db import Settings
 from pra.tools import BGE_MODEL as BGE_DEFAULT_MODEL
 from pra.tools.base import Tool
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+
 _BGE_HF_SOURCE_REPO = "Qdrant"
+
+
+def ensure_scripts_importable() -> None:
+    """把 ``scripts/`` 加入 ``sys.path``：其中的评测包与独立入口按顶层名导入。"""
+    entry = str(SCRIPTS_DIR)
+    if entry not in sys.path:
+        sys.path.insert(0, entry)
+
+
+def load_script(path: Path) -> ModuleType:
+    """按路径 exec 独立入口脚本（非包）并返回模块对象。
+
+    先保证 ``scripts/`` 在 ``sys.path`` 上，供脚本内顶层 import 解析。
+    """
+    ensure_scripts_importable()
+    spec = importlib.util.spec_from_file_location(f"{path.stem}_mod", path)
+    assert spec and spec.loader, f"无法定位脚本: {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def mysql_reachable() -> bool:
+    """按默认配置路径解析 DSN 并做 1s socket 探测（不连库、不建 engine）。"""
+    parsed = urlparse(Settings().database_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 3306
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
 
 
 def bge_model_cached(cache_dir: Path, model_name: str = BGE_DEFAULT_MODEL) -> bool:

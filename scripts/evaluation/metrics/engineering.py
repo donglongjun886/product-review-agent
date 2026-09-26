@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import math
 
+from evaluation.record import EvalRecord
 from pydantic import BaseModel, Field
-
-from pra.evaluation.record import EvalRecord
 
 __all__ = [
     "DistributionMetrics",

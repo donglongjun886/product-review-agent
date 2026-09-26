@@ -2,34 +2,19 @@
 
 from __future__ import annotations
 
-import socket
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import WalkthroughBackend, make_case
+from helpers import WalkthroughBackend, make_case, mysql_reachable
 from sqlalchemy import text
 
 from pra import wiring
 from pra.domain.models import ProductReviewCase
-from pra.infra.db import Settings, get_sessionmaker
+from pra.infra.db import get_sessionmaker
 from pra.infra.persist_service import process_review
 
-
-def _mysql_reachable() -> bool:
-    """按 **默认配置路径** 解析 DSN 并做 1s socket 探测（不连库、不建 engine）。"""
-    parsed = urlparse(Settings().database_url)
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 3306
-    try:
-        with socket.create_connection((host, port), timeout=1):
-            return True
-    except OSError:
-        return False
-
-
 pytestmark = pytest.mark.skipif(
-    not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库冒烟"
+    not mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库冒烟"
 )
 
 

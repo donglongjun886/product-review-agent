@@ -2,22 +2,10 @@
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import pytest
+from helpers import SCRIPTS_DIR, load_script
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "scripts" / "run_evaluation.py"
-
-
-def _load_script():
-    """按路径加载跑分脚本（它不是包）。"""
-    spec = importlib.util.spec_from_file_location("run_evaluation_mod", SCRIPT)
-    assert spec and spec.loader, f"无法定位脚本: {SCRIPT}"
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+SCRIPT = SCRIPTS_DIR / "run_evaluation.py"
 
 
 def _backend(mod, **cfg):
@@ -28,7 +16,7 @@ def _backend(mod, **cfg):
 
 def test_llm_config_defaults_are_not_sent() -> None:
     """默认：CLI 与后端两侧都为 None（不下发，用网关默认）。"""
-    mod = _load_script()
+    mod = load_script(SCRIPT)
     args = mod._parse_args([])
     assert args.thinking is None
     assert args.reasoning_effort is None
@@ -40,7 +28,7 @@ def test_llm_config_defaults_are_not_sent() -> None:
 
 def test_llm_config_threads_cli_to_backend() -> None:
     """显式档位：CLI 解析值原样进后端属性（含 disabled 与非默认 effort）。"""
-    mod = _load_script()
+    mod = load_script(SCRIPT)
     args = mod._parse_args(["--thinking", "disabled", "--reasoning-effort", "low"])
     assert (args.thinking, args.reasoning_effort) == ("disabled", "low")
 
@@ -51,7 +39,7 @@ def test_llm_config_threads_cli_to_backend() -> None:
 
 def test_llm_config_rejects_out_of_contract_values() -> None:
     """白名单外取值直接报错：只暴露官方规范档（none/low/high/max + enabled/disabled）。"""
-    mod = _load_script()
+    mod = load_script(SCRIPT)
     with pytest.raises(SystemExit):
         mod._parse_args(["--thinking", "off"])
     with pytest.raises(SystemExit):

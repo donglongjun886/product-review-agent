@@ -2,33 +2,20 @@
 
 from __future__ import annotations
 
-import importlib.util
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
-from helpers import make_case
+from evaluation.dataset.schema import EvalCase, EvalExpected
+from evaluation.metrics.business import DecisionEvaluator
+from evaluation.metrics.engineering import EngineeringEvaluator
+from evaluation.record import EvalRecord
+from helpers import SCRIPTS_DIR, load_script, make_case
 
-from pra.evaluation.dataset.schema import EvalCase, EvalExpected
-from pra.evaluation.metrics.business import DecisionEvaluator
-from pra.evaluation.metrics.engineering import EngineeringEvaluator
-from pra.evaluation.record import EvalRecord
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "scripts" / "run_evaluation.py"
+SCRIPT = SCRIPTS_DIR / "run_evaluation.py"
 _FAIL_CASE_ID = "EC_T2"
 _FAIL_TYPE = "RuntimeError"
 _FAIL_MESSAGE = "injected infra failure"
-
-
-def _load_script():
-    """按路径加载跑分脚本（它不是包）。"""
-    spec = importlib.util.spec_from_file_location("run_evaluation_mod", SCRIPT)
-    assert spec and spec.loader, f"无法定位脚本: {SCRIPT}"
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _eval_case(eval_case_id: str, case_id: str) -> EvalCase:
@@ -44,7 +31,7 @@ def _eval_case(eval_case_id: str, case_id: str) -> EvalCase:
 @pytest.fixture
 def script() -> Iterator[Any]:
     """按路径加载的跑分脚本模块（``scripts/`` 下的独立入口，不是包）。"""
-    yield _load_script()
+    yield load_script(SCRIPT)
 
 
 async def test_single_case_failure_keeps_arm_alive(script) -> None:

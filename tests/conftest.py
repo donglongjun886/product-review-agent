@@ -1,8 +1,12 @@
-"""pytest 共享配置：只放跨测试的 autouse fixture。"""
+"""pytest 共享配置：``scripts/`` 导入引导 + 只放跨测试的 autouse fixture。"""
 
 from __future__ import annotations
 
 import pytest
+from helpers import ensure_scripts_importable
+
+# 在 collection 之前生效：测试模块顶层 import scripts/ 下的评测包（``evaluation.*``）。
+ensure_scripts_importable()
 
 
 @pytest.fixture(autouse=True)

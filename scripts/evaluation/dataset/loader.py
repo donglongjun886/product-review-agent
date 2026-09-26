@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pra.evaluation.dataset.schema import EvalCase
+from evaluation.dataset.schema import EvalCase
 
 __all__ = ["load_dataset"]
 

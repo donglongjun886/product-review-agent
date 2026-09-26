@@ -6,9 +6,10 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from evaluation.dataset.loader import load_dataset
+from evaluation.dataset.schema import EvalCase
+
 from pra.domain.models import ProductReviewCase
-from pra.evaluation.dataset.loader import load_dataset
-from pra.evaluation.dataset.schema import EvalCase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V2_PATH = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"

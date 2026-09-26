@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-import socket
 from collections.abc import AsyncIterator
 from typing import Any
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import ev, make_case
+from helpers import ev, make_case, mysql_reachable
 from sqlalchemy import text
 
 from pra.agent import tools_node as tools_node_mod
@@ -16,7 +14,7 @@ from pra.agent.guardrails.errors import SEV_WARN
 from pra.agent.tools_node import make_tools_node
 from pra.domain.models import Budget, Evidence
 from pra.infra import persist_service
-from pra.infra.db import Settings, get_sessionmaker
+from pra.infra.db import get_sessionmaker
 from pra.infra.persist_service import run_and_persist
 from pra.tools.base import ToolArgs, ToolContext, ToolResult
 
@@ -118,18 +116,6 @@ async def test_tool_business_failure_still_warns_and_continues():
     assert out["pending_tool_calls"] == [], "本 visit 待办消费完（空）"
 
 
-def _mysql_reachable() -> bool:
-    """按默认配置路径解析 DSN 并做 1s socket 探测（不连库、不建 engine）。"""
-    parsed = urlparse(Settings().database_url)
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 3306
-    try:
-        with socket.create_connection((host, port), timeout=1):
-            return True
-    except OSError:
-        return False
-
-
 async def _cleanup(case_id: str, run_id: str) -> None:
     """按 case_id/run_id 清理本次写入的行。"""
     sm = get_sessionmaker()
@@ -157,7 +143,7 @@ class _FakeFailingGraph:
 
 
 @pytest.mark.skipif(
-    not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库终态守护"
+    not mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库终态守护"
 )
 async def test_run_and_persist_graph_failure_writes_terminal_state(monkeypatch):
     """图异常 → review_result 显式 HUMAN_REVIEW + infra_error trace，异常仍穿透。"""
@@ -219,7 +205,7 @@ class _FakeTwoVisitFailingGraph:
 
 
 @pytest.mark.skipif(
-    not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库终态守护"
+    not mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库终态守护"
 )
 async def test_run_and_persist_failure_keeps_evidence_of_all_visits(monkeypatch):
     """异常前每一轮 tools visit 的证据都要落 review_evidence（跨 visit 累积）。"""

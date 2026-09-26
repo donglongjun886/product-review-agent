@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import socket
 from typing import Self
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import AlwaysRaiseBackend, WalkthroughBackend, make_case, tool_by_name
+from helpers import (
+    AlwaysRaiseBackend,
+    WalkthroughBackend,
+    make_case,
+    mysql_reachable,
+    tool_by_name,
+)
 from inmemory_world import (
     _DEFAULT_PRODUCTS,
     InMemoryMerchantRepository,
@@ -26,7 +30,7 @@ from pra.domain.measurement import (
 )
 from pra.domain.models import Budget, ProductReviewCase
 from pra.infra import persist_service as ps
-from pra.infra.db import Settings, get_sessionmaker
+from pra.infra.db import get_sessionmaker
 from pra.tools import build_production_tools
 from pra.tools.base import ToolContext
 from pra.tools.product.mysql_repo import (
@@ -198,18 +202,6 @@ def test_production_and_inmemory_world_product_sources_are_distinct():
     assert isinstance(tool_by_name(memory, "ProductTool")._repo, InMemoryProductRepository)
 
 
-def _mysql_reachable() -> bool:
-    """按 **默认配置路径** 解析 DSN 并做 1s socket 探测（不连库、不建 engine）。"""
-    parsed = urlparse(Settings().database_url)
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 3306
-    try:
-        with socket.create_connection((host, port), timeout=1):
-            return True
-    except OSError:
-        return False
-
-
 async def _insert_seed(product_id: str, seed: dict) -> None:
     """用**裸 SQL** 写入 P_88231 同构种子（独立 product_id）。"""
     sm = get_sessionmaker()
@@ -241,7 +233,7 @@ async def _delete_seed(product_id: str) -> None:
 
 
 @pytest.mark.skipif(
-    not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库集成"
+    not mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库集成"
 )
 async def test_mysql_product_repository_roundtrip_against_real_db():
     """MySQL → ProductSnapshot → Evidence 全字段往返（种子取自 InMemory 世界种子的 P_88231）。"""
@@ -377,7 +369,7 @@ async def _drop_cases(case_ids: tuple[str, ...]) -> None:
 
 
 @pytest.mark.skipif(
-    not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库集成"
+    not mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库集成"
 )
 async def test_production_path_reads_product_fact_from_mysql(monkeypatch):
     """生产装配 → 落库入口 → 图 → ProductTool → MySQL → PRODUCT_FACT 落 review_evidence。"""

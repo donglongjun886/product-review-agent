@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from evaluation.record import EvalRecord
 from pydantic import BaseModel, Field
-
-from pra.evaluation.record import EvalRecord
 
 __all__ = ["DecisionEvaluator", "DecisionMetrics"]
 
