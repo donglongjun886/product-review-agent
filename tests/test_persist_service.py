@@ -29,10 +29,8 @@ def test_enum_value_maps_enum_to_value():
     assert _enum_value("str") == "str"
 
 
-def test_token_count_accepts_budget_and_dict():
+def test_token_count_accepts_budget_and_none():
     assert _token_count(Budget(tokens=123)) == 123
-    assert _token_count({"tokens": 45}) == 45
-    assert _token_count({"tokens": None}) == 0
     assert _token_count(None) == 0
 
 

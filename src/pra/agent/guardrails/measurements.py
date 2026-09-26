@@ -44,13 +44,6 @@ RULE_EVASION_WORD = "R-302"
 _CITATION_TOOLS: frozenset[str] = frozenset({"CaseSearchTool", "PolicySearchTool"})
 
 
-def _coerce_case(case: Any) -> ProductReviewCase:
-    """把 case 归一成 ``ProductReviewCase``（dict 输入严格校验）。"""
-    if isinstance(case, ProductReviewCase):
-        return case
-    return ProductReviewCase.model_validate(case)
-
-
 def _merchant_is_dirty(e: Evidence) -> bool:
     """``MERCHANT_HISTORY`` 是否达到 ``MERCHANT_DIRTY_MIN``（读 extra 的 removals / title）。"""
     extra = e.extra or {}
@@ -75,11 +68,10 @@ def positive_dimensions(evidence: Iterable[Evidence]) -> dict[str, list[Evidence
     return dict(out)
 
 
-def required_dimensions(case: Any) -> tuple[str, ...]:
+def required_dimensions(case: ProductReviewCase | None) -> tuple[str, ...]:
     """本案必需的测量维度；``case`` 缺失返回空元组。"""
     if case is None:
         return ()
-    _coerce_case(case)  # 契约校验：非法输入即抛
     return (DIM_LISTING_REGISTRY, DIM_MERCHANT_PROFILE, DIM_TEXT_COMPLIANCE)
 
 
@@ -110,7 +102,7 @@ class CoverageReport:
 
 
 def coverage_report(
-    case: Any,
+    case: ProductReviewCase | None,
     evidence: Iterable[Evidence],
     capabilities: Mapping[str, bool] | None = None,
 ) -> CoverageReport:
@@ -139,10 +131,10 @@ def coverage_report(
     )
 
 
-def rule_hit_ids(case: Any) -> frozenset[str]:
+def rule_hit_ids(case: ProductReviewCase | None) -> frozenset[str]:
     """平台规则层命中的 rule_id 集合；``case`` 缺失返回空集。"""
     if case is None:
         return frozenset()
     from pra.screening.engine import triage  # 延迟 import
 
-    return frozenset(hit.rule_id for hit in triage(_coerce_case(case)).hits)
+    return frozenset(hit.rule_id for hit in triage(case).hits)

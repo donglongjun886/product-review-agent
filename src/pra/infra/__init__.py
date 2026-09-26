@@ -1,1 +1,1 @@
-# 基础设施集成：MySQL / Redis / MQ / Langfuse / 向量库
+# 基础设施集成：MySQL 连接与持久化（审核五表 ORM 模型 / 落库服务）

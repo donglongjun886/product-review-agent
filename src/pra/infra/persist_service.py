@@ -68,11 +68,10 @@ def _enum_value(v: Any) -> Any:
 
 
 def _token_count(budget: Any) -> int:
-    """从 budget 快照取 tokens（兼容 Pydantic Budget / JSON dict 两种形态）。"""
+    """取 budget 的 tokens（budget 为 None → 0）。"""
     if budget is None:
         return 0
-    tokens = budget.tokens if not isinstance(budget, dict) else budget.get("tokens")
-    return int(tokens or 0)
+    return int(budget.tokens or 0)
 
 
 def _json_cap(obj: Any, cap: int = _JSON_CAP) -> Any:
@@ -110,8 +109,8 @@ def _node_output_summary(node_name: str, update: dict) -> dict:
     budget_snap = None
     if budget is not None:
         budget_snap = {
-            "llm_calls": budget.llm_calls if not isinstance(budget, dict) else budget.get("llm_calls"),
-            "tool_calls": budget.tool_calls if not isinstance(budget, dict) else budget.get("tool_calls"),
+            "llm_calls": budget.llm_calls,
+            "tool_calls": budget.tool_calls,
             "tokens": _token_count(budget),
         }
 
