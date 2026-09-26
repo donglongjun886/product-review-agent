@@ -31,7 +31,7 @@ from pra.observability.tracing import get_tracer
 class LLMBackendError(RuntimeError):
     """LLM 后端调用失败（超时/网络/未知 node 等）。
 
-    供测试侧 ``tests/stub_llm.ScriptedLLMBackend`` import —— 该桩对未知 node 抛本异常。
+    后端遇到不可继续的错误时抛本异常，由 ``call_structured_llm`` 按 transport 类处理。
     """
 
 
@@ -40,7 +40,7 @@ class LLMResponse:
     """``LLMBackend.complete`` 的返回：LLM 输出的 JSON 文本 + 本次 token 数。"""
 
     content: str  # LLM 返回的 JSON 文本（须能被对应 OutputModel 校验通过）
-    tokens: int  # = 后端 usage.total_tokens（input+output 合计、含缓存命中；桩可给 0）
+    tokens: int  # = 后端 usage.total_tokens（input+output 合计、含缓存命中）
     truncated: bool = False  # finish_reason=="length"；按 transport 类处理（见模块 docstring）
     usage: dict | None = None  # 可选 token 拆分，形状 {"input","output","total"}；
                                # 键名对齐 Langfuse ``usage_details``。取不到的键不放
@@ -49,12 +49,12 @@ class LLMResponse:
 
 @runtime_checkable
 class LLMBackend(Protocol):
-    """可注入 LLM 后端接口 —— ``ScriptedLLMBackend`` / ``LiteLLMBackend`` 实现同一 Protocol。
+    """可注入 LLM 后端接口 —— 后端由调用方显式注入（生产 / 评测 / 测试各自给自己的实现）。
 
     失败须抛 ``LLMBackendError``；状态进出**只经方法参数**。
     """
 
-    name: str  # 后端标识（如 "scripted" / "litellm-gpt-4o-mini"），仅审计/展示用
+    name: str  # 后端标识（如 "litellm-gpt-4o-mini"），仅审计/展示用
 
     async def complete(
         self,

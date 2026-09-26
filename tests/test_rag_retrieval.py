@@ -633,7 +633,8 @@ async def test_unreachable_chroma_host_raises_instead_of_silent_empty(
 
     断言：``ChromaConfig(host=<不可达>, port=<不可达>)`` 下，「构建索引 或 首次 ``search``」必抛
     异常。意义：RAG 不可用时若静默返回 ``[]``，Agent 会把「检索不到」误当「没有相关政策/先例」
-    并据此决策 —— 本仓红线是「失败要显式、可观测」（由 tools_node 记 warn failure），绝不静默降级。
+    并据此决策 —— 本仓红线是「失败要显式、可观测」（异常经 tools_node 上抛，由落库编排层记
+    R6_INFRA_UNAVAILABLE 终态），绝不静默降级。
     """
     from pra.rag.chroma_store import ChromaConfig
     from pra.rag.factory import build_policy_index

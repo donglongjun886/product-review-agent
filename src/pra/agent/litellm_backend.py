@@ -1,13 +1,10 @@
 """真实 litellm 后端 ``LiteLLMBackend``（real LLM 评测用）。
 
 本后端实现 ``LLMBackend`` Protocol，由调用方在装配处**显式注入**
-（``build_agent_graph(llm=...)`` / ``AgentScheme(llm=...)``）—— CI 确定性回归用测试侧的
-``tests/stub_llm.ScriptedLLMBackend``，二者可互换。语义差异：
-
-- 桩据结构化 ``state`` 做确定性分支；本后端把同一 state 子集渲染成人读中文上下文
-  （见 :mod:`pra.agent.llm_prompts`）发给真实模型 —— **输出非确定性**：同
-  (node, state) 不保证同结果、不可重放，与桩的"逐字节一致"口径不可混用。schema
-  强校验 / 重试 1 次仍在 llm_shell（``model_validate_json``），后端不做内容校验。
+（``build_agent_graph(llm=...)``）。本后端把结构化 ``state`` 子集渲染成人读中文上下文
+（见 :mod:`pra.agent.llm_prompts`）后替换 system 消息、发给真实网关 —— **输出非确定性**：
+同 (node, state) 不保证同结果、不可重放。schema 强校验 / 重试 1 次仍在 llm_shell
+（``model_validate_json``），后端不做内容校验。
 
 配置：``model`` 默认 ``"deepseek/deepseek-flash"``；``api_key`` 构造传入或读
 ``DEEPSEEK_API_KEY``（两处都缺不报错，首次 ``complete`` 前才抛 ``LLMBackendError``）；

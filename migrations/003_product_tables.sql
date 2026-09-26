@@ -1,10 +1,9 @@
 -- ============================================================================
 -- product-review-agent · 商品事实表 DDL + 开发/评测种子（迁移 003）
 -- ============================================================================
--- 背景：ProductTool 此前只读进程内种子（工具默认 _DEFAULT_PRODUCTS）。本迁移把
--- 「商品在库事实」落到真库，供 pra/tools/product/mysql_repo.py 的
--- MySQLProductRepository 读取。默认装配路径（ProductTool() / build_tools()）**仍是
--- InMemory**；生产与评测入口经 build_production_tools() 显式读本库。
+-- 背景：本迁移把「商品在库事实」落到真库，供 pra/tools/product/mysql_repo.py 的
+-- MySQLProductRepository 读取；生产与评测入口经 build_production_tools() 构造该实现，
+-- 测试世界的数据源见 tests/inmemory_world.py。
 --
 -- 字段口径：只建 ProductSnapshot / 决策链真正消费的列（product_id / category / brand /
 -- version / status）；SKU 与图片两表随「未消费字段收敛」删除（存量库由迁移 005 DROP）。

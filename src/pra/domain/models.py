@@ -189,8 +189,9 @@ class ReviewDecision(_StrictModel):
     三分类 + 风险等级/类型 + 置信度 + 证据链 + 政策引用 + 假设轨迹 + 预算快照，全部可回溯到
     「哪个工具提供的哪条证据导致该结论」。``risk_type`` 语义上必填（PASS 时为 ``[]``）。
     ``overrides`` 记录确定性 overlay 的改判/归因原因码（R1_HARD_RULE / R2_* / R3_* / R4_* /
-    R5_*）—— 空 = overlay 未改判（LLM 提案即终值），是「谁把 PASS 改成了 HUMAN_REVIEW」的
-    可审计落点。图内运行唯一终态为 DECIDED（含三种决策结果），ESCALATED / BUDGET_EXCEEDED
+    R5_* / R6_INFRA_UNAVAILABLE）—— 空 = overlay 未改判（LLM 提案即终值），是「谁把 PASS 改成了
+    HUMAN_REVIEW」的可审计落点；R6_INFRA_UNAVAILABLE = 图执行/落库链路的 infra 故障（非业务判定），
+    由落库编排层写入。图内运行唯一终态为 DECIDED（含三种决策结果），ESCALATED / BUDGET_EXCEEDED
     不再作为主终态，超限归因只记在 overrides 与预算快照。
     """
 
@@ -207,4 +208,4 @@ class ReviewDecision(_StrictModel):
     policy: list[str] = Field(default_factory=list, description="引用的政策条款 ID，如 POLICY_3.2（REJECT 必须有可引用依据）")
     hypothesis_trace: list[Hypothesis] = Field(default_factory=list, description="关键假设的演变轨迹（prior→posterior→status），供解释与 eval 重放")
     budget_used: Budget = Field(default_factory=Budget, description="裁决时的预算快照（引用运行期 Budget 实例，含限额与启动时间）")
-    overrides: list[str] = Field(default_factory=list, description="overlay 改判/归因原因码（R1_HARD_RULE / R2_* / R3_* / R4_* / R5_*）；空=overlay 未改判")
+    overrides: list[str] = Field(default_factory=list, description="overlay 改判/归因原因码（R1_HARD_RULE / R2_* / R3_* / R4_* / R5_* / R6_INFRA_UNAVAILABLE，其中 R6_INFRA_UNAVAILABLE = 图执行/落库链路的 infra 故障（非业务判定），由落库编排层写入）；空=overlay 未改判")

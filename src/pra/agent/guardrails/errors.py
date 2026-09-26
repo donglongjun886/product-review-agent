@@ -3,8 +3,9 @@
 failures 元素 shape ``{step_type, tool?, severity, reason, ts}``：
 
 - ``step_type`` ∈ HYPOTHESIZE / PLAN / TOOL_CALL / REEVALUATE / DECIDE；
-- ``severity="warn"`` 只进审计与 trace（工具失败一律 warn —— 不让工具抖动推高
-  Human Review Rate）；``severity="critical"`` = LLM 步 schema 校验失败（degraded）。
+- ``severity="warn"`` 只进审计与 trace（业务性失败（``ok=False``）记 warn —— 不让工具抖动推高
+  Human Review Rate；工具 infra 异常不上抛成 failure，直接抛出）；``severity="critical"`` =
+  LLM 步 schema 校验失败（degraded）。
 - **failures 非空不等于一律 HUMAN_REVIEW**：只有 LLM 步失败（``degraded``，
   ``R5_DEGRADED_OR_FAILED_STEP``）触发；``warn`` 不触发。
 """

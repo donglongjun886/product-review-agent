@@ -5,7 +5,8 @@
 这条链；用例自建自删（``PYTEST_PRODUCT_`` 前缀 + ``finally`` 清理），重复跑不污染开发库。
 
 纯单测部分注入假 sessionmaker，覆盖 DB 行 → ``ProductSnapshot`` 的全部边界（``brand`` 为
-SQL NULL 不得归一成空串/``'null'``），并守护「默认装配路径仍是 InMemory、不连库」。
+SQL NULL 不得归一成空串/``'null'``），并对照「生产装配 = 真库数据源」与「InMemory 世界 =
+进程内数据源」两侧的商品数据源。
 """
 
 from __future__ import annotations
@@ -16,7 +17,13 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import make_case, tool_by_name
+from helpers import AlwaysRaiseBackend, WalkthroughBackend, make_case, tool_by_name
+from inmemory_world import (
+    _DEFAULT_PRODUCTS,
+    InMemoryMerchantRepository,
+    InMemoryProductRepository,
+    build_inmemory_tools,
+)
 from sqlalchemy import text
 
 from pra import wiring
@@ -29,18 +36,15 @@ from pra.domain.measurement import (
 from pra.domain.models import Budget, ProductReviewCase
 from pra.infra import persist_service as ps
 from pra.infra.db import Settings, get_sessionmaker
-from pra.tools import build_production_tools, build_tools
+from pra.tools import build_production_tools
 from pra.tools.base import ToolContext
-from pra.tools.merchant.tool import InMemoryMerchantRepository
 from pra.tools.product.mysql_repo import (
     MySQLProductRepository,
     ProductORM,
     to_snapshot,
 )
 from pra.tools.product.tool import (
-    _DEFAULT_PRODUCTS,
     PRODUCT_FACT_TYPE,
-    InMemoryProductRepository,
     ProductArgs,
     ProductResult,
     ProductTool,
@@ -52,13 +56,13 @@ _REAL_BUILD_PRODUCTION_TOOLS = build_production_tools
 
 
 def _inmemory_case_index():
-    from pra.tools.case_search.tool import InMemoryCaseIndex
+    from inmemory_world import InMemoryCaseIndex
 
     return InMemoryCaseIndex()
 
 
 def _inmemory_policy_index():
-    from pra.tools.policy_search.tool import InMemoryPolicyIndex
+    from inmemory_world import InMemoryPolicyIndex
 
     return InMemoryPolicyIndex()
 
@@ -161,7 +165,7 @@ def test_brand_sql_null_is_not_normalised_to_empty_string():
     assert snap.brand != ""
     assert snap.brand != "null"
 
-    evs = ProductTool().to_evidence(ProductResult(product=snap))
+    evs = ProductTool(repo=MySQLProductRepository()).to_evidence(ProductResult(product=snap))
     facts = [e for e in evs if e.type == PRODUCT_FACT_TYPE]
     assert len(facts) == 1
     assert "brand=null" in facts[0].value
@@ -217,18 +221,16 @@ async def test_missing_product_flows_to_ok_false_and_no_evidence():
 
 
 # ---------------------------------------------------------------------------
-# 守护：默认装配路径仍是 InMemory（谁把默认改成连库，这里变红）
+# 守护：生产装配的商品数据源是真库，InMemory 世界的是进程内实现
 # ---------------------------------------------------------------------------
 
 
-def test_default_product_tool_is_still_inmemory():
-    assert isinstance(tool_by_name(build_tools(), "ProductTool")._repo, InMemoryProductRepository)
-
-
-def test_build_tools_uses_mysql_repo_only_when_explicitly_injected():
-    repo, _ = _repo_with_fake_sessions([])
-    assert tool_by_name(build_tools(), "ProductTool")._repo is not repo
-    assert tool_by_name(build_tools(product_repo=repo), "ProductTool")._repo is repo
+def test_production_and_inmemory_world_product_sources_are_distinct():
+    """生产装配的 ProductTool 读真库，``build_inmemory_tools()`` 的读进程内种子。"""
+    prod = _REAL_BUILD_PRODUCTION_TOOLS()
+    memory = build_inmemory_tools()
+    assert isinstance(tool_by_name(prod, "ProductTool")._repo, MySQLProductRepository)
+    assert isinstance(tool_by_name(memory, "ProductTool")._repo, InMemoryProductRepository)
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +292,7 @@ async def _delete_seed(product_id: str) -> None:
     not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库集成"
 )
 async def test_mysql_product_repository_roundtrip_against_real_db():
-    """MySQL → ProductSnapshot → Evidence 全字段往返（种子取自工具默认商品的 P_88231）。
+    """MySQL → ProductSnapshot → Evidence 全字段往返（种子取自 InMemory 世界种子的 P_88231）。
 
     独立 product_id + ``finally`` 清理：可重复跑、不污染开发库。
     """
@@ -336,18 +338,18 @@ async def test_mysql_product_repository_roundtrip_against_real_db():
 
 
 # ---------------------------------------------------------------------------
-# 生产装配：HTTP/落库入口读真库，默认路径与测试仍走 InMemory
+# 生产装配：HTTP/落库入口读真库，测试期由 conftest 钉回 InMemory 世界
 # ---------------------------------------------------------------------------
 
 
 def test_build_production_tools_swaps_only_the_mysql_backed_sources():
-    """生产装配 = 默认 6 工具，只把 ProductTool / MerchantTool 的数据源换成真库（装配期不连库）。"""
+    """生产装配 = 4 件工具，只把 ProductTool / MerchantTool 的数据源换成真库（装配期不连库）。"""
     prod = _REAL_BUILD_PRODUCTION_TOOLS()
-    default = build_tools()
+    memory = build_inmemory_tools()
     assert type(tool_by_name(prod, "ProductTool")._repo).__name__ == "MySQLProductRepository"
     assert type(tool_by_name(prod, "MerchantTool")._repo).__name__ == "MySQLMerchantRepository"
-    assert [t.name for t in prod] == [t.name for t in default]
-    assert [type(t).__name__ for t in prod[1:]] == [type(t).__name__ for t in default[1:]]
+    assert [t.name for t in prod] == [t.name for t in memory]
+    assert [type(t).__name__ for t in prod[1:]] == [type(t).__name__ for t in memory[1:]]
 
 
 def test_tests_are_pinned_to_the_inmemory_world():
@@ -381,6 +383,8 @@ def test_single_source_assembly_feeds_the_production_world(monkeypatch):
 
     sentinel = object()
     monkeypatch.setattr("pra.tools.build_production_tools", lambda: sentinel)
+    # LLM 后端按需构造真网关（读 .env 凭据），而本用例只验工具世界的注入接缝。
+    monkeypatch.setattr(wiring, "build_llm_backend", lambda *, tools=None: AlwaysRaiseBackend())
     monkeypatch.setattr(wiring, "build_agent_graph", fake_build_agent_graph)
     monkeypatch.setattr(wiring, "_graph", None)
 
@@ -396,13 +400,13 @@ def test_single_source_assembly_feeds_the_production_world(monkeypatch):
 # 生产路径端到端（真库，可跳过）：HTTP/落库入口 → MySQL → Evidence
 # ---------------------------------------------------------------------------
 
-# 只在真库种子里的商品（``tool.py`` 的 _DEFAULT_PRODUCTS 只有 P_88231）—— 用它才能在证据层面
-# 区分「读了真库」与「读了 InMemory 默认世界」。
+# 只在真库种子里的商品（``inmemory_world.py`` 的 _DEFAULT_PRODUCTS 只有 P_88231）—— 用它才能在证据层面
+# 区分「读了真库」与「读了 InMemory 世界」。
 _MYSQL_ONLY_PRODUCT = "P_77310"
 
 
 def _case_for_product(case_id: str) -> ProductReviewCase:
-    """COMPLEX 案件（brand 空缺 → R-301），商品只有真库有（与 InMemory 默认世界可区分）。"""
+    """COMPLEX 案件（brand 空缺 → R-301），商品只有真库有（与 InMemory 世界可区分）。"""
     return make_case(
         case_id=case_id, brand=None, product_id=_MYSQL_ONLY_PRODUCT, merchant_id="M_5512"
     )
@@ -454,13 +458,15 @@ async def test_production_path_reads_product_fact_from_mysql(monkeypatch):
     """生产装配 → 落库入口 → 图 → ProductTool → MySQL → PRODUCT_FACT 落 review_evidence。
 
     同一案件跑两遍做**回退反证**：生产装配（真库）应取到只存在于库中的商品并落证据；换回
-    InMemory 默认世界后该商品不存在，同一位置不应有 PRODUCT_FACT —— 若有人把生产装配改回
+    InMemory 世界后该商品不存在，同一位置不应有 PRODUCT_FACT —— 若有人把生产装配改回
     InMemory，前一半会立刻变红。
     """
     monkeypatch.setattr("pra.tools.build_production_tools", _REAL_BUILD_PRODUCTION_TOOLS)
-    # 本用例只验证 MySQL 链路：把生产装配的 RAG 侧钉回 InMemory 种子（scripted plan 分支 3 会调
-    # CaseSearch/PolicySearch，真实 RAG 在缺 rag extra / 模型缓存时会尝试联网下载模型而阻塞，
-    # 与「读真库商品」这一被测目标无关）。
+    # 图装配期按需构造真 LLM 网关（读 .env 凭据）；本用例只验证 MySQL 取证链路，
+    # 故注入确定性假后端（不联网、无真实模型）。
+    monkeypatch.setattr(wiring, "build_llm_backend", lambda *, tools=None: WalkthroughBackend())
+    # 本用例只验证 MySQL 链路：把生产装配的 RAG 侧钉回 InMemory 种子（真实 RAG 在缺 rag extra /
+    # 模型缓存时会尝试联网下载模型而阻塞，与「读真库商品」这一被测目标无关）。
     monkeypatch.setattr("pra.tools._build_production_case_index", _inmemory_case_index)
     monkeypatch.setattr("pra.tools._build_production_policy_index", _inmemory_policy_index)
     tag = uuid4().hex[:8]
@@ -474,11 +480,11 @@ async def test_production_path_reads_product_fact_from_mysql(monkeypatch):
         assert facts[0][2] == _MYSQL_ONLY_PRODUCT, "ref_id 必须是案件商品（真库读到的那个）"
         assert "version=1" in facts[0][3], "版本必须来自真库行（P_77310 的 version=1）"
 
-        monkeypatch.setattr("pra.tools.build_production_tools", build_tools)
+        monkeypatch.setattr("pra.tools.build_production_tools", build_inmemory_tools)
         monkeypatch.setattr(wiring, "_graph", None)
         out_mem = await ps.process_review(_case_for_product(memory_case_id))
         assert await _product_fact_rows(out_mem["run_id"]) == [], (
-            "InMemory 默认世界没有该商品 → 不应有 PRODUCT_FACT（本断言是上面那条的回退反证）"
+            "InMemory 世界没有该商品 → 不应有 PRODUCT_FACT（本断言是上面那条的回退反证）"
         )
     finally:
         await _drop_cases((mysql_case_id, memory_case_id))

@@ -59,7 +59,7 @@ def get_production_graph() -> CompiledStateGraph:
     工具世界取 ``pra.tools.build_production_tools()``（商品/商家读 MySQL，案例/政策读真实
     RAG），同一份列表分别交给 LLM 后端（渲染工具目录）与图；LLM 凭据取 ``Settings``（仓库根
     ``.env``），缺失即抛 ``RuntimeError``。测试/CI 由 ``tests/conftest.py`` 的 autouse fixture
-    把工具装配钉回 InMemory、LLM 装配钉回确定性桩。
+    把工具装配钉回 ``tests/inmemory_world.py`` 的 InMemory 世界，LLM 后端由各用例自行注入。
     """
     global _graph
     if _graph is None:

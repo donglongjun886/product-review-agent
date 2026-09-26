@@ -361,3 +361,89 @@ class NodePayloadBackend:
         if node not in self._payloads:
             raise LLMBackendError(f"test backend unknown node: {node}")
         return LLMResponse(content=self._payloads[node], tokens=5)
+
+
+_WALKTHROUGH_DECIDE = {
+    "decision": "HUMAN_REVIEW",
+    "risk_level": "MEDIUM",
+    "risk_type": ["POTENTIAL_IP_RISK"],
+    "confidence": 0.8,
+    "evidence_ids": [],
+    "policy": [],
+    "rationale": "test",
+}
+
+
+class WalkthroughBackend:
+    """测试用确定性后端：把四节点图驱动到终态（无网络、无真实模型语义，同 state 恒同输出）。
+
+    剧本：``hypothesize`` 固定 2 假设；``plan`` 首轮按案件标识调度 ProductTool + MerchantTool
+    （补齐本 listing 事实通道），其后一律 ``conclude``（保证回环必终止，不依赖收敛判定）；
+    ``reevaluate`` 恒「无更新 / INSUFFICIENT」；``decide`` 固定 HUMAN_REVIEW 提案（Gate 收口）。
+    需真实 MySQL / Chroma 链路或完整调查的用例不适用本替身。
+    """
+
+    name = "test-walkthrough"
+
+    def __init__(self) -> None:
+        self.plan_calls = 0
+        self.calls: list[str] = []  # 每次 complete 收到的 node
+
+    async def complete(
+        self, *, node: str, state: dict, json_schema: dict, feedback: list[str] | None = None
+    ) -> LLMResponse:
+        self.calls.append(node)
+        if node == "hypothesize":
+            return LLMResponse(content=hypothesize_json(), tokens=7)
+        if node == "plan":
+            self.plan_calls += 1
+            return LLMResponse(content=self._plan(state), tokens=7)
+        if node == "reevaluate":
+            return LLMResponse(
+                content=json_dumps(
+                    {
+                        "hypothesis_updates": [],
+                        "new_hypotheses": [],
+                        "evidence_sufficiency": "INSUFFICIENT",
+                        "conflicts": [],
+                        "rationale": "test",
+                    }
+                ),
+                tokens=7,
+            )
+        if node == "decide":
+            return LLMResponse(content=json_dumps(_WALKTHROUGH_DECIDE), tokens=7)
+        raise LLMBackendError(f"test backend unknown node: {node}")
+
+    def _plan(self, state: dict) -> str:
+        """首轮按 ``state["case"]`` 的两个标识调度事实工具；其后（或标识缺失）conclude。"""
+        if self.plan_calls > 1:
+            return json_dumps({"next_action": "conclude", "tools": [], "rationale": "test"})
+        case = state.get("case")
+        case = case if isinstance(case, dict) else {}
+        product = case.get("product")
+        product = product if isinstance(product, dict) else {}
+        tools: list[dict] = []
+        if product.get("product_id"):
+            tools.append(
+                {
+                    "tool": "ProductTool",
+                    "args": {"product_id": product["product_id"]},
+                    "reason": "核对商品在库事实",
+                    "priority": 1,
+                }
+            )
+        if case.get("merchant_id"):
+            tools.append(
+                {
+                    "tool": "MerchantTool",
+                    "args": {"merchant_id": case["merchant_id"], "window_days": 90},
+                    "reason": "核查商家系统性上架/下架历史",
+                    "priority": 2,
+                }
+            )
+        if not tools:
+            return json_dumps({"next_action": "conclude", "tools": [], "rationale": "test"})
+        return json_dumps(
+            {"next_action": "call_tools", "tools": tools, "rationale": "补齐事实通道"}
+        )

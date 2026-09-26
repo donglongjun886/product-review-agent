@@ -22,7 +22,11 @@ review_result（source_run_id 指向被采纳的 run），命中证据挂 review
   到达墙钟差（近似）。
 - 时间：所有时间列写 naive UTC（``_utcnow``），MySQL DATETIME(3) 存 naive。
 - 错误：图执行/落库异常向上抛出（HTTP 层转 500），已 commit 的 run/trace 行保留 —— 不吞异常、
-  不做部分回滚（crash 可查优先于 all-or-nothing）。
+  不做部分回滚（crash 可查优先于 all-or-nothing）。Agent 路径抛出前先落**显式终态**：
+  review_result 写 HUMAN_REVIEW + overrides 归因码 R6_INFRA_UNAVAILABLE，异常前真实出现的
+  evidence 照常落 review_evidence（hypotheses 只进该 ReviewDecision，无落库列），review_trace
+  追加一条 step_type="infra_error" 行承载错误摘要、R6 归因与两类计数（review_result 无 overrides
+  列），run/case 状态保持 RUNNING/INVESTIGATING。
 """
 
 from __future__ import annotations
@@ -37,11 +41,13 @@ from uuid import uuid4
 
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
+from pra.agent.guardrails.gate import R6_INFRA_UNAVAILABLE
 from pra.agent.state import build_initial_state
 from pra.domain.models import (
     Budget,
     Decision,
     Evidence,
+    Hypothesis,
     ProductReviewCase,
     ReviewDecision,
     RiskLevel,
@@ -307,6 +313,10 @@ async def run_and_persist(
     review_trace 并 commit（tools 节点每条 record 一行 TOOL_CALL，其余节点一行、step_type=
     节点名大写）→ ``aget_state`` 终态 decision 落 review_result + decision.evidence 全量落
     review_evidence → run/case 收尾 DECIDED。
+
+    异常里程碑：图执行或终态提取抛出时，先落 HUMAN_REVIEW + R6 归因的 review_result 与一条
+    ``step_type="infra_error"`` 的 review_trace 行（两者各自 commit），再原样向上抛出；run/case
+    状态不动，保留「悬空 run」语义供事后定位。
     """
     resolved_run_id = run_id or uuid4().hex
     case_id = case.case_id
@@ -377,92 +387,155 @@ async def run_and_persist(
             tags=["env:local", "source:http"],
             input={"case_id": case_id},
         )
-        with get_tracer().trace_root(root_ctx) as root:
-            async for chunk in app.astream(
-                build_initial_state(case), config, stream_mode="updates"
-            ):
-                for node_name, update in chunk.items():
-                    wall_now = time.perf_counter()
-                    node_latency_ms = max(int((wall_now - wall_prev) * 1000), 0)
-                    wall_prev = wall_now
+        # 异常前最近一次真实出现的证据/假设（异常终态用）。初始为空：缺失即缺失，不造证据。
+        latest_evidence: list[Evidence] = []
+        latest_hypotheses: list[Hypothesis] = []
+        try:
+            with get_tracer().trace_root(root_ctx) as root:
+                async for chunk in app.astream(
+                    build_initial_state(case), config, stream_mode="updates"
+                ):
+                    for node_name, update in chunk.items():
+                        wall_now = time.perf_counter()
+                        node_latency_ms = max(int((wall_now - wall_prev) * 1000), 0)
+                        wall_prev = wall_now
 
-                    budget = update.get("budget")
-                    if budget is None:
-                        # 无 budget 键（plan/reevaluate 短路）：tokens 记 0，但**不推进差分
-                        # 基线** —— 否则基线被重置为 0，后续节点会把全量当差值重复计。
-                        step_tokens = 0
-                    else:
-                        new_tokens = _token_count(budget)
-                        step_tokens = max(new_tokens - prev_budget_tokens, 0)  # 差分：首步用其值
-                        prev_budget_tokens = new_tokens  # 只对带 budget 的 update 更新基线
+                        budget = update.get("budget")
+                        if budget is None:
+                            # 无 budget 键（plan/reevaluate 短路）：tokens 记 0，但**不推进差分
+                            # 基线** —— 否则基线被重置为 0，后续节点会把全量当差值重复计。
+                            step_tokens = 0
+                        else:
+                            new_tokens = _token_count(budget)
+                            step_tokens = max(new_tokens - prev_budget_tokens, 0)  # 差分：首步用其值
+                            prev_budget_tokens = new_tokens  # 只对带 budget 的 update 更新基线
 
-                    if node_name == "tools":
-                        # tools 节点：每条 audit record 一行 TOOL_CALL（含边际增益 4 字段）；
-                        # 无 record 的访问（预算截断空批等）不落行、seq 不推进。
-                        records = list(update.get("tool_call_history") or [])
-                        for rec in records:
+                        # stream_mode="updates" 下单节点 update 只带自己返回的键（decide 步只有
+                        # decision），故按「键存在且非空即覆盖」累积，取异常前最后一次真实出现的
+                        # 列表；元素只认本域模型实例，过滤而非构造/补齐。
+                        raw_evidence = update.get("evidence")
+                        if raw_evidence:
+                            latest_evidence = [
+                                e for e in raw_evidence if isinstance(e, Evidence)
+                            ]
+                        raw_hypotheses = update.get("hypotheses")
+                        if raw_hypotheses:
+                            latest_hypotheses = [
+                                h for h in raw_hypotheses if isinstance(h, Hypothesis)
+                            ]
+
+                        if node_name == "tools":
+                            # tools 节点：每条 audit record 一行 TOOL_CALL（含边际增益 4 字段）；
+                            # 无 record 的访问（预算截断空批等）不落行、seq 不推进。
+                            records = list(update.get("tool_call_history") or [])
+                            for rec in records:
+                                seq += 1
+                                session.add(
+                                    ReviewTraceORM(
+                                        run_id=resolved_run_id,
+                                        seq=seq,
+                                        step_type="TOOL_CALL",
+                                        tool_name=rec.get("tool"),
+                                        input_json=_json_cap(rec.get("args")) if rec.get("args") else None,
+                                        output_json=_json_cap(rec),
+                                        tokens=int(rec.get("tokens") or 0),
+                                        latency_ms=int(rec.get("latency_ms") or 0),
+                                        created_at=_utcnow(),
+                                    )
+                                )
+                                trace_rows += 1
+                        else:
                             seq += 1
                             session.add(
                                 ReviewTraceORM(
                                     run_id=resolved_run_id,
                                     seq=seq,
-                                    step_type="TOOL_CALL",
-                                    tool_name=rec.get("tool"),
-                                    input_json=_json_cap(rec.get("args")) if rec.get("args") else None,
-                                    output_json=_json_cap(rec),
-                                    tokens=int(rec.get("tokens") or 0),
-                                    latency_ms=int(rec.get("latency_ms") or 0),
+                                    step_type=_NODE_STEP_TYPE.get(node_name, node_name.upper()),
+                                    tool_name=None,
+                                    input_json=_json_cap(
+                                        _node_input_summary(node_name, update, case_id)
+                                    ),
+                                    output_json=_json_cap(
+                                        _node_output_summary(node_name, update)
+                                    ),
+                                    tokens=step_tokens,
+                                    latency_ms=node_latency_ms,
                                     created_at=_utcnow(),
                                 )
                             )
                             trace_rows += 1
-                    else:
-                        seq += 1
-                        session.add(
-                            ReviewTraceORM(
-                                run_id=resolved_run_id,
-                                seq=seq,
-                                step_type=_NODE_STEP_TYPE.get(node_name, node_name.upper()),
-                                tool_name=None,
-                                input_json=_json_cap(
-                                    _node_input_summary(node_name, update, case_id)
-                                ),
-                                output_json=_json_cap(
-                                    _node_output_summary(node_name, update)
-                                ),
-                                tokens=step_tokens,
-                                latency_ms=node_latency_ms,
-                                created_at=_utcnow(),
-                            )
-                        )
-                        trace_rows += 1
-                    await session.commit()  # 每 update 后 commit：中途崩溃可查已落 trace
+                        await session.commit()  # 每 update 后 commit：中途崩溃可查已落 trace
 
-            logger.info(
-                "run_and_persist 图执行完成 case_id=%s run_id=%s trace_rows=%d",
-                case_id, resolved_run_id, trace_rows,
-            )
-
-            snapshot = await app.aget_state(config)
-            try:  # langgraph 1.2.11 StateSnapshot 为 NamedTuple（不可下标）
-                final_state = snapshot["values"]  # type: ignore[index]
-            except TypeError:
-                final_state = snapshot.values  # type: ignore[attr-defined]
-
-            decision = final_state.get("decision")
-            if isinstance(decision, ReviewDecision):
-                root.update(
-                    output={
-                        "decision": decision.decision.value,
-                        "risk_level": decision.risk_level.value,
-                    }
+                logger.info(
+                    "run_and_persist 图执行完成 case_id=%s run_id=%s trace_rows=%d",
+                    case_id, resolved_run_id, trace_rows,
                 )
 
-        if not isinstance(decision, ReviewDecision):
-            raise RuntimeError(
-                f"调查图执行完成但终态缺少 decision（run_id={resolved_run_id}, "
-                f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
+                snapshot = await app.aget_state(config)
+                try:  # langgraph 1.2.11 StateSnapshot 为 NamedTuple（不可下标）
+                    final_state = snapshot["values"]  # type: ignore[index]
+                except TypeError:
+                    final_state = snapshot.values  # type: ignore[attr-defined]
+
+                decision = final_state.get("decision")
+                if isinstance(decision, ReviewDecision):
+                    root.update(
+                        output={
+                            "decision": decision.decision.value,
+                            "risk_level": decision.risk_level.value,
+                        }
+                    )
+
+            if not isinstance(decision, ReviewDecision):
+                raise RuntimeError(
+                    f"调查图执行完成但终态缺少 decision（run_id={resolved_run_id}, "
+                    f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
+                )
+        except Exception as exc:
+            # 图执行/终态提取失败：先落显式终态（HUMAN_REVIEW + R6 归因）再原样上抛。
+            # review_result 无 overrides 列，R6 归因码落在 infra_error trace 的 output_json。
+            error_decision = ReviewDecision(
+                decision=Decision.HUMAN_REVIEW,
+                risk_level=RiskLevel.NONE,
+                risk_type=[],
+                decision_confidence=1.0,
+                evidence=latest_evidence,
+                hypothesis_trace=latest_hypotheses,
+                overrides=[R6_INFRA_UNAVAILABLE],
             )
+            await _upsert_result(
+                session, _result_payload(error_decision, case_id, resolved_run_id)
+            )
+            await session.commit()
+
+            # 异常前已取得的证据照常落 review_evidence（与正常路径同构：decision.evidence 全量落库）
+            # —— 只写真实观测到的行，不为缺席造证据。
+            for ev in error_decision.evidence:
+                _evidence_row(session, resolved_run_id, ev)
+
+            seq += 1
+            session.add(
+                ReviewTraceORM(
+                    run_id=resolved_run_id,
+                    seq=seq,
+                    step_type="infra_error",
+                    tool_name=None,
+                    input_json=None,
+                    output_json=_json_cap(
+                        {
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "overrides": [R6_INFRA_UNAVAILABLE],
+                            "evidence_count": len(error_decision.evidence),
+                            "hypotheses_count": len(error_decision.hypothesis_trace),
+                        }
+                    ),
+                    tokens=0,
+                    latency_ms=0,
+                    created_at=_utcnow(),
+                )
+            )
+            await session.commit()
+            raise
 
         # 不变量：分流命中证据经上文已落本 run，且从不进 AgentState（build_initial_state
         # evidence=[]）—— decision.evidence 不应含同源行，否则 RULE_HIT 重复落库、

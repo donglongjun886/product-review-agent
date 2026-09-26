@@ -4,14 +4,14 @@
 下架/改标题重上架次数、信用分。
 
 ``MerchantRepository`` 是窄接口（按 merchant_id 取行为画像；返回 None = 商家不存在 → ``ok=False``）；
-``InMemoryMerchantRepository`` 是 **Mock 默认实现**（默认装配路径恒用它，CI 不连库、评测可重放），
-真实实现见 ``pra.tools.merchant.mysql_repo.MySQLMerchantRepository``。本工具不含业务判定：只
-交付「取到的事实」，「违规 + 下架 + 改标题重上架是否构成规避」归 guardrails/reevaluate。
+数据源**构造时必填**，真实实现见 ``pra.tools.merchant.mysql_repo.MySQLMerchantRepository``。
+本工具不含业务判定：只交付「取到的事实」，「违规 + 下架 + 改标题重上架是否构成规避」归
+guardrails/reevaluate。
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
@@ -52,38 +52,11 @@ class MerchantRepository(Protocol):
     不变量：商家不存在返回 ``None``（确定性「无结果」，由工具转 ``ok=False``）；基础设施异常由
     实现直接抛出，不得吞成 ``None``。
 
-    ``window_days`` 只作调用方语义声明 —— **两个实现都返回数据源侧预计算的固定窗口快照，不按
-    window_days 重算**。按墙钟重算会让同一案件随运行时间改变结果（破坏可重放），也会让真库世界
-    与 InMemory 世界不等价；窗口切分属数据源侧职责（如离线物化不同窗口的聚合）。
+    ``window_days`` 只作调用方语义声明 —— 实现返回数据源侧预计算的固定窗口快照，**不按
+    window_days 重算**。按墙钟重算会让同一案件随运行时间改变结果（破坏可重放）；窗口切分属
+    数据源侧职责（如离线物化不同窗口的聚合）。
     """
     async def get_profile(self, merchant_id: str, window_days: int) -> MerchantProfile | None: ...
-
-
-_DEFAULT_MERCHANTS: Mapping[str, dict[str, Any]] = {
-    "M_5512": {
-        "merchant_id": "M_5512",
-        "similar_product_count": 23,
-        "removals": 5,
-        "title_relisting_count": 3,
-        "credit_score": 62,
-    },
-}
-
-
-class InMemoryMerchantRepository:
-    """MerchantRepository 的 Mock 默认实现（仅供开发/测试/演示）。
-
-    种子画像按 merchant_id 匹配；``window_days`` 在 mock 中不改变聚合结果（真实实现按其
-    截取事件窗口）。
-    """
-
-    def __init__(self, data: Mapping[str, dict[str, Any]] | None = None) -> None:
-        self._store: dict[str, MerchantProfile] = {
-            mid: MerchantProfile.model_validate(row) for mid, row in (data or _DEFAULT_MERCHANTS).items()
-        }
-
-    async def get_profile(self, merchant_id: str, window_days: int) -> MerchantProfile | None:
-        return self._store.get(merchant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +87,8 @@ class MerchantTool:
     measured_dimensions: frozenset[str] = frozenset({DIM_MERCHANT_PROFILE})
     measurement_available: bool = True
 
-    def __init__(self, repo: MerchantRepository | None = None) -> None:
-        self._repo: MerchantRepository = repo or InMemoryMerchantRepository()
+    def __init__(self, repo: MerchantRepository) -> None:
+        self._repo: MerchantRepository = repo
 
     async def call(self, args: MerchantArgs, ctx: ToolContext) -> MerchantResult:
         profile = await self._repo.get_profile(args.merchant_id, window_days=args.window_days)

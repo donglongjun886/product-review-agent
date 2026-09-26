@@ -82,7 +82,6 @@ def test_plan_state_payload_passes_full_case():
         "hypotheses",
         "evidence",
         "case",
-        "measurement_capabilities",
         "required_measurement_coverage",
     }
     assert payload["case"] == state["case"].model_dump(mode="json")

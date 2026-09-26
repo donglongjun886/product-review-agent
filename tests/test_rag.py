@@ -4,7 +4,7 @@
 - corpus loader / schema 校验：Policy/Case KB 规模与唯一性、≥2 条 EXPIRED、meta 隔离声明；
 - **隔离红线**：Case KB 的 case_id 与 eval_data v2 全部 case 标识（含 InMemory 种子先例）无交集，
   防评测作弊；
-- ``build_tools()`` 默认世界仍是 4 个 InMemory 工具。
+- ``build_inmemory_tools()``（``tests/inmemory_world.py``）仍是 4 个 InMemory 工具。
 
 **chroma 真实检索的离线验收用例已整体移除**：它们靠一个测试自持的假编码器（词面 sha256 特征）
 离线跑，验的是管道而非检索质量；假编码器及其用例一并删除后，chroma 检索只剩
@@ -20,11 +20,13 @@ import json
 from pathlib import Path
 
 from helpers import tool_by_name
+from inmemory_world import (
+    _DEFAULT_PRECEDENTS,
+    InMemoryPolicyIndex,
+    build_inmemory_tools,
+)
 
 from pra.rag.corpus import load_cases, load_policies
-from pra.tools import build_tools
-from pra.tools.case_search.tool import _DEFAULT_PRECEDENTS
-from pra.tools.policy_search.tool import InMemoryPolicyIndex
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_V2 = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
@@ -44,7 +46,7 @@ def _eval_case_ids() -> set[str]:
             lineage = obj.get("lineage") or {}
             if lineage.get("seed_case_id"):
                 ids.add(lineage["seed_case_id"])
-    # 追加 InMemory 种子先例（case_search.tool._DEFAULT_PRECEDENTS / CASE_1832 等）
+    # 追加 InMemory 种子先例（inmemory_world._DEFAULT_PRECEDENTS / CASE_1832 等）
     for row in _DEFAULT_PRECEDENTS:
         ids.add(row["case_id"])
     return ids
@@ -89,9 +91,9 @@ _EXPECTED_TOOLS = [
 ]
 
 
-def test_build_tools_default_world_is_inmemory() -> None:
-    tools = build_tools()
+def test_build_inmemory_tools_uses_inmemory_indexes() -> None:
+    tools = build_inmemory_tools()
     assert [t.name for t in tools] == _EXPECTED_TOOLS
-    # 默认世界的两个检索工具注入 InMemory 索引（确定性可重放的种子）
+    # tests 世界的两个检索工具注入 InMemory 索引（确定性可重放的种子）
     assert type(tool_by_name(tools, "CaseSearchTool")._index).__name__ == "InMemoryCaseIndex"
     assert isinstance(tool_by_name(tools, "PolicySearchTool")._index, InMemoryPolicyIndex)

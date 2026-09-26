@@ -1,12 +1,12 @@
 """CaseSearchTool：先例检索工具（RAG · Case KB）。
 
-默认/评测世界用 ``InMemoryCaseIndex``（Mock：只做元数据过滤 + 种子分排序，``query`` 不参与匹配），
-生产/HTTP 入口注入真实 RAG 索引；``retrieval_score`` 是检索分、不是语义相似度，也不做量纲适配。
+生产/HTTP 入口**构造时必填**注入真实 RAG 索引（测试世界见 ``tests/inmemory_world.py``）；
+``retrieval_score`` 是检索分、不是语义相似度，也不做量纲适配。
 """
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
@@ -51,53 +51,6 @@ class CaseIndex(Protocol):
     async def search(self, query: str, filters: CaseSearchFilters, top_k: int) -> list[CaseHit]: ...
 
 
-_DEFAULT_PRECEDENTS: list[dict[str, Any]] = [
-    {
-        "case_id": "CASE_1832",
-        "retrieval_score": 0.86,
-        "decision": "REJECT",
-        "risk_level": "HIGH",
-        "risk_type": ["POTENTIAL_IP_RISK"],
-        "summary": "无品牌标识 + 标题含高仿/复刻规避用语 + 商家多次改标题重上架",
-        "key_evidence": ["text_evasion_word", "merchant_history>=5_removals"],
-        "policy_refs": ["POLICY_3.2"],
-        "category": "女鞋/运动鞋",
-    },
-    {
-        "case_id": "CASE_0911",
-        "retrieval_score": 0.31,
-        "decision": "PASS",
-        "risk_level": "NONE",
-        "risk_type": [],
-        "summary": "普通休闲鞋，无品牌标识且无规避用语",
-        "key_evidence": [],
-        "policy_refs": [],
-        "category": "女鞋/运动鞋",
-    },
-]
-
-
-class InMemoryCaseIndex:
-    """``CaseIndex`` 的 Mock 默认实现（仅供开发/测试/演示）。
-
-    检索 = 元数据过滤（category 精确 / risk_type 交叠）+ 种子分降序 + top_k；**query 不参与匹配**。
-    """
-
-    def __init__(self, precedents: list[dict[str, Any]] | None = None) -> None:
-        # 保留原始行（含元数据过滤字段 category），检索过滤后再校验为 CaseHit。
-        self._rows: list[dict[str, Any]] = list(precedents or _DEFAULT_PRECEDENTS)
-
-    async def search(self, query: str, filters: CaseSearchFilters, top_k: int) -> list[CaseHit]:
-        rows = self._rows
-        if filters.category:
-            rows = [r for r in rows if r.get("category") == filters.category]
-        if filters.risk_type:
-            wanted = set(filters.risk_type)
-            rows = [r for r in rows if wanted & set(r.get("risk_type", []))]
-        ranked = sorted(rows, key=lambda r: r.get("retrieval_score", 0.0), reverse=True)
-        return [CaseHit.model_validate(r) for r in ranked[:top_k]]
-
-
 # ---------------------------------------------------------------------------
 # Tool
 # ---------------------------------------------------------------------------
@@ -121,8 +74,8 @@ class CaseSearchTool:
     description = "检索历史人工裁决的相似案件（先例），返回 Top-K 相似案例及其决策/风险类型/关键证据/适用政策"
     args_model = CaseSearchArgs
 
-    def __init__(self, index: CaseIndex | None = None) -> None:
-        self._index: CaseIndex = index or InMemoryCaseIndex()
+    def __init__(self, index: CaseIndex) -> None:
+        self._index: CaseIndex = index
 
     async def call(self, args: CaseSearchArgs, ctx: ToolContext) -> CaseSearchResult:
         hits = await self._index.search(args.query, args.filters, top_k=args.top_k)

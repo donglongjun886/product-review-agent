@@ -2,9 +2,9 @@
 
 asyncio 由 pyproject 的 asyncio_mode="auto" 驱动。
 ``_disable_langfuse_tracing`` 保证测试永不联网、观测为 no-op（见下）。
-``_production_tools_use_inmemory_world`` / ``_production_entry_uses_stub_llm`` 把生产入口
-的工具与 LLM 装配钉回确定性桩世界（见下）—— LLM 后端**不再有进程级全局**，注入一律经
-``build_agent_graph(llm=...)``，故测试之间无需还原任何全局状态。
+``_production_tools_use_inmemory_world`` 把生产入口的工具装配钉回 InMemory 测试世界（见下）。
+LLM 后端**不再有进程级全局**，注入一律经 ``build_agent_graph(llm=...)``，故测试之间无需还原
+任何全局状态。
 """
 
 from __future__ import annotations
@@ -37,27 +37,13 @@ def _production_tools_use_inmemory_world(monkeypatch):
 
     生产入口唯一装配处 ``pra.wiring.get_production_graph`` 按设计调
     ``pra.tools.build_production_tools()`` 读真库商品表；而测试必须无库可跑（CI 上没有
-    MySQL），故把该装配函数替换为 ``build_tools()``。真库集成测试不依赖本 fixture —— 它们自行
-    把真实装配函数换回去并显式连库。
+    MySQL），故把该装配函数替换为 ``build_inmemory_tools()``。InMemory 世界已从
+    ``pra.tools`` 移到 ``tests/inmemory_world.py``（tests 无 ``__init__.py``，按仓库约定
+    以顶层模块名导入）。真库集成测试不依赖本 fixture —— 它们自行把真实装配函数换回去并
+    显式连库。
     """
+    from inmemory_world import build_inmemory_tools
+
     import pra.tools as tools_pkg
-    from pra.tools import build_tools
 
-    monkeypatch.setattr(tools_pkg, "build_production_tools", build_tools)
-
-
-@pytest.fixture(autouse=True)
-def _production_entry_uses_stub_llm(monkeypatch):
-    """单测/CI 不调真实模型：把生产入口的 LLM 装配钉回 ``ScriptedLLMBackend``。
-
-    生产入口唯一装配处 ``pra.wiring.get_production_graph`` 按设计调
-    ``pra.wiring.build_llm_backend`` 读 ``Settings``（本机 `.env` 配了真实 key）；不钉回则走生产
-    入口的用例会真的联网调模型：结果不确定、按量计费，CI 上没有凭据还会直接报错。故把该装配
-    函数替换为构造确定性桩的替身（签名吃 ``tools=`` 关键字）。
-    """
-    from stub_llm import ScriptedLLMBackend
-
-    monkeypatch.setattr(
-        "pra.wiring.build_llm_backend",
-        lambda *, tools=None: ScriptedLLMBackend(),
-    )
+    monkeypatch.setattr(tools_pkg, "build_production_tools", build_inmemory_tools)

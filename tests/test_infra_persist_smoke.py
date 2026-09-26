@@ -7,6 +7,8 @@
 因此本测试不得注入 ``_env_file=None``、不得 monkeypatch ``db._settings``，必须经
 ``get_sessionmaker()`` 默认路径；覆盖 COMPLEX（brand 空缺 → R-301 → Agent 图）与
 PASS（规则直判）各一发，断言五表落库行数与关键列，``finally`` 按 case_id 清理。
+COMPLEX 分支经生产入口图，故由用例注入确定性 LLM 替身（``WalkthroughBackend``）并重置图单例，
+不构造真实 LLM 网关；工具装配仍由 ``tests/conftest.py`` 的 autouse fixture 钉在 InMemory 世界。
 MySQL 未起时跳过，配置层缺陷另有 ``test_infra_settings.py`` 纯单测兜底（恒跑）。
 """
 
@@ -17,9 +19,10 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import make_case
+from helpers import WalkthroughBackend, make_case
 from sqlalchemy import text
 
+from pra import wiring
 from pra.domain.models import ProductReviewCase
 from pra.infra.db import Settings, get_sessionmaker
 from pra.infra.persist_service import process_review
@@ -86,7 +89,12 @@ async def _cleanup(case_ids: tuple[str, str]) -> None:
         await s.commit()
 
 
-async def test_persist_smoke_two_branches():
+async def test_persist_smoke_two_branches(monkeypatch):
+    # COMPLEX 分支经生产入口图：注入确定性 LLM 替身并重置图单例，免建真实 LLM 网关。
+    monkeypatch.setattr(
+        wiring, "build_llm_backend", lambda *, tools=None: WalkthroughBackend()
+    )
+    monkeypatch.setattr(wiring, "_graph", None)
     tag = uuid4().hex[:8]
     cx_id, pass_id = f"PYTEST_SMOKE_CMPLX_{tag}", f"PYTEST_SMOKE_PASS_{tag}"
     ids = (cx_id, pass_id)

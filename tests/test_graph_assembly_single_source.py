@@ -19,6 +19,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from helpers import AlwaysRaiseBackend
 
 from pra import wiring
 from pra.infra import persist_service as ps
@@ -36,8 +37,14 @@ _FORBIDDEN_ENTRY_ATTRS = (
 )
 
 
-def test_get_production_graph_is_a_process_singleton():
-    """(a) 单例同一性：连续两次取图是同一实例（模块级缓存生效，不再双份单例）。"""
+def test_get_production_graph_is_a_process_singleton(monkeypatch):
+    """(a) 单例同一性：连续两次取图是同一实例（模块级缓存生效，不再双份单例）。
+
+    ``monkeypatch`` 注入必抛后端并清空图缓存 —— 本用例只校验「取两次是同一实例」，
+    不构造真 LLM 后端（不读 Settings / 凭据）。
+    """
+    monkeypatch.setattr(wiring, "build_llm_backend", lambda *, tools=None: AlwaysRaiseBackend())
+    monkeypatch.setattr(wiring, "_graph", None)
     assert wiring.get_production_graph() is wiring.get_production_graph()
 
 

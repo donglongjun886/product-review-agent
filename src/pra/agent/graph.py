@@ -167,8 +167,8 @@ def build_agent_graph(
     """装配并编译复杂风险调查子图。
 
     ``tools`` 与 ``llm`` 均为**必填的显式依赖**：没有缺省值、没有进程级全局、不回落任何桩
-    —— 生产（``pra.wiring``）、评测（``pra.evaluation.harness.agent_scheme``）、测试各自
-    注入自己的世界。
+    —— 生产（组合根 ``pra.wiring``）、评测（入口 ``scripts/run_evaluation.py`` 与
+    ``pra/evaluation/``）、测试各自注入自己的世界。
 
     :param tools: ``Tool`` 列表（生产 ``pra.tools.build_production_tools()``；评测/测试显式
         装配自己的工具世界），经 ``make_tools_node(tools)`` 闭包工厂注入 tools 节点。

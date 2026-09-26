@@ -15,7 +15,15 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from helpers import all_measureable_caps, covered_evidence, ev, make_case, measurement
+from helpers import (
+    WalkthroughBackend,
+    all_measureable_caps,
+    covered_evidence,
+    ev,
+    make_case,
+    measurement,
+)
+from inmemory_world import InMemoryMerchantRepository, InMemoryProductRepository
 
 from pra.agent.guardrails.measurements import (
     ALWAYS_COVERED_DIMENSIONS,
@@ -211,7 +219,12 @@ def test_brand_missing_alone_is_not_text_positive():
 
 
 def test_capabilities_from_tools_reads_declared_dimensions():
-    caps = capabilities_from_tools([ProductTool(), MerchantTool()])
+    caps = capabilities_from_tools(
+        [
+            ProductTool(repo=InMemoryProductRepository()),
+            MerchantTool(repo=InMemoryMerchantRepository()),
+        ]
+    )
     assert caps[DIM_LISTING_REGISTRY] and caps[DIM_MERCHANT_PROFILE]
     assert caps[DIM_TEXT_COMPLIANCE] is True  # 纯函数维度恒可测
     assert caps[DIM_POLICY_CITATION] is False  # 没有检索工具
@@ -224,14 +237,13 @@ async def test_graph_writes_tool_derived_capabilities_into_state():
     ⇒ 生产环境的"测不出"被误判成"可测却没测"（NOT_MEASURED，可补救），而不是
     UNMEASURABLE（环境缺失，重跑无用）。
     """
-    from stub_llm import ScriptedLLMBackend
+    from inmemory_world import build_inmemory_tools
 
     from pra.agent.graph import build_agent_graph
     from pra.agent.state import build_initial_state
-    from pra.tools import build_tools
 
-    tools = build_tools()
-    graph = build_agent_graph(tools=tools, llm=ScriptedLLMBackend(), checkpointer=None)
+    tools = build_inmemory_tools()
+    graph = build_agent_graph(tools=tools, llm=WalkthroughBackend(), checkpointer=None)
     state = await graph.ainvoke(
         build_initial_state(make_case()),
         {"configurable": {"thread_id": "caps-tool-derived"}},

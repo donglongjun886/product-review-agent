@@ -1,13 +1,13 @@
 """PolicySearchTool：政策依据检索工具（RAG · Policy KB）。
 
-默认/评测世界用 ``InMemoryPolicyIndex``（Mock：只做元数据过滤，``query`` 不参与匹配），
-生产/HTTP 入口注入真实 RAG 索引；本工具不含业务判定，每个 hit → 1 条 ``POLICY_REF`` 证据。
+生产/HTTP 入口**构造时必填**注入真实 RAG 索引（测试世界见 ``tests/inmemory_world.py``）；
+本工具不含业务判定，每个 hit → 1 条 ``POLICY_REF`` 证据。
 """
 
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
@@ -56,59 +56,6 @@ class PolicyIndex(Protocol):
     ) -> list[PolicyClauseHit]: ...
 
 
-_DEFAULT_CLAUSES: list[dict[str, Any]] = [
-    {
-        "policy_id": "POLICY_3.2",
-        "version": 2,
-        "clause_id": "POLICY_3.2_v2_c1",
-        "title": "标题/描述使用仿冒规避用语",
-        "text": "商品标题或描述使用高仿、复刻、1:1 等仿冒规避用语且无品牌授权，判定为高风险，转人工审核处理",
-        "category": "女鞋/运动鞋",
-        "risk_type": ["POTENTIAL_IP_RISK"],
-        "status": "EFFECTIVE",
-        "effective_date": "2024-03-01",
-    },
-    {
-        "policy_id": "POLICY_3.1",
-        "version": 1,
-        "clause_id": "POLICY_3.1_v1_c2",
-        "title": "品牌词滥用（旧版）",
-        "text": "标题/描述不得出现未授权品牌词（旧版，已失效）",
-        "category": "全类目",
-        "risk_type": ["POTENTIAL_IP_RISK"],
-        "status": "EXPIRED",
-        "effective_date": "2023-01-01",
-    },
-]
-
-
-class InMemoryPolicyIndex:
-    """``PolicyIndex`` 的 Mock 默认实现（仅供开发/测试/演示）。
-
-    检索 = 版本有效性 + 元数据过滤（category / risk_type）+ top_k 截断；**query 不参与匹配**。
-    """
-
-    def __init__(self, clauses: list[dict[str, Any]] | None = None) -> None:
-        self._rows: list[dict[str, Any]] = list(clauses or _DEFAULT_CLAUSES)
-
-    async def search(
-        self,
-        query: str,
-        filters: PolicySearchFilters,
-        top_k: int,
-        effective_only: bool,
-    ) -> list[PolicyClauseHit]:
-        rows = self._rows
-        if effective_only:
-            rows = [r for r in rows if r.get("status") == "EFFECTIVE"]
-        if filters.category:
-            rows = [r for r in rows if r.get("category") in (None, filters.category, "全类目")]
-        if filters.risk_type:
-            wanted = set(filters.risk_type)
-            rows = [r for r in rows if wanted & set(r.get("risk_type", []))]
-        return [PolicyClauseHit.model_validate(r) for r in rows[:top_k]]
-
-
 # ---------------------------------------------------------------------------
 # Tool
 # ---------------------------------------------------------------------------
@@ -133,8 +80,8 @@ class PolicySearchTool:
     description = "检索当前有效平台政策条款（按类目/风险类型过滤），返回条款原文与版本引用"
     args_model = PolicySearchArgs
 
-    def __init__(self, index: PolicyIndex | None = None) -> None:
-        self._index: PolicyIndex = index or InMemoryPolicyIndex()
+    def __init__(self, index: PolicyIndex) -> None:
+        self._index: PolicyIndex = index
 
     async def call(self, args: PolicySearchArgs, ctx: ToolContext) -> PolicySearchResult:
         hits = await self._index.search(

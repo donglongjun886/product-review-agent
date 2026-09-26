@@ -1,10 +1,9 @@
 -- ============================================================================
 -- product-review-agent · 商家行为画像 DDL + 开发/评测种子（迁移 004）
 -- ============================================================================
--- 背景：MerchantTool 此前只读进程内种子（工具默认 _DEFAULT_MERCHANTS）。本迁移把
--- 「商家行为画像」落到真库，供 pra/tools/merchant/mysql_repo.py 的
--- MySQLMerchantRepository 读取。默认装配路径（MerchantTool() / build_tools()）**仍是
--- InMemory**；生产与评测入口经 build_production_tools() 显式读本库。
+-- 背景：本迁移把「商家行为画像」落到真库，供 pra/tools/merchant/mysql_repo.py 的
+-- MySQLMerchantRepository 读取；生产与评测入口经 build_production_tools() 构造该实现，
+-- 测试世界的数据源见 tests/inmemory_world.py。
 --
 -- 字段口径：只建 MerchantProfile / 决策链真正消费的列（merchant_id /
 -- similar_product_count / removals / title_relisting_count / credit_score）；

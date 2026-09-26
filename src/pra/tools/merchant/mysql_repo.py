@@ -10,7 +10,7 @@ docstring 的口径说明）。按墙钟重算会让同一案件随运行时间�
 
 坑：构造期与 import 期都不建 engine / 不连库（engine 经 ``get_sessionmaker`` 懒加载，首次
 ``get_profile`` 才建立）；async engine 绑定创建它的 event loop，跨 loop 复用会报
-``attached to a different loop``（见 ``pra.infra.db``）。装配入口：``build_tools(merchant_repo=…)``。
+``attached to a different loop``（见 ``pra.infra.db``）。装配入口：``build_production_tools()``。
 """
 
 from __future__ import annotations

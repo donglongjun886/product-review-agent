@@ -28,6 +28,10 @@ base-url 同理。API key 必填 —— 缺 key 预检即报错，避免整卷�
 ``EvalRecord`` 不含墙钟 latency（进程相关量会让跨 run 比对漂移），墙钟只进进程内进度打印与
 报告。观测：agent / single 臂每案一条 root trace，整轮结束 ``flush_tracer()``
 （``pra.observability.tracing``；无凭据 = NullTracer 全 no-op）。
+
+单案保护：某案抛异常只作废该案（记入该臂 failures + 报告/stderr 明细），整臂与整轮照常出数；
+失败案不产出任何 ``EvalRecord``、绝不写成 ``HUMAN_REVIEW``，也不进任何指标分母（报告与 JSON
+payload 的 ``failed`` 计数显式标记）。
 """
 
 import argparse
@@ -38,6 +42,7 @@ import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -89,6 +94,20 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # 数据集 / 凭据 / 后端装配
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ArmFailure:
+    """一臂内单个失败案：只承载「哪一案、什么异常」，不产出 EvalRecord。
+
+    :param eval_case_id: 失败案的 ``EvalCase.eval_case_id``；
+    :param error_type: 异常类型短名（``type(exc).__name__``）；
+    :param reason: 异常消息（``str(exc)``）。
+    """
+
+    eval_case_id: str
+    error_type: str
+    reason: str
 
 
 def _resolve_data_path(raw: str) -> Path:
@@ -462,21 +481,39 @@ async def _run_arm(
     *,
     concurrency: int,
     progress: bool,
-) -> list[tuple[EvalRecord, float]]:
-    """并发跑一臂，返回按用例原序的 ``(record, 进程内墙钟毫秒)`` 列表。
+) -> tuple[list[tuple[EvalRecord, float]], list["_ArmFailure"]]:
+    """并发跑一臂，返回 ``(按用例原序的 (record, 进程内墙钟毫秒) 列表, 失败案列表)``。
 
-    用例之间天然隔离：每案由 ``build_initial_state`` 起算、thread_id 唯一，图无
-    checkpointer、无跨案可变状态。墙钟**只回报告**，不写进 EvalRecord。
+    单案异常（基础设施故障）只让该案进 failures，不产出 EvalRecord、不中断整臂：失败案
+    绝不写成 HUMAN_REVIEW（否则基础设施故障会被伪装成「克制转人工」，污染混淆矩阵与
+    human_review_rate）。用例之间天然隔离：每案由 ``build_initial_state`` 起算、thread_id
+    唯一，图无 checkpointer、无跨案可变状态。墙钟**只回报告**，不写进 EvalRecord。
     """
     sem = asyncio.Semaphore(max(1, concurrency))
     total = len(cases)
     done = 0
 
-    async def _one(case: EvalCase) -> tuple[EvalRecord, float]:
+    async def _one(case: EvalCase) -> tuple[EvalRecord, float] | _ArmFailure:
         nonlocal done
         async with sem:
             t0 = time.monotonic()
-            rec = await run_one(case)
+            try:
+                rec = await run_one(case)
+            # 单案 infra 故障要整类隔离：任何一种异常都只废该案
+            except Exception as exc:  # noqa: BLE001
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                done += 1
+                if progress:
+                    print(
+                        f"  [{done}/{total}] {case.eval_case_id:<12} → FAILED "
+                        f"({type(exc).__name__}) ({elapsed_ms / 1000:.1f}s)",
+                        flush=True,
+                    )
+                return _ArmFailure(
+                    eval_case_id=case.eval_case_id,
+                    error_type=type(exc).__name__,
+                    reason=str(exc),
+                )
             elapsed_ms = (time.monotonic() - t0) * 1000
             done += 1
             if progress:
@@ -487,7 +524,10 @@ async def _run_arm(
                 )
             return rec, elapsed_ms
 
-    return list(await asyncio.gather(*[_one(c) for c in cases]))
+    settled = list(await asyncio.gather(*[_one(c) for c in cases]))
+    ok = [item for item in settled if isinstance(item, tuple)]
+    failures = [item for item in settled if isinstance(item, _ArmFailure)]
+    return ok, failures
 
 
 # ---------------------------------------------------------------------------
@@ -507,8 +547,13 @@ def _ratio_cell(value: float | None, numer: int, denom: int) -> str:
     return f"{value:.3f}({numer}/{denom})"
 
 
-def _metrics_row(arm: str, m: DecisionMetrics, eng: EngineeringMetrics) -> list[str]:
-    """三臂并排表的一行：业务比率（带分子/分母）+ 混淆计数 + 成本均值。"""
+def _metrics_row(
+    arm: str, m: DecisionMetrics, eng: EngineeringMetrics, failed: int
+) -> list[str]:
+    """三臂并排表的一行：业务比率（带分子/分母）+ 混淆计数 + 失败案数 + 成本均值。
+
+    :param failed: 该臂失败案数（失败案不产 EvalRecord，故不进任何指标分母）。
+    """
     return [
         arm,
         _ratio_cell(m.accuracy, m.tp + m.tn, m.auto_decidable_total),
@@ -519,6 +564,7 @@ def _metrics_row(arm: str, m: DecisionMetrics, eng: EngineeringMetrics) -> list[
         _ratio_cell(m.human_review_rate, m.human_pred_total, m.total),
         _ratio_cell(m.automation_coverage, m.total - m.human_pred_total, m.total),
         f"{m.tp}/{m.fp}/{m.tn}/{m.fn}",
+        f"{failed}",
         f"llm={_num(eng.llm_calls.mean)} tool={_num(eng.tool_calls.mean)} tok={_num(eng.tokens.mean)}",
     ]
 
@@ -533,6 +579,7 @@ _METRIC_HEADERS = [
     "human_review_rate",
     "automation_coverage",
     "TP/FP/TN/FN",
+    "failed",
     "成本均值(llm/tool/tok)",
 ]
 
@@ -559,10 +606,14 @@ def _render_report(
     cases: list[EvalCase],
     metrics: dict[str, DecisionMetrics],
     engineering: dict[str, EngineeringMetrics],
+    failures: dict[str, list["_ArmFailure"]],
     llm_config: dict,
     out_path: str | None,
 ) -> str:
-    """渲染 Console 报告：结论边界 + 三臂并排指标表 + 分母/墙钟注记。"""
+    """渲染 Console 报告：结论边界 + 三臂并排指标表 + 分母/失败案/墙钟注记。
+
+    :param failures: 各臂失败案列表（不进任何指标分母，明细在此如实列出）。
+    """
     out: list[str] = []
     add = out.append
     m0 = metrics["rule"]
@@ -584,13 +635,28 @@ def _render_report(
     add("指标口径: accuracy/precision/wrong_auto_decision_rate 与 TP/FP/TN/FN 只在 AUTO_DECIDABLE 案；")
     add("  recall/reject_unhandled 分母 = 真值 REJECT 案；human_review_rate/automation_coverage 分母 = 全量")
     add("  比率形如 值(分子/分母)；分母为 0 → '-'（不硬造 0/∞）")
+    add("  失败案（单案基础设施异常）不产出记录：全部分母均**不含失败案**，分母口径见上方分子/分母")
     add("-" * 100)
-    rows = [_metrics_row(arm, metrics[arm], engineering[arm]) for arm in ARMS]
+    rows = [
+        _metrics_row(arm, metrics[arm], engineering[arm], len(failures[arm])) for arm in ARMS
+    ]
     add(_table(_METRIC_HEADERS, rows))
     add(
         f"  分母注记: AUTO_DECIDABLE 案 {m0.auto_decidable_total} / 真值 REJECT 案 {m0.reject_truth} / "
-        f"全量 {m0.total} —— 三组分母不同，勿混读"
+        f"全量 {m0.total} —— 三组分母不同，勿混读（均不含失败案）"
     )
+    add("-" * 100)
+    add("失败案明细（单案异常只废该案；不写成任何业务判定）:")
+    for arm in ARMS:
+        arm_failures = failures[arm]
+        if not arm_failures:
+            add(f"  {arm:<7} 无失败案")
+            continue
+        for failure in arm_failures:
+            add(
+                f"  {arm:<7} {failure.eval_case_id:<12} {failure.error_type}: "
+                f"{failure.reason[:80]}"
+            )
     add("-" * 100)
     add("工程指标（进程内墙钟：均值/P50/P95 毫秒 —— 不写进 record，跨 run 比对会漂移）:")
     for arm in ARMS:
@@ -598,7 +664,7 @@ def _render_report(
         add(
             f"  {arm:<7} llm_calls={_latency_cell(eng.llm_calls)} "
             f"tool_calls={_latency_cell(eng.tool_calls)} tokens={_latency_cell(eng.tokens)} "
-            f"latency_ms={_latency_cell(eng.latency_ms)}"
+            f"latency_ms={_latency_cell(eng.latency_ms)} failed={len(failures[arm])}"
         )
     add("-" * 100)
     out_note = f" | JSON 已写入: {out_path}" if out_path else " | 未写文件（--out 可落盘）"
@@ -767,34 +833,42 @@ async def _main(argv: list[str] | None = None) -> int:
     print("-" * 100)
 
     exp = _expected_index(cases)
-    results: dict[str, list[tuple[EvalRecord, float]]] = {}
+    arm_runs: dict[str, tuple[list[tuple[EvalRecord, float]], list[_ArmFailure]]] = {}
+
+    async def _run_and_report(
+        arm: str, run_one: Callable[[EvalCase], Awaitable[EvalRecord]], *, progress: bool
+    ) -> None:
+        """跑一臂并打印完成/失败计数与失败原因（含异常类型短名，同时进报告）。"""
+        results, failures = await _run_arm(
+            cases, run_one, concurrency=args.concurrency, progress=progress
+        )
+        arm_runs[arm] = (results, failures)
+        print(f"  → {len(results)} 案完成 / {len(failures)} 案失败")
+        for failure in failures:
+            print(
+                f"  !! {failure.eval_case_id:<12} {failure.error_type}: {failure.reason}",
+                file=sys.stderr,
+            )
+
     try:
         print("① rule（pra.screening 确定性初筛 · 零 LLM 零工具）")
-        results["rule"] = await _run_arm(
-            cases, _run_rule, concurrency=args.concurrency, progress=False
-        )
-        print(f"  → {len(results['rule'])} 案完成")
+        await _run_and_report("rule", _run_rule, progress=False)
         print("-" * 100)
         print(f"② single（{args.model} · 一次调用 · 只喂 case 快照 · 不调工具）")
-        results["single"] = await _run_arm(
-            cases,
-            lambda case: _run_single(case, llm=backend),
-            concurrency=args.concurrency,
-            progress=True,
+        await _run_and_report(
+            "single", lambda case: _run_single(case, llm=backend), progress=True
         )
         print("-" * 100)
         print(f"③ agent（{args.model} · 完整调查图 · 生产装配：真 MySQL + 真 RAG）")
-        results["agent"] = await _run_arm(
-            cases,
-            lambda case: _run_agent(case, graph=graph, llm=backend),
-            concurrency=args.concurrency,
-            progress=True,
+        await _run_and_report(
+            "agent", lambda case: _run_agent(case, graph=graph, llm=backend), progress=True
         )
     finally:
         flush_tracer()  # 整轮结束统一刷出（不 per-case flush）
 
-    records = {arm: [rec for rec, _ in results[arm]] for arm in ARMS}
-    latencies = {arm: [ms for _, ms in results[arm]] for arm in ARMS}
+    records = {arm: [rec for rec, _ in arm_runs[arm][0]] for arm in ARMS}
+    latencies = {arm: [ms for _, ms in arm_runs[arm][0]] for arm in ARMS}
+    failures = {arm: arm_runs[arm][1] for arm in ARMS}
     metrics = {arm: DecisionEvaluator.evaluate(records[arm], exp) for arm in ARMS}
     engineering = {
         arm: EngineeringEvaluator.evaluate(records[arm], latency_ms=latencies[arm]) for arm in ARMS
@@ -808,6 +882,9 @@ async def _main(argv: list[str] | None = None) -> int:
         "count": len(cases),
         # 本次 LLM 口径（None = 网关默认 enabled + high）：产物自带口径，防跨口径混读
         "real_llm_config": llm_config,
+        # 失败案计数器：count 与 len(records[arm]) 的差额在此显式标记（不静默失配）；
+        # 失败原因只进报告 / stderr，不进 payload 结构。
+        "failed": {arm: len(failures[arm]) for arm in ARMS},
         "records": {arm: [rec.model_dump() for rec in records[arm]] for arm in ARMS},
         "metrics": {
             arm: {
@@ -833,6 +910,7 @@ async def _main(argv: list[str] | None = None) -> int:
             cases=cases,
             metrics=metrics,
             engineering=engineering,
+            failures=failures,
             llm_config=llm_config,
             out_path=out_path,
         )

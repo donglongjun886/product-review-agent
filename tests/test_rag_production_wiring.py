@@ -1,42 +1,34 @@
-"""生产入口的 RAG 接线 —— 装配惰性 / 首次检索才构建 / 真 Chroma e2e。
+"""生产入口的 RAG 接线 —— 装配惰性 / 首次检索才构建。
 
 契约：
 - ``build_production_tools()`` 把 CaseSearchTool / PolicySearchTool 指向真实 RAG
   （``LazyCaseIndex`` / ``LazyPolicyIndex``），但**装配期零 import、零 IO**：不建库、不连
-  Chroma、不加载模型，失败留到首次检索（由 ``tools_node`` 记 warn failure）；
+  Chroma、不加载模型，失败留到首次检索（异常经 ``tools_node`` 上抛）；
 - 首次 ``search`` 才调用 builder，之后复用同一实例；**构建失败不缓存**（下次重试）；
-- 默认 ``build_tools()``（以及 conftest 钉回的测试路径）仍是 InMemory 种子 —— 评测确定性红线。
+- 测试世界 = ``inmemory_world`` 的 InMemory 种子（``build_inmemory_tools()``），conftest 把
+  生产入口的工具装配钉到它 —— 评测确定性红线。
 
-真 Chroma 段需要 rag extra + 服务端可达 + BGE 模型缓存，缺一即 **运行期 skip**（不在收集期
-import fastembed，避免污染其他用例的 ``sys.modules`` 断言）。CI 只跑 ``uv sync --frozen``
-（不装 extra）→ 必然 skip；CI 上真正跑得动的守护是默认路径零 extra 契约测试。
+缺 rag extra 路径由子进程用例守护（不在收集期 import fastembed，避免污染其他用例的
+``sys.modules`` 断言）；CI 只跑 ``uv sync --frozen``（不装 extra）→ 该路径必然走到引导报错。
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import socket
 import subprocess
 import sys
 import time
-from pathlib import Path
-from uuid import uuid4
 
 import pytest
 from helpers import tool_by_name
+from inmemory_world import build_inmemory_tools
 
 import pra.tools as tools_pkg
-from pra.tools import build_tools
 
 # 模块导入期抓真实装配函数：conftest 的 autouse fixture 会在测试期把 ``pra.tools`` 上的
-# 同名属性换成 ``build_tools``（保证 CI 不连库/不连 Chroma），此处保留真身供本文件使用。
+# 同名属性换成 ``inmemory_world.build_inmemory_tools``（保证 CI 不连库/不连 Chroma），
+# 此处保留真身供本文件使用。
 _REAL_BUILD_PRODUCTION_TOOLS = tools_pkg.build_production_tools
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_BGE_CACHE = _REPO_ROOT / ".cache" / "model_cache"
-_CHROMA_HOST = "127.0.0.1"
-_CHROMA_PORT = 8001
 
 
 # ---------------------------------------------------------------------------
@@ -45,11 +37,11 @@ _CHROMA_PORT = 8001
 
 
 def test_production_assembly_injects_lazy_rag_indices():
-    """生产装配 = 默认 4 工具；商品/商家换真库、案例/政策换惰性 RAG；**装配期不构建**。"""
+    """生产装配 = 4 工具（名称与测试世界一致）；商品/商家换真库、案例/政策换惰性 RAG；**装配期不构建**。"""
     from pra.rag.lazy_index import LazyCaseIndex, LazyPolicyIndex
 
     prod = _REAL_BUILD_PRODUCTION_TOOLS()
-    default = build_tools()
+    default = build_inmemory_tools()
     prod_case = tool_by_name(prod, "CaseSearchTool")
     prod_policy = tool_by_name(prod, "PolicySearchTool")
     assert [t.name for t in prod] == [t.name for t in default]
@@ -62,11 +54,10 @@ def test_production_assembly_injects_lazy_rag_indices():
 
 
 def test_default_tools_keep_inmemory_knowledge_sources():
-    """默认 ``build_tools()`` 的两个知识库工具仍是 InMemory 种子（不改评测可重放口径）。"""
-    from pra.tools.case_search.tool import InMemoryCaseIndex
-    from pra.tools.policy_search.tool import InMemoryPolicyIndex
+    """测试世界 ``build_inmemory_tools()`` 的两个知识库工具仍是 InMemory 种子（评测可重放口径）。"""
+    from inmemory_world import InMemoryCaseIndex, InMemoryPolicyIndex
 
-    default = build_tools()
+    default = build_inmemory_tools()
     assert isinstance(tool_by_name(default, "CaseSearchTool")._index, InMemoryCaseIndex)
     assert isinstance(tool_by_name(default, "PolicySearchTool")._index, InMemoryPolicyIndex)
 
@@ -186,132 +177,3 @@ def test_missing_extra_embedder_raises_guided_runtime_error():
     payload = json.loads(lines[-1][len("PRA_NOEXTRA:") :])
     assert payload["type"] == "RuntimeError", f"缺 extra 应抛 RuntimeError，实为 {payload['type']}"
     assert "uv sync --extra rag" in payload["msg"], "缺 extra 的异常须带安装指引（承重）"
-
-
-# ---------------------------------------------------------------------------
-# 真 Chroma + BGE 端到端（缺条件运行期 skip）
-# ---------------------------------------------------------------------------
-
-
-def _e2e_skip_reason() -> str | None:
-    missing = [
-        name
-        for name in ("chromadb", "llama_index", "fastembed")
-        if importlib.util.find_spec(name) is None
-    ]
-    if missing:
-        return (
-            f"未安装 rag extra（缺 {missing}）→ 跳过真 Chroma e2e；"
-            "装上：uv sync --extra rag --extra observability"
-        )
-    try:
-        with socket.create_connection((_CHROMA_HOST, _CHROMA_PORT), timeout=1):
-            pass
-    except OSError:
-        return (
-            f"Chroma 服务端不可达（{_CHROMA_HOST}:{_CHROMA_PORT}）→ 跳过；"
-            "起服务：cd deploy/chroma && docker compose up -d"
-        )
-    from helpers import bge_model_cached
-
-    if not bge_model_cached(_BGE_CACHE):
-        return (
-            f"BGE 模型未缓存（{_BGE_CACHE}）→ 跳过真模型 e2e；"
-            "首次需联网下载（HF_ENDPOINT=https://hf-mirror.com）"
-        )
-    return None
-
-
-def _delete_prefix(prefix: str) -> None:
-    """只删本测试前缀的 collection（Chroma 是共享单实例，绝不动别人的库）。"""
-    from pra.rag.chroma_store import ChromaConfig, make_chroma_client
-
-    client = make_chroma_client(ChromaConfig(host=_CHROMA_HOST, port=_CHROMA_PORT))
-    for coll in list(client.list_collections()):
-        if coll.name.startswith(prefix):
-            client.delete_collection(coll.name)
-
-
-def _demo_case():
-    """走查案件（复古运动鞋 P_88231 / 商家 M_5512，品牌空缺）。
-
-    scripted plan 先从商品在库事实 / 商家行为取证，再落到 CaseSearch / PolicySearch。
-    """
-    from helpers import make_case
-
-    return make_case(
-        case_id=f"CASE_PROD_RAG_{uuid4().hex[:8]}",
-        brand=None,
-        product_id="P_88231",
-        merchant_id="M_5512",
-    )
-
-
-async def _run_graph(tools) -> dict:
-    from stub_llm import ScriptedLLMBackend
-
-    from pra.agent.graph import build_agent_graph
-    from pra.agent.state import build_initial_state
-
-    graph = build_agent_graph(
-        tools=tools, llm=ScriptedLLMBackend(), checkpointer=None
-    )
-    return await graph.ainvoke(
-        build_initial_state(_demo_case()),
-        {"configurable": {"thread_id": f"prod-rag-{uuid4().hex[:8]}"}},
-    )
-
-
-async def test_production_rag_reaches_real_knowledge_base(monkeypatch):
-    """生产装配 → 惰性构建真 Chroma 库 → 图内检索 → CASE_PRECEDENT / POLICY_REF 证据。
-
-    判别器：真实 KB 的先例 id 全为 ``RAG_CASE_`` 前缀（与评测 GT 隔离），政策条款来自真实
-    corpus；同一案件换回 ``build_tools()`` 默认世界则得 InMemory 种子（``CASE_1832`` /
-    ``POLICY_3.2_v2_c1``）—— 后半段是本用例的回退反证。
-
-    用 uuid 前缀隔离 collection（共享服务端上自建自删）；embedder 走生产默认
-    ``production_embedder()``（缺省只读本地缓存；缓存目录经
-    ``PRA_EMBED_CACHE_DIR`` 指向仓库内 ``.cache/model_cache``，未缓存即本地报错、不下载）。
-    """
-    reason = _e2e_skip_reason()
-    if reason:
-        pytest.skip(reason)
-
-    from pra.rag import factory
-    from pra.rag.chroma_store import ChromaConfig
-
-    monkeypatch.setenv("PRA_EMBED_CACHE_DIR", str(_BGE_CACHE))
-    prefix = f"pytest_prod_rag_{uuid4().hex[:8]}"
-    isolated = ChromaConfig(collection_prefix=prefix)
-    real_case, real_policy = factory.build_case_index, factory.build_policy_index
-    monkeypatch.setattr(
-        factory, "build_case_index", lambda **kw: real_case(config=isolated, **kw)
-    )
-    monkeypatch.setattr(
-        factory, "build_policy_index", lambda **kw: real_policy(config=isolated, **kw)
-    )
-
-    try:
-        prod_tools = _REAL_BUILD_PRODUCTION_TOOLS()
-        state = await _run_graph(prod_tools)
-
-        # 命中真实 KB 即证明「装配期没建库、首次检索才建」这条惰性契约兑现（未触发构建就取不到真语料）。
-        case_hits = [e for e in state["evidence"] if e.type == "CASE_PRECEDENT"]
-        policy_hits = [e for e in state["evidence"] if e.type == "POLICY_REF"]
-        assert case_hits, "生产 RAG 世界应产出 CASE_PRECEDENT 证据"
-        assert policy_hits, "生产 RAG 世界应产出 POLICY_REF 证据"
-        assert all(str(e.ref_id).startswith("RAG_CASE_") for e in case_hits), (
-            "先例必须来自真实 Case KB（RAG_CASE_ 前缀 = 与评测 GT 隔离）"
-        )
-        assert not any(str(e.ref_id).startswith("CASE_18") for e in case_hits), (
-            "不得回落到 InMemory 种子 CASE_1832"
-        )
-
-        # 回退反证：同一案件走默认 InMemory 世界 → 命中种子先例/政策，而非真实 KB
-        memory_state = await _run_graph(build_tools())
-        memory_cases = [e.ref_id for e in memory_state["evidence"] if e.type == "CASE_PRECEDENT"]
-        assert memory_cases == ["CASE_1832"], (
-            "默认世界必须仍是 InMemory 种子（本断言是上面「读了真实 KB」的回退反证）"
-        )
-    finally:
-        _delete_prefix(prefix)

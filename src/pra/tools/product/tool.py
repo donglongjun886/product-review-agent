@@ -2,15 +2,14 @@
 
 回答的业务问题：判断「规避品牌」前，先确认商品在库最新事实 —— brand 是否真空缺、快照版本。
 
-``ProductRepository`` 是窄接口（按 product_id 取在库事实快照）；``InMemoryProductRepository``
-是 **Mock 默认实现**（默认装配路径恒用它，CI 不连库、评测可重放），真实实现是
-``pra.tools.product.mysql_repo.MySQLProductRepository``（显式 opt-in：``build_tools(product_repo=…)``）。
+``ProductRepository`` 是窄接口（按 product_id 取在库事实快照）；数据源**构造时必填**，
+真实实现是 ``pra.tools.product.mysql_repo.MySQLProductRepository``。
 本模块**不含业务判定**：只取事实并结构化为 Evidence 原料。``ref_id`` 填 ``product_id``。
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
@@ -50,38 +49,12 @@ class ProductRepository(Protocol):
 
     语义：取该商品**当前行** —— ``product`` 表以 product_id 为主键只存当前行，该行 ``version``
     即最新乐观锁版本（历史版本不入库），故「取当前行」与「取最新 version 行」是同一件事。
-    实现：``InMemoryProductRepository``（Mock 默认）/ ``MySQLProductRepository``（真库，显式注入）。
+    实现：``MySQLProductRepository``（真库，构造时注入）。
     **商品不存在返回 None**（确定性「无结果」，由工具转 ``ok=False``，不抛异常）；基础设施异常
     由实现直接抛出，不得吞成 None。
     """
 
     async def get_latest(self, product_id: str) -> ProductSnapshot | None: ...
-
-
-_DEFAULT_PRODUCTS: Mapping[str, dict[str, Any]] = {
-    "P_88231": {
-        "product_id": "P_88231",
-        "category": "女鞋/运动鞋",
-        "brand": None,
-        "version": 3,
-        "status": "ON_SALE",
-    },
-}
-
-
-class InMemoryProductRepository:
-    """ProductRepository 的 Mock 默认实现（仅供开发/测试/演示）。
-
-    ``data`` 构造入参可注入自定义种子；不传则用模块级演示数据。
-    """
-
-    def __init__(self, data: Mapping[str, dict[str, Any]] | None = None) -> None:
-        self._store: dict[str, ProductSnapshot] = {
-            pid: ProductSnapshot.model_validate(row) for pid, row in (data or _DEFAULT_PRODUCTS).items()
-        }
-
-    async def get_latest(self, product_id: str) -> ProductSnapshot | None:
-        return self._store.get(product_id)
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +91,8 @@ class ProductTool:
     measured_dimensions: frozenset[str] = frozenset({DIM_LISTING_REGISTRY})
     measurement_available: bool = True
 
-    def __init__(self, repo: ProductRepository | None = None) -> None:
-        self._repo: ProductRepository = repo or InMemoryProductRepository()
+    def __init__(self, repo: ProductRepository) -> None:
+        self._repo: ProductRepository = repo
 
     async def call(self, args: ProductArgs, ctx: ToolContext) -> ProductResult:
         product = await self._repo.get_latest(args.product_id)

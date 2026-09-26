@@ -40,12 +40,8 @@ uv run pytest -q                            # 跑测试：不需要网络，也�
 uv sync --extra rag --extra observability
 ```
 
-配好 `LANGFUSE_*`（`.env` 或环境变量）+ `cd deploy/langfuse && docker compose up -d` 后，
-可跑一次观测接线自检（发一条合成 trace 再从服务端读回断言；无凭据时退出码 0 并提示启用方式）：
-
-```bash
-uv run --extra observability python scripts/langfuse_smoke.py
-```
+配好 `LANGFUSE_*`（`.env` 或环境变量）后每次 Agent 执行会上报 trace，未配 key 时观测为 no-op。
+Langfuse 可本地自托管：`cd deploy/langfuse && docker compose up -d`，在 UI 建项目取 key。
 
 ## 跑一次真实的调查
 

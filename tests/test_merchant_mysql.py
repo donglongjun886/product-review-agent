@@ -5,7 +5,7 @@
 这条链；用例自建自删（``PYTEST_MERCHANT_`` 前缀 + ``finally`` 清理），重复跑不污染开发库。
 
 纯单测部分注入假 sessionmaker，覆盖 DB 行 → ``MerchantProfile`` 的全部边界，
-并守护「默认装配路径仍是 InMemory、不连库」。
+并对照生产装配（MySQL）与 InMemory 测试世界（``inmemory_world``）的数据源。
 """
 
 from __future__ import annotations
@@ -16,7 +16,12 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import make_case, tool_by_name
+from helpers import WalkthroughBackend, make_case, tool_by_name
+from inmemory_world import (
+    _DEFAULT_MERCHANTS,
+    InMemoryMerchantRepository,
+    build_inmemory_tools,
+)
 from sqlalchemy import text
 
 from pra import wiring
@@ -29,7 +34,7 @@ from pra.domain.measurement import (
 from pra.domain.models import Budget, ProductReviewCase
 from pra.infra import persist_service as ps
 from pra.infra.db import Settings, get_sessionmaker
-from pra.tools import build_production_tools, build_tools
+from pra.tools import build_production_tools
 from pra.tools.base import ToolContext
 from pra.tools.merchant.mysql_repo import (
     MerchantORM,
@@ -37,10 +42,8 @@ from pra.tools.merchant.mysql_repo import (
     to_profile,
 )
 from pra.tools.merchant.tool import (
-    _DEFAULT_MERCHANTS,
     MERCHANT_HISTORY_TYPE,
     MERCHANT_HISTORY_WEIGHT,
-    InMemoryMerchantRepository,
     MerchantArgs,
     MerchantTool,
 )
@@ -51,13 +54,13 @@ _REAL_BUILD_PRODUCTION_TOOLS = build_production_tools
 
 
 def _inmemory_case_index():
-    from pra.tools.case_search.tool import InMemoryCaseIndex
+    from inmemory_world import InMemoryCaseIndex
 
     return InMemoryCaseIndex()
 
 
 def _inmemory_policy_index():
-    from pra.tools.policy_search.tool import InMemoryPolicyIndex
+    from inmemory_world import InMemoryPolicyIndex
 
     return InMemoryPolicyIndex()
 
@@ -188,15 +191,12 @@ async def test_missing_merchant_flows_to_ok_false_and_no_evidence():
     assert tool.to_evidence(res) == []
 
 
-def test_default_merchant_tool_is_still_inmemory():
-    """守护：默认装配路径不许连库（谁把默认改成真库，这里变红）。"""
-    assert isinstance(tool_by_name(build_tools(), "MerchantTool")._repo, InMemoryMerchantRepository)
-
-
-def test_build_tools_uses_mysql_merchant_repo_only_when_explicitly_injected():
-    repo, _ = _repo_with_fake_sessions([])
-    assert tool_by_name(build_tools(), "MerchantTool")._repo is not repo
-    assert tool_by_name(build_tools(merchant_repo=repo), "MerchantTool")._repo is repo
+def test_production_assembly_and_inmemory_world_have_distinct_data_sources():
+    """数据源对照：生产装配的 MerchantTool 读 MySQL，InMemory 世界的读进程内种子。"""
+    prod_repo = tool_by_name(_REAL_BUILD_PRODUCTION_TOOLS(), "MerchantTool")._repo
+    memory_repo = tool_by_name(build_inmemory_tools(), "MerchantTool")._repo
+    assert isinstance(prod_repo, MySQLMerchantRepository)
+    assert isinstance(memory_repo, InMemoryMerchantRepository)
 
 
 # ---------------------------------------------------------------------------
@@ -300,13 +300,13 @@ async def test_mysql_merchant_repository_roundtrip_against_real_db():
 # 生产路径端到端（真库，可跳过）：HTTP/落库入口 → MySQL → Evidence
 # ---------------------------------------------------------------------------
 
-# 只在真库种子里的商家（``tool.py`` 的 _DEFAULT_MERCHANTS 只有 M_5512）—— 用它才能在证据层面
-# 区分「读了真库」与「读了 InMemory 默认世界」。
+# 只在真库种子里的商家（``inmemory_world.py`` 的 _DEFAULT_MERCHANTS 只有 M_5512）—— 用它才能在
+# 证据层面区分「读了真库」与「读了 InMemory 测试世界」。
 _MYSQL_ONLY_MERCHANT = "M_8801"
 
 
 def _case_for_merchant(case_id: str) -> ProductReviewCase:
-    """COMPLEX 案件（brand 空缺 → R-301），商家只有真库有（与 InMemory 默认世界可区分）。"""
+    """COMPLEX 案件（brand 空缺 → R-301），商家只有真库有（与 InMemory 测试世界可区分）。"""
     return make_case(
         case_id=case_id, brand=None, product_id="P_77310", merchant_id=_MYSQL_ONLY_MERCHANT
     )
@@ -357,13 +357,15 @@ async def test_production_path_reads_merchant_history_from_mysql(monkeypatch):
     """生产装配 → 落库入口 → 图 → MerchantTool → MySQL → MERCHANT_HISTORY 落 review_evidence。
 
     同一案件跑两遍做**回退反证**：生产装配（真库）应取到只存在于库中的商家并落证据；换回
-    InMemory 默认世界后该商家不存在，同一位置不应有 MERCHANT_HISTORY —— 若有人把生产装配改回
+    InMemory 测试世界后该商家不存在，同一位置不应有 MERCHANT_HISTORY —— 若有人把生产装配改回
     InMemory，前一半会立刻变红。
     """
+    monkeypatch.setattr(
+        wiring, "build_llm_backend", lambda *, tools=None: WalkthroughBackend()
+    )
     monkeypatch.setattr("pra.tools.build_production_tools", _REAL_BUILD_PRODUCTION_TOOLS)
-    # 本用例只验证 MySQL 链路：把生产装配的 RAG 侧钉回 InMemory 种子（scripted plan 分支 3 会调
-    # CaseSearch/PolicySearch，真实 RAG 在缺 rag extra / 模型缓存时会尝试联网下载模型而阻塞，
-    # 与「读真库商家」这一被测目标无关）。
+    # 本用例只验证 MySQL 链路，不需要真实 RAG 检索：把生产装配的案例/政策索引构建器钉回
+    # InMemory 种子，免去真实 RAG 在缺 rag extra / 缺模型缓存时联网下载模型。
     monkeypatch.setattr("pra.tools._build_production_case_index", _inmemory_case_index)
     monkeypatch.setattr("pra.tools._build_production_policy_index", _inmemory_policy_index)
     tag = uuid4().hex[:8]
@@ -377,11 +379,11 @@ async def test_production_path_reads_merchant_history_from_mysql(monkeypatch):
         assert rows[0][1] == _MYSQL_ONLY_MERCHANT, "ref_id 必须是案件商家（真库读到的那个）"
         assert "credit=38" in rows[0][2], "画像必须来自真库行（M_8801 的 credit=38）"
 
-        monkeypatch.setattr("pra.tools.build_production_tools", build_tools)
+        monkeypatch.setattr("pra.tools.build_production_tools", build_inmemory_tools)
         monkeypatch.setattr(wiring, "_graph", None)
         out_mem = await ps.process_review(_case_for_merchant(memory_case_id))
         assert await _merchant_history_rows(out_mem["run_id"]) == [], (
-            "InMemory 默认世界没有该商家 → 不应有 MERCHANT_HISTORY（本断言是上面那条的回退反证）"
+            "InMemory 测试世界没有该商家 → 不应有 MERCHANT_HISTORY（本断言是上面那条的回退反证）"
         )
     finally:
         await _drop_cases((mysql_case_id, memory_case_id))

@@ -5,10 +5,11 @@
 → after 边际探针 → 审计 record（ok 含边际增益字段：evidence_added / decision_changed，
 JSON 承载、不进 DB 列）。
 
-确定性口径：全程纯 Python，不调 LLM；工具失败一律 ``severity=warn``（warn 只进审计与
-trace，不触发转人工 —— 只有 critical 才触发）。预算语义：args 校验失败不计 tool_calls、
-不入 failures；真正执行 call（成功 / 业务失败 / 异常重试后）计 1 次；失败不中断本
-visit。边际探针同样只进 record，不驱动路由。
+确定性口径：全程纯 Python，不调 LLM；infra 异常在重试 1 次后上抛（不写 failure、不落
+record），业务失败（``ok=False``）仍 ``severity=warn``（warn 只进审计与 trace，不触发
+转人工 —— 只有 critical 才触发）。预算语义：args 校验失败不计 tool_calls、不入 failures；
+真正执行 call（成功 / 业务失败）计 1 次；业务失败不中断本 visit。边际探针同样只进
+record，不驱动路由。
 
 依赖注入：``make_tools_node(tools)`` 闭包持有私有 ``{name: tool}`` 映射，不建模块级单例；
 run_id 从节点 config 的 ``configurable.thread_id`` 读取（缺省 ``"unknown-run"``）。
@@ -62,7 +63,7 @@ def _error_record(seq: int, tool: str, args: Any, error: str, latency_ms: int = 
 def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]]:
     """构建 tools 节点（闭包工厂）。
 
-    ``tools``（如 ``pra.tools.build_tools()`` 或测试替身）按 ``tool.name`` 建私有映射
+    ``tools``（如 ``pra.tools.build_production_tools()`` 或测试替身）按 ``tool.name`` 建私有映射
     （重名 = 装配缺陷，直接抛错，避免按名调度静默失配）。
     """
     tools_by_name: dict[str, Tool] = {}
@@ -148,7 +149,7 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
 
             ctx = ToolContext(run_id=run_id, case_id=case_id, budget=budget_w)
 
-            # ④ 执行：失败 infra 重试 1 次；重试仍抛 → error 分支（不中断本 visit）
+            # ④ 执行：失败 infra 重试 1 次；重试仍抛 → 异常上抛
             # 观测（旁路）：一次工具调用 = 一个 tool span（覆盖 infra 重试；只读）。
             t0 = time.perf_counter()
             with tracer.tool_span(
@@ -161,17 +162,8 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
                     try:
                         result = await tool.call(parsed, ctx)
                     except Exception as exc:
-                        latency_ms = _elapsed_ms(t0)
-                        budget_w = bump_tool_usage(budget_w)  # 已执行（含重试）计 1 次
-                        reason = f"工具执行异常（infra 重试 1 次后仍失败）: {type(exc).__name__}: {exc}"
-                        records.append(_error_record(seq, tool.name, args_raw, reason, latency_ms))
-                        warn_failures.append(
-                            make_failure(step_type=STEP_TOOL_CALL, severity=SEV_WARN,
-                                         tool=tool.name, seq=seq, reason=reason)
-                        )
                         obs.record_error(exc)  # 观测：异常（原 record 不变）
-                        seq += 1
-                        continue
+                        raise
                 latency_ms = _elapsed_ms(t0)
 
                 if not result.ok:

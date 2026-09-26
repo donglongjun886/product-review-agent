@@ -77,13 +77,12 @@ def _coverage_gap_lines(state: dict) -> list[str]:
 
 
 def _state_payload(state: dict) -> dict:
-    """LLM 入参 state 子集：hypotheses 仪表盘 + evidence 摘要 + case 全量 + 环境测量能力
-    + 必需测量缺口（供 scripted 桩做确定性分支）。
+    """LLM 入参 state 子集：hypotheses 仪表盘 + evidence 摘要 + case 全量 + 必需测量缺口。
 
     ``case`` 传 ``model_dump(mode="json")`` 全量：渲染层 ``_case_lines`` / ``_product_lines``
     本就只读身份与商品核心字段且做防御式格式化，节点侧不再重复裁剪。
 
-    ``measurement_capabilities`` 与覆盖缺口一并注入：让 plan 优先安排能补齐缺口的工具，
+    覆盖缺口注入 ``required_measurement_coverage``：让 plan 优先安排能补齐缺口的工具，
     并区分"没测"（可补）与"本环境不可测"（补不了，别空转）。
     """
     return {
@@ -92,7 +91,6 @@ def _state_payload(state: dict) -> dict:
         ],
         "evidence": [e.model_dump(mode="json") for e in (state.get("evidence") or [])],
         "case": state["case"].model_dump(mode="json"),
-        "measurement_capabilities": dict(state.get("measurement_capabilities") or {}),
         "required_measurement_coverage": _coverage_gap_lines(state),
     }
 
