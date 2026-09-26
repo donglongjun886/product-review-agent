@@ -12,7 +12,7 @@
   （同 max_tokens 下大概率再截断），直接降级；截断但内容合法则照常成功。
 
 后端**由调用方显式注入**（每个节点从图装配处拿到 ``llm=`` 后透传给本壳）—— 本壳不持
-任何进程级默认后端，也不会在缺后端时回落到 scripted 桩。本壳不做预算/降级检查（在节点
+任何进程级默认后端，缺后端直接抛 ``TypeError``。本壳不做预算/降级检查（在节点
 入口），LLM 记账由节点按 ``outcome.attempts`` bump。token 口径 = ``usage.total_tokens``
 （input+output 合计、含 provider 缓存命中）；**schema 校验失败的尝试也全额累计**，
 transport 失败无响应不计。
@@ -67,7 +67,7 @@ class LLMBackend(Protocol):
         """按 node 分发生成结构化输出 JSON 文本。
 
         :param state: 节点构造并直传的、JSON 可序列化的结构化 state 子集；
-        :param json_schema: OutputModel 的 JSON Schema（供真实后端约束输出；scripted 桩忽略）；
+        :param json_schema: OutputModel 的 JSON Schema（供真实后端约束输出）；
         :param feedback: 上一轮 schema 校验失败的修正提示文本列表（首次尝试为 None）。
         """
         ...
@@ -143,8 +143,7 @@ async def call_structured_llm(
 
     成功时首轮通过 ``attempts=1``，失败后按类处理重试 → ``attempts=2``；两次均失败
     → ``model=None``、``error`` 为最后一次失败文本、``tokens`` 为已累计。不做预算
-    检查。失败分类/回喂/退避只出现在失败重试路径，scripted 桩恒返回可校验内容 →
-    默认路径决策序列零变化。
+    检查。失败分类/回喂/退避只出现在失败重试路径。
 
     :param state: 节点构造的 JSON 可序列化 state 子集 —— 直传后端，不再经 ``__STATE__``
         文本协议；同一 state + 空 feedback 渲染出的 prompt 与改造前等价。
@@ -154,7 +153,7 @@ async def call_structured_llm(
     if llm is None:
         raise TypeError(
             f"call_structured_llm（node={node!r}）需要显式注入 LLM 后端（llm=None）—— "
-            "不再回落 scripted 桩；请在装配处把 LLMBackend 注入 build_agent_graph(llm=...)"
+            "请在装配处把 LLMBackend 注入 build_agent_graph(llm=...)"
         )
 
     # JSON Schema 只算一次；非 pydantic 模型按不可恢复失败返回

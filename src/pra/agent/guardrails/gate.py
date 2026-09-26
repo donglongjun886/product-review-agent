@@ -58,7 +58,8 @@ R3_DIMENSION_UNMEASURABLE = "R3_DIMENSION_UNMEASURABLE"
 R3_POSITIVE_INSUFFICIENT = "R3_POSITIVE_INSUFFICIENT"
 R4_PASS_GATE_FAIL = "R4_PASS_GATE_FAIL"
 R5_DEGRADED_OR_FAILED_STEP = "R5_DEGRADED_OR_FAILED_STEP"
-# 图执行/落库链路的 infra 故障（非业务判定），由落库编排层写入；Gate 不消费本码。
+# 图执行/落库链路的 infra 故障（非业务判定）：落库编排层写进 review_trace 的 infra_error 行；
+# Gate 不消费本码，ReviewDecision.overrides 也不落它。
 R6_INFRA_UNAVAILABLE = "R6_INFRA_UNAVAILABLE"
 
 

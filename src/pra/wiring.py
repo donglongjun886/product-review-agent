@@ -36,7 +36,7 @@ def build_llm_backend(*, tools: list | None = None) -> LLMBackend:
 
     :param tools: 取证工具列表 —— 经 ``LiteLLMBackend`` 渲染进 plan 节点的工具目录；
         None → 真实模型看到"无可用工具"。
-    :raises RuntimeError: ``DEEPSEEK_API_KEY`` 缺失或全空白 —— 显式失败，不回落 scripted 桩。
+    :raises RuntimeError: ``DEEPSEEK_API_KEY`` 缺失或全空白 —— 显式失败。
     """
     settings = Settings()
     api_key = settings.deepseek_api_key

@@ -185,11 +185,11 @@ def build_agent_graph(
     if tools is None:
         raise TypeError(
             "build_agent_graph 需要显式注入工具列表（tools=None）—— "
-            "不再回落 InMemory 默认工具世界"
+            "生产/评测/测试各自装配自己的工具世界"
         )
     if llm is None:
         raise TypeError(
-            "build_agent_graph 需要显式注入 LLM 后端（llm=None）—— 不再回落 scripted 桩"
+            "build_agent_graph 需要显式注入 LLM 后端（llm=None）—— 请在装配处注入 LLMBackend"
         )
 
     tools_action = make_tools_node(tools)

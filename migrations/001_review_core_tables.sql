@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS review_trace (
   trace_id    BIGINT       NOT NULL AUTO_INCREMENT COMMENT 'DB 行号',
   run_id      VARCHAR(64)  NOT NULL COMMENT '归属 run',
   seq         INT          NOT NULL COMMENT 'run 内步骤序号（轨迹还原顺序）',
-  step_type   VARCHAR(24)  NOT NULL COMMENT 'HYPOTHESIZE/PLAN/TOOL_CALL/REEVALUATE/DECIDE',
+  step_type   VARCHAR(24)  NOT NULL COMMENT 'HYPOTHESIZE/PLAN/TOOL_CALL/REEVALUATE/DECIDE/infra_error',
   tool_name   VARCHAR(64)  NULL     COMMENT 'TOOL_CALL 行的工具名',
   input_json  JSON         NULL     COMMENT '步骤输入摘要（LLM 步=状态摘要；TOOL_CALL=args）',
   output_json JSON         NULL     COMMENT '步骤输出（TOOL_CALL 行含边际增益 4 字段，O-10 JSON 承载）',

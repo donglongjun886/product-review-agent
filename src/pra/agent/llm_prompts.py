@@ -1,10 +1,10 @@
 """四个 LLM 节点的「完整 prompt」渲染（纯函数、无 IO；供真实后端组装消息）。
 
-节点把结构化 state 子集以 ``state=`` 传给后端（scripted 桩据此做确定性决策）。本模块把
+节点把结构化 state 子集以 ``state=`` 传给后端。本模块把
 这些 state 渲染成结构化人读中文上下文（商品事实 / 假设仪表盘 /
 证据链 / 预算 / 工具目录）+ 输出 Schema 要点：system = 角色 + 完整约束中文指令
 （``SYSTEM_PROMPTS``），user = 人读上下文 + Schema 要点；不把裸 JSON dump 当 user 正文。
-scripted 桩与节点本身都不依赖本模块。
+本模块只被真实后端用于渲染 prompt，节点本身不依赖它。
 
 ``SYSTEM_PROMPTS`` 另含评测用单次调用基线 ``single_call``：只吃案件快照、不调工具，无对应
 图节点，故 ``build_user_prompt`` 不为它单独分节（由评测侧自行组装 user 消息）。

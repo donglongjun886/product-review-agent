@@ -165,7 +165,7 @@ class LiteLLMBackend(LLMBackend):
         """按 node 渲染完整 prompt 并调用 litellm，返回 content 原样文本 + token 数。
 
         node 词表外或调用失败（无 key / 网络 / 超时 / HTTP / 上游异常）→
-        ``LLMBackendError``（与 scripted 桩一致）；content 提取/清理失败**不抛**，返回
+        ``LLMBackendError``；content 提取/清理失败**不抛**，返回
         原样文本交 llm_shell 强校验；截断（``finish_reason == "length"``）→
         ``LLMResponse.truncated=True``。
         """

@@ -1,7 +1,7 @@
 """MerchantTool 的 MySQL 数据源实现（``MerchantRepository`` Protocol 的真实实现）。
 
-为什么：工具默认读进程内种子（CI 不连库、评测可重放）；生产/HTTP 路径需要真实商家行为数据。
-不变量（与 InMemory 版逐字一致）：商家不存在 → 返回 ``None``（确定性「无结果」，由工具转
+为什么：生产/HTTP 路径需要真实商家行为数据（测试世界的数据源见 ``tests/inmemory_world.py``）。
+不变量：商家不存在 → 返回 ``None``（确定性「无结果」，由工具转
 ``ok=False``，不抛）；基础设施异常（连不上库 / SQL 报错）**一律向上抛**，绝不吞成 ``None``
 —— 把「查不到」伪装成「证明无」是本项目的业务红线。
 
@@ -80,7 +80,7 @@ SessionFactory = Callable[[], Any]
 
 
 class MySQLMerchantRepository:
-    """``MerchantRepository`` 的 MySQL 实现（**显式 opt-in**，默认装配路径不用它）。
+    """``MerchantRepository`` 的 MySQL 实现（生产装配用它；测试世界注入 InMemory 实现）。
 
     ``sessionmaker_factory`` 是 ``() -> async_sessionmaker`` 的**提供者**，默认
     ``pra.infra.db.get_sessionmaker``（进程级懒加载单例）。构造期不调用它 —— engine 到首次
