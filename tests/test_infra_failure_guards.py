@@ -1,17 +1,3 @@
-"""B 段失败路径守护四条（**净新增**：旧 ``tools_node`` 失败分支此前零覆盖）。
-
-守护 1：工具 ``call`` 抛 infra 异常 → 恰好重试 1 次后**裸抛**，且不写 ``severity=warn`` 的
-failure。它防的回归 = 旧行为吞掉异常、转 warn 并 ``continue``（或重试次数变成 0 / 多次）。
-
-守护 2：业务失败（``ok=False``）→ 仍写一条 warn failure、记 error record、记账并继续本 visit。
-它防的回归 = 把业务失败也当 infra 异常上抛，或不再记账 / 不再清空待办。本守护是**防回归**，
-不证明新行为（新旧实现在本分支上一致）。
-
-守护 3：``run_and_persist`` 遇图执行异常 → 先落 ``decision=HUMAN_REVIEW`` 的 review_result 与
-一条 ``step_type="infra_error"`` 的 review_trace 行（承载 R6 归因码），再原样上抛，run 保持
-RUNNING。它防的回归 = 旧行为只有裸抛：库中既无显式终态也无归因，「悬空 run」无法解释。
-"""
-
 from __future__ import annotations
 
 import json
@@ -36,7 +22,7 @@ from pra.tools.base import ToolArgs, ToolContext, ToolResult
 
 
 class _EmptyArgs(ToolArgs):
-    """空入参模型 —— tools_node 用 ``model_validate({})`` 校验 plan 给的 args，恒通过。"""
+    """空入参模型。"""
 
 
 class _InfraFailureTool:
@@ -47,15 +33,15 @@ class _InfraFailureTool:
     args_model = _EmptyArgs
 
     def __init__(self) -> None:
-        self.calls = 0  # call 被调用次数（断言重试恰好 1 次）
+        self.calls = 0
 
     async def call(self, args: ToolArgs, ctx: ToolContext) -> ToolResult:
-        """抛 RuntimeError；``args`` / ``ctx`` 由 tools_node 传入。"""
+        """抛 RuntimeError。"""
         self.calls += 1
         raise RuntimeError("injected tool infra failure")
 
     def to_evidence(self, result: ToolResult) -> list[Evidence]:
-        """恒抛路径不会走到成功分支；返回空证据列表以满足 Tool 协议。"""
+        """返回空证据列表。"""
         return []
 
 
@@ -67,7 +53,7 @@ class _BusinessFailureTool:
     args_model = _EmptyArgs
 
     def __init__(self) -> None:
-        self.calls = 0  # call 被调用次数（业务失败不应重试）
+        self.calls = 0
 
     async def call(self, args: ToolArgs, ctx: ToolContext) -> ToolResult:
         """返回业务失败信封（``error`` 为人读原因）。"""
@@ -75,7 +61,7 @@ class _BusinessFailureTool:
         return ToolResult(ok=False, error="商品不存在")
 
     def to_evidence(self, result: ToolResult) -> list[Evidence]:
-        """业务失败分支不调用本方法；返回空证据列表以满足 Tool 协议。"""
+        """返回空证据列表。"""
         return []
 
 
@@ -93,7 +79,7 @@ def _tools_state(tool_name: str) -> dict:
 
 
 async def test_tool_infra_error_retries_once_then_raises(monkeypatch):
-    """守护 1：infra 异常 → 重试 1 次后裸抛，且 make_failure 零调用（不写 warn failure）。"""
+    """infra 异常 → 重试 1 次后裸抛，且 make_failure 零调用（不写 warn failure）。"""
     tool = _InfraFailureTool()
     node = make_tools_node([tool])
     failure_calls: list[dict] = []
@@ -113,7 +99,7 @@ async def test_tool_infra_error_retries_once_then_raises(monkeypatch):
 
 
 async def test_tool_business_failure_still_warns_and_continues():
-    """守护 2：业务失败 → 不抛异常，写 1 条 warn failure + error record，记账并清空待办。"""
+    """业务失败 → 不抛异常，写 1 条 warn failure + error record，记账并清空待办。"""
     tool = _BusinessFailureTool()
     node = make_tools_node([tool])
 
@@ -133,11 +119,7 @@ async def test_tool_business_failure_still_warns_and_continues():
 
 
 def _mysql_reachable() -> bool:
-    """按默认配置路径解析 DSN 并做 1s socket 探测（不连库、不建 engine）。
-
-    ``Settings()`` 抛错时不吞异常 —— 配置层坏掉就该让本文件变红（收集期报错），
-    而不是伪装成"环境没 DB"跳过。
-    """
+    """按默认配置路径解析 DSN 并做 1s socket 探测（不连库、不建 engine）。"""
     parsed = urlparse(Settings().database_url)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 3306
@@ -149,7 +131,7 @@ def _mysql_reachable() -> bool:
 
 
 async def _cleanup(case_id: str, run_id: str) -> None:
-    """按 case_id/run_id 清理本次写入的行（先子后主；可重复运行、不污染开发库）。"""
+    """按 case_id/run_id 清理本次写入的行。"""
     sm = get_sessionmaker()
     async with sm() as s:
         await s.execute(text("delete from review_trace where run_id = :r"), {"r": run_id})
@@ -171,7 +153,6 @@ class _FakeFailingGraph:
         raise RuntimeError("injected graph failure")
 
     async def aget_state(self, config: dict) -> Any:
-        """不该被调用（``astream`` 已抛出）；被调用即测试前提失效。"""
         raise AssertionError("aget_state 不应被调用：astream 已抛异常")
 
 
@@ -179,7 +160,7 @@ class _FakeFailingGraph:
     not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库终态守护"
 )
 async def test_run_and_persist_graph_failure_writes_terminal_state(monkeypatch):
-    """守护 3：图异常 → review_result 显式 HUMAN_REVIEW + infra_error trace，异常仍穿透。"""
+    """图异常 → review_result 显式 HUMAN_REVIEW + infra_error trace，异常仍穿透。"""
     tag = uuid4().hex[:8]
     case_id = f"PYTEST_INFRA_GUARD_{tag}"
     run_id = f"PYTEST_INFRA_GUARD_RUN_{tag}"
@@ -234,7 +215,6 @@ class _FakeTwoVisitFailingGraph:
         raise RuntimeError("injected graph failure after two visits")
 
     async def aget_state(self, config: dict) -> Any:
-        """不该被调用（``astream`` 已抛出）；被调用即测试前提失效。"""
         raise AssertionError("aget_state 不应被调用：astream 已抛异常")
 
 
@@ -242,7 +222,7 @@ class _FakeTwoVisitFailingGraph:
     not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库终态守护"
 )
 async def test_run_and_persist_failure_keeps_evidence_of_all_visits(monkeypatch):
-    """守护 4：异常前每一轮 tools visit 的证据都要落 review_evidence（跨 visit 累积）。"""
+    """异常前每一轮 tools visit 的证据都要落 review_evidence（跨 visit 累积）。"""
     tag = uuid4().hex[:8]
     case_id = f"PYTEST_INFRA_EVIDENCE_{tag}"
     run_id = f"PYTEST_INFRA_EVIDENCE_RUN_{tag}"

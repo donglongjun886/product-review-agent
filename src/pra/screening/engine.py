@@ -1,17 +1,7 @@
 """Screening 三分流 Triage 引擎 —— 纯函数层（无 IO）。
 
-三分流语义：**PASS / REJECT = 确定性直接终裁**（不再进 Agent；落库走
-``persist_service.run_screening_direct``，trigger_type="SCREENING_DIRECT"）；
-**COMPLEX = 进 Agent 调查**（落库走 ``persist_service.run_and_persist``）。判定原则：
-**能确定才直判，不能确定一律 COMPLEX**。
-
-收敛顺序：任一 REJECT 命中即 REJECT（优先于 COMPLEX）；无 REJECT 但任一 COMPLEX 命中 →
-COMPLEX；都无命中 → PASS（brand/类目空缺已由 R-301 兜成 COMPLEX，故零命中 PASS 即确定性
-放行）。同轮多命中**都收集**（hits 按 ``DEFAULT_RULES`` 声明序）。
-
-``rule_evidence`` 只**构造** Evidence（type=RULE_HIT / source=ScreeningRuleEngine /
-weight=RULE_EVIDENCE_WEIGHT / extra={"rule_id"}），落库由 persist 层做（review_evidence.run_id NOT NULL ——
-直判 run 也建行，保证 result → run → evidence 审计链统一成立）。
+判定：任一 REJECT 命中即 REJECT，否则任一 COMPLEX 命中 → COMPLEX，都无命中 → PASS；
+hits 按 ``DEFAULT_RULES`` 声明序全收集。
 """
 
 from __future__ import annotations
@@ -24,15 +14,15 @@ from pra.screening.rule_engine.rules import DEFAULT_RULES
 
 Verdict = Literal["PASS", "REJECT", "COMPLEX"]
 
-# RULE_HIT 证据常量（screening 规则命中的统一证据来源；source_tool 落库同名）。
+# RULE_HIT 证据常量。
 RULE_EVIDENCE_TYPE = "RULE_HIT"
 RULE_EVIDENCE_SOURCE = "ScreeningRuleEngine"
-RULE_EVIDENCE_WEIGHT = 1.0  # 确定性规则命中 → 满强度证据
+RULE_EVIDENCE_WEIGHT = 1.0
 
 
 @dataclass(frozen=True)
 class RuleHit:
-    """单条规则命中记录（审计/评测：rule_id 稳定；detail 人读摘要进证据 value）。"""
+    """单条规则命中记录（``rule_id`` 稳定、``detail`` 为人读摘要）。"""
 
     rule_id: str
     name: str
@@ -48,9 +38,8 @@ class TriageResult:
 
 
 def triage(case: ProductReviewCase) -> TriageResult:
-    """对 case 快照做三分流 —— **纯函数**（只读 case，无 IO）。
+    """对 case 快照做三分流（纯函数）。
 
-    :param case: 审核案件（只读 ``product.brand/title/description/category`` 等）。
     :return: TriageResult{verdict, hits}；hits 按 ``DEFAULT_RULES`` 声明序全收集。
     """
     hits: list[RuleHit] = []
@@ -73,12 +62,7 @@ def triage(case: ProductReviewCase) -> TriageResult:
 
 
 def rule_evidence(hit: RuleHit) -> Evidence:
-    """把一条规则命中构造成 Evidence 对象（只构造，不落库）。
-
-    :param hit: 命中的 RuleHit。
-    :return: ``Evidence(value=f"{rule_id} {name}: {detail}", ref_id=None, ...)`` ——
-        确定性直判证据，供落库与决策快照引用。
-    """
+    """把一条规则命中构造成 Evidence（只构造，不落库）。"""
     return Evidence(
         type=RULE_EVIDENCE_TYPE,
         source=RULE_EVIDENCE_SOURCE,

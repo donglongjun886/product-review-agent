@@ -1,9 +1,4 @@
-"""API 路由层（pra/api/routes.py）轻量单测：不碰真库、不跑真图。
-
-POST /api/v1/reviews 用 **monkeypatch process_review**（避免连 MySQL / 执行完整图 /
-triage 分支），断言 200 与响应信封 {run_id, review_decision}；extra 字段 → 422；
-GET /health → 200。
-"""
+"""API 路由层（pra/api/routes.py）轻量单测：不碰真库、不跑真图。"""
 
 from __future__ import annotations
 
@@ -37,7 +32,7 @@ def test_health_ok():
 def test_create_review_returns_envelope(monkeypatch):
 
     async def fake_process_review(case):
-        assert case.case_id == _CASE.case_id  # 路由把解析后的 ProductReviewCase 传入
+        assert case.case_id == _CASE.case_id
         return {"run_id": "RUN_API_001", "decision": _fake_decision()}
 
     monkeypatch.setattr("pra.api.routes.process_review", fake_process_review)
@@ -73,8 +68,7 @@ def test_create_review_missing_required_field_422():
 
 
 def test_process_review_exception_maps_to_500(monkeypatch):
-    """process_review 抛异常 → HTTP 500，detail 为固定人读文案 + 异常类型短名；
-    绝不泄漏内部异常消息（可能含 SQL / 表列名）。"""
+    """process_review 抛异常 → HTTP 500，detail 为固定人读文案 + 异常类型短名，不泄漏内部异常消息。"""
 
     async def broken_process_review(case):
         raise RuntimeError("db down")
@@ -86,5 +80,5 @@ def test_process_review_exception_maps_to_500(monkeypatch):
     assert resp.status_code == 500
     detail = resp.json()["detail"]
     assert "请稍后重试或联系管理员" in detail
-    assert "RuntimeError" in detail  # 异常类型短名保留，供排障
-    assert "db down" not in detail  # 内部异常消息绝不外泄
+    assert "RuntimeError" in detail
+    assert "db down" not in detail

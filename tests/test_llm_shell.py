@@ -1,17 +1,4 @@
-"""LLM 壳（guardrails/llm_shell.py）单测：强校验 + 失败分类重试 + 失败不抛异常。
-
-注入替身（实现 LLMBackend Protocol，本文件内定义）验证：
-
-- schema 校验失败（后端成功返回但内容不合法）→ 收集含非法输出原文 + 校验错误的修正提示，
-  重试 1 次时以 ``feedback=`` 传回，成功后 attempts=2；
-- 后端异常（transport 类：超时/网络等）→ 无输出可修正，不产生 feedback，退避后原样重试；
-- 截断（``LLMResponse.truncated``，finish_reason=length）且校验失败 → 不重试，attempts=1；
-- 恒失败 → ``model=None``、attempts=2、不抛异常；
-- ``llm=None``（装配缺陷）→ ``TypeError``，不回落任何默认桩；
-- 调用方 state 不被污染（修正提示只进内部 feedback 列表）。
-
-后端一律经 ``call_structured_llm(llm=...)`` 显式注入（无进程级全局可设）。
-"""
+"""LLM 壳（guardrails/llm_shell.py）单测：强校验 + 失败分类重试 + 失败不抛异常。"""
 
 from __future__ import annotations
 
@@ -28,23 +15,18 @@ from helpers import AlwaysRaiseBackend, plan_conclude_json
 
 _STATE = {"case": {"case_id": "CASE_SHELL_01"}}
 _INVALID = "this is not valid json"
-# 合法 JSON 但 schema 不满足（next_action 超词表）→ pydantic ValidationError
 _SCHEMA_BAD = '{"next_action": "SOMETHING_ELSE", "tools": []}'
 
 
 class _FeedbackSequenceBackend:
-    """按序返回 content 的替身（元素 None = 抛后端异常）；**记录每次 state + feedback**。
-
-    ``feedback`` 是本壳的契约通道（helpers.SequenceBackend 只记 state），故本文件自带替身
-    以便直接断言「修正提示是否随重试回喂」。
-    """
+    """按序返回 content 的替身（元素 None = 抛后端异常）；**记录每次 state + feedback**。"""
 
     name = "test-sequence"
 
     def __init__(self, contents: list, tokens: int = 7) -> None:
         self._contents = list(contents)
         self._tokens = tokens
-        self.calls: list[dict] = []  # 每次 complete 收到的 state/feedback
+        self.calls: list[dict] = []
 
     async def complete(
         self, *, node: str, state: dict, json_schema: dict, feedback: list[str] | None = None
@@ -77,18 +59,16 @@ async def test_schema_fail_then_success_retries_once():
     assert outcome.model.next_action == "conclude"
     assert outcome.attempts == 2
     assert outcome.error is None
-    assert outcome.tokens == 10  # 两次响应 tokens 累计
-    # 后端第 2 次收到的 feedback 含修正提示（含"重新输出"文案 + 原文 + 校验错误）
+    assert outcome.tokens == 10
     assert len(backend.calls) == 2
-    assert backend.calls[0]["feedback"] in (None, [])  # 首次无可回喂的失败
-    assert backend.calls[0]["state"] == _STATE  # state 直传，不裹文本协议
+    assert backend.calls[0]["feedback"] in (None, [])
+    assert backend.calls[0]["state"] == _STATE
     repair = backend.calls[1]["feedback"]
     assert isinstance(repair, list) and len(repair) == 1
-    assert isinstance(repair[0], str)  # 纯文本，不再是 dict 消息
-    assert "重新输出" in repair[0]  # 含"重新输出"语义的修正提示（宽匹配，不锁措辞）
-    assert '"next_action": "SOMETHING_ELSE"' in repair[0]  # 原文回喂
-    assert "validation" in repair[0].lower()  # 校验错误一并回喂（pydantic 文本）
-    # 重试请求仍带同一 state（feedback 是唯一增量）
+    assert isinstance(repair[0], str)
+    assert "重新输出" in repair[0]
+    assert '"next_action": "SOMETHING_ELSE"' in repair[0]
+    assert "validation" in repair[0].lower()
     assert backend.calls[1]["state"] == _STATE
 
 
@@ -98,7 +78,7 @@ async def test_valid_first_attempt_succeeds():
     assert outcome.model is not None and outcome.attempts == 1
     assert outcome.tokens == 3
     assert len(backend.calls) == 1
-    assert backend.calls[0]["feedback"] in (None, [])  # 未追加修正
+    assert backend.calls[0]["feedback"] in (None, [])
 
 
 async def test_always_invalid_two_failures_no_raise():
@@ -106,7 +86,7 @@ async def test_always_invalid_two_failures_no_raise():
     outcome = await _call(backend)
     assert outcome.model is None
     assert outcome.attempts == 2
-    assert outcome.error  # 最后一次错误文本（供 failure.reason）
+    assert outcome.error
     assert "validation" in outcome.error.lower() or "ValidationError" in outcome.error
 
 
@@ -127,7 +107,6 @@ async def test_backend_raise_then_success_recovers():
     assert outcome.attempts == 2
     assert outcome.tokens == 4
     assert len(backend.calls) == 2
-    # transport 类失败没有可修正输出 → 第 2 次不带 feedback（不误导模型）
     assert backend.calls[1]["feedback"] in (None, [])
 
 
@@ -136,11 +115,11 @@ async def test_caller_state_not_polluted():
     snapshot = {"case": dict(state["case"])}
     backend = _FeedbackSequenceBackend(contents=[_SCHEMA_BAD, plan_conclude_json()], tokens=1)
     await _call(backend, state=state)
-    assert state == snapshot  # 修正提示只进内部 feedback，不改调用方 state
+    assert state == snapshot
 
 
 async def test_missing_backend_raises_type_error():
-    """``llm=None``（装配缺陷）→ ``TypeError``：不回落默认桩、不降级成 HUMAN_REVIEW 掩盖。"""
+    """``llm=None``（装配缺陷）→ ``TypeError``。"""
     with pytest.raises(TypeError, match="llm=None"):
         await call_structured_llm(
             OutputModel=PlanOutput, node="plan", state=dict(_STATE), llm=None
@@ -153,8 +132,8 @@ async def test_invalid_output_model_type_returns_error():
     )
     assert outcome.model is None
     assert outcome.attempts == 1
-    assert outcome.error  # 有可归因的错误文本
-    assert "dict" in (outcome.error or "")  # 错误里点名了非法的 OutputModel 类型
+    assert outcome.error
+    assert "dict" in (outcome.error or "")
 
 
 async def test_backend_protocol_violation_is_caught_as_failure():
@@ -171,7 +150,7 @@ async def test_backend_protocol_violation_is_caught_as_failure():
 
 
 class _TruncatedOnceBackend:
-    """返回一次 truncated（finish_reason=length）且内容非法的替身；再调用即失败哨兵。"""
+    """返回一次 truncated 且内容非法的替身；再调用即失败哨兵。"""
 
     name = "test-truncated-once"
 
@@ -190,15 +169,15 @@ class _TruncatedOnceBackend:
 async def test_truncated_failure_is_not_retried_attempts_one():
     backend = _TruncatedOnceBackend()
     outcome = await _call(backend)
-    assert backend.calls == 1  # 恰好一次
+    assert backend.calls == 1
     assert outcome.model is None
     assert outcome.attempts == 1
-    assert outcome.tokens == 3  # 截断响应本身已计 token
+    assert outcome.tokens == 3
     assert outcome.error and "截断" in outcome.error
 
 
 class _TruncatedValidBackend:
-    """返回一次 truncated 但内容恰好合法的替身 —— 应照常成功（不浪费）。"""
+    """返回一次 truncated 但内容恰好合法的替身 —— 应照常成功。"""
 
     name = "test-truncated-valid"
 

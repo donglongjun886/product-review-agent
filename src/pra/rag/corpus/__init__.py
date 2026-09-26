@@ -1,7 +1,4 @@
-"""Policy KB / Case KB 静态 corpus 加载器：读 JSON → 信封校验 → 返回 ``(records, meta)``。
-
-数据文件是可评审的 git 入库 JSON，schema 见 ``schema.py``。
-"""
+"""Policy KB / Case KB 静态 corpus 加载器：读 JSON → 信封校验 → 返回 ``(records, meta)``。"""
 
 from __future__ import annotations
 

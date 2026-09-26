@@ -1,19 +1,4 @@
-"""Agent 级指标：工具选择 / 推理正确性 / 边际证据增益。
-
-只消费 ``EvalRecord`` × ``expected`` 真值（指标层唯一输入），**不参与任何判定** —— Agent
-决策、Gate 与工具调度零依赖本模块。
-
-三条口径不变量：
-
-- **空真值不进分母**：``expected_tools=[]``（未标注工具期望）/ ``expected.risk_type=[]``
-  一律排除，并在计数里显式给出被排除的案数 —— 避免把「未标注」读成「应调 0 个工具」；
-- **不引入人为权重**：边际增益只做可核对的计数与比率，不做「新增证据数 × 翻转权重」这类
-  合成分（权重无法自证，越合成越不可解释）；
-- **分母为 0 的比率返回 None**（报告显示 "-"），不硬造 0/∞。
-
-**自动代理声明**：推理正确性只实现可自动计算的两项（risk_type 覆盖 + risk_level 一致）；
-"结论对但理由错"的语义层面判定无法自动化，本仓库也没有第二标注者 —— 不假装能测。
-"""
+"""Agent 级指标：工具选择 / 推理正确性 / 边际证据增益。"""
 
 from __future__ import annotations
 
@@ -44,13 +29,7 @@ def _ratio(numer: int, denom: int) -> float | None:
 
 
 class ToolSelectionMetrics(BaseModel):
-    """工具选择准确性（覆盖口径）+ 冗余调用观测。仅 agent scheme 有意义。
-
-    ``tool_selection_accuracy``：分母 = 标注了工具期望的案；分子 = ``expected_tools ⊆
-    实际调用工具集合``（覆盖口径，**不把"调用少"混进准确性**）。``redundant_tool_rate``
-    单独看"期望之外还调了什么"（案级；``tool_calls_actual`` 已按工具名去重，故不做调用次数
-    层面的浪费统计）。
-    """
+    """工具选择准确性 + 冗余调用观测（仅 agent scheme 有意义）。"""
 
     total_records: int = Field(description="纳入统计的 record 数")
     cases_with_expectation: int = Field(description="expected_tools 非空的案数（指标分母）")
@@ -72,7 +51,7 @@ class ToolSelectionEvaluator:
                 continue
             total += 1
             wanted = {str(t) for t in (exp.get("expected_tools") or [])}
-            if not wanted:  # 未标注工具期望 → 不进分母
+            if not wanted:
                 continue
             with_exp += 1
             actual = {str(t) for t in rec.tool_calls_actual}
@@ -101,11 +80,7 @@ class ToolSelectionEvaluator:
 
 
 class ReasoningCorrectnessMetrics(BaseModel):
-    """推理正确性**自动代理**：risk_type 覆盖 + risk_level 一致。
-
-    只覆盖可自动判定的部分：结论与真值一致但风险类型/等级错，会被这两项抓到；语义层面的
-    "理由是否成立"不在本指标内（无第二标注者，不做人工抽样复核）。
-    """
+    """推理正确性自动代理：risk_type 覆盖 + risk_level 一致。"""
 
     total_records: int
     cases_with_expected_risk_type: int = Field(description="expected.risk_type 非空的案数")
@@ -152,14 +127,7 @@ class ReasoningCorrectnessEvaluator:
 
 
 class MarginalEvidenceGainMetrics(BaseModel):
-    """逐次工具调用的边际增益（**计数与比率，无加权合成**）。
-
-    数据来自 ``EvalRecord.detail["tool_history"]``（agent 臂的审计透传，见
-    ``scripts/run_evaluation.py``）：每次调用的 ``evidence_added``（新增证据引用）与
-    ``decision_changed``（本轮 Gate 判定是否翻转）。增益统计只算 ``status=="ok"`` 的调用 ——
-    失败/跳过的调用不可能带来证据，混进分母会稀释信号。``no_gain_calls`` 即"调了但没带来
-    新证据"的直接计数（回答'为调查而调查'）。
-    """
+    """逐次工具调用的边际增益（计数与比率，无加权合成）。"""
 
     records_with_history: int = Field(description="带 tool_history 的 record 数（仅 agent 有）")
     audited_tool_calls: int = Field(description="审计到的工具调用数（含失败/跳过）")

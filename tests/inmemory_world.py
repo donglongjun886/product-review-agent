@@ -1,9 +1,4 @@
-"""InMemory 测试世界：4 个调查工具 + 各自的进程内数据源与种子数据。
-
-``build_inmemory_tools()`` 组装 ProductTool / MerchantTool / CaseSearchTool / PolicySearchTool
-（顺序即此），四件数据源均在此处**显式**构造 —— CI 不连 MySQL / Chroma，评测与业务用例可重放。
-四个 InMemory 实现与种子字面量已从 ``src/pra/tools`` 各 ``tool.py`` 移出，生产装配不再提供默认世界。
-"""
+"""InMemory 测试世界：4 个调查工具 + 各自的进程内数据源与种子数据。"""
 
 from __future__ import annotations
 
@@ -29,10 +24,6 @@ from pra.tools.product.tool import (
     ProductSnapshot,
     ProductTool,
 )
-
-# ---------------------------------------------------------------------------
-# 商品事实（ProductTool）
-# ---------------------------------------------------------------------------
 
 _DEFAULT_PRODUCTS: Mapping[str, dict[str, Any]] = {
     "P_88231": {
@@ -60,10 +51,6 @@ class InMemoryProductRepository:
         return self._store.get(product_id)
 
 
-# ---------------------------------------------------------------------------
-# 商家行为（MerchantTool）
-# ---------------------------------------------------------------------------
-
 _DEFAULT_MERCHANTS: Mapping[str, dict[str, Any]] = {
     "M_5512": {
         "merchant_id": "M_5512",
@@ -78,8 +65,7 @@ _DEFAULT_MERCHANTS: Mapping[str, dict[str, Any]] = {
 class InMemoryMerchantRepository:
     """MerchantRepository 的 Mock 默认实现（仅供开发/测试/演示）。
 
-    种子画像按 merchant_id 匹配；``window_days`` 在 mock 中不改变聚合结果（真实实现按其
-    截取事件窗口）。
+    种子画像按 merchant_id 匹配；``window_days`` 在本实现中不改变聚合结果。
     """
 
     def __init__(self, data: Mapping[str, dict[str, Any]] | None = None) -> None:
@@ -90,10 +76,6 @@ class InMemoryMerchantRepository:
     async def get_profile(self, merchant_id: str, window_days: int) -> MerchantProfile | None:
         return self._store.get(merchant_id)
 
-
-# ---------------------------------------------------------------------------
-# 先例检索（CaseSearchTool）
-# ---------------------------------------------------------------------------
 
 _DEFAULT_PRECEDENTS: list[dict[str, Any]] = [
     {
@@ -128,7 +110,6 @@ class InMemoryCaseIndex:
     """
 
     def __init__(self, precedents: list[dict[str, Any]] | None = None) -> None:
-        # 保留原始行（含元数据过滤字段 category），检索过滤后再校验为 CaseHit。
         self._rows: list[dict[str, Any]] = list(precedents or _DEFAULT_PRECEDENTS)
 
     async def search(self, query: str, filters: CaseSearchFilters, top_k: int) -> list[CaseHit]:
@@ -141,10 +122,6 @@ class InMemoryCaseIndex:
         ranked = sorted(rows, key=lambda r: r.get("retrieval_score", 0.0), reverse=True)
         return [CaseHit.model_validate(r) for r in ranked[:top_k]]
 
-
-# ---------------------------------------------------------------------------
-# 政策检索（PolicySearchTool）
-# ---------------------------------------------------------------------------
 
 _DEFAULT_CLAUSES: list[dict[str, Any]] = [
     {

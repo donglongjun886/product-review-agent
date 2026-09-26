@@ -1,18 +1,4 @@
-"""real LLM 路径的 mock 单测 —— LiteLLMBackend + llm_prompts 渲染层。
-
-无网络、无 API key、不依赖 .env：所有 litellm 调用都被 monkeypatch 到
-``litellm.acompletion`` 的本地替身；真实调用留 scripts/run_evaluation.py 人工实测。
-
-覆盖：构造（model/name/api_key 来源）/ tools 目录提取 / acompletion 成功路径
-（content/tokens/kwargs）/ 网络失败 → ``LLMBackendError`` / 模型文本清洗三态
-（经公开 ``complete`` 验证）/ 未知 node 不触发调用 / ``call_structured_llm`` 全链路重试
-闭环 / 四节点 prompt 渲染（state 直传、空 state 防御 / schema 枚举与必填）/
-延迟 import 不拉起 litellm。
-
-不烧 key：只 monkeypatch ``litellm.acompletion`` 属性（不 mock 整个模块 import）；每个触发
-complete 的测试都打上「耗尽即 pytest.fail」的哨兵；无 key / 未知 node 在 litellm import 之前
-就抛 ``LLMBackendError``。后端一律经 ``call_structured_llm(llm=...)`` 显式注入。
-"""
+"""real LLM 路径的 mock 单测 —— LiteLLMBackend + llm_prompts 渲染层。"""
 
 from __future__ import annotations
 
@@ -23,7 +9,7 @@ import types
 from typing import Any
 
 import pytest
-from helpers import plan_conclude_json  # 既有测试替身 JSON（tests/helpers.py）
+from helpers import plan_conclude_json
 from pydantic import BaseModel, Field
 
 from pra.agent.guardrails.llm_shell import (
@@ -38,13 +24,7 @@ from pra.agent.llm_prompts import (
     build_user_prompt,
 )
 
-# litellm 被 import 时默认会尝试拉远程 model cost map（联网、慢）；关掉它保证测试进程
-# 全程离线 —— 本文件首个 import litellm 发生在测试函数内（延迟 import，同 src 惯例）。
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-# ---------------------------------------------------------------------------
-# 测试数据（手写 dict state —— JSON 可序列化的结构化 state 子集，与节点直接构造的
-# state 同构；不用 domain 对象：LiteLLMBackend 只消费 dict state）
-# ---------------------------------------------------------------------------
 
 _PRODUCT_STATE = {
     "case": {
@@ -73,7 +53,6 @@ _PRODUCT_STATE = {
     },
 }
 
-# plan 最小 state：无假设/无证据 → plan 渲染走"无可用取证工具 → conclude"兜底分支。
 _PLAN_STATE = {
     "hypotheses": [],
     "evidence": [],
@@ -94,10 +73,8 @@ _PLAN_STATE = {
     },
 }
 
-# 合法 JSON 但不符合 PlanOutput schema（next_action 超词表）→ pydantic ValidationError。
 _SCHEMA_BAD = '{"next_action": "SOMETHING_ELSE", "tools": [], "rationale": "x"}'
 
-# 简单 OutputModel JSON Schema（decide 侧；enum + required 供 schema 要点断言）。
 _SIMPLE_SCHEMA = {
     "title": "DecisionProposal",
     "type": "object",
@@ -114,15 +91,12 @@ _SIMPLE_SCHEMA = {
     "required": ["decision"],
 }
 
-# litellm.acompletion 替身（本文件所有真实 litellm 调用都被它替换）
-
 
 def _make_fake_acompletion(contents: list, tokens: int = 7, finish_reason: str = "stop"):
     """返回可 monkeypatch 到 ``litellm.acompletion`` 的 async 替身，记录每次调用。
 
-    ``contents`` 为逐个返回的 content 文本列表；耗尽后再被调用 → pytest.fail
-    （哨兵：说明存在未 mock 的真实调用泄漏）。记录 ``calls`` = 每次的 kwargs/messages。
-    ``finish_reason`` 为每次响应的 finish_reason（"stop"/"length"；截断测试用）。
+    ``contents`` 为逐个返回的 content 文本列表（耗尽后再被调用 → pytest.fail）；
+    ``calls`` 记录每次的 kwargs/messages；``finish_reason`` 为每次响应的 finish_reason。
     """
 
     queue = list(contents)
@@ -152,7 +126,7 @@ def _make_fake_acompletion(contents: list, tokens: int = 7, finish_reason: str =
 
 def _patch_acompletion(monkeypatch, contents: list, tokens: int = 7, finish_reason: str = "stop"):
     """import litellm 并把 acompletion monkeypatch 为按序返回的本地替身。"""
-    import litellm  # 延迟 import：本文件顶部不 import，避免收集期拉起 litellm
+    import litellm
 
     fake = _make_fake_acompletion(contents, tokens=tokens, finish_reason=finish_reason)
     monkeypatch.setattr(litellm, "acompletion", fake)
@@ -160,7 +134,7 @@ def _patch_acompletion(monkeypatch, contents: list, tokens: int = 7, finish_reas
 
 
 def _patch_acompletion_with_usage(monkeypatch, usage: Any):
-    """按**任意** ``usage`` 对象 patch acompletion（`_patch_acompletion` 只造 total_tokens 口径）。"""
+    """按**任意** ``usage`` 对象 patch acompletion。"""
     import litellm
 
     calls: list = []
@@ -182,16 +156,11 @@ def _patch_acompletion_with_usage(monkeypatch, usage: Any):
     return fake
 
 
-# ---------------------------------------------------------------------------
-# A. LiteLLMBackend 直接测# ---------------------------------------------------------------------------
-
-
 def test_constructor_default_model_and_name_format():
     """默认 model="deepseek/deepseek-flash"；name = f"litellm-{model}"（构造无 key 不抛）。"""
     backend = LiteLLMBackend()
     assert backend.model == "deepseek/deepseek-flash"
     assert backend.name == "litellm-deepseek/deepseek-flash"
-    # 自定义 model 时 name 跟着变（Protocol.name 只做审计/展示标识）
     alt = LiteLLMBackend(model="openai/gpt-4o-mini")
     assert alt.name == "litellm-openai/gpt-4o-mini"
 
@@ -205,7 +174,7 @@ def test_constructor_explicit_api_key_overrides_env(monkeypatch):
         max_tokens=128,
         temperature=0.5,
     )
-    assert backend._api_key == "sk-explicit"  # 入参覆盖环境变量
+    assert backend._api_key == "sk-explicit"
     assert backend.base_url == "https://gateway.example.com/v1"
     assert backend.max_tokens == 128
     assert backend.temperature == 0.5
@@ -221,11 +190,11 @@ def test_constructor_api_key_from_env_when_not_passed(monkeypatch):
 async def test_no_api_key_constructor_ok_first_complete_raises(monkeypatch):
     """环境无 DEEPSEEK_API_KEY：构造不抛；首次 complete 抛 LLMBackendError 中文提示。"""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    backend = LiteLLMBackend()  # 无 key 构造不抛（便于无 key 环境 import/渲染调试）
+    backend = LiteLLMBackend()
     with pytest.raises(LLMBackendError) as ei:
         await backend.complete(node="hypothesize", state={}, json_schema={})
     message = str(ei.value)
-    assert "DEEPSEEK_API_KEY" in message  # 提示告诉用户该设哪个环境变量
+    assert "DEEPSEEK_API_KEY" in message
     assert "未配置" in message
 
 
@@ -238,7 +207,7 @@ def test_tool_catalog_extracted_from_tool_objects():
     class _MerchantArgs(BaseModel):
         merchant_id: str = Field(description="商家 ID")
 
-    class _FakeSearchTool:  # 协议只需 name/description/args_model（结构类型）
+    class _FakeSearchTool:
         name = "PolicySearchTool"
         description = "政策条款检索取证工具"
         args_model = _SearchArgs
@@ -248,7 +217,7 @@ def test_tool_catalog_extracted_from_tool_objects():
         description = "商家历史行为取证"
         args_model = _MerchantArgs
 
-    class _BrokenTool:  # 协议缺 name → 构造时跳过，不影响其余工具
+    class _BrokenTool:
         name = ""
         description = "broken"
         args_model = None
@@ -261,11 +230,9 @@ def test_tool_catalog_extracted_from_tool_objects():
     assert [t["name"] for t in catalog] == ["PolicySearchTool", "MerchantTool"]
     search = catalog[0]
     assert search["description"] == "政策条款检索取证工具"
-    # args_schema 由 pydantic model_json_schema() 生成：含入参字段名与必填信息
     assert "query" in search["args_schema"]["properties"]
     assert "top_k" in search["args_schema"]["properties"]
     assert search["args_schema"]["required"] == ["query"]
-    # None/空 tools → 空目录（plan 渲染走"无可用工具"分支）
     assert LiteLLMBackend(api_key="sk-test", tools=None)._tool_catalog == []
     assert LiteLLMBackend(api_key="sk-test", tools=[])._tool_catalog == []
 
@@ -283,48 +250,37 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
     resp = await backend.complete(
         node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
     )
-    # content == 模型返回的干净 JSON 文本；tokens == usage.total_tokens
     assert resp.content == '{"foo": 1}'
     assert resp.tokens == 23
 
-    assert len(fake.calls) == 1  # 恰好一次调用（无额外泄漏）
+    assert len(fake.calls) == 1
     kwargs = fake.calls[0]["kwargs"]
     assert kwargs["model"] == "deepseek/deepseek-flash"
     assert kwargs["temperature"] == 0.0
-    assert isinstance(kwargs["timeout"], (int, float)) and kwargs["timeout"] > 0  # 必须设超时，默认值是实现选择
-    assert kwargs["response_format"] == {"type": "json_object"}  # 强制 JSON 对象输出
-    assert kwargs["api_key"] == "sk-test"  # 显式 key 透传给 litellm
+    assert isinstance(kwargs["timeout"], (int, float)) and kwargs["timeout"] > 0
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["api_key"] == "sk-test"
     assert kwargs["api_base"] == "https://gateway.example.com/v1"
     assert kwargs["max_tokens"] == 128
 
-    # 发给模型的 messages：system=该节点的完整约束提示；user=渲染上下文
     msgs = fake.calls[0]["messages"]
     assert [m["role"] for m in msgs] == ["system", "user"]
-    # 行为级接线：system 恰为该节点的 SYSTEM_PROMPTS 渲染结果（不锁提示正文措辞）
     assert msgs[0]["content"] == build_system_prompt("hypothesize")
     user = msgs[1]["content"]
-    assert "P_MOCK_99" in user  # state 里的商品事实被渲染出来（值而非裸 JSON）
-    assert "decision" in user and "HUMAN_REVIEW" in user  # schema 要点（字段/枚举值）入 user
+    assert "P_MOCK_99" in user
+    assert "decision" in user and "HUMAN_REVIEW" in user
 
 
 async def test_complete_usage_details_extraction_matrix(monkeypatch):
-    """usage 拆分口径：三键齐全 / 只有 total / 缺 total / 无 usage 属性。
-
-    ``LLMResponse.usage`` 只放 provider **真给**的键 —— 缺 ``total`` 时不得填 0 冒充
-    （``tokens`` 才落 0）；无 usage 属性 → ``usage=None``。
-    """
+    """usage 拆分：三键齐全 / 只有 total / 缺 total / 无 usage 属性。"""
     cases = [
-        # 三键齐全
         (
             types.SimpleNamespace(prompt_tokens=10, completion_tokens=4, total_tokens=14),
             {"input": 10, "output": 4, "total": 14},
             14,
         ),
-        # 只有 total（旧口径：usage 对象缺 prompt/completion）
         (types.SimpleNamespace(total_tokens=23), {"total": 23}, 23),
-        # 缺 total：不填 0 冒充 → usage 只有 input/output、tokens=0
         (types.SimpleNamespace(prompt_tokens=2, completion_tokens=3), {"input": 2, "output": 3}, 0),
-        # 无 usage 属性 → usage=None、tokens=0
         (None, None, 0),
     ]
     backend = LiteLLMBackend(api_key="sk-test")
@@ -336,10 +292,7 @@ async def test_complete_usage_details_extraction_matrix(monkeypatch):
 
 
 async def test_thinking_config_kwargs_only_when_set(monkeypatch):
-    """思考配置显式入口：为 None 不下发（用网关默认），非 None 才进 kwargs。
-
-    不下发与"下发默认值"是两回事 —— 后者会把网关默认档钉死在本仓库里，改变真实行为。
-    """
+    """思考配置显式入口：为 None 不下发（用网关默认），非 None 才进 kwargs。"""
     fake = _patch_acompletion(monkeypatch, contents=['{"foo": 1}', '{"foo": 1}'], tokens=7)
 
     await LiteLLMBackend(api_key="sk-test").complete(
@@ -375,11 +328,7 @@ async def test_complete_network_failure_raises_llm_backend_error(monkeypatch):
 
 
 async def test_complete_cleans_model_content_three_states(monkeypatch):
-    """模型文本清洗三态（经公开 ``complete`` 验证，不锁私有 ``_clean_json_text``）：
-
-    干净 JSON 原样 / 围栏+杂文本截首 ``{`` 到末 ``}`` / 无 ``{`` 原样返回（交由
-    llm_shell ``model_validate_json`` 强校验 + 回喂重试）；None/空串防御不抛。
-    """
+    """模型文本清洗三态（经公开 ``complete`` 验证）。"""
     clean = '{"decision": "PASS", "confidence": 0.9}'
     fenced = '以下是结果：\n```json\n{"a": 1, "b": [1,2]}\n```\n以上仅供参考。'
     no_brace = "抱歉，我无法以 JSON 输出。"
@@ -388,16 +337,12 @@ async def test_complete_cleans_model_content_three_states(monkeypatch):
     )
     backend = LiteLLMBackend(api_key="sk-test")
     call = dict(node="hypothesize", state=_PRODUCT_STATE, json_schema={})
-    # 1) 干净 JSON 原样返回
     assert (await backend.complete(**call)).content == clean
-    # 2) 围栏 + 前后杂文本 → 截取首个 { 到末个 }
     assert (await backend.complete(**call)).content == '{"a": 1, "b": [1,2]}'
-    # 3) 无 { → 原样返回（下游强校验兜底）
     assert (await backend.complete(**call)).content == no_brace
-    # 防御：None/空串不抛
     assert (await backend.complete(**call)).content == ""
     assert (await backend.complete(**call)).content == ""
-    assert len(fake.calls) == 5  # 每态恰一次调用
+    assert len(fake.calls) == 5
 
 
 async def test_unknown_node_raises_without_calling_litellm(monkeypatch):
@@ -409,19 +354,15 @@ async def test_unknown_node_raises_without_calling_litellm(monkeypatch):
     import litellm
 
     monkeypatch.setattr(litellm, "acompletion", should_not_be_called)
-    backend = LiteLLMBackend(api_key="sk-test")  # 有 key，确保失败源于未知 node
+    backend = LiteLLMBackend(api_key="sk-test")
     with pytest.raises(LLMBackendError) as ei:
         await backend.complete(node="bogus", state={}, json_schema={})
     assert "未知 node" in str(ei.value)
-    assert "hypothesize" in str(ei.value)  # 提示里带合法 node 词表
+    assert "hypothesize" in str(ei.value)
 
 
 async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypatch):
-    """全链路重试闭环：第 1 次非法 JSON → 修正提示回喂 → 第 2 次合法 → 成功。
-
-    验证 LiteLLMBackend（真实渲染路径）+ llm_shell 的「校验失败重试 1 次」协作。回喂内容必须含
-    **第 1 次非法输出原文**（模型第 2 次能「看到」自己上一版输出去修正），不只是 ValidationError。
-    """
+    """全链路重试闭环：第 1 次非法 JSON → 修正提示回喂 → 第 2 次合法 → 成功。"""
     fake = _patch_acompletion(monkeypatch, contents=[_SCHEMA_BAD, plan_conclude_json()])
     backend = LiteLLMBackend(api_key="sk-test")
     outcome = await call_structured_llm(
@@ -432,27 +373,20 @@ async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypat
     assert outcome.model.next_action == "conclude"
     assert outcome.attempts == 2
     assert outcome.error is None
-    assert outcome.tokens == 14  # 两次响应 tokens 累计（每次 7）
-    assert len(fake.calls) == 2  # 恰好两次（重试 1 次）
+    assert outcome.tokens == 14
+    assert len(fake.calls) == 2
 
-    # 第 2 次发给模型的 user 里带"上一轮输出校验反馈"分节 —— 修正提示被回喂（非空转）
     second_user = fake.calls[1]["messages"][1]["content"]
     assert "上一轮输出校验反馈" in second_user
     assert "重新输出" in second_user
-    # 回喂含第 1 次非法输出原文（next_action 超词表的 _SCHEMA_BAD 全文）
     assert '"next_action": "SOMETHING_ELSE"' in second_user
-    assert "validation error" in second_user.lower()  # 校验错误文本也一并回喂
-    # 第 1 次 user 无反馈分节（没有可回喂的上一轮错误）
+    assert "validation error" in second_user.lower()
     first_user = fake.calls[0]["messages"][1]["content"]
     assert "上一轮输出校验反馈" not in first_user
 
 
 async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeypatch):
-    """第 1 次 mock 网络失败（transport 类）→ 退避后原样重试 → 第 2 次成功恢复。
-
-    transport 失败没有可「修正」的输出 —— 第 2 次请求**不追加 schema 修正文案**（不误导模型
-    「你的输出不满足 Schema」，实为网络超时），user 与第 1 次完全一致（纯重试）。
-    """
+    """第 1 次 mock 网络失败（transport 类）→ 退避后原样重试 → 第 2 次成功恢复。"""
     import litellm
 
     call_count = {"n": 0}
@@ -478,13 +412,12 @@ async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeyp
     outcome = await call_structured_llm(
         OutputModel=PlanOutput, node="plan", state=_PLAN_STATE, llm=backend
     )
-    assert call_count["n"] == 2  # 失败后重试了 1 次
+    assert call_count["n"] == 2
     assert outcome.model is not None and outcome.model.next_action == "conclude"
     assert outcome.attempts == 2
     assert outcome.error is None
-    assert outcome.tokens == 7  # 第 1 次后端异常不计 tokens
+    assert outcome.tokens == 7
 
-    # transport 重试不加 schema 修正文案 —— 两次请求的 user 内容一致（纯重试）
     first_user = fake_acompletion.calls[0][1]["content"]
     second_user = fake_acompletion.calls[1][1]["content"]
     assert second_user == first_user
@@ -493,7 +426,7 @@ async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeyp
 
 
 async def test_backend_complete_marks_truncated_on_finish_reason_length(monkeypatch):
-    """``finish_reason=="length"`` → ``LLMResponse.truncated=True``（供 shell 分类）。"""
+    """``finish_reason=="length"`` → ``LLMResponse.truncated=True``。"""
     fake = _patch_acompletion(monkeypatch, contents=['{"partial": "json'], finish_reason="length")
     backend = LiteLLMBackend(api_key="sk-test")
     resp = await backend.complete(
@@ -501,7 +434,6 @@ async def test_backend_complete_marks_truncated_on_finish_reason_length(monkeypa
     )
     assert resp.truncated is True
     assert len(fake.calls) == 1
-    # 对照：finish_reason="stop"（默认）→ truncated=False
     fake2 = _patch_acompletion(monkeypatch, contents=['{"ok": 1}'], finish_reason="stop")
     resp2 = await backend.complete(
         node="hypothesize", state=_PRODUCT_STATE, json_schema={}
@@ -511,14 +443,10 @@ async def test_backend_complete_marks_truncated_on_finish_reason_length(monkeypa
 
 
 async def test_call_structured_llm_truncated_invalid_output_not_retried(monkeypatch):
-    """截断（finish_reason=length）且校验失败 → **不重试**（attempts=1 降级）。
-
-    只 mock 一次响应：若 shell 仍按「普通 schema 校验失败」重试 → 哨兵 pytest.fail
-    拦截第二次 acompletion（省一次大概率无效的全量调用）。
-    """
+    """截断（finish_reason=length）且校验失败 → **不重试**（attempts=1 降级）。"""
     fake = _patch_acompletion(
         monkeypatch,
-        contents=['{"next_action": "SOME_TRUNCATED'],  # 截断 + 非法 JSON
+        contents=['{"next_action": "SOME_TRUNCATED'],
         finish_reason="length",
     )
     backend = LiteLLMBackend(api_key="sk-test")
@@ -526,9 +454,9 @@ async def test_call_structured_llm_truncated_invalid_output_not_retried(monkeypa
         OutputModel=PlanOutput, node="plan", state=_PLAN_STATE, llm=backend
     )
     assert outcome.model is None
-    assert outcome.attempts == 1  # 截断按 transport 类：不重试
+    assert outcome.attempts == 1
     assert outcome.error and "截断" in outcome.error
-    assert len(fake.calls) == 1  # 恰好一次（没有白烧第 2 次）
+    assert len(fake.calls) == 1
 
 
 async def test_call_structured_llm_truncated_but_valid_content_succeeds(monkeypatch):
@@ -557,22 +485,20 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
     )
     assert outcome.model is None
     assert outcome.attempts == 2
-    assert outcome.error  # 最后一次 ValidationError 文本（供节点写 failure.reason）
+    assert outcome.error
     assert "validation error" in outcome.error.lower()
-    assert outcome.tokens == 10  # transport 成功两次都记 token；校验失败在 llm_shell
+    assert outcome.tokens == 10
     assert len(fake.calls) == 2
 
-
-# B. llm_prompts 渲染纯测
 
 def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
     """hypothesize user prompt：分节中文上下文含商品事实。"""
     text = build_user_prompt(
         node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
     )
-    assert "P_MOCK_99" in text  # 字段值渲染而非裸 JSON
-    assert "复古跑鞋（高仿嫌疑样）" in text  # 商品标题值入上下文
-    assert "decision" in text and "HUMAN_REVIEW" in text  # schema 要点（字段/枚举值）渲染
+    assert "P_MOCK_99" in text
+    assert "复古跑鞋（高仿嫌疑样）" in text
+    assert "decision" in text and "HUMAN_REVIEW" in text
 
 
 def test_build_user_prompt_decide_sections():
@@ -631,13 +557,10 @@ def test_build_user_prompt_decide_sections():
         },
     }
     text = build_user_prompt(node="decide", state=state, json_schema=_SIMPLE_SCHEMA)
-    # 行为级：decide 决策所需的事实（假设仪表盘/证据引用/运行状态/预算）全部入上下文；
-    # 不锁分节编号与行格式
     assert "H1" in text and "SUPPORTED" in text
-    assert "商家存在系统性规避行为" in text  # hypothesis.statement 值渲染
-    assert "POLICY_REF" in text  # 证据 type 保真（REJECT 引用来源）
-    assert "degraded" in text  # 运行状态入上下文
-    # 预算入上下文：已用 token 观测值 + 两维上限（LLM 调用 / Tool 调用）数值
+    assert "商家存在系统性规避行为" in text
+    assert "POLICY_REF" in text
+    assert "degraded" in text
     assert "1000" in text
     assert "LLM≤10" in text and "工具≤20" in text
 
@@ -675,24 +598,22 @@ def test_build_user_prompt_plan_tool_catalog_and_feedback():
         tool_catalog=catalog,
         feedbacks=["JSON 校验失败：decision 字段缺失，请补全后重新输出"],
     )
-    assert "PolicySearchTool" in text  # 工具目录入上下文
-    assert "query" in text and "top_k" in text  # 工具入参要点渲染
-    assert "必填" in text and "可选" in text  # required/optional 区分被表达（不锁标记格式）
-    assert "decision 字段缺失" in text  # llm_shell 修正提示内容被回喂到 user
-    assert "上一轮输出校验反馈" in text  # 修正反馈分节标记（llm_shell 重试协议回喂载体）
-    # 空目录 → plan 上下文提示无工具可查、引导 conclude
+    assert "PolicySearchTool" in text
+    assert "query" in text and "top_k" in text
+    assert "必填" in text and "可选" in text
+    assert "decision 字段缺失" in text
+    assert "上一轮输出校验反馈" in text
     empty = build_user_prompt(node="plan", state={}, json_schema={})
     assert "conclude" in empty
     assert "无可用取证工具" in empty
 
 
 def test_build_user_prompt_empty_state_all_nodes_robust():
-    """空 state / 缺键：四个节点都不崩、返回非空文本（防御式降级口径）。"""
+    """空 state / 缺键：四个节点都不崩、返回非空文本。"""
     for node in SYSTEM_PROMPTS:
         text = build_user_prompt(node=node, state={}, json_schema={})
         assert isinstance(text, str) and text
-        assert "## 输出格式要求" in text  # Schema 要点段始终在
-    # 畸形 state（hypotheses 不是列表）也不崩、仍有非空上下文
+        assert "## 输出格式要求" in text
     text = build_user_prompt(
         node="decide", state={"hypotheses": "not-a-list"}, json_schema={}
     )
@@ -702,24 +623,15 @@ def test_build_user_prompt_empty_state_all_nodes_robust():
 def test_build_user_prompt_schema_enum_and_required_fields():
     """输出格式要点来自 json_schema：schema 的标题/字段/枚举值/必填可选信息均渲染。"""
     text = build_user_prompt(node="decide", state={}, json_schema=_SIMPLE_SCHEMA)
-    # 行为级：schema 派生信息全部出现在要点段；不锁渲染短语的具体措辞
-    assert "DecisionProposal" in text  # schema title
-    assert "decision" in text  # 必填字段名
-    assert "PASS" in text and "REJECT" in text and "HUMAN_REVIEW" in text  # 枚举可取值
-    assert "risk_type" in text  # 可选字段名
-    assert "必填" in text and "可选" in text  # 必填/可选区分被表达
+    assert "DecisionProposal" in text
+    assert "decision" in text
+    assert "PASS" in text and "REJECT" in text and "HUMAN_REVIEW" in text
+    assert "risk_type" in text
+    assert "必填" in text and "可选" in text
 
-
-# C. 确定性回归守护（无网络 / 无 key）
 
 def test_import_backend_does_not_pull_litellm():
-    """import pra.agent.litellm_backend 不 import litellm（延迟 import 契约守护）。
-
-    litellm 1.100.0 被 import 时会尝试拉远程 model cost map（联网）：若有人把
-    litellm_backend 的 ``import litellm`` 提到模块顶层，每个测试收集期都会产生网络请求 ——
-    本测试用**全新子进程**验证模块 import 不拉起 litellm（子进程隔离与 pytest 进程内是否已
-    import litellm 无关）。
-    """
+    """import pra.agent.litellm_backend 不 import litellm（延迟 import）。"""
     repo_src = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"
     )
@@ -730,12 +642,12 @@ def test_import_backend_does_not_pull_litellm():
         "assert 'litellm' not in sys.modules, 'litellm_backend import 拉起了 litellm'\n"
     )
     env = dict(os.environ)
-    env.pop("DEEPSEEK_API_KEY", None)  # 子进程也不带 key（防任何隐式联网读 key）
+    env.pop("DEEPSEEK_API_KEY", None)
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
         timeout=60,
-        check=False,  # 失败由下方 returncode 断言给出可读 stderr
+        check=False,
     )
     assert result.returncode == 0, result.stderr

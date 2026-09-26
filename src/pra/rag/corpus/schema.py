@@ -1,8 +1,4 @@
-"""RAG corpus 数据契约（Pydantic 强校验）：``PolicyClauseRecord`` / ``CasePrecedentRecord`` 与顶层信封。
-
-``CasePrecedentRecord`` 不含 ``retrieval_score``（检索期才计算，不入库）。
-case_id 统一 ``RAG_CASE_`` 前缀，**严禁包含 eval 的 ground-truth 案**（防「检索到 GT = 评测作弊」）。
-"""
+"""RAG corpus 数据契约（Pydantic 强校验）：``PolicyClauseRecord`` / ``CasePrecedentRecord`` 与顶层信封。"""
 
 from __future__ import annotations
 
@@ -13,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pra.domain.models import Decision, RiskLevel, RiskType
 
-# status 受控取值（须与 PolicyClauseHit.status 一致，勿单改）
 ClauseStatus = Literal["EFFECTIVE", "EXPIRED"]
 
 

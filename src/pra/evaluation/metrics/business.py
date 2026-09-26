@@ -1,26 +1,4 @@
-"""决策业务指标：DecisionEvaluator —— 全量分母与 AUTO_DECIDABLE 分母一次遍历同算。
-
-真值子集由 expected 的 (decision, abstain_label) 推导：``abstain_label`` 优先；缺失时
-``decision == HUMAN_REVIEW`` → SHOULD_ABSTAIN，其余 → AUTO_DECIDABLE。
-
-指标口径（REJECT 为正类）：
-
-- 全量分母（全部案，含 HUMAN_REVIEW 真值）：
-  ``automation_coverage`` = pred ∈ {PASS,REJECT} / total；
-  ``human_review_rate`` = pred HUMAN_REVIEW / total；
-- AUTO_DECIDABLE 分母（本可自动判的案）：
-  ``accuracy`` = (tp+tn) / auto_decidable_total（pred HUMAN 入分母、不入分子）；
-  ``precision`` = tp/(tp+fp)；
-  ``wrong_auto_decision_rate`` = (fp+fn)/(tp+fp+tn+fn)（pred HUMAN 不入该分母）；
-- 真值 REJECT 分母（全部真违规案）：
-  ``recall`` = tp / reject_truth（pred HUMAN_REVIEW 记为该真违规未被自动拦下，入分母不入 TP/FN）；
-  ``reject_unhandled`` = reject_human / reject_truth。
-
-真值 REJECT 案被 ``tp`` / ``reject_human`` / ``fn`` 三个互斥桶完全划分，故恒有
-``recall + reject_unhandled + fn/reject_truth = 1`` —— 缺口据此区分"安全转人工"与"漏放"。
-
-分母为 0 的比率返回 None（报告显示 "-"，不硬造 0/∞）。
-"""
+"""决策业务指标：DecisionEvaluator。"""
 
 from __future__ import annotations
 
@@ -37,7 +15,7 @@ _SHOULD = "SHOULD_ABSTAIN"
 
 
 class DecisionMetrics(BaseModel):
-    """两套分母的业务指标 + 各自分子分母计数（None = 分母为 0，未定义）。"""
+    """业务指标与各自分子分母计数（None = 分母为 0，未定义）。"""
 
     total: int = Field(description="全部案数（全量分母）")
     human_pred_total: int = Field(description="pred HUMAN_REVIEW 的案数（human_review_rate 分子）")

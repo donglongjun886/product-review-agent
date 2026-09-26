@@ -1,22 +1,8 @@
 """测量维度与「已测」事实的领域契约（无依赖叶子模块）。
 
-**为什么单独一个模块**：工具层（``pra.tools.*``）需要产出测量证据，而 gate 层需要读取它；
-若把类型常量放在 guardrails 侧，就会形成 ``tools → guardrails → tools`` 的循环 import。
-本模块只依赖 ``domain/models``，两层都可安全引用。
-
-三个概念必须分清（缺一不可）：
-
-- **dimension**：平台风险面的**受控词表**（封闭枚举），不是 LLM 自由文本；
+- **dimension**：平台风险面的**受控词表**（封闭枚举）；
 - **verdict**：一次**已完成测量**的结论 —— ``POSITIVE``（发现达处置阈值的风险）/
   ``NEGATIVE``（未发现）。
-- **coverage**（``COVERED`` / ``NOT_MEASURED`` / ``UNMEASURABLE``）：**不是证据**，
-  是"测量是否发生"的状态，由 gate 层用 ``required × 证据存在性 × 环境能力`` 推导 ——
-  绝不能为"没测"造一个证据对象（那会把"缺席"变成"事实"，
-  正是"查不到 ≠ 证明无"被破坏的根源）。
-
-``MEASUREMENT`` 是承载「已测」的**唯一**证据类型；风险**阳性**仍由各工具既有的证据类型
-承载（商家脏 / 规则命中 …），本模块不为阳性另造表示，
-避免同一事实两处表示而漂移。
 """
 
 from __future__ import annotations
@@ -43,7 +29,7 @@ __all__ = [
     "measurement_verdict",
 ]
 
-# ---- 受控维度词表（封闭枚举；新增维度须同时给出：必需性来源、可测性来源、阳性类型映射）----
+# ---- 受控维度词表（封闭枚举）----
 
 DIM_LISTING_REGISTRY = "listing_registry"  # 商品在库可核验（品牌/类目/版本事实）
 DIM_MERCHANT_PROFILE = "merchant_profile"  # 商家行为模式（removals / title-relisting）
@@ -67,27 +53,20 @@ VERDICTS: frozenset[str] = frozenset({VERDICT_POSITIVE, VERDICT_NEGATIVE})
 
 MEASUREMENT_TYPE = "MEASUREMENT"
 
-# ---- 证据确定性阈值（单一来源；tools / guardrails / evaluation 统一从此取值）----
+# ---- 证据确定性阈值 ----
 
-# 无风险量纲证据类型的默认权重（PRODUCT_FACT / POLICY_REF）；不被任何决策读取。
-# RULE_HIT 是确定性规则命中，按满强度 1.0 单独定义在 pra.screening.engine。
+# 无风险量纲证据类型的默认权重（PRODUCT_FACT / POLICY_REF）。
 DEFAULT_EVIDENCE_WEIGHT = 0.5
 
 # 商家历史「系统性规避行为」阈值：removals 或 title-relisting 达到该值即成立。
 MERCHANT_DIRTY_MIN = 3
 
-# 可引用依据类型（Gate / 收敛判定 / 指标层共用；构成引用还须带 ref_id）。
+# 可引用依据类型。
 CITABLE_TYPES = frozenset({"CASE_PRECEDENT", "POLICY_REF"})
 
 
 def measurement_ref_id(dimension: str, source_ref: str) -> str:
-    """测量证据的 ``ref_id`` = ``"{dimension}:{source_ref}"``。
-
-    **必须包含 dimension**：证据去重指纹是 ``(type, source, ref_id or value)``
-    （``agent/state.py::_evidence_key``），语义为"证据不可篡改、重放/重试幂等"。
-    若 ``ref_id`` 只取源对象（如图片 URL），同一对象在不同维度上的测量会互相吞并；
-    测到阳性时改由**阳性证据类型**承载（类型不同 ⇒ key 不同），故阳性不会被阴性覆盖。
-    """
+    """测量证据的 ``ref_id`` = ``"{dimension}:{source_ref}"``。"""
     return f"{dimension}:{source_ref}"
 
 
@@ -130,7 +109,7 @@ def is_measurement(e: Evidence) -> bool:
 
 
 def measurement_dimension(e: Evidence) -> str | None:
-    """取测量证据的维度；缺失/非测量证据返回 None（防御：extra 由工具填写）。"""
+    """取测量证据的维度；缺失/非测量证据返回 None。"""
     if not is_measurement(e):
         return None
     dim = (e.extra or {}).get("dimension")
@@ -138,7 +117,7 @@ def measurement_dimension(e: Evidence) -> str | None:
 
 
 def measurement_verdict(e: Evidence) -> str | None:
-    """取测量证据的结论；非法值返回 None（gate 侧按"未证实"保守处理）。"""
+    """取测量证据的结论；非法值返回 None。"""
     if not is_measurement(e):
         return None
     verdict = (e.extra or {}).get("verdict")

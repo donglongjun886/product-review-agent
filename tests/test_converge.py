@@ -1,11 +1,4 @@
-"""收敛判定 ``is_converged``（guardrails/converge.py）单测。
-
-本次语义重构后：收敛由**事实侧的 required 覆盖**决定，**完全不看 hypothesis 状态**。
-
-- 还有"本环境可测却没测"的维度 → 未收敛（继续回环补测）；
-- 已确定 UNMEASURABLE 的维度**不算缺口**（重跑也测不出，继续循环只是烧预算）；
-- 已出现阳性时，必须已有可引用依据（除非该维度在本环境不可测）。
-"""
+"""收敛判定 ``is_converged``（guardrails/converge.py）单测。"""
 
 from __future__ import annotations
 
@@ -37,7 +30,7 @@ def test_converged_when_all_required_covered():
 
 
 def test_not_converged_when_required_measurement_missing():
-    """商家画像本可测却没测（N1）→ 继续回环补测。"""
+    """商家画像本可测却没测 → 继续回环补测。"""
     evs = [
         e for e in covered_evidence()
         if not (e.type == "MEASUREMENT" and e.ref_id.startswith(DIM_MERCHANT_PROFILE))
@@ -93,11 +86,11 @@ def test_citable_without_ref_id_does_not_count():
     ],
 )
 def test_hypothesis_status_no_longer_affects_convergence(status):
-    """收敛不再看假设状态：四种状态结果一致（旧链路里 PENDING/UNRESOLVED 会阻塞）。"""
+    """收敛不看假设状态：四种状态结果一致。"""
     hyps = [hp("H1", prior=0.9, posterior=0.9, status=status, evidence_for=["x"])]
     assert is_converged(_state(evidence=covered_evidence(), hypotheses=hyps)) is True
 
 
 def test_empty_state_converged_without_raise():
-    """无 case ⇒ required 为空 ⇒ 收敛（但 gate 侧另有"无 case 不得 PASS"守卫）。"""
+    """无 case ⇒ required 为空 ⇒ 收敛。"""
     assert is_converged({"hypotheses": [], "evidence": []}) is True

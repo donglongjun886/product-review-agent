@@ -1,23 +1,4 @@
-"""真实 litellm 后端 ``LiteLLMBackend``（real LLM 评测用）。
-
-本后端实现 ``LLMBackend`` Protocol，由调用方在装配处**显式注入**
-（``build_agent_graph(llm=...)``）。本后端把结构化 ``state`` 子集渲染成人读中文上下文
-（见 :mod:`pra.agent.llm_prompts`）后替换 system 消息、发给真实网关 —— **输出非确定性**：
-同 (node, state) 不保证同结果、不可重放。schema 强校验 / 重试 1 次仍在 llm_shell
-（``model_validate_json``），后端不做内容校验。
-
-配置：``model`` 默认 ``"deepseek/deepseek-flash"``；``api_key`` 构造传入或读
-``DEEPSEEK_API_KEY``（两处都缺不报错，首次 ``complete`` 前才抛 ``LLMBackendError``）；
-``base_url`` 非 None 时以 ``api_base`` 传 litellm；``tools`` 提取
-``{name, description, args_schema}`` 存为 plan 渲染用工具目录；``thinking`` /
-``reasoning_effort`` 为 None 时不传（用网关默认 enabled + high），非 None 时按
-DeepSeek 口径下发（详见 ``__init__``）。
-
-失败形态：任一错误（网络/超时/HTTP/无 key/上游异常）→ ``LLMBackendError``（llm_shell
-按 transport 类处理：退避重试 1 次）；内容提取失败不抛，返回原样文本 + ``truncated``
-标记。token 口径：``tokens`` = ``usage.total_tokens``（input+output 合计、含缓存命中；
-无 usage → 0），schema 校验失败的尝试也全额累计（transport 失败不计）。
-"""
+"""真实 litellm 后端 ``LiteLLMBackend``（实现 ``LLMBackend`` Protocol，真实 LLM 评测用）。"""
 
 from __future__ import annotations
 
@@ -37,12 +18,11 @@ from pra.agent.llm_prompts import (
 
 __all__ = ["LiteLLMBackend"]
 
-# 环境变量：api_key 缺省来源
 _API_KEY_ENV = "DEEPSEEK_API_KEY"
 
 
 def _int_or_none(value: Any) -> int | None:
-    """把 usage 字段转 int；缺失/None/非法 → ``None``（不填 0 冒充）。"""
+    """``value`` 转 int；缺失 / None / 非法 → ``None``。"""
     if value is None:
         return None
     try:
@@ -52,9 +32,9 @@ def _int_or_none(value: Any) -> int | None:
 
 
 class LiteLLMBackend(LLMBackend):
-    """真实 litellm 后端：渲染结构化 state → 完整 prompt → 调 API（见模块 docstring）。"""
+    """真实 litellm 后端：渲染结构化 state 为 prompt 后调用 API。"""
 
-    name: str = "litellm"  # Protocol 属性；__init__ 覆写为 f"litellm-{model}"
+    name: str = "litellm"  # Protocol 属性（``__init__`` 覆写）
 
     def __init__(
         self,
@@ -69,20 +49,11 @@ class LiteLLMBackend(LLMBackend):
         thinking: Literal["enabled", "disabled"] | None = None,
         reasoning_effort: Literal["none", "low", "high", "max"] | None = None,
     ) -> None:
-        """构造真实 LLM 后端（只固化参数，不触发任何网络/API 调用）。
+        """构造真实 LLM 后端（只固化参数，不发起网络调用）。
 
-        :param model: litellm 模型名（provider 前缀写法）；
-        :param api_key: None → 读 ``DEEPSEEK_API_KEY``（仍缺不报错，首次 ``complete``
-            时抛 ``LLMBackendError``）；
-        :param base_url: 可选 OpenAI 兼容端点，非 None 时以 ``api_base`` 传 litellm；
-        :param temperature: 采样温度（0.0 —— 尽量稳定，但真实模型仍非确定性）；
-        :param timeout_s: 单次请求超时秒数；max_tokens：输出上限（None = 模型默认）；
-        :param tools: ``Tool`` 协议对象列表 —— 提取 {name, description, args_schema}
-            存为 plan 渲染用工具目录；None/空 → plan 上下文说明"无可用工具"；
-        :param thinking: 思考模式开关（网关默认 ``enabled``）—— 非 None 时以
-            ``extra_body={"thinking": {"type": ...}}`` 下发；``disabled`` 为非思考模式；
-        :param reasoning_effort: 思考强度（网关默认 ``high``）—— 非 None 时以顶层
-            ``reasoning_effort`` 下发；``none`` 等价关闭思考模式。
+        ``api_key`` None → 读 ``DEEPSEEK_API_KEY``；``base_url`` 非 None → 以 ``api_base`` 传给 litellm。
+        ``tools`` → 工具目录 ``{name, description, args_schema}``；``thinking`` / ``reasoning_effort``
+        None → 不传，用网关默认。
         """
         self.model = model
         self.name = f"litellm-{model}"
@@ -95,19 +66,13 @@ class LiteLLMBackend(LLMBackend):
         self._api_key: str | None = (api_key or os.environ.get(_API_KEY_ENV) or None)
         self._tool_catalog: list[dict] = self._extract_tool_catalog(tools)
 
-    # -- 工具目录提取（构造时调用；plan 渲染依赖） --------------------------------
-
     @staticmethod
     def _extract_tool_catalog(tools: list | None) -> list[dict]:
-        """把 ``Tool`` 协议对象列表 → 工具目录。
-
-        元素 = ``{"name", "description", "args_schema"}``（args_schema 由
-        ``args_model.model_json_schema()`` 生成）；单个工具提取失败 → 跳过不崩；
-        None/空/全失败 → 空目录（plan 走"无可用工具"分支）。
+        """``Tool`` 列表 → 工具目录：元素 ``{"name", "description", "args_schema"}``；
+        单个工具提取失败则跳过，空输入 → 空目录。
         """
         catalog: list[dict] = []
         for tool in tools or []:
-            # 逐个提取并跳过异常工具：协议缺字段/args_model 异常只影响该工具。
             name = getattr(tool, "name", None)
             if not name:
                 continue
@@ -116,7 +81,7 @@ class LiteLLMBackend(LLMBackend):
                 args_schema = (
                     args_model.model_json_schema() if args_model is not None else {}
                 )
-            except Exception:  # 防御：args_model 非 pydantic 模型时无 model_json_schema
+            except Exception:
                 args_schema = {}
             catalog.append(
                 {
@@ -127,8 +92,6 @@ class LiteLLMBackend(LLMBackend):
             )
         return catalog
 
-    # -- 渲染（system=角色+约束；user=结构化人读上下文 + Schema 要点） -----------
-
     def _render(
         self,
         *,
@@ -137,10 +100,8 @@ class LiteLLMBackend(LLMBackend):
         json_schema: dict,
         feedback: list[str] | None = None,
     ) -> tuple[str, str]:
-        """组装发给真实 LLM 的 (system, user) 完整消息（本类唯一渲染入口）。
-
-        system 来自 :mod:`pra.agent.llm_prompts` 的约束中文指令；user 是分节上下文 +
-        Schema 要点，并追加第 2 次尝试带回的修正提示（避免重试退化成同 prompt 空转）。
+        """组装 (system, user) 消息：system = 角色约束指令，user = 分节上下文 + Schema 要点
+        + 可选修正提示。
         """
         system = build_system_prompt(node)
         user = build_user_prompt(
@@ -152,8 +113,6 @@ class LiteLLMBackend(LLMBackend):
         )
         return system, user
 
-    # -- LLMBackend.complete ------------------------------------------------------
-
     async def complete(
         self,
         *,
@@ -162,35 +121,28 @@ class LiteLLMBackend(LLMBackend):
         json_schema: dict,
         feedback: list[str] | None = None,
     ) -> LLMResponse:
-        """按 node 渲染完整 prompt 并调用 litellm，返回 content 原样文本 + token 数。
+        """按 ``node`` 渲染 prompt 并调用 litellm。
 
-        node 词表外或调用失败（无 key / 网络 / 超时 / HTTP / 上游异常）→
-        ``LLMBackendError``；content 提取/清理失败**不抛**，返回
-        原样文本交 llm_shell 强校验；截断（``finish_reason == "length"``）→
-        ``LLMResponse.truncated=True``。
+        返回 ``LLMResponse``：``content`` 为模型原样文本，``truncated`` 标记
+        ``finish_reason == "length"``；``node`` 词表外或无 key / 调用失败 → ``LLMBackendError``。
         """
-        # 1) node 词表校验（与 SYSTEM_PROMPTS 词表一致）
         if node not in SYSTEM_PROMPTS:
             raise LLMBackendError(
                 f"未知 node: {node!r}，应为 {sorted(SYSTEM_PROMPTS)}"
             )
-        # 2) 无 key 检查（构造后到真正调用前才抛）
         if not self._api_key:
             raise LLMBackendError(
                 f"未配置 DeepSeek API key：请在构造 LiteLLMBackend(api_key=...) 时传入，"
                 f"或设置环境变量 {_API_KEY_ENV} 后重试（当前 model={self.model}）。"
             )
-        # 3) 渲染完整消息（state 直传；feedback 为上一轮 schema 修正提示）
         system, user = self._render(
             node=node, state=state, json_schema=json_schema, feedback=feedback
         )
-        # 4) litellm 调用（延迟 import：模块 import 期零 litellm 依赖）
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "temperature": self.temperature,
             "timeout": self.timeout_s,
-            # 强制 JSON 对象输出（deepseek 等 OpenAI 兼容网关支持；不支持时由上层降级）
             "response_format": {"type": "json_object"},
         }
         if self._api_key:
@@ -199,40 +151,30 @@ class LiteLLMBackend(LLMBackend):
             kwargs["api_base"] = self.base_url
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
-        # 思考模式开关 / 强度：None = 不传，用网关默认（enabled + high）
         if self.thinking is not None:
             kwargs["extra_body"] = {"thinking": {"type": self.thinking}}
         if self.reasoning_effort is not None:
             kwargs["reasoning_effort"] = self.reasoning_effort
         try:
-            # 离线化：litellm import 时默认联网拉远程 model cost map，无外网会白等一次
-            # 超时 —— 置 LITELLM_LOCAL_MODEL_COST_MAP=True 用本地备份，import 零网络。
             os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-            import litellm  # 延迟 import：避免本模块被 import 就拉起 litellm
+            import litellm
 
             resp = await litellm.acompletion(**kwargs)
         except LLMBackendError:
-            raise  # 不二次包装
+            raise
         except Exception as exc:
-            # 网络/超时/HTTP/上游 4xx-5xx/参数错误等一律收敛为 LLMBackendError
             raise LLMBackendError(
                 f"litellm 调用失败（node={node}, model={self.model}）：{exc}"
             ) from exc
-        # 5) 取 content + 截断标记（choices 异常 → 空串，交上层校验）
         content = ""
         truncated = False
         try:
             choice = resp.choices[0]
             message = choice.message
             content = message.content or ""
-            # finish_reason == "length" ⇒ 内容可能不完整；标记给 llm_shell 按
-            # transport 类处理（校验失败不重试），不再当普通校验失败烧一次全量调用。
             truncated = str(getattr(choice, "finish_reason", "") or "") == "length"
         except Exception:
             content = ""
-        # 6) token 记账：tokens = usage.total_tokens（input+output 合计、含缓存命中；
-        #    无 usage → 0）；另透出拆分 usage（input/output/total，对齐 Langfuse
-        #    usage_details），取不到的键不放（不填 0 冒充），整体拿不到 → None。
         tokens = 0
         usage_details: dict[str, int] | None = None
         usage = getattr(resp, "usage", None)
@@ -256,15 +198,9 @@ class LiteLLMBackend(LLMBackend):
             usage=usage_details,
         )
 
-    # -- content 清理（best-effort，任何失败不抛，原样返回） ----------------------
-
     @staticmethod
     def _clean_json_text(content: str) -> str:
-        """从模型返回文本里取 JSON 子串（best-effort，绝不抛）。
-
-        已是干净 JSON / 找不到 '{' → 原样返回；带 ```json 围栏 / 前后杂文本 → 截取首个
-        '{' 到末个 '}'，提高首次校验通过率。
-        """
+        """从模型返回文本里取 JSON 子串：截取首个 ``{`` 到末个 ``}``；找不到则原样返回。"""
         if not isinstance(content, str) or not content.strip():
             return content if isinstance(content, str) else ""
         start = content.find("{")

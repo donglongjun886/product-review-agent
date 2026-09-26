@@ -1,5 +1,4 @@
-# 评测指标：DecisionEvaluator（全量 + AUTO_DECIDABLE 两套分母）
-# + Agent 级指标（工具选择 / 推理正确性 / 边际证据增益）+ EngineeringEvaluator（成本分布）。
+# 评测指标：决策 / Agent / 工程三组评测器的导出。
 from pra.evaluation.metrics.agent import (
     AgentMetricsBundle,
     MarginalEvidenceGainEvaluator,

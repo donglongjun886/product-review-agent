@@ -1,19 +1,7 @@
-"""hypothesize 节点 —— 初始风险假设生成（LLM 语义步）。
+"""hypothesize 节点：初始风险假设生成（LLM 语义步）。
 
-把输入 ``ProductReviewCase``（商品快照 + 商家）转化为**初始待验证假设集**
-（每条带 ``prior`` 先验 = 未经调查的怀疑度 0..1，不归一化、不要求和为 1），
-交给 plan → tools → reevaluate 循环逐条验证。
-
-- 本节点是图的**入口首节点**：无 degraded 短路；仅防御性检查 ``budget_exceeded``
-  （checkpoint 续跑等异常态）→ 止损降级，不调 LLM。
-- 假设内容与 prior 来自 LLM（``HypothesizeOutput`` 由 llm_shell 强校验：失败重试 1 次
-  仍失败 → 返回降级结果并置 ``degraded=True``）。
-- 其余为确定性 apply：``id`` 按序编号 H1..Hn、``status=PENDING``、``posterior=None``、
-  ``evidence_for/against=[]``。LLM 的 ``rationale`` 在 AgentState 中无 channel，apply
-  时直接丢弃。
-- ``_state_payload`` 以结构化 dict 注入 state 子集（case 全量，domain 对象经
-  ``model_dump(mode="json")`` 转 JSON 形状）—— 后端按 ``state=`` 接收，
-  不再有 ``__STATE__`` 文本协议。
+把 ``ProductReviewCase`` 转为初始假设集（``prior`` 为未经调查的怀疑度 0..1）；
+返回 hypotheses / degraded / failures / budget（failures 只含本次新增）。
 """
 
 from __future__ import annotations
@@ -26,7 +14,7 @@ from pra.domain.models import Hypothesis, HypothesisStatus
 
 __all__ = ["hypothesize_node"]
 
-# LLM 步降级 failure 文案：取固定字面值、不拼 outcome.error（reason 稳定、可断言）。
+# LLM 步降级 failure 文案（固定字面值）
 _DEGRADE_REASON = "schema 校验重试仍失败"
 
 
@@ -37,11 +25,7 @@ def _state_payload(state: dict) -> dict:
 
 
 def _apply_hypotheses(out: HypothesizeOutput) -> list[Hypothesis]:
-    """LLM 提案 → Hypothesis 列表（确定性 apply）。
-
-    按序编号 H1..Hn；``status=PENDING``、``posterior=None``、``evidence_for/against=[]``
-    （重建而非引用 LLM 对象）；``evidence_hint`` / ``rationale`` 无对应字段，直接丢弃。
-    """
+    """LLM 提案 → Hypothesis 列表：按序编号 H1..Hn，``status=PENDING``、``posterior=None``；``evidence_hint`` / ``rationale`` 丢弃。"""
     return [
         Hypothesis(
             id=f"H{idx + 1}",
@@ -57,13 +41,7 @@ def _apply_hypotheses(out: HypothesizeOutput) -> list[Hypothesis]:
 
 
 async def hypothesize_node(state: dict, config, *, llm: LLMBackend) -> dict:
-    """hypothesize 图节点（入口首节点）：生成初始假设集。
-
-    ``llm`` 由 ``build_agent_graph`` 装配期显式注入（本节点不持有/不查找任何默认后端）。
-
-    返回 hypotheses / degraded / failures / budget（failures 只含本次新增）。
-    """
-    # 入口防御：预算已超限（checkpoint 续跑等异常态）→ 不调 LLM，降级转人工。
+    """hypothesize 图节点：生成初始假设集；``llm`` 由装配期显式注入。"""
     if budget_exceeded(state["budget"]) is not None:
         return {
             "hypotheses": [],
@@ -84,7 +62,6 @@ async def hypothesize_node(state: dict, config, *, llm: LLMBackend) -> dict:
         state=_state_payload(state),
         llm=llm,
     )
-    # LLM 记账：按实际尝试次数 bump（成功 1 次 / 重试后成功 2 次 / 两次失败仍 2 次）
     budget = bump_llm_usage(
         state["budget"], llm_calls=outcome.attempts, tokens=outcome.tokens
     )

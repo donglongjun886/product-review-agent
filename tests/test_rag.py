@@ -1,18 +1,4 @@
-"""RAG 共享件与默认路径验收测试（CI 上恒跑的那一面）。
-
-保留范围（被测对象仍存在、且不依赖 ``--extra rag``）：
-- corpus loader / schema 校验：Policy/Case KB 规模与唯一性、≥2 条 EXPIRED、meta 隔离声明；
-- **隔离红线**：Case KB 的 case_id 与 eval_data v2 全部 case 标识（含 InMemory 种子先例）无交集，
-  防评测作弊；
-- ``build_inmemory_tools()``（``tests/inmemory_world.py``）仍是 4 个 InMemory 工具。
-
-**chroma 真实检索的离线验收用例已整体移除**：它们靠一个测试自持的假编码器（词面 sha256 特征）
-离线跑，验的是管道而非检索质量；假编码器及其用例一并删除后，chroma 检索只剩
-``tests/test_rag_production_wiring.py`` 的真模型端到端用例。默认路径「零额外依赖」仍由
-``tests/test_rag_default_path_no_extra.py`` 守护。
-
-确定性、无网络、无真 LLM、不写评测数据目录。
-"""
+"""RAG 共享件与默认路径验收测试（CI 上恒跑的那一面）。"""
 
 from __future__ import annotations
 
@@ -46,7 +32,6 @@ def _eval_case_ids() -> set[str]:
             lineage = obj.get("lineage") or {}
             if lineage.get("seed_case_id"):
                 ids.add(lineage["seed_case_id"])
-    # 追加 InMemory 种子先例（inmemory_world._DEFAULT_PRECEDENTS / CASE_1832 等）
     for row in _DEFAULT_PRECEDENTS:
         ids.add(row["case_id"])
     return ids
@@ -67,19 +52,17 @@ def test_corpus_data_integrity() -> None:
     assert len(case_ids) == len(set(case_ids)), "case_id 须唯一"
     assert all(str(cid).startswith("RAG_CASE_") for cid in case_ids)
 
-    # meta 携带来源/隔离声明（JSON 无注释 → meta 字段，schema 校验即生效）
     assert "isolation_declaration" in pmeta and "isolation_declaration" in cmeta
 
 
 def test_case_kb_isolated_from_eval_gt() -> None:
-    """Case KB 与 eval GT 严格隔离（防检索到 GT = 评测作弊）。"""
+    """Case KB 与 eval GT 严格隔离。"""
     cases, _ = load_cases()
     kb_ids = {c.case_id for c in cases}
     eval_ids = _eval_case_ids()
 
     overlap = kb_ids & eval_ids
     assert not overlap, f"Case KB 与 eval GT case_id 有交集（红线违反）: {sorted(overlap)[:10]}"
-    # InMemory 种子先例 id 亦不得混入（CASE_1832/0911 等）
     assert kb_ids.isdisjoint({r["case_id"] for r in _DEFAULT_PRECEDENTS})
 
 
@@ -94,6 +77,5 @@ _EXPECTED_TOOLS = [
 def test_build_inmemory_tools_uses_inmemory_indexes() -> None:
     tools = build_inmemory_tools()
     assert [t.name for t in tools] == _EXPECTED_TOOLS
-    # tests 世界的两个检索工具注入 InMemory 索引（确定性可重放的种子）
     assert type(tool_by_name(tools, "CaseSearchTool")._index).__name__ == "InMemoryCaseIndex"
     assert isinstance(tool_by_name(tools, "PolicySearchTool")._index, InMemoryPolicyIndex)

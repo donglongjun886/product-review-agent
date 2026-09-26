@@ -1,19 +1,4 @@
-"""S1 契约：生产 LLM 装配（``pra.wiring.build_llm_backend`` + ``get_production_graph``）。
-
-政策：生产入口必须注入**真实** LLM 后端（``LiteLLMBackend``）；缺 ``DEEPSEEK_API_KEY`` 显式抛
-``RuntimeError``，绝不静默回落 scripted 桩。本文件锁死四条：
-
-1. 缺 key（None / 全空白）→ ``RuntimeError``，消息含 ``DEEPSEEK_API_KEY``；
-2. 模型名 / base_url / 凭据逐项来自 ``Settings``（字段名与 env 键映射）；
-3. ``tools`` 真的传进后端工具目录 —— plan 节点 prompt 靠它渲染，漏传会让真模型看到
-   "无可用工具" 而规划环节静默废掉；
-4. 生产图把同一份后端与同一份工具列表注入 ``build_agent_graph``（删 ``llm=`` / ``tools=``
-   立刻变红）。
-
-零网络 / 零真钱 / 不依赖本机真实 key：只构造后端（``LiteLLMBackend.__init__`` 不触发网络，
-litellm 是延迟 import），``Settings`` 一律钉成 ``_env_file=None`` 或 ``tmp_path`` 造的临时 env
-文件，绝不读仓库根 ``.env``；断言只在假 key 上做等值比较。
-"""
+"""生产 LLM 装配（``pra.wiring.build_llm_backend`` + ``get_production_graph``）。"""
 
 from __future__ import annotations
 
@@ -28,9 +13,8 @@ from pra.infra import db as infra_db
 from pra.infra.db import Settings as RealSettings
 from pra.wiring import build_llm_backend
 
-# 假凭据：只用于断言"值来自 Settings"，不是真实 key，也不会发请求。
 _FAKE_KEY = "sk-test-not-real"
-_MODEL_FROM_ENV = "deepseek/deepseek-reasoner"  # 刻意≠LiteLLMBackend 默认值，防"碰巧相等"
+_MODEL_FROM_ENV = "deepseek/deepseek-reasoner"
 _BASE_URL_FROM_ENV = "https://example.invalid"
 
 
@@ -42,33 +26,26 @@ def _write_env_file(tmp_path: Path, text: str) -> str:
 
 
 def _pin_settings(monkeypatch: pytest.MonkeyPatch, factory) -> None:
-    """把 ``Settings`` 的查找点钉成 ``factory``（``build_llm_backend`` 的配置唯一来源）。
-
-    当前唯一查找点是 ``wiring`` 的模块全局属性（``from pra.infra.db import Settings``）；同时钉
-    ``pra.infra.db`` 的模块属性属防御：实现若改成函数内惰性 import，本用例仍读到钉死的配置，
-    否则会悄悄去读本机真实 ``.env`` 而失去确定性。
-    """
+    """把 ``Settings`` 的查找点钉成 ``factory``（``build_llm_backend`` 的配置唯一来源）。"""
     monkeypatch.setattr(wiring, "Settings", factory, raising=False)
     monkeypatch.setattr(infra_db, "Settings", factory, raising=False)
 
 
 def test_missing_api_key_raises_runtime_error(monkeypatch):
-    """契约 1：key 缺失或全空白 → ``RuntimeError``（消息含 DEEPSEEK_API_KEY），不回落桩。"""
+    """key 缺失或全空白 → ``RuntimeError``（消息含 DEEPSEEK_API_KEY），不回落桩。"""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     _pin_settings(monkeypatch, lambda: RealSettings(_env_file=None))
 
     with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
         build_llm_backend()
 
-    # 全空白同样视为未配置（不得 strip 后当成有效凭据去调真网关）。
     monkeypatch.setenv("DEEPSEEK_API_KEY", "   ")
     with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
         build_llm_backend()
 
 
 def test_backend_model_and_credentials_come_from_settings(monkeypatch, tmp_path):
-    """契约 2：后端类型与 model / base_url / api_key 逐项来自 ``Settings``（只构造，不调 API）。"""
-    # 真实环境变量优先级高于 env_file：先清空，保证取值唯一来自下面这个临时文件。
+    """后端类型与 model / base_url / api_key 逐项来自 ``Settings``（只构造，不调 API）。"""
     for key in ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"):
         monkeypatch.delenv(key, raising=False)
     env_file = _write_env_file(
@@ -88,7 +65,7 @@ def test_backend_model_and_credentials_come_from_settings(monkeypatch, tmp_path)
 
 
 def test_tools_reach_backend_tool_catalog(monkeypatch, tmp_path):
-    """契约 3：``tools=`` 真的进后端工具目录（plan 渲染依赖），逐条对应且非空。"""
+    """``tools=`` 真的进后端工具目录，逐条对应且非空。"""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     env_file = _write_env_file(tmp_path, f"DEEPSEEK_API_KEY={_FAKE_KEY}\n")
     _pin_settings(monkeypatch, lambda: RealSettings(_env_file=env_file))
@@ -98,18 +75,17 @@ def test_tools_reach_backend_tool_catalog(monkeypatch, tmp_path):
 
     assert isinstance(backend, LiteLLMBackend)
     assert len(tools) > 0
-    # 漏传 tools → 空目录（"无可用工具"），本断言立刻变红。
     catalog = backend._tool_catalog
     assert len(catalog) == len(tools)
     assert [entry["name"] for entry in catalog] == [tool.name for tool in tools]
     for entry in catalog:
         assert set(entry) == {"name", "description", "args_schema"}
-        assert entry["description"]  # 空说明 = 真模型看不到工具用途
+        assert entry["description"]
         assert isinstance(entry["args_schema"], dict)
 
 
 def test_production_graph_injects_backend_and_same_tools(monkeypatch):
-    """契约 4：生产图注入工厂返回的后端 + **同一份**工具列表（删任一转发参数即变红）。"""
+    """生产图注入工厂返回的后端 + **同一份**工具列表。"""
     sentinel_backend = object()
     sentinel_graph = object()
     factory_calls: dict[str, object] = {}

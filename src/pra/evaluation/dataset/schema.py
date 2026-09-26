@@ -1,23 +1,4 @@
-"""eval_case 的结构化标签契约：EvalCase / EvalExpected。
-
-真值三值 PASS / REJECT / HUMAN_REVIEW；``expected.abstain_label`` 是 abstention
-语义标签：``AUTO_DECIDABLE`` = 本可自动判（decision ∈ {PASS, REJECT}）；
-``SHOULD_ABSTAIN`` = 应转人工（decision == HUMAN_REVIEW）；``None`` = v1 老数据
-缺该字段，语义等价 AUTO_DECIDABLE（loader 照常读入）。三者的一致性由
-``_abstain_consistency`` 校验，冲突报错；不允许裸 HUMAN 真值（真值要么可自动判、
-要么应转人工）。
-
-``input`` 复用 ``pra.domain.models.ProductReviewCase``：该模型 ``extra="forbid"``，
-故 ``input`` 不许塞任何 domain 未声明的额外键（评测数据与线上 DTO 对齐，
-loader 校验 = 线上 DTO 校验）。
-
-``schema_version`` 由数据文件自声明：v1 = 1，v2 = 2。
-
-``lineage.seed_case_id`` 是变异溯源锚点（RAG 语料防泄漏守卫按该 JSON 路径读取它）。
-
-风险类型 / 证据标签是开放性字符串标签，不做枚举约束；映射到运行时 RiskType
-枚举留给未实现的 EvidenceEvaluator。
-"""
+"""eval_case 的结构化标签契约：EvalCase / EvalExpected。"""
 
 from __future__ import annotations
 
@@ -27,22 +8,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pra.domain.models import ProductReviewCase
 
-# 五类 scene
 SceneName = Literal["normal", "violation", "boundary", "multi-signal", "evasion"]
-
-# 真值三分类：v1 只用前两者；HUMAN_REVIEW 只出现在 SHOULD_ABSTAIN 案
-# （decision 与 abstain_label 的一致性由 EvalExpected 校验器保证）。
 TruthDecision = Literal["PASS", "REJECT", "HUMAN_REVIEW"]
 
-# abstention 语义标签：AUTO_DECIDABLE=本可自动判 / SHOULD_ABSTAIN=应转人工（克制 abstention）。
+# abstention 语义标签：AUTO_DECIDABLE=本可自动判 / SHOULD_ABSTAIN=应转人工。
 AbstainLabel = Literal["AUTO_DECIDABLE", "SHOULD_ABSTAIN"]
 
 
 class EvalLineage(BaseModel):
-    """程序化变异的溯源锚点。
-
-    ``seed_case_id`` 指向模板/种子案（v1 老案 EC_xxxx 或 v2 语义种子 SEED_V2_*）。
-    """
+    """程序化变异的溯源锚点（``seed_case_id`` 指向模板/种子案）。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -50,12 +24,7 @@ class EvalLineage(BaseModel):
 
 
 class EvalExpected(BaseModel):
-    """单条 eval_case 的标注期望。
-
-    v1 只有二值真值（无 abstain_label → None 等价 AUTO_DECIDABLE）；v2 引入三值
-    真值与 abstention 标签（一致性约束见模块 docstring）。risk_level / risk_type /
-    evidence / expected_tools 是标签完整性字段 —— 供人工评审与指标层使用。
-    """
+    """单条 eval_case 的标注期望。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -82,13 +51,7 @@ class EvalExpected(BaseModel):
 
     @model_validator(mode="after")
     def _abstain_consistency(self) -> EvalExpected:
-        """abstain_label ⇔ decision 的一致性校验；冲突即报错。
-
-        - SHOULD_ABSTAIN ⇒ decision == HUMAN_REVIEW（应转人工案不许标自动真值）；
-        - AUTO_DECIDABLE ⇒ decision ∈ {PASS, REJECT}（本可自动判案不许标人工真值）；
-        - decision == HUMAN_REVIEW ⇒ abstain_label == SHOULD_ABSTAIN（裸 HUMAN 真值
-          是歧义标注，直接报错而非静默兜底；v1 老数据无 HUMAN 真值故不受影响）。
-        """
+        """abstain_label ⇔ decision 的一致性校验；冲突即报错。"""
         if self.abstain_label == "SHOULD_ABSTAIN" and self.decision != "HUMAN_REVIEW":
             raise ValueError(
                 "abstain_label=SHOULD_ABSTAIN 要求 decision=HUMAN_REVIEW "
@@ -108,13 +71,7 @@ class EvalExpected(BaseModel):
 
 
 class EvalCase(BaseModel):
-    """一条完整评测案（JSONL 行的对象形态）。
-
-    ``input`` 复用 ``ProductReviewCase``（extra=forbid → 与 domain 完全对齐）；
-    ``eval_case_id`` 与业务 ``case_id`` 解耦（评审/报告引用稳定标识）。
-    ``schema_version`` 声明数据版本（v1 = 1，v2 = 2）—— v2 数据读入后
-    abstain_label 缺失一律 None（等价 AUTO_DECIDABLE，兼容 v1）。
-    """
+    """一条完整评测案（JSONL 行的对象形态）。"""
 
     model_config = ConfigDict(extra="forbid")
 

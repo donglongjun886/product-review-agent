@@ -1,9 +1,4 @@
-"""评测 CLI 的思考配置入口：``--thinking`` / ``--reasoning-effort`` 必须真的落到后端。
-
-钉住"参数解析 → 后端属性"这条链路：默认档必须**不下发**（用网关默认 enabled + high），
-否则等于把网关默认值钉死在本仓库里；显式档必须原样传到后端，否则实验会静默退回默认档
-（这类失败不报错、只是结果全一样，最难发现）。
-"""
+"""评测 CLI 的思考配置入口：``--thinking`` / ``--reasoning-effort`` 必须真的落到后端。"""
 
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ SCRIPT = REPO_ROOT / "scripts" / "run_evaluation.py"
 
 
 def _load_script():
-    """按路径加载跑分脚本（它不是包，且 import 期不拉起 litellm）。"""
+    """按路径加载跑分脚本（它不是包）。"""
     spec = importlib.util.spec_from_file_location("run_evaluation_mod", SCRIPT)
     assert spec and spec.loader, f"无法定位脚本: {SCRIPT}"
     mod = importlib.util.module_from_spec(spec)
@@ -60,4 +55,4 @@ def test_llm_config_rejects_out_of_contract_values() -> None:
     with pytest.raises(SystemExit):
         mod._parse_args(["--thinking", "off"])
     with pytest.raises(SystemExit):
-        mod._parse_args(["--reasoning-effort", "medium"])  # 官方别名（映射为 high），不在白名单
+        mod._parse_args(["--reasoning-effort", "medium"])

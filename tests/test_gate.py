@@ -1,13 +1,4 @@
-"""确定性决策 Gate / overlay（``guardrails/gate.py``）单测：锁住事实侧判定与归因码。
-
-核心不变量（本文件的主要目的）：
-
-1. **终裁不读任何 LLM 生成量** —— 篡改 ``prior`` / ``posterior`` / ``status`` /
-   ``evidence_for`` 后 ``pass_gate`` / ``reject_gate`` 结果必须逐字不变；
-2. PASS = 无阳性 ∧ 无规则阳性 ∧ required 全覆盖；
-3. REJECT = R-302 规避词命中 ∧ 可引用依据；
-4. HUMAN 归因区分：关键测量未取（可补救） / 维度不可测（环境缺失） / 阳性不足。
-"""
+"""确定性决策 Gate / overlay（``guardrails/gate.py``）单测：锁住事实侧判定与归因码。"""
 
 from __future__ import annotations
 
@@ -49,7 +40,7 @@ from pra.screening.rule_engine import terms
 
 
 def _pass_ready_state(**overrides) -> dict:
-    """满足新 PASS Gate 五项条件的 state（干净案 + required 覆盖完整 + 无阳性）。"""
+    """满足 PASS Gate 条件的干净 state（required 覆盖完整、无阳性）。"""
     state = {
         "case": make_case(),
         "hypotheses": [],
@@ -82,20 +73,15 @@ def _proposal(
     )
 
 
-# ---- PASS Gate ----
-
-
 def test_pass_gate_clean_covered_case_true():
     assert pass_gate(_pass_ready_state()) is True
 
 
 def test_pass_gate_true_even_with_empty_hypotheses():
-    """旧链路死在 `hp==[]`；新链路里假设为空**不再阻塞** PASS。"""
     assert pass_gate(_pass_ready_state(hypotheses=[])) is True
 
 
 def test_pass_gate_true_even_with_high_prior_normal_hypotheses():
-    """旧链路死在"正常假设进 hp 后必须 REFUTED"；新链路完全不读假设。"""
     st = _pass_ready_state(
         hypotheses=[
             hp("H1", prior=0.35, posterior=0.9, status=HypothesisStatus.SUPPORTED,
@@ -128,11 +114,7 @@ def test_pass_gate_false_when_rule_positive():
 
 
 def test_pass_gate_false_when_no_case():
-    """空 state 防御：无 case ⇒ required 为空，若不显式拦截会 vacuous PASS。"""
     assert pass_gate({"evidence": [], "failures": []}) is False
-
-
-# ---- REJECT Gate ----
 
 
 def test_reject_gate_true_with_evasion_word_and_citation():
@@ -149,13 +131,10 @@ def test_reject_gate_false_without_citable():
 
 
 def test_reject_gate_false_without_case():
-    """空 state 防御：无 case 时即便命中规避词 + 有可引用依据，也不得自动拒绝。"""
+    """无 case 时即便命中规避词 + 有可引用依据，也不得自动拒绝。"""
     st = risk_anchor_state()
     st["case"] = None
     assert reject_gate(st) is False
-
-
-# ---- 核心不变量：终裁不读 LLM 生成量 ----
 
 
 @pytest.mark.parametrize(
@@ -191,9 +170,6 @@ def test_gate_is_invariant_to_hypotheses_being_removed_entirely():
     assert reject_gate(base) == reject_gate(stripped)
 
 
-# ---- overlay：归因码 ----
-
-
 def test_overlay_pass_accepted_on_clean_case():
     final = run_decision_overlay(_pass_ready_state(), _proposal(decision="PASS"))
     assert final.decision is Decision.PASS and final.overrides == []
@@ -205,13 +181,13 @@ def test_overlay_reject_accepted_when_gate_passes():
         _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"]),
     )
     assert final.decision is Decision.REJECT and final.overrides == []
-    assert final.policy == ["POLICY_3.2"]  # 只从 POLICY_REF 证据读，不采信提案
+    assert final.policy == ["POLICY_3.2"]
     assert final.decision_confidence == 1.0
 
 
 def test_overlay_pass_gate_fail_gets_r4():
     st = _pass_ready_state()
-    st["case"].product.title = "高仿 1:1 复古跑鞋"  # 规则侧阳性 ⇒ PASS 不得放行
+    st["case"].product.title = "高仿 1:1 复古跑鞋"
     final = run_decision_overlay(st, _proposal(decision="PASS"))
     assert final.decision is Decision.HUMAN_REVIEW
     assert final.overrides == [R4_PASS_GATE_FAIL]
@@ -231,7 +207,7 @@ def test_overlay_reject_gate_fail_without_citation_gets_r2_and_positive_insuffic
 
 def test_overlay_r1_hard_rule_forces_reject():
     st = _pass_ready_state()
-    st["case"].product.brand = "山寨"  # 内置 demo 黑名单值
+    st["case"].product.brand = "山寨"
     final = run_decision_overlay(st, _proposal(decision="PASS"))
     assert final.decision is Decision.REJECT
     assert final.overrides == [R1_HARD_RULE]
@@ -240,10 +216,7 @@ def test_overlay_r1_hard_rule_forces_reject():
 
 
 def test_r1_and_r101_share_one_blacklist_source():
-    """R1 硬规则与 R-101 必须消费同一份内置黑名单：同一 brand 两者同时命中。
-
-    守护「词表单一来源」：任一侧改回 import 值绑定 / 另建词表，本用例即红。
-    """
+    """R1 硬规则与 R-101 必须消费同一份内置黑名单：同一 brand 两者同时命中。"""
     brand = "山寨"
     assert brand in terms.BLACKLISTED_BRANDS
     assert hard_rule_hit({"case": make_case(brand=brand), "evidence": []}) is not None

@@ -1,23 +1,5 @@
-"""四个 LLM 节点的「完整 prompt」渲染（纯函数、无 IO；供真实后端组装消息）。
-
-节点把结构化 state 子集以 ``state=`` 传给后端。本模块把
-这些 state 渲染成结构化人读中文上下文（商品事实 / 假设仪表盘 /
-证据链 / 预算 / 工具目录）+ 输出 Schema 要点：system = 角色 + 完整约束中文指令
-（``SYSTEM_PROMPTS``），user = 人读上下文 + Schema 要点；不把裸 JSON dump 当 user 正文。
-本模块只被真实后端用于渲染 prompt，节点本身不依赖它。
-
-``SYSTEM_PROMPTS`` 另含评测用单次调用基线 ``single_call``：只吃案件快照、不调工具，无对应
-图节点，故 ``build_user_prompt`` 不为它单独分节（由评测侧自行组装 user 消息）。
-
-各 node 的 state 键（字段均为 ``model_dump(mode="json")`` 的可序列化形状）：
-- hypothesize: ``{"case": 全量}``，续跑场景额外带
-  ``hypotheses``（渲染为去重参考）；
-- plan: ``{"hypotheses", "evidence", "case"（全量）}``；
-- reevaluate: ``{"hypotheses", "evidence", "pending_tool_calls": [{tool,priority,reason}]}``；
-- decide: ``{"hypotheses", "evidence", "degraded", "failures", "budget"(摘要)}``。
-
-schema 强校验在 llm_shell / OutputModel 层，不在此重复实现；本模块不 import pra 内部
-模块（避免循环依赖），state 读取一律防御式降级（缺失/畸形键给安全空值，不崩不抛）。
+"""四个 LLM 节点的 prompt 渲染（纯函数、无 IO）：system 为角色约束指令，
+user 为人读中文上下文 + 输出 Schema 要点。
 """
 
 from __future__ import annotations
@@ -26,12 +8,9 @@ from typing import Any
 
 __all__ = ["SYSTEM_PROMPTS", "build_system_prompt", "build_user_prompt"]
 
-# 常量（与 domain/models.py 对齐，供 decide 分区渲染）
+_POLICY_REF = "POLICY_REF"  # 政策条款证据类型
+_CASE_PRECEDENT = "CASE_PRECEDENT"  # 人工先例证据类型
 
-_POLICY_REF = "POLICY_REF"  # 政策条款证据类型（REJECT 的可引用条款来源）
-_CASE_PRECEDENT = "CASE_PRECEDENT"  # 人工先例证据类型（REJECT 的可引用先例来源）
-
-# 基础格式化工具（防御式，一律不抛）
 
 def _text(value: Any) -> str:
     """任意值 → 展示文本：None/空串 → "无"；其余原样 str。"""
@@ -43,7 +22,7 @@ def _text(value: Any) -> str:
 
 
 def _clip(text: str, limit: int = 200) -> str:
-    """超长文本截断（控制 token；与证据引用串 value ≤200 字符口径对齐）。"""
+    """超长文本截断到 ``limit`` 字符（超出追加省略号）。"""
     text = _text(text)
     return text if len(text) <= limit else text[:limit] + "…"
 
@@ -70,8 +49,6 @@ def _section(title: str, body: str) -> str:
     """一个 ## 分节标题 + 正文。"""
     return f"## {title}\n{body}"
 
-
-# 各节点 system prompt（角色 + 完整约束中文指令）
 
 SYSTEM_PROMPTS: dict[str, str] = {
     "hypothesize": (
@@ -223,11 +200,8 @@ def build_system_prompt(node: str) -> str:
         ) from None
 
 
-# 上下文段落渲染器（各自防御式读取 state，全部纯函数）
-
-
 def _case_lines(state: dict) -> list[str]:
-    """案件身份 + 商品事实行（hypothesize / plan 共用）。"""
+    """案件身份 + 商品事实行。"""
     case = state.get("case")
     case = case if isinstance(case, dict) else {}
     product = case.get("product")
@@ -258,7 +232,6 @@ def _product_lines(product: dict) -> list[str]:
     if brand:
         lines.append(f"- 品牌：{_text(brand)}")
     else:
-        # 品牌真空缺 = "规避品牌识别"调查的起点信号
         lines.append("- 品牌：无/空缺（字段为 null —— 「规避品牌识别」调查的起点信号）")
     attrs = product.get("attributes")
     if isinstance(attrs, dict) and attrs:
@@ -303,7 +276,7 @@ def _hypothesis_lines(hypotheses: Any) -> list[str]:
 
 
 def _hypothesis_short_lines(hypotheses: Any) -> list[str]:
-    """既有假设清单精简行（去重参考：id/status/statement 一行一条）。"""
+    """既有假设清单精简行（id / status / statement）。"""
     lines: list[str] = []
     for h in hypotheses or []:
         if not isinstance(h, dict):
@@ -315,7 +288,7 @@ def _hypothesis_short_lines(hypotheses: Any) -> list[str]:
 
 
 def _evidence_lines(evidence: Any, *, full_value: bool = True, limit: int = 200) -> list[str]:
-    """证据行（type/source/value/weight/ref_id/extra；plan 摘要用 full_value=False）。"""
+    """证据行（type / source / value / weight / ref_id / extra）；``full_value=False`` 时截断。"""
     lines: list[str] = []
     for ev in evidence or []:
         if not isinstance(ev, dict):
@@ -339,7 +312,7 @@ def _evidence_lines(evidence: Any, *, full_value: bool = True, limit: int = 200)
 
 
 def _pending_tool_lines(items: Any) -> list[str]:
-    """上一轮待执行工具摘要行（tool/priority/reason；args ≤160 字符）。"""
+    """待执行工具摘要行（tool / priority / reason / args）。"""
     lines: list[str] = []
     for call in items or []:
         if not isinstance(call, dict):
@@ -395,9 +368,6 @@ def _budget_lines(budget: Any) -> list[str]:
     return lines
 
 
-# 可用取证工具目录（plan 渲染用；catalog 由 LiteLLMBackend 构造时从 Tool 提取）
-
-
 def _args_schema_hint(args_schema: dict) -> str:
     """工具 args JSON Schema → 一句人读入参提示。"""
     if not isinstance(args_schema, dict):
@@ -437,7 +407,7 @@ def _args_schema_hint(args_schema: dict) -> str:
 
 
 def _tool_catalog_text(tool_catalog: list) -> str:
-    """可用取证工具目录段落（plan 专用）；空目录给 conclude 提示。"""
+    """可用取证工具目录段落；空目录给 conclude 提示。"""
     if not tool_catalog:
         return (
             "（无可用取证工具）本轮没有任何可执行的取证工具。若已无其他能带来新证据的"
@@ -456,9 +426,6 @@ def _tool_catalog_text(tool_catalog: list) -> str:
         if isinstance(args_schema, dict):
             lines.append(f"    入参：{_args_schema_hint(args_schema)}")
     return "\n".join(lines) if lines else "（工具目录为空）"
-
-
-# 输出 JSON Schema 要点生成（从 pydantic model_json_schema() 挑字段/枚举/必填）
 
 
 def _resolve_ref(sch: dict, defs: dict) -> dict:
@@ -484,7 +451,7 @@ def _num_bounds(sch: dict) -> str:
 
 
 def _describe_field(name: str, sch: dict, defs: dict, required: bool, depth: int) -> list[str]:
-    """单字段 → 展示行；对象/对象数组递归展开（depth 防环，>3 层省略明细）。"""
+    """单字段 → 展示行；对象/对象数组递归展开（``depth`` 超限则省略明细）。"""
     pad = "  " * depth
     if depth > 3:
         return [f"{pad}- {name}（{'必填' if required else '可选'}）：层级过深，详见上方描述"]
@@ -583,11 +550,8 @@ def _schema_guide(json_schema: dict) -> str:
     return "\n".join(lines)
 
 
-# 对外入口：build_user_prompt（按 node 组装分节上下文 + Schema 要点）
-
-
 def _feedback_section(feedbacks: Any) -> str:
-    """把修正提示（第 2 次尝试回喂）并入 user 尾部；无提示返回空串。"""
+    """修正提示并入 user 尾部；无提示返回空串。"""
     texts = [f for f in (feedbacks or []) if isinstance(f, str) and f.strip()]
     if not texts:
         return ""
@@ -605,13 +569,12 @@ def build_user_prompt(
     tool_catalog: Any = None,
     feedbacks: Any = None,
 ) -> str:
-    """按 node 组装 user 消息正文（结构化人读中文上下文 + 输出 Schema 要点）。
+    """按 node 组装 user 消息正文（人读中文上下文 + 输出 Schema 要点）。
 
-    :param state: 节点传给后端的结构化 state dict（各 node 的键见模块 docstring）；
+    :param state: 节点传入的结构化 state dict；
     :param json_schema: OutputModel 的 ``model_json_schema()`` dict；
-    :param tool_catalog: 后端构造时提取的工具目录 ``[{name, description, args_schema}]``
-        （None → 空目录兜底）；
-    :param feedbacks: 第 2 次尝试追加的修正提示文本列表（可选）。
+    :param tool_catalog: 工具目录 ``[{name, description, args_schema}]``；None → 空目录；
+    :param feedbacks: 修正提示文本列表（可选）。
     """
     state = state if isinstance(state, dict) else {}
     catalog = tool_catalog if isinstance(tool_catalog, list) else []
@@ -623,7 +586,6 @@ def build_user_prompt(
     ]
     if node == "hypothesize":
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
-        # 续跑场景下若 state 带了既有假设，渲染成精简清单供去重（无则整节省略）。
         existing = state.get("hypotheses")
         if isinstance(existing, list) and existing:
             parts.append(
@@ -651,7 +613,6 @@ def build_user_prompt(
         parts.append(_section("三、上一轮待执行工具（供参考，本轮不执行）", "\n".join(_pending_tool_lines(state.get("pending_tool_calls")))))
     elif node == "decide":
         parts.append(_section("一、假设仪表盘（含支持/反驳证据引用）", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
-        # 可引用政策/先例单独全量列出（REJECT 依据来源）；其余证据单列避免重复推理
         evidence = state.get("evidence")
         evidence = [e for e in (evidence or []) if isinstance(e, dict)]
         policy_pre = [e for e in evidence if e.get("type") in (_POLICY_REF, _CASE_PRECEDENT)]
@@ -679,10 +640,8 @@ def build_user_prompt(
         parts.append(_section("四、运行状态（degraded / failures）", "\n".join(status_lines)))
         parts.append(_section("五、预算摘要", "\n".join(_budget_lines(state.get("budget")))))
     elif node == "single_call":
-        # 单次调用基线：只渲染案件快照（本臂不取证，无假设/证据可渲染）。
         parts.append(_section("案件与商品事实", "\n".join(_case_lines(state))))
     else:
-        # 未知 node：complete 已前置校验，此处兜底渲染（不崩，便于排查）
         parts.append(_section("案件与商品事实", "\n".join(_case_lines(state))))
         parts.append(_section("假设", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
         parts.append(_section("证据", "\n".join(_evidence_lines(state.get("evidence")))))

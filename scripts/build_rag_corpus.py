@@ -1,19 +1,6 @@
 """确定性生成 RAG 知识库数据（Policy KB / Case KB）并自检。
 
-产物 ``src/pra/rag/corpus/policies.json`` 与 ``cases.json``：静态、git 入库、可评审；
-幂等（同输入重跑逐字节一致），已存在文件会被覆盖。
-
-隔离不变量：Case KB 的 case_id 与 eval_data/v2 的全部 case 标识（eval_case_id /
-input.case_id / lineage.seed_case_id）无交集，否则非零退出 —— 防「检索到 eval GT = 作弊」。
-
-数据：Policy KB 手写 24 条款（品牌/IP、虚假宣传、类目准入与标识、规避行为、处置与复核
-五族，3 条 EXPIRED 测版本过滤，编号避开 eval mock 世界的 POLICY_3.2/4.1/5.2）；Case KB =
-手写种子 26 条（demo 剧情 P_88231/M_5512 改写 + 合成案型）+ 程序化变体 42 条（固定 seed，
-``random.Random`` 确定性，case_id 前缀 ``RAG_CASE_``，与 eval 的 EC_*/EC_V2_*/CASE_EC_*
-无交集，剧情不与任何 eval 违规案对应）。
-
-用法：``uv run python scripts/build_rag_corpus.py``（生成 + 校验 + 隔离自检）；
-``--no-write`` 只自检不覆盖文件。退出码 0 = 生成成功且自检通过，非零 = 自检失败。
+退出码 0 = 生成成功且自检通过，非零 = 自检失败。
 """
 
 from __future__ import annotations
@@ -24,7 +11,7 @@ import random
 import sys
 from pathlib import Path
 
-from pra.rag.corpus.schema import CaseCorpus, PolicyCorpus  # 导入期校验 shape
+from pra.rag.corpus.schema import CaseCorpus, PolicyCorpus
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CORPUS_DIR = REPO_ROOT / "src" / "pra" / "rag" / "corpus"
@@ -35,10 +22,10 @@ EVAL_FILES = [
     REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl",
 ]
 
-GEN_SEED = 20260908  # 勿改 —— 改了 corpus 即变
+GEN_SEED = 20260908
 VARIANTS_TARGET = 42
 
-# Policy KB —— 手写
+# Policy KB
 
 _POLICY_ROWS: list[dict] = [
     # ---- 1.x 品牌 / 知识产权 ----
@@ -216,10 +203,10 @@ _POLICY_ROWS: list[dict] = [
     },
 ]
 
-# Case KB —— 手写种子（demo 改写 + 合成案型，不来自 eval GT）
+# Case KB —— 手写种子
 
 _CASE_SEEDS: list[dict] = [
-    # demo 剧情改写（P_88231 / M_5512 同源：无品牌复古跑鞋 + 强相似 + 脏商家）
+    # demo 剧情改写
     {
         "category": "女鞋/运动鞋", "decision": "REJECT", "risk_level": "HIGH",
         "risk_type": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
@@ -263,7 +250,7 @@ _CASE_SEEDS: list[dict] = [
         "key_evidence": ["fabric_label_ok", "merchant_clean"],
         "policy_refs": [],
     },
-    # 边界案（弱相似：需交叉证据）
+    # 边界案
     {
         "category": "女鞋/运动鞋", "decision": "PASS", "risk_level": "NONE",
         "risk_type": [],
@@ -405,7 +392,7 @@ _CASE_SEEDS: list[dict] = [
     },
 ]
 
-# Case KB —— 程序化变体（固定 seed；模板按案型组装，与 eval GT 剧情不同源）
+# Case KB —— 程序化变体
 
 _CATS = ("女鞋/运动鞋", "箱包/女包", "服装/卫衣")
 
@@ -417,7 +404,7 @@ _GOODS = {
 
 
 def _gen_variants(seed: int, target: int) -> list[dict]:
-    """程序化变体：``random.Random(seed)`` 确定性组装，跨进程可重放。"""
+    """程序化变体：按 ``seed`` 确定性组装。"""
     rng = random.Random(seed)
     rows: list[dict] = []
     pattern_idx = 0
@@ -584,7 +571,6 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     policy_env, case_env = build()
 
-    # schema 强校验（Pydantic 信封模型）
     PolicyCorpus.model_validate(policy_env)
     CaseCorpus.model_validate(case_env)
 

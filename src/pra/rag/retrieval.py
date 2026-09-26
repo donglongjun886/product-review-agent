@@ -1,7 +1,4 @@
-"""检索公共件：候选集检索上下文 ``_RetrievalContext``。
-
-两路分数不做量纲适配（量纲互不可比），由后端自持。
-"""
+"""检索公共件：候选集检索上下文 ``_RetrievalContext``。"""
 
 from __future__ import annotations
 
@@ -15,5 +12,5 @@ class _RetrievalContext:
 
     node_ids: list[str]
     nodes: list[Any]
-    #: 与 ``node_ids`` / ``nodes`` 同序并行的 corpus 原序行索引（排序 tie-break 用原序）。
+    #: 与 ``node_ids`` / ``nodes`` 同序并行的 corpus 原序行索引。
     row_index: list[int] = field(default_factory=list)

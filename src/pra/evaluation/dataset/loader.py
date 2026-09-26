@@ -1,11 +1,4 @@
-"""评测集加载器：JSONL 强校验读取。
-
-``load_dataset(path)`` 逐行读 JSONL，每条经 ``EvalCase.model_validate_json`` 强校验
-（任何 domain 未声明键在加载期即报错；abstain_label⇔decision 一致性由 schema 校验器保证）。
-解析失败抛带行号的 ``ValueError`` —— 评测集损坏不该被静默跳过。
-
-行号从 1 起，异常信息含行号。
-"""
+"""评测集加载器：JSONL 强校验读取。"""
 
 from __future__ import annotations
 
@@ -28,7 +21,7 @@ def load_dataset(path: str | Path) -> list[EvalCase]:
     with p.open("r", encoding="utf-8") as fh:
         for lineno, line in enumerate(fh, start=1):
             stripped = line.strip()
-            if not stripped:  # 容忍空行（编辑器尾行）
+            if not stripped:
                 continue
             try:
                 case = EvalCase.model_validate_json(stripped)

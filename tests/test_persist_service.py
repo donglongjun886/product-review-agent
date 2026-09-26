@@ -1,9 +1,4 @@
-"""persist 服务的**不连真库**单测：只钉纯映射/摘要函数，无 DB、无 I/O。
-
-``_enum_value`` / ``_token_count`` / ``_json_cap`` / ``_hypothesis_summary`` /
-``_node_output_summary``（各节点 trace output_json 形状，即落库 review_trace 列的
-确定性契约）。真库冒烟路径由 ``tests/test_api_routes.py`` 与 ``test_product_mysql.py`` 覆盖。
-"""
+"""persist 服务的**不连真库**单测：只钉纯映射/摘要函数，无 DB、无 I/O。"""
 
 from __future__ import annotations
 
@@ -30,7 +25,7 @@ from helpers import ev, hp
 def test_enum_value_maps_enum_to_value():
     assert _enum_value(Decision.PASS) == "PASS"
     assert _enum_value(RiskLevel.HIGH) == "HIGH"
-    assert _enum_value(3) == 3  # 普通值原样返回
+    assert _enum_value(3) == 3
     assert _enum_value("str") == "str"
 
 
@@ -47,7 +42,7 @@ def test_json_cap_pass_through_primitives_and_small_objects():
     assert _json_cap("text") == "text"
     obj = {"a": 1, "b": ["x", "y"]}
     assert _json_cap(obj) == obj
-    assert _json_cap(obj) is obj  # 可序列化时原对象返回
+    assert _json_cap(obj) is obj
 
 
 def test_json_cap_truncates_oversized_objects():
@@ -56,7 +51,7 @@ def test_json_cap_truncates_oversized_objects():
     assert capped["_truncated"] is True
     assert capped["_type"] == "dict"
     assert capped["_length"] > 64
-    assert capped["_preview"]  # 截断预览非空
+    assert capped["_preview"]
 
 
 def test_hypothesis_summary_shape():
@@ -68,7 +63,7 @@ def test_hypothesis_summary_shape():
     assert summary == {
         "id": "H1",
         "statement": "刻意规避品牌识别",
-        "status": "SUPPORTED",  # Enum → .value（JSON 标量）
+        "status": "SUPPORTED",
         "prior": 0.4,
         "posterior": 0.91,
     }
@@ -90,7 +85,7 @@ def test_node_output_summary_hypothesize():
 
 
 def test_trace_summaries_carry_no_investigation_queue_fields():
-    """回归守护：investigation_queue 已删，摘要不再落队列键（即使 update 里混入）。"""
+    """摘要不落 investigation_queue 队列键（即使 update 里混入）。"""
     update = {
         "hypotheses": [hp("H1", prior=0.5)],
         "investigation_queue": [{"q": "文本合规问题", "priority": 1, "status": "DONE"}],
@@ -110,7 +105,7 @@ def test_node_output_summary_plan_dedup_skipped():
         "pending_tool_calls": [
             {"tool": "ProductTool", "args": {}, "reason": "r", "priority": 1}
         ],
-        "tool_call_history": [  # dedup 跳过审计并入本行
+        "tool_call_history": [
             {"tool": "ProductTool", "status": "skipped", "seq": 5, "reason": "duplicate"}
         ],
         "degraded": False,

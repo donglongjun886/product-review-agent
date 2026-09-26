@@ -1,21 +1,7 @@
-"""plan 节点 —— 决定本轮取证工具（LLM 语义步 + 确定性 dedup）。
+"""plan 节点：决定取证工具（LLM 语义步 + 确定性 dedup）。
 
-对照当前证据缺口与仍存疑（PENDING/UNRESOLVED）的假设，决定本轮是否调用取证工具：
-``PlanOutput.next_action`` ∈ call_tools / conclude。
-
-- **入口短路**：``state["degraded"]`` 为真或 ``budget_exceeded(state["budget"])`` 非
-  None → 不调 LLM，返回 ``{"pending_tool_calls": []}``，且**不动 degraded**（后续路由
-  转 decide 止损）。
-- 假设/证据/工具选择来自 LLM（``PlanOutput`` 由 llm_shell 强校验：失败重试 1 次仍失败
-  → 降级 + ``degraded=True``）；**是否真的执行**由 tools_node 用该工具的 ``args_model``
-  确定性校验（不信任 LLM 参数）。
-- 确定性 apply：``next_action=="conclude"`` 或 ``tools`` 为空 → 计划为空；否则
-  ``PlannedToolCall → dict {tool, args, reason, priority}``。
-- **确定性 dedup**（guardrails/dedup）：同轮自去重 + 过滤已执行成功调用（曾 error 的
-  同 tool+args 允许重试）；被过滤的调用进 ``skipped`` 审计（带 seq 的 tool_call_history
-  记录，append reducer）。清洗后 pending 为空 → 路由自动 decide。
-- ``_state_payload`` 以结构化 dict 注入 state 子集（hypotheses 仪表盘 + evidence 摘要 +
-  case 全量），后端按 ``state=`` 接收。
+``PlanOutput.next_action`` ∈ ``call_tools`` / ``conclude``；返回 pending_tool_calls /
+tool_call_history / degraded / failures / budget。
 """
 
 from __future__ import annotations
@@ -28,21 +14,12 @@ from pra.agent.guardrails.schemas import PlanOutput
 
 __all__ = ["plan_node"]
 
-# LLM 步降级 failure 文案：与 hypothesize 一致，取固定字面值、不拼 outcome.error。
+# LLM 步降级 failure 文案（固定字面值）
 _DEGRADE_REASON = "schema 校验重试仍失败"
 
 
 def _coverage_gap_lines(state: dict) -> list[str]:
-    """本案必需测量的覆盖清单（人读行，注入 plan 上下文）。
-
-    在**节点侧**用真实 state 计算（case 是 domain 对象、能力表齐备），渲染层只负责打印 ——
-    避免渲染层拿 state 里的 case 去反序列化（缺字段会炸）。
-
-    除 PASS 必需的四维外，**有阳性证据时额外列出 ``policy_citation`` 缺口**：
-    它不是 PASS 的必要条件（放行不需要引用依据），却是自动 REJECT 的必要条件。
-    不列出来，plan 会因为"必需覆盖已满"而提前 conclude，导致案件以
-    ``R3_POSITIVE_INSUFFICIENT`` 转人工、白白丢掉可自动拒绝的案。
-    """
+    """本案必需测量的覆盖清单（人读行，注入 plan 上下文）；有阳性证据且无可引用依据时额外列出 ``policy_citation`` 缺口。"""
     from pra.agent.guardrails.measurements import coverage_report
     from pra.domain.measurement import DIM_POLICY_CITATION
 
@@ -77,14 +54,7 @@ def _coverage_gap_lines(state: dict) -> list[str]:
 
 
 def _state_payload(state: dict) -> dict:
-    """LLM 入参 state 子集：hypotheses 仪表盘 + evidence 摘要 + case 全量 + 必需测量缺口。
-
-    ``case`` 传 ``model_dump(mode="json")`` 全量：渲染层 ``_case_lines`` / ``_product_lines``
-    本就只读身份与商品核心字段且做防御式格式化，节点侧不再重复裁剪。
-
-    覆盖缺口注入 ``required_measurement_coverage``：让 plan 优先安排能补齐缺口的工具，
-    并区分"没测"（可补）与"本环境不可测"（补不了，别空转）。
-    """
+    """LLM 入参 state 子集：hypotheses / evidence / case 全量 + ``required_measurement_coverage`` 覆盖缺口。"""
     return {
         "hypotheses": [
             h.model_dump(mode="json") for h in (state.get("hypotheses") or [])
@@ -96,32 +66,20 @@ def _state_payload(state: dict) -> dict:
 
 
 def _apply_plan(out: PlanOutput) -> list[dict]:
-    """LLM 提案 → 待执行工具列表（确定性 apply）。
-
-    ``conclude`` 或 ``tools`` 为空（含 call_tools 但 tools 空，按 conclude 容错）→ 计划
-    为空；否则 PlannedToolCall → dict ``model_dump()``。
-    """
+    """LLM 提案 → 待执行工具列表；``conclude`` 或 ``tools`` 为空返回空列表。"""
     if out.next_action == "conclude" or not out.tools:
         return []
     return [call.model_dump() for call in out.tools]
 
 
 async def plan_node(state: dict, config, *, llm: LLMBackend) -> dict:
-    """plan 图节点：决定本轮取证工具（LLM 语义步）+ 确定性 dedup。
-
-    ``llm`` 由 ``build_agent_graph`` 装配期显式注入（本节点不持有/不查找任何默认后端）。
-
-    返回 pending_tool_calls / tool_call_history / degraded / failures / budget；cleaned
-    为空 → 路由自动 decide。
-    """
-    # 入口短路：degraded 或预算超限 → 不调 LLM、最小更新、不动 degraded。
+    """plan 图节点：决定取证工具并做确定性 dedup；``llm`` 由装配期显式注入。"""
     if state.get("degraded") or budget_exceeded(state["budget"]) is not None:
         return {"pending_tool_calls": []}
 
     outcome = await call_structured_llm(
         OutputModel=PlanOutput, node="plan", state=_state_payload(state), llm=llm
     )
-    # LLM 记账：按实际尝试次数 bump（成功 1 次 / 重试后成功 2 次 / 两次失败仍 2 次）
     budget = bump_llm_usage(
         state["budget"], llm_calls=outcome.attempts, tokens=outcome.tokens
     )
@@ -140,8 +98,6 @@ async def plan_node(state: dict, config, *, llm: LLMBackend) -> dict:
         }
 
     planned = _apply_plan(outcome.model)
-    # 确定性 dedup：同轮自去重 + 过滤已执行成功调用（曾 error 的允许重试）；
-    # skipped 为被过滤调用的审计记录（append reducer），与 pending 分离。
     cleaned, skipped = dedup_pending(state, planned)
     return {
         "pending_tool_calls": cleaned,

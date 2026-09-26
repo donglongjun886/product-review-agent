@@ -1,8 +1,4 @@
-"""边际增益审计探针（guardrails/metrics.py）单测：钉死 gate_probe 与 overlay 语义。
-
-``gate_probe`` 是 ``run_decision_overlay``（无提案输入）的轻量代理，顺序一致：
-R1 → abstention 清单 → PASS/REJECT Gate → UNDECIDED。探针只供审计、不驱动路由。
-"""
+"""边际增益审计探针（guardrails/metrics.py）单测：钉死 gate_probe 与 overlay 语义。"""
 
 from __future__ import annotations
 
@@ -20,7 +16,7 @@ from pra.domain.models import Budget
 
 
 def _clean_pass_state() -> dict:
-    """干净 PASS 案（事实侧口径）：required 覆盖完整 + 无阳性 + 无规则命中。"""
+    """干净 PASS 案：required 覆盖完整 + 无阳性 + 无规则命中。"""
     return {
         "case": make_case(),
         "hypotheses": [],
@@ -66,7 +62,7 @@ def test_gate_probe_degraded_human():
 
 def test_gate_probe_r1_hard_rule_reject():
     st = {
-        "case": make_case(brand="某违禁品牌"),  # 内置 demo 黑名单值
+        "case": make_case(brand="某违禁品牌"),
         "hypotheses": [],
         "evidence": [],
         "budget": Budget(),
@@ -85,13 +81,11 @@ def test_gate_probe_agrees_with_overlay_outcome():
     assert run_decision_overlay(_clean_pass_state(), pass_prop).decision.value == "PASS"
     assert gate_probe(_clean_pass_state()) == "PASS"
 
-    # 风险无政策 + REJECT 提案 → HUMAN：REJECT Gate 缺可引用依据（R2 + 阳性不足）
     risk = _risk_no_policy_state()
     reject_prop = DecisionProposal(decision="REJECT", risk_level="HIGH", confidence=0.9)  # type: ignore[arg-type]
     risk_final = run_decision_overlay(risk, reject_prop)
     assert risk_final.decision.value == "HUMAN_REVIEW"
     assert risk_final.overrides == ["R2_REJECT_GATE_FAIL", "R3_POSITIVE_INSUFFICIENT"]
-    # 无提案时探针只能给"待定"（是否转人工取决于提案走哪道 Gate）
     assert gate_probe(risk) == "UNDECIDED"
 
     assert run_decision_overlay(risk_anchor_state(), reject_prop).decision.value == "REJECT"

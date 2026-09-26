@@ -1,12 +1,7 @@
-"""核心审核 5 表的 SQLAlchemy ORM 模型（与 migrations/001_review_core_tables.sql 同构）。
+"""核心审核 5 表的 SQLAlchemy ORM 模型。
 
 关系：review_case 1:N review_run（review_run 1:N review_trace、1:N review_evidence）；
 review_case 1:1 review_result（source_run_id → review_run）。
-
-边界：本模块是审核业务表的 ORM 映射（DB 真相），与 ``pra.domain.models``（业务 DTO，不落库）
-解耦 —— domain → ORM 的转换与落库在 persist_service。只含核心 5 表，勿扩展。类型刻意用
-MySQL 方言（BIGINT/DATETIME(fsp=3)/DOUBLE/JSON），与手写 DDL 逐字一致；engine/session 工厂在
-``pra.infra.db``，本文件不持有连接。
 """
 
 from __future__ import annotations
@@ -32,17 +27,12 @@ class Base(DeclarativeBase):
 
 
 class ReviewCaseORM(Base):
-    """审核案件 —— 一次上架/修改事件 = 一个案件（1 行 = 1 次审核事件）。
-
-    ``triage_result``：Screening 三分流结果（PASS/REJECT/COMPLEX）—— COMPLEX 走 Agent
-    调查，直判也记录原因，用于回答「case 为什么直接结束 / 为什么进 Agent」。直判 case
-    收尾 status=DECIDED；Agent 调查 case 先 INVESTIGATING 后 DECIDED。
-    """
+    """审核案件 —— 一次上架/修改事件 = 一个案件（1 行 = 1 次审核事件）。"""
 
     __tablename__ = "review_case"
     __table_args__ = (
-        Index("idx_status_created", "status", "created_at"),      # 工作台按状态列队
-        Index("idx_merchant_created", "merchant_id", "created_at"),  # 商家维度查询
+        Index("idx_status_created", "status", "created_at"),
+        Index("idx_merchant_created", "merchant_id", "created_at"),
     )
 
     case_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -67,19 +57,10 @@ class ReviewCaseORM(Base):
 
 
 class ReviewRunORM(Base):
-    """一次审核判定活动（case 1:N run）—— Agent 调查或规则直判各占一行。
-
-    - Agent 调查：trigger_type=INITIAL/RE_REVIEW，逐节点落 review_trace；
-    - 规则直判：trigger_type="SCREENING_DIRECT"（Screening PASS/REJECT 直接终裁），
-      无 trace 行、started_at≈ended_at、status 直接 DECIDED；规则命中证据挂本 run 的
-      review_evidence，终裁写 review_result（source_run_id=本 run）—— 保证
-      ``result → run → evidence`` 审计链对两类裁决统一成立。
-
-    本表只存运行侧事实，不存裁决（裁决唯一在 review_result）。
-    """
+    """一次审核判定活动（case 1:N run）—— Agent 调查或规则直判各占一行。"""
 
     __tablename__ = "review_run"
-    __table_args__ = (Index("idx_case_started", "case_id", "started_at"),)  # case 下 run 列表
+    __table_args__ = (Index("idx_case_started", "case_id", "started_at"),)
 
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # Agent 路径 = LangGraph thread_id；直判路径 = uuid4 hex
     case_id: Mapped[str] = mapped_column(
@@ -109,12 +90,12 @@ class ReviewTraceORM(Base):
     __tablename__ = "review_trace"
     __table_args__ = (
         UniqueConstraint("run_id", "seq", name="uq_run_seq"),  # run 内步骤序号唯一
-        Index("idx_run_type", "run_id", "step_type"),          # 按类型统计耗时/token
+        Index("idx_run_type", "run_id", "step_type"),
     )
 
     trace_id: Mapped[int] = mapped_column(
         BIGINT, primary_key=True, autoincrement=True
-    )  # MySQL BIGINT（对齐 DDL 001：INTEGER 21 亿行会溢出 / create_all 与手写 DDL 漂移）
+    )
     run_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("review_run.run_id"), nullable=False
     )
@@ -131,18 +112,18 @@ class ReviewTraceORM(Base):
 
 
 class ReviewEvidenceORM(Base):
-    """一次 Run 收集的证据（挂 run 不挂 case：多 Run 证据隔离；E_nn = DB 主键）。"""
+    """一次 Run 收集的证据。"""
 
     __tablename__ = "review_evidence"
-    __table_args__ = (Index("idx_run_type", "run_id", "type"),)  # 按 run+类型取证据链
+    __table_args__ = (Index("idx_run_type", "run_id", "type"),)
 
     evidence_id: Mapped[int] = mapped_column(
         BIGINT, primary_key=True, autoincrement=True
-    )  # MySQL BIGINT（对齐 DDL 001：见 ReviewTraceORM.trace_id 注）
+    )
     run_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("review_run.run_id"), nullable=False
     )
-    type: Mapped[str] = mapped_column(String(32), nullable=False)  # 开放词表与 DTO 一致
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
     source_tool: Mapped[str] = mapped_column(String(64), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     weight: Mapped[float] = mapped_column(DOUBLE, nullable=False)
@@ -157,7 +138,7 @@ class ReviewResultORM(Base):
     """Case 最终生效裁决（1:1，case_id 自然主键；source_run_id 指向被采纳的 Run）。"""
 
     __tablename__ = "review_result"
-    __table_args__ = (Index("idx_decision_created", "decision", "created_at"),)  # 按裁决统计/筛选
+    __table_args__ = (Index("idx_decision_created", "decision", "created_at"),)
 
     case_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("review_case.case_id"), primary_key=True

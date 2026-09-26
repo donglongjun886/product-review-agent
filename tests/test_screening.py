@@ -1,12 +1,4 @@
-"""Screening 三分流（``pra/screening/**`` + ``persist_service.process_review``）单测 —— 不连真库。
-
-覆盖：``triage`` 纯函数（PASS / COMPLEX / REJECT 与命中收集顺序）；``rule_evidence``
-证据形状；``process_review`` 分支（COMPLEX → ``run_and_persist`` 且携带 RULE_HIT
-evidence，PASS/REJECT → ``run_screening_direct``）。
-
-三分流口径：brand/类目空缺、规避词、品牌词命中一律 COMPLEX 交 Agent 调查；只有内置
-demo 黑名单（``terms.BLACKLISTED_BRANDS``）命中才确定性 REJECT，且 REJECT 优先于 COMPLEX。
-"""
+"""Screening 三分流（``pra/screening/**`` + ``persist_service.process_review``）单测 —— 不连真库。"""
 
 from __future__ import annotations
 
@@ -57,82 +49,82 @@ def _case(
 
 _CLEAN = _case(
     case_id="CASE_PASS",
-    brand="自营品牌A",  # brand 明确（不在黑名单）
+    brand="自营品牌A",
     title="北欧风陶瓷花瓶 简约桌面装饰",
     description="釉面细腻，清新雅致。",
-    category="家居日用",  # 非高危前缀类目
+    category="家居日用",
 )
-_COMPLEX_HIGH_RISK = _case(  # brand=None + 高危类目女鞋/运动鞋
+_COMPLEX_HIGH_RISK = _case(
     case_id="CASE_CMPLX_HIGHRISK",
     brand=None,
     title="新款厚底复古跑鞋",
     description="复古厚底设计，舒适百搭。",
     category="女鞋/运动鞋",
 )
-_COMPLEX_EVASION = _case(  # brand 明确但描述含规避词
+_COMPLEX_EVASION = _case(
     case_id="CASE_CMPLX_EVASION",
     brand="自营品牌A",
     title="设计师简约布艺沙发",
     description="同款复刻工艺，1:1 细节还原。",
     category="家居日用",
 )
-_COMPLEX_BRANDTERM = _case(  # brand=None + 标题 NIKE（R-102 COMPLEX）+ 高危类目（R-301）
+_COMPLEX_BRANDTERM = _case(
     case_id="CASE_CMPLX_BRANDTERM",
     brand=None,
     title="NIKE 新款复古跑鞋 轻便透气",
     description="舒适运动。",
     category="女鞋/运动鞋",
 )
-_LOWERCASE_BRANDTERM = _case(  # 大小写不敏感：小写 nike 也命中 R-102（COMPLEX）
+_LOWERCASE_BRANDTERM = _case(
     case_id="CASE_CMPLX_LOWER",
     brand=None,
     title="nike air 复古跑鞋",
     description="舒适运动。",
     category="女鞋/运动鞋",
 )
-_REJECT_BLACKLIST = _case(  # brand ∈ 内置 demo 黑名单 + 标题无品牌词 → 只命中 R-101
+_REJECT_BLACKLIST = _case(
     case_id="CASE_REJECT_BLACKLIST",
-    brand="某违禁品牌",  # 内置 demo 黑名单值；标题无品牌词 → 只命中 R-101
+    brand="某违禁品牌",
     title="复古运动鞋 轻便透气",
     description="舒适运动。",
     category="女鞋/运动鞋",
 )
-_CLEAN_NO_BRAND_EMPTY = _case(  # brand=""（空串空缺，统一口径）+ 干净文本 + 非高危类目
+_CLEAN_NO_BRAND_EMPTY = _case(
     case_id="CASE_CMPLX_BRAND_EMPTY",
     brand="",
     title="北欧风陶瓷花瓶 简约桌面装饰",
     description="釉面细腻，清新雅致。",
     category="家居日用",
 )
-_CLEAN_NO_BRAND_NONE = _case(  # brand=None（空缺）+ 干净文本 + 非高危类目 → 不 PASS
+_CLEAN_NO_BRAND_NONE = _case(
     case_id="CASE_CMPLX_BRAND_NONE_NONRISK",
     brand=None,
     title="北欧风陶瓷花瓶 简约桌面装饰",
     description="釉面细腻，清新雅致。",
     category="家居日用",
 )
-_CLEAN_CATEGORY_MISSING = _case(  # brand 明确但 category 空缺 → 也不得 PASS 直放
+_CLEAN_CATEGORY_MISSING = _case(
     case_id="CASE_CMPLX_CATEGORY_MISSING",
     brand="自营品牌A",
     title="北欧风陶瓷花瓶 简约桌面装饰",
     description="釉面细腻，清新雅致。",
     category="",
 )
-_SILVER_SUBSTRING_TITLE = _case(  # 英文词内含 "LV" 子串（SILVER）→ 不得触发 R-102
+_SILVER_SUBSTRING_TITLE = _case(
     case_id="CASE_SILVER_925",
     brand="自营品牌A",
     title="925 SILVER 银饰项链 简约锁骨链",
     description="S925 纯银，工艺细腻。",
     category="家居日用",
 )
-_LV_REAL_BRAND_TERM = _case(  # 真实 LV 品牌词（独立成词）→ R-102 命中（COMPLEX）
+_LV_REAL_BRAND_TERM = _case(
     case_id="CASE_LV_REAL",
     brand="自营品牌A",
     title="LV 经典老花手袋 通勤单肩包",
     description="经典老花纹理，配皮饰边。",
     category="家居日用",
 )
-_COMPLEX_MULTI_HIT_NONRISK = _case(  # 多命中 COMPLEX：brand 空缺(R-301) + 规避词(R-302)
+_COMPLEX_MULTI_HIT_NONRISK = _case(
     case_id="CASE_CMPLX_MULTI_NONRISK",
     brand=None,
     title="北欧风布艺沙发 简约设计",
@@ -142,7 +134,7 @@ _COMPLEX_MULTI_HIT_NONRISK = _case(  # 多命中 COMPLEX：brand 空缺(R-301) +
 
 
 def test_triage_pass_clean_case():
-    """brand 明确 + 标题/描述干净 + 类目非高危 → PASS（确定性放行，零命中）。"""
+    """brand 明确 + 标题/描述干净 + 类目非高危 → PASS（零命中）。"""
     t = triage(_CLEAN)
     assert t.verdict == "PASS"
     assert t.hits == []
@@ -157,7 +149,7 @@ def test_triage_complex_brand_none_high_risk_category():
 
 
 def test_triage_complex_evasion_terms():
-    """描述含规避词（同款/复刻/1:1）→ COMPLEX，命中 R-302（不直判）。"""
+    """描述含规避词（同款/复刻/1:1）→ COMPLEX，命中 R-302。"""
     t = triage(_COMPLEX_EVASION)
     assert t.verdict == "COMPLEX"
     assert [h.rule_id for h in t.hits] == ["R-302"]
@@ -165,8 +157,8 @@ def test_triage_complex_evasion_terms():
 
 
 def test_triage_reject_blacklisted_brand():
-    """内置 demo 黑名单：brand ∈ terms.BLACKLISTED_BRANDS → REJECT（R-101，唯一确定性 REJECT）。"""
-    assert "某违禁品牌" in terms.BLACKLISTED_BRANDS  # 样本确在词表内（数据变更即失败）
+    """内置 demo 黑名单：brand ∈ terms.BLACKLISTED_BRANDS → REJECT（R-101）。"""
+    assert "某违禁品牌" in terms.BLACKLISTED_BRANDS
     t = triage(_REJECT_BLACKLIST)
     assert t.verdict == "REJECT"
     assert [h.rule_id for h in t.hits] == ["R-101"]
@@ -174,16 +166,15 @@ def test_triage_reject_blacklisted_brand():
 
 
 def test_triage_brand_term_in_title_is_complex():
-    """标题含 BRAND_TERMS（NIKE）→ COMPLEX 交 Agent，不再 REJECT。"""
+    """标题含 BRAND_TERMS（NIKE）→ COMPLEX 交 Agent。"""
     t = triage(_COMPLEX_BRANDTERM)
     assert t.verdict == "COMPLEX"
-    assert [h.rule_id for h in t.hits] == ["R-102", "R-301"]  # 品牌词 + brand 空缺
+    assert [h.rule_id for h in t.hits] == ["R-102", "R-301"]
     assert "NIKE" in t.hits[0].detail
 
 
 def test_triage_brand_term_matching_brand_is_complex():
-    """brand=NIKE（未上黑名单）+ 标题含 NIKE —— 标题品牌词不能证明真品
-    （官方店/授权或仿冒皆可能）→ COMPLEX，绝不 REJECT 直判。"""
+    """brand=NIKE（未上黑名单）+ 标题含 NIKE → COMPLEX。"""
     case = _case(
         case_id="CASE_BRAND_TITLE_SAME",
         brand="NIKE",
@@ -200,19 +191,18 @@ def test_triage_brand_term_case_insensitive_complex():
     """BRAND_TERMS 大小写不敏感：小写 nike 同样命中 R-102（→ COMPLEX）。"""
     t = triage(_LOWERCASE_BRANDTERM)
     assert t.verdict == "COMPLEX"
-    assert [h.rule_id for h in t.hits] == ["R-102", "R-301"]  # R-102 + R-301 均 COMPLEX
+    assert [h.rule_id for h in t.hits] == ["R-102", "R-301"]
 
 
 def test_triage_r102_short_term_word_boundary_no_misfire():
-    """R-102 词边界：英文词内部 "lv" 子串（SILVER/valve 等）不触发 —— 925 SILVER
-    银饰项链零命中 PASS（不因 "LV" 命中子串触发无谓 COMPLEX/REJECT 处理）。"""
+    """R-102 词边界：英文词内部 "lv" 子串（SILVER/valve 等）不触发 —— 925 SILVER 银饰项链零命中 PASS。"""
     t = triage(_SILVER_SUBSTRING_TITLE)
-    assert t.verdict == "PASS"  # 零命中：无 R-102 误杀（brand/类目明确）
+    assert t.verdict == "PASS"
     assert t.hits == []
 
 
 def test_triage_r102_real_brand_term_still_hits_complex():
-    """真正的 "LV" 品牌词（独立成词）仍命中 R-102 → COMPLEX（词边界不吞真实品牌）。"""
+    """真正的 "LV" 品牌词（独立成词）仍命中 R-102 → COMPLEX。"""
     t = triage(_LV_REAL_BRAND_TERM)
     assert t.verdict == "COMPLEX"
     assert [h.rule_id for h in t.hits] == ["R-102"]
@@ -220,8 +210,7 @@ def test_triage_r102_real_brand_term_still_hits_complex():
 
 
 def test_triage_r102_lv_adjacent_to_chinese_still_hits_complex():
-    """词边界按 ASCII 词字符界定：中文邻接的真实 "lv"（新款lv手袋）仍命中 R-102
-    → COMPLEX。"""
+    """中文邻接的真实 "lv"（新款lv手袋）仍命中 R-102 → COMPLEX。"""
     case = _case(
         case_id="CASE_LV_CJK",
         brand="自营品牌A",
@@ -236,17 +225,16 @@ def test_triage_r102_lv_adjacent_to_chinese_still_hits_complex():
 
 
 def test_triage_reject_priority_over_complex():
-    """REJECT 优先于 COMPLEX：R-101（黑名单 REJECT）+ R-102（品牌词 COMPLEX）同轮
-    → 终裁 REJECT（R-102 只下调为 COMPLEX，R-101 黑名单仍确定性终裁，不被稀释）。"""
+    """REJECT 优先于 COMPLEX：R-101（黑名单 REJECT）+ R-102（品牌词 COMPLEX）同轮 → 终裁 REJECT。"""
     case = _case(
         case_id="CASE_REJECT_PRIORITY",
-        brand="某违禁品牌",  # R-101 黑名单 REJECT
-        title="NIKE 新款复古跑鞋",  # R-102 品牌词 → COMPLEX
+        brand="某违禁品牌",
+        title="NIKE 新款复古跑鞋",
         description="舒适运动。",
         category="女鞋/运动鞋",
     )
     t = triage(case)
-    assert t.verdict == "REJECT"  # 而非 COMPLEX
+    assert t.verdict == "REJECT"
     assert [h.rule_id for h in t.hits] == ["R-101", "R-102"]
 
 
@@ -255,18 +243,18 @@ def test_triage_hits_collected_in_rule_order():
     case = _case(
         case_id="CASE_MULTI_HIT",
         brand=None,
-        title="NIKE 新款跑鞋",  # R-102
-        description="同款复刻工艺 1:1 细节。",  # R-302
-        category="女鞋/运动鞋",  # R-301
+        title="NIKE 新款跑鞋",
+        description="同款复刻工艺 1:1 细节。",
+        category="女鞋/运动鞋",
     )
     t = triage(case)
-    assert t.verdict == "COMPLEX"  # 无 REJECT 命中（brand 不在内置黑名单）→ COMPLEX
+    assert t.verdict == "COMPLEX"
     assert [h.rule_id for h in t.hits] == ["R-102", "R-301", "R-302"]
     assert "同款" in t.hits[2].detail and "复刻" in t.hits[2].detail
 
 
 def test_triage_brand_empty_string_is_complex_not_pass():
-    """brand=''（空串空缺，与 None 统一口径）→ 干净文本也 COMPLEX，绝不 PASS 直放。"""
+    """brand=''（空串空缺）→ 干净文本也 COMPLEX，不 PASS 直放。"""
     t = triage(_CLEAN_NO_BRAND_EMPTY)
     assert t.verdict == "COMPLEX"
     assert [h.rule_id for h in t.hits] == ["R-301"]
@@ -275,14 +263,14 @@ def test_triage_brand_empty_string_is_complex_not_pass():
 
 
 def test_triage_brand_none_non_high_risk_category_is_complex():
-    """brand=None + 类目不在高危表（零规则命中缺口）→ COMPLEX，不 PASS 直放。"""
+    """brand=None + 类目不在高危表 → COMPLEX，不 PASS 直放。"""
     t = triage(_CLEAN_NO_BRAND_NONE)
     assert t.verdict == "COMPLEX"
     assert [h.rule_id for h in t.hits] == ["R-301"]
 
 
 def test_triage_category_missing_is_complex():
-    """brand 明确但 category 空缺 → COMPLEX（无法确定审查域，不 PASS 直放）。"""
+    """brand 明确但 category 空缺 → COMPLEX。"""
     t = triage(_CLEAN_CATEGORY_MISSING)
     assert t.verdict == "COMPLEX"
     assert [h.rule_id for h in t.hits] == ["R-301"]
@@ -290,35 +278,28 @@ def test_triage_category_missing_is_complex():
 
 
 def test_blacklist_disjoint_from_brand_terms():
-    """黑名单与 BRAND_TERMS 不得相交：同一词同时进两者会让 R-101 抢先自动 REJECT，
-    使 R-102「品牌词 → COMPLEX 交 Agent 调查」的语义失效（官方店/适配词被误杀）。"""
+    """黑名单与 BRAND_TERMS 不得相交。"""
     assert terms.BLACKLISTED_BRANDS.isdisjoint(terms.BRAND_TERMS)
 
 
 def test_default_rules_declaration_order():
-    """DEFAULT_RULES 声明序与动作（kind）收敛：R-101 黑名单 = REJECT；R-102 品牌词 =
-    COMPLEX；R-301/302 = COMPLEX。"""
+    """DEFAULT_RULES 声明序与动作（kind）。"""
     assert [r.rule_id for r in DEFAULT_RULES] == ["R-101", "R-102", "R-301", "R-302"]
     assert [r.kind for r in DEFAULT_RULES] == ["REJECT", "COMPLEX", "COMPLEX", "COMPLEX"]
 
 
 def test_rule_evidence_shape():
-    """rule_evidence 构造确定性直判证据（只构造不落库）。
-
-    行为级：RULE_HIT 证据携带规则 id（machine-readable）+ 可追溯的人读 value
-    （rule_id/name/detail 保真）+ 确定性 weight=RULE_EVIDENCE_WEIGHT（规则命中满强度）；不锁 value 的
-    拼接格式与 extra 全量键位。
-    """
+    """rule_evidence 构造确定性直判证据（只构造不落库）。"""
     hit = RuleHit(rule_id="R-102", name="品牌词命中", detail="标题/描述命中品牌词: NIKE")
     ev = rule_evidence(hit)
     assert ev.type == "RULE_HIT"
     assert ev.source == "ScreeningRuleEngine"
-    assert ev.weight == RULE_EVIDENCE_WEIGHT  # 与 engine 的单一来源常量同值
+    assert ev.weight == RULE_EVIDENCE_WEIGHT
     assert ev.ref_id is None
     assert ev.extra.get("rule_id") == "R-102"
-    assert ev.value.startswith("R-102")  # value 以 rule_id 起头（与直判转发路径同构）
-    assert "品牌词命中" in ev.value  # hit.name 保真
-    assert "标题/描述命中品牌词: NIKE" in ev.value  # hit.detail 保真
+    assert ev.value.startswith("R-102")
+    assert "品牌词命中" in ev.value
+    assert "标题/描述命中品牌词: NIKE" in ev.value
 
 
 def _fake_graph_decision() -> ReviewDecision:
@@ -333,8 +314,7 @@ def _fake_graph_decision() -> ReviewDecision:
 
 
 async def test_process_review_complex_goes_to_agent(monkeypatch):
-    """verdict=COMPLEX → 调 run_and_persist(triage_result='COMPLEX'，携带 RULE_HIT
-    evidence)，不走直判。"""
+    """verdict=COMPLEX → 调 run_and_persist(triage_result='COMPLEX'，携带 RULE_HIT evidence)。"""
     calls: dict = {}
 
     async def fake_run_and_persist(case, *, run_id=None, trigger_type="INITIAL",
@@ -364,8 +344,7 @@ async def test_process_review_complex_goes_to_agent(monkeypatch):
 
 
 async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
-    """COMPLEX 分支把触发进 Agent 的 RULE_HIT evidence（t.hits，与直判同构）传给
-    run_and_persist 落 review_evidence —— 事后可回答"哪条规则触发了 Agent"。"""
+    """COMPLEX 分支把触发进 Agent 的 RULE_HIT evidence（t.hits）传给 run_and_persist 落 review_evidence。"""
     seen: dict = {}
 
     async def fake_run_and_persist(case, *, run_id=None, trigger_type="INITIAL",
@@ -377,7 +356,6 @@ async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
 
     monkeypatch.setattr(ps, "run_and_persist", fake_run_and_persist)
 
-    # 单命中：R-301（品牌空缺+高危类目）
     await ps.process_review(_COMPLEX_HIGH_RISK, run_id="RUN_CMPLX")
     assert seen["run_id"] == "RUN_CMPLX"
     evs = seen["extra_evidence"]
@@ -388,9 +366,8 @@ async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
     assert ev.weight == RULE_EVIDENCE_WEIGHT
     assert ev.ref_id is None
     assert ev.extra == {"rule_id": "R-301"}
-    assert ev.value.startswith("R-301")  # value = "R-301 {name}: {detail}"
+    assert ev.value.startswith("R-301")
 
-    # 多命中全转发（按 hits 规则序）：R-301（品牌空缺）+ R-302（规避词）
     await ps.process_review(_COMPLEX_MULTI_HIT_NONRISK, run_id="RUN_CMPLX_MULTI")
     assert seen["run_id"] == "RUN_CMPLX_MULTI"
     evs2 = seen["extra_evidence"]
@@ -398,7 +375,6 @@ async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
     assert all(e.type == "RULE_HIT" and e.source == "ScreeningRuleEngine"
                for e in evs2)
 
-    # 品牌词命中：R-102 单命中 → COMPLEX 进 Agent 且转发 R-102 evidence
     await ps.process_review(_LV_REAL_BRAND_TERM, run_id="RUN_CMPLX_LV")
     assert seen["run_id"] == "RUN_CMPLX_LV"
     evs3 = seen["extra_evidence"]
@@ -411,7 +387,7 @@ async def test_process_review_complex_forwards_rule_hit_evidence(monkeypatch):
     [(_CLEAN, "PASS"), (_REJECT_BLACKLIST, "REJECT")],
 )
 async def test_process_review_direct_branches(monkeypatch, case, expect_verdict):
-    """verdict=PASS/REJECT → 调 run_screening_direct（直判），不走 Agent。"""
+    """verdict=PASS/REJECT → 调 run_screening_direct（直判）。"""
     calls: dict = {}
 
     async def fake_direct(c, triage_result, *, run_id=None):
@@ -434,7 +410,6 @@ async def test_process_review_direct_branches(monkeypatch, case, expect_verdict)
     assert calls["direct"] == {"run_id": "RUN_DIRECT", "verdict": expect_verdict}
     assert out["verdict"] == expect_verdict
     assert out["run_id"] == "RUN_DIRECT"
-    # 直判 decision 与落库投影列同构：确定性 confidence=1.0
     assert isinstance(out["decision"], ReviewDecision)
     assert out["decision"].decision_confidence == 1.0
     assert out["decision"].decision == (Decision.PASS if expect_verdict == "PASS"
@@ -458,7 +433,7 @@ async def test_process_review_direct_decision_evidence(monkeypatch):
 
     out = await ps.process_review(_REJECT_BLACKLIST)
     rules_in_evidence = {ev.extra.get("rule_id") for ev in out["decision"].evidence}
-    assert rules_in_evidence == {"R-101"}  # 黑名单命中证据进链
+    assert rules_in_evidence == {"R-101"}
 
     out_pass = await ps.process_review(_CLEAN)
-    assert out_pass["decision"].evidence == []  # PASS 零命中 → 空证据链
+    assert out_pass["decision"].evidence == []

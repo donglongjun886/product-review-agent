@@ -1,8 +1,4 @@
-"""步骤失败分级（guardrails/errors.py）单测：failures 形状。
-
-``make_failure``：``step_type``/``severity``/``reason``/``ts`` 必需，``tool``/``seq``
-可选（有才带）。
-"""
+"""步骤失败分级（guardrails/errors.py）单测：failures 形状。"""
 
 from __future__ import annotations
 
@@ -21,7 +17,7 @@ def test_make_failure_default_shape():
     assert f["step_type"] == STEP_DECIDE
     assert f["severity"] == SEV_WARN
     assert f["reason"] == "schema 校验重试仍失败"
-    assert isinstance(f["ts"], str) and f["ts"]  # UTC ISO8601，非空
+    assert isinstance(f["ts"], str) and f["ts"]
 
 
 def test_make_failure_with_tool_and_seq():

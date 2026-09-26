@@ -1,9 +1,4 @@
-"""FastAPI 应用工厂 —— 只装配应用壳（元信息 + 路由），不持有图/DB 等重对象。
-
-调查图单例由组合根 ``pra.wiring.get_production_graph`` 模块级懒加载持有（经
-``pra.infra.persist_service`` 间接调用），与 app 生命周期解耦：热重载或多 worker 各自独立 build
-一次，测试可直接 ``create_app()`` 起 TestClient。
-"""
+"""FastAPI 应用工厂 —— 只装配应用壳（元信息 + 路由），不持有图/DB 等重对象。"""
 
 from __future__ import annotations
 

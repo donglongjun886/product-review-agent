@@ -1,14 +1,4 @@
-"""评测逐案保护：单案基础设施异常只废该案，整臂仍产出可读数据。
-
-守护三条业主口径：
-
-1. 某案抛异常**不得**让整臂挂掉 —— ``_run_arm`` 照常返回其余案的数据；
-2. 失败案**不得**被伪装成任何一种业务判定（尤其 HUMAN_REVIEW —— 那会污染混淆矩阵与
-   ``human_review_rate``）、不得产出 ``EvalRecord``、不得进任何指标分母；
-3. 失败原因必须带异常类型短名且落在报告文本里，而不是只留在内存。
-
-第二条用例另用 ``_render_report`` 反证：失败列 ``failed=1`` 与「分母不含失败案」注记真实可见。
-"""
+"""评测逐案保护：单案基础设施异常只废该案，整臂仍产出可读数据。"""
 
 from __future__ import annotations
 
@@ -27,14 +17,13 @@ from pra.evaluation.record import EvalRecord
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "run_evaluation.py"
-# 该案刻意让 run_one 抛异常：异常类型短名是守护断言的一部分
 _FAIL_CASE_ID = "EC_T2"
 _FAIL_TYPE = "RuntimeError"
 _FAIL_MESSAGE = "injected infra failure"
 
 
 def _load_script():
-    """按路径加载跑分脚本（它不是包，且 import 期不拉起 litellm）。"""
+    """按路径加载跑分脚本（它不是包）。"""
     spec = importlib.util.spec_from_file_location("run_evaluation_mod", SCRIPT)
     assert spec and spec.loader, f"无法定位脚本: {SCRIPT}"
     mod = importlib.util.module_from_spec(spec)
@@ -43,7 +32,7 @@ def _load_script():
 
 
 def _eval_case(eval_case_id: str, case_id: str) -> EvalCase:
-    """造一条真 ``EvalCase``（真值 PASS；``abstain_label`` 默认 None = AUTO_DECIDABLE）。"""
+    """造一条真 ``EvalCase``（真值 PASS）。"""
     return EvalCase(
         eval_case_id=eval_case_id,
         scene="normal",
@@ -96,7 +85,7 @@ async def test_single_case_failure_keeps_arm_alive(script) -> None:
     exp = script._expected_index(cases)
     metrics = DecisionEvaluator.evaluate(records, exp)
     assert (metrics.total, metrics.human_pred_total) == (2, 0)
-    assert metrics.human_review_rate == 0.0  # 分母只含成功案 → 不是 1/3
+    assert metrics.human_review_rate == 0.0
     latencies = [ms for _, ms in results]
     engineering = EngineeringEvaluator.evaluate(records, latency_ms=latencies)
     assert engineering.total_records == 2
@@ -129,7 +118,6 @@ async def test_failed_count_and_reason_reach_report_text(script) -> None:
     engineering = {
         arm: EngineeringEvaluator.evaluate(records, latency_ms=latencies) for arm in script.ARMS
     }
-    # 真失败只发生在被守护的这一臂；其余两臂记 0 反证失败计数逐臂独立
     failures_by_arm = {arm: (failures if arm == "rule" else []) for arm in script.ARMS}
 
     report = script._render_report(

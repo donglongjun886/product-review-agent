@@ -1,16 +1,4 @@
-"""生产入口的 RAG 接线 —— 装配惰性 / 首次检索才构建。
-
-契约：
-- ``build_production_tools()`` 把 CaseSearchTool / PolicySearchTool 指向真实 RAG
-  （``LazyCaseIndex`` / ``LazyPolicyIndex``），但**装配期零 import、零 IO**：不建库、不连
-  Chroma、不加载模型，失败留到首次检索（异常经 ``tools_node`` 上抛）；
-- 首次 ``search`` 才调用 builder，之后复用同一实例；**构建失败不缓存**（下次重试）；
-- 测试世界 = ``inmemory_world`` 的 InMemory 种子（``build_inmemory_tools()``），conftest 把
-  生产入口的工具装配钉到它 —— 评测确定性红线。
-
-缺 rag extra 路径由子进程用例守护（不在收集期 import fastembed，避免污染其他用例的
-``sys.modules`` 断言）；CI 只跑 ``uv sync --frozen``（不装 extra）→ 该路径必然走到引导报错。
-"""
+"""生产入口的 RAG 接线 —— 装配惰性 / 首次检索才构建。"""
 
 from __future__ import annotations
 
@@ -25,15 +13,7 @@ from inmemory_world import build_inmemory_tools
 
 import pra.tools as tools_pkg
 
-# 模块导入期抓真实装配函数：conftest 的 autouse fixture 会在测试期把 ``pra.tools`` 上的
-# 同名属性换成 ``inmemory_world.build_inmemory_tools``（保证 CI 不连库/不连 Chroma），
-# 此处保留真身供本文件使用。
 _REAL_BUILD_PRODUCTION_TOOLS = tools_pkg.build_production_tools
-
-
-# ---------------------------------------------------------------------------
-# 生产装配：惰性注入
-# ---------------------------------------------------------------------------
 
 
 def test_production_assembly_injects_lazy_rag_indices():
@@ -49,22 +29,15 @@ def test_production_assembly_injects_lazy_rag_indices():
     assert type(tool_by_name(prod, "MerchantTool")._repo).__name__ == "MySQLMerchantRepository"
     assert isinstance(prod_case._index, LazyCaseIndex)
     assert isinstance(prod_policy._index, LazyPolicyIndex)
-    # 惰性的全部意义：装配完还没建库（未 import 后端、未连服务端、未加载模型）——
-    # 该契约的行为守护在 tests/test_rag_default_path_no_extra.py（子进程查 sys.modules）。
 
 
 def test_default_tools_keep_inmemory_knowledge_sources():
-    """测试世界 ``build_inmemory_tools()`` 的两个知识库工具仍是 InMemory 种子（评测可重放口径）。"""
+    """测试世界 ``build_inmemory_tools()`` 的两个知识库工具仍是 InMemory 种子。"""
     from inmemory_world import InMemoryCaseIndex, InMemoryPolicyIndex
 
     default = build_inmemory_tools()
     assert isinstance(tool_by_name(default, "CaseSearchTool")._index, InMemoryCaseIndex)
     assert isinstance(tool_by_name(default, "PolicySearchTool")._index, InMemoryPolicyIndex)
-
-
-# ---------------------------------------------------------------------------
-# 惰性代理语义（不依赖 extra / 服务端）
-# ---------------------------------------------------------------------------
 
 
 async def test_lazy_index_defers_build_then_caches():
@@ -91,7 +64,7 @@ async def test_lazy_index_defers_build_then_caches():
 
 
 async def test_lazy_build_failure_is_not_cached_and_is_retried():
-    """构建失败原样上抛、不缓存失败 —— 服务端短暂不可达可自愈（下次检索重试）。"""
+    """构建失败原样上抛、不缓存失败，下次检索重试。"""
     from pra.rag.lazy_index import LazyCaseIndex
     from pra.tools.case_search.tool import CaseSearchFilters
 
@@ -117,10 +90,7 @@ async def test_lazy_build_failure_is_not_cached_and_is_retried():
 
 def test_production_embedder_fails_fast_instead_of_downloading(monkeypatch, tmp_path):
     """**生产请求期绝不下载模型**：缓存目录里没有模型时，``local_files_only=True`` 让 fastembed
-    只读本地并**立刻**抛错（否则请求线程会挂在首次下载上——这正是 e2e / 演示脚本子进程挂死的根因）。
-
-    非空转：不打桩任何被测函数，真实调用 ``production_embedder()``，只把
-    ``PRA_EMBED_CACHE_DIR``（生产代码实际读取的缓存目录开关）指到一个空的临时目录。
+    只读本地并**立刻**抛错。
     """
     monkeypatch.setenv("PRA_EMBED_CACHE_DIR", str(tmp_path))
     started = time.monotonic()
@@ -131,7 +101,6 @@ def test_production_embedder_fails_fast_instead_of_downloading(monkeypatch, tmp_
 
 
 #: 子进程脚本：屏蔽 ``llama_index``（模拟「缺 rag extra」）后调 ``production_embedder``。
-#: 「缺 extra」也必须汇到同一条带安装指引的 ``RuntimeError``（import 必须留在 ``try`` 内）。
 _NOEXTRA_CHILD_SCRIPT = """
 import importlib.abc, json, sys
 
@@ -160,10 +129,6 @@ else:
 def test_missing_extra_embedder_raises_guided_runtime_error():
     """缺 rag extra（``llama_index`` 不可导入）时 ``production_embedder`` 必须抛带安装指引的
     ``RuntimeError``（含 ``uv sync --extra rag``），而非裸 ``ModuleNotFoundError``。
-
-    子进程模拟「缺 extra」：装了 extra 的开发 venv 里 ``llama_index`` 已在 ``sys.modules``，
-    进程内屏蔽不可靠（先例见 ``test_rag_default_path_no_extra`` 的 docstring）。本用例是这条路径
-    在装了 extra 的环境下唯一的守护 —— import 一旦被挪出 ``try`` 会再次静默复发。
     """
     proc = subprocess.run(
         [sys.executable, "-c", _NOEXTRA_CHILD_SCRIPT],

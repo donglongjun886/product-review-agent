@@ -1,8 +1,4 @@
-"""PolicySearchTool：政策依据检索工具（RAG · Policy KB）。
-
-生产/HTTP 入口**构造时必填**注入真实 RAG 索引（测试世界见 ``tests/inmemory_world.py``）；
-本工具不含业务判定，每个 hit → 1 条 ``POLICY_REF`` 证据。
-"""
+"""PolicySearchTool：政策依据检索工具（RAG · Policy KB）。"""
 
 from __future__ import annotations
 
@@ -17,11 +13,11 @@ from ..base import ToolArgs, ToolContext, ToolResult
 
 # ---- 受控证据类型 ----
 POLICY_REF_TYPE = "POLICY_REF"
-POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限（全文在 Result）
+POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限
 
 
 # ---------------------------------------------------------------------------
-# 数据访问契约（依赖倒置）
+# 数据访问契约
 # ---------------------------------------------------------------------------
 
 
@@ -32,7 +28,7 @@ class PolicySearchFilters(BaseModel):
 
 
 class PolicyClauseHit(BaseModel):
-    """单个政策条款命中（DB ``policy / policy_clause``）；``status`` 取 "EFFECTIVE" / "EXPIRED"。"""
+    """单个政策条款命中（``status`` 取 EFFECTIVE / EXPIRED）。"""
 
     policy_id: str
     version: int
@@ -90,10 +86,7 @@ class PolicySearchTool:
         return PolicySearchResult(hits=hits)
 
     def to_evidence(self, result: PolicySearchResult) -> list[Evidence]:
-        """结果 → Evidence：每个 hit 1 条 ``POLICY_REF``。
-
-        ``ref_id=clause_id`` 必填（可追溯）；``policy_id`` / ``policy_version`` 写入 ``extra`` 供 Gate 读引用。
-        """
+        """结果 → Evidence：每个 hit 1 条 ``POLICY_REF``（``ref_id=clause_id``；``policy_id`` / ``policy_version`` 进 ``extra``）。"""
         evidences: list[Evidence] = []
         for h in result.hits:
             text = h.text[:POLICY_TEXT_MAX_CHARS]

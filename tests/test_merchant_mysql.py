@@ -1,12 +1,4 @@
-"""MerchantTool 的 MySQL 数据源（``mysql_repo``）：真库集成（可跳过）+ 恒跑纯单测。
-
-真库部分照抄 ``tests/test_infra_persist_smoke.py`` 的默认配置路径 + 1s socket 探测 ``skipif``，
-**不 mock ``db._settings``、不注 ``_env_file``** —— 专测「.env / DATABASE_URL 配错就连不上」
-这条链；用例自建自删（``PYTEST_MERCHANT_`` 前缀 + ``finally`` 清理），重复跑不污染开发库。
-
-纯单测部分注入假 sessionmaker，覆盖 DB 行 → ``MerchantProfile`` 的全部边界，
-并对照生产装配（MySQL）与 InMemory 测试世界（``inmemory_world``）的数据源。
-"""
+"""MerchantTool 的 MySQL 数据源（``mysql_repo``）：真库集成（可跳过）+ 恒跑纯单测。"""
 
 from __future__ import annotations
 
@@ -48,8 +40,6 @@ from pra.tools.merchant.tool import (
     MerchantTool,
 )
 
-# 模块导入期绑定真身：``tests/conftest.py`` 的 autouse fixture 会把 ``pra.tools`` 上的这个名字
-# 换成 InMemory 装配（测试不连库），此处留住原函数供真库集成用例显式换回去。
 _REAL_BUILD_PRODUCTION_TOOLS = build_production_tools
 
 
@@ -65,13 +55,8 @@ def _inmemory_policy_index():
     return InMemoryPolicyIndex()
 
 
-# ---------------------------------------------------------------------------
-# 替身：假 session / 假 sessionmaker（形状与 async_sessionmaker 一致，可 async with）
-# ---------------------------------------------------------------------------
-
-
 class _FakeResult:
-    """够用即止：``scalar_one_or_none()`` 给首行。"""
+    """``scalar_one_or_none()`` 给首行。"""
 
     def __init__(self, *, first: object = None) -> None:
         self._first = first
@@ -133,11 +118,6 @@ def _ctx() -> ToolContext:
     return ToolContext(run_id="RUN_T", case_id="CASE_T", budget=Budget())
 
 
-# ---------------------------------------------------------------------------
-# 纯单测：行 → 画像（不连库）
-# ---------------------------------------------------------------------------
-
-
 def test_to_profile_maps_every_field():
     profile = to_profile(_merchant_row())
     assert profile.merchant_id == "M_TEST"
@@ -148,7 +128,7 @@ def test_to_profile_maps_every_field():
 
 
 def test_construction_does_not_touch_the_sessionmaker_provider():
-    """构造期不得建 engine / 连库（连库延迟到首次调用）。"""
+    """构造期不得建 engine / 连库。"""
     calls: list[int] = []
 
     def _provider():
@@ -160,7 +140,7 @@ def test_construction_does_not_touch_the_sessionmaker_provider():
 
 
 async def test_get_profile_loads_profile():
-    """行为不变量：命中商家时画像非空且字段来自库行。"""
+    """命中商家时画像非空且字段来自库行。"""
     repo, _ = _repo_with_fake_sessions([_FakeResult(first=_merchant_row())])
 
     profile = await repo.get_profile("M_TEST", window_days=90)
@@ -175,7 +155,7 @@ async def test_missing_merchant_returns_none():
 
 
 async def test_infrastructure_error_propagates_and_is_never_swallowed_as_none():
-    """连不上库/查询报错必须上抛 —— 吞成 None 会把「查不到」伪装成「证明无」。"""
+    """连不上库/查询报错必须上抛。"""
     repo, _ = _repo_with_fake_sessions([], error=RuntimeError("connection refused"))
 
     with pytest.raises(RuntimeError, match="connection refused"):
@@ -192,24 +172,15 @@ async def test_missing_merchant_flows_to_ok_false_and_no_evidence():
 
 
 def test_production_assembly_and_inmemory_world_have_distinct_data_sources():
-    """数据源对照：生产装配的 MerchantTool 读 MySQL，InMemory 世界的读进程内种子。"""
+    """生产装配的 MerchantTool 读 MySQL，InMemory 世界的读进程内种子。"""
     prod_repo = tool_by_name(_REAL_BUILD_PRODUCTION_TOOLS(), "MerchantTool")._repo
     memory_repo = tool_by_name(build_inmemory_tools(), "MerchantTool")._repo
     assert isinstance(prod_repo, MySQLMerchantRepository)
     assert isinstance(memory_repo, InMemoryMerchantRepository)
 
 
-# ---------------------------------------------------------------------------
-# 真库集成（MySQL 不可达时跳过）：默认配置路径，自建自删
-# ---------------------------------------------------------------------------
-
-
 def _mysql_reachable() -> bool:
-    """按 **默认配置路径** 解析 DSN 并做 1s socket 探测（不连库、不建 engine）。
-
-    ``Settings()`` 抛错时**不吞异常**：配置层坏掉就该让本文件变红（收集期报错），
-    而不是伪装成「环境没 DB」跳过。
-    """
+    """按 **默认配置路径** 解析 DSN 并做 1s socket 探测（不连库、不建 engine）。"""
     parsed = urlparse(Settings().database_url)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 3306
@@ -221,11 +192,7 @@ def _mysql_reachable() -> bool:
 
 
 async def _insert_merchant(merchant_id: str, seed: dict) -> None:
-    """用**裸 SQL** 写入 M_5512 同构种子（独立 merchant_id）。
-
-    绕开 ORM 写：这样列名口径由手写 DDL 独立钉住，读路径才走 ORM ——
-    DDL 与 ORM 谁漂移了都直接报错。
-    """
+    """用**裸 SQL** 写入 M_5512 同构种子（独立 merchant_id）。"""
     sm = get_sessionmaker()
     async with sm() as s:
         await s.execute(
@@ -275,7 +242,6 @@ async def test_mysql_merchant_repository_roundtrip_against_real_db():
         res = await tool.call(MerchantArgs(merchant_id=merchant_id), _ctx())
         assert res.ok is True
         evs = tool.to_evidence(res)
-        # 1 条聚合画像事实 + 1 条测量结论（含阳性/阴性判定）
         history = [e for e in evs if e.type == MERCHANT_HISTORY_TYPE]
         assert len(history) == 1
         assert history[0].ref_id == merchant_id
@@ -296,17 +262,11 @@ async def test_mysql_merchant_repository_roundtrip_against_real_db():
         await _delete_merchant(merchant_id)
 
 
-# ---------------------------------------------------------------------------
-# 生产路径端到端（真库，可跳过）：HTTP/落库入口 → MySQL → Evidence
-# ---------------------------------------------------------------------------
-
-# 只在真库种子里的商家（``inmemory_world.py`` 的 _DEFAULT_MERCHANTS 只有 M_5512）—— 用它才能在
-# 证据层面区分「读了真库」与「读了 InMemory 测试世界」。
 _MYSQL_ONLY_MERCHANT = "M_8801"
 
 
 def _case_for_merchant(case_id: str) -> ProductReviewCase:
-    """COMPLEX 案件（brand 空缺 → R-301），商家只有真库有（与 InMemory 测试世界可区分）。"""
+    """COMPLEX 案件（brand 空缺 → R-301），商家只有真库有。"""
     return make_case(
         case_id=case_id, brand=None, product_id="P_77310", merchant_id=_MYSQL_ONLY_MERCHANT
     )
@@ -354,18 +314,11 @@ async def _drop_cases(case_ids: tuple[str, ...]) -> None:
     not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库集成"
 )
 async def test_production_path_reads_merchant_history_from_mysql(monkeypatch):
-    """生产装配 → 落库入口 → 图 → MerchantTool → MySQL → MERCHANT_HISTORY 落 review_evidence。
-
-    同一案件跑两遍做**回退反证**：生产装配（真库）应取到只存在于库中的商家并落证据；换回
-    InMemory 测试世界后该商家不存在，同一位置不应有 MERCHANT_HISTORY —— 若有人把生产装配改回
-    InMemory，前一半会立刻变红。
-    """
+    """生产装配 → 落库入口 → 图 → MerchantTool → MySQL → MERCHANT_HISTORY 落 review_evidence。"""
     monkeypatch.setattr(
         wiring, "build_llm_backend", lambda *, tools=None: WalkthroughBackend()
     )
     monkeypatch.setattr("pra.tools.build_production_tools", _REAL_BUILD_PRODUCTION_TOOLS)
-    # 本用例只验证 MySQL 链路，不需要真实 RAG 检索：把生产装配的案例/政策索引构建器钉回
-    # InMemory 种子，免去真实 RAG 在缺 rag extra / 缺模型缓存时联网下载模型。
     monkeypatch.setattr("pra.tools._build_production_case_index", _inmemory_case_index)
     monkeypatch.setattr("pra.tools._build_production_policy_index", _inmemory_policy_index)
     tag = uuid4().hex[:8]

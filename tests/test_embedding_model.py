@@ -1,13 +1,4 @@
-"""BGE 编码器构造点 ``pra.tools.production_embedder`` 的真模型 smoke 单测。
-
-红线：模块级不 import fastembed —— 真模型依赖只在真模型组的 fixture 里拉起。
-真模型组走 ``TestRealEmbeddingModel`` 类级 skipif：就绪判定 = 纯文件系统只读探测
-（fastembed 落盘布局里有 onnx）+ ``fastembed``/``llama_index`` 可 import；未就绪即整组跳过，
-绝不联网/下载。编码走与生产同款的 ``production_embedder(cache_dir=...)`` + ``get_text_embedding``。
-
-语义 smoke 断言 cos(仿冒, 复刻) > cos(仿冒, 正品) 与 > cos(仿冒, 无关)，
-探针见 ``_PROBE_*`` 常量。
-"""
+"""BGE 编码器构造点 ``pra.tools.production_embedder`` 的真模型 smoke 单测。"""
 
 from __future__ import annotations
 
@@ -22,7 +13,6 @@ import pytest
 from helpers import bge_model_cached
 from pra.tools import production_embedder
 
-# 真模型缓存目录：优先 PRA_RAG2_MODEL_CACHE，缺省为仓库内 .cache/model_cache。
 _MODEL_CACHE = os.environ.get(
     "PRA_RAG2_MODEL_CACHE",
     str(Path(__file__).resolve().parents[1] / ".cache" / "model_cache"),
@@ -30,7 +20,6 @@ _MODEL_CACHE = os.environ.get(
 
 
 def _rag_deps_importable() -> bool:
-    # 顶层名 find_spec 不 import 任何模块（不破「收集期不 import fastembed」红线）。
     return all(
         importlib.util.find_spec(name) is not None for name in ("fastembed", "llama_index")
     )
@@ -44,7 +33,6 @@ _PROBE_REPLICA = "复刻经典配色运动鞋，做工用料高度还原原版�
 _PROBE_UNRELATED = "今天天气晴朗，适合户外慢跑锻炼身体。"
 
 
-# --- 真模型组（类级 skipif：模型未缓存/依赖缺失时整组跳过）
 def _cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
@@ -56,7 +44,6 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 @pytest.fixture(scope="module")
 def _embedding_model() -> Any:
-    # 与生产同一构造路径：local_files_only=True（只读本地缓存，绝不联网下载）。
     return production_embedder(cache_dir=_MODEL_CACHE)
 
 

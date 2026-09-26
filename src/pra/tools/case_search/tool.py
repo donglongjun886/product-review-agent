@@ -1,8 +1,4 @@
-"""CaseSearchTool：先例检索工具（RAG · Case KB）。
-
-生产/HTTP 入口**构造时必填**注入真实 RAG 索引（测试世界见 ``tests/inmemory_world.py``）；
-``retrieval_score`` 是检索分、不是语义相似度，也不做量纲适配。
-"""
+"""CaseSearchTool：先例检索工具（RAG · Case KB）。"""
 
 from __future__ import annotations
 
@@ -18,7 +14,7 @@ CASE_PRECEDENT_TYPE = "CASE_PRECEDENT"
 
 
 # ---------------------------------------------------------------------------
-# 数据访问契约（依赖倒置）
+# 数据访问契约
 # ---------------------------------------------------------------------------
 
 
@@ -82,10 +78,7 @@ class CaseSearchTool:
         return CaseSearchResult(hits=hits)
 
     def to_evidence(self, result: CaseSearchResult) -> list[Evidence]:
-        """结果 → Evidence：每个 hit 1 条 ``CASE_PRECEDENT``。
-
-        ``weight=retrieval_score``（检索分即证据强度，**不是**语义相似度）；``ref_id=case_id`` 必填。
-        """
+        """结果 → Evidence：每个 hit 1 条 ``CASE_PRECEDENT``（``weight=retrieval_score``、``ref_id=case_id``）。"""
         evidences: list[Evidence] = []
         for h in result.hits:
             risk_types = "/".join(t.value for t in h.risk_type) or "风险类型未标注"

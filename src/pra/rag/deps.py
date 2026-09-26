@@ -1,8 +1,4 @@
-"""第三方重依赖的延迟 import 边界（全仓唯一）：``chroma()`` / ``llama()``。
-
-两者都在函数体内 import，故 ``import pra.rag`` / ``import pra.tools`` 不把 chromadb / llama_index
-拉进 ``sys.modules``；缺 rag extra 时抛带指引的 ``RuntimeError``，不静默降级。
-"""
+"""第三方重依赖的延迟 import 边界：``chroma()`` / ``llama()``。"""
 
 from __future__ import annotations
 
@@ -14,7 +10,7 @@ __all__ = ["chroma", "llama"]
 
 
 def chroma() -> Any:
-    """返回 chromadb 模块（在函数体内 import，保持默认路径零依赖）。"""
+    """返回 chromadb 模块（在函数体内 import）。"""
     try:
         import chromadb
     except ImportError as exc:  # pragma: no cover — 触发路径仅在显式开启 chroma 后端
@@ -26,7 +22,7 @@ def chroma() -> Any:
 
 @functools.cache
 def llama() -> SimpleNamespace:
-    """返回延迟 import 的 LlamaIndex 装配面（SimpleNamespace；进程内缓存复用）。"""
+    """返回 LlamaIndex 装配面（``SimpleNamespace``；进程内缓存复用）。"""
     try:
         from llama_index.core import VectorStoreIndex
         from llama_index.core.llms import MockLLM

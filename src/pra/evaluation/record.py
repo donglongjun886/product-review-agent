@@ -1,12 +1,4 @@
-"""评测记录契约：EvalRecord / DecisionLabel / SchemeName。
-
-``EvalRecord`` 是各臂归一化后的**统一输出**，也是 metrics 层唯一输入（metrics 不直接吃
-DB / AgentState）。``decision`` ∈ PASS/REJECT/HUMAN_REVIEW（rule 的 COMPLEX、single 调用
-失败、agent 的 Gate / overlay 收口都映射 HUMAN_REVIEW）；``evidence`` 为
-``[{type, value, extra?}]`` 摘要；``tool_calls_actual`` 为实际调用工具名（去重保序，
-rule / single 恒 []）；``cost`` = ``{llm_calls, tool_calls, tokens}``，**刻意不含墙钟
-latency_ms**（进程相关量会让跨 run 比对漂移）；``detail`` 只进审计，不参与指标。
-"""
+"""评测记录契约：EvalRecord / DecisionLabel / SchemeName。"""
 
 from __future__ import annotations
 
@@ -14,14 +6,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# 三分类输出空间（rule 的 COMPLEX、single 调用失败、agent 的 Gate / overlay 收口都映射
-# HUMAN_REVIEW）；三条臂名与 metrics 层的 scheme 同源。
 SchemeName = Literal["rule", "single", "agent"]
 DecisionLabel = Literal["PASS", "REJECT", "HUMAN_REVIEW"]
 
 
 class EvalRecord(BaseModel):
-    """统一评测记录 —— metrics 层唯一输入。"""
+    """统一评测记录。"""
 
     model_config = ConfigDict(extra="forbid")
 

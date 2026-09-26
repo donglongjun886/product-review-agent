@@ -1,7 +1,4 @@
-"""BM25 检索器：jieba 分词 + ``bm25s`` 自建索引（不使用库 ``BM25Retriever``）。
-
-语料与查询共用本模块 ``_tokenize``，无全局分词替换、无锁、无调用顺序约束。
-"""
+"""BM25 检索器：jieba 分词 + ``bm25s`` 自建索引。"""
 
 from __future__ import annotations
 
@@ -34,21 +31,20 @@ def _jieba_tokens(text: str) -> list[str]:
 
 
 def _tokenize(texts: Any) -> Any:
-    """文本（单条或列表）→ token 二维列表；语料与查询共用同一分词口径。"""
+    """文本（单条或列表）→ token 二维列表。"""
     items = [texts] if isinstance(texts, str) else list(texts)
     return [_jieba_tokens(str(text)) for text in items]
 
 
 @functools.cache
 def _retriever_class() -> type:
-    """BM25 检索器的类对象（继承库 ``BaseRetriever`` ⇒ 首次调用才 import llama_index）。"""
+    """返回 BM25 检索器的类对象。"""
     import bm25s
 
     class _JiebaBM25Retriever(llama().BaseRetriever):
-        """候选 node 上的 BM25 检索器（jieba 分词 + ``bm25s``；索引与词表随实例自持）。"""
+        """候选 node 上的 BM25 检索器（jieba 分词 + ``bm25s``）。"""
 
         def __init__(self, nodes: list[Any], similarity_top_k: int) -> None:
-            # 索引文本 = node 正文（metadata 已由 chroma_store._build_nodes 排除）。
             self._corpus = [
                 llama().node_to_metadata_dict(node) | {"node_id": node.node_id} for node in nodes
             ]
@@ -63,7 +59,7 @@ def _retriever_class() -> type:
             super().__init__()
 
         def _retrieve(self, query_bundle: Any) -> list[Any]:
-            """Top-K 命中（分数原样透传 ``bm25s``，不做量纲适配）。"""
+            """返回 Top-K 命中（``NodeWithScore`` 列表）。"""
             indexes, scores = self._bm25.retrieve(
                 _tokenize(query_bundle.query_str),
                 k=self._similarity_top_k,
@@ -82,5 +78,5 @@ def _retriever_class() -> type:
 
 
 def make_bm25_retriever(ctx: _RetrievalContext, top_k: int) -> Any:
-    """候选 node 上的 BM25 检索器（Python 侧过滤 = 只喂候选 node）。"""
+    """候选 node 上的 BM25 检索器。"""
     return _retriever_class()(list(ctx.nodes), top_k)

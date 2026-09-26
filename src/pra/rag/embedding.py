@@ -1,4 +1,4 @@
-"""BGE 编码器构造点（全仓唯一的 ``FastEmbedEmbedding``）—— ``BGE_MODEL`` / ``production_embedder``。"""
+"""BGE 编码器构造点：``BGE_MODEL`` / ``production_embedder``。"""
 
 from __future__ import annotations
 
@@ -6,17 +6,13 @@ from typing import Any
 
 __all__ = ["BGE_MODEL", "production_embedder"]
 
-#: BGE 中文小模型（fastembed 官方支持，dim 512，onnx ~90MB）。
+#: BGE 中文小模型（fastembed）。
 BGE_MODEL = "BAAI/bge-small-zh-v1.5"
 
 
 def production_embedder(*, cache_dir: str | None = None) -> Any:
     """构造 BGE 编码器（``BAAI/bge-small-zh-v1.5`` @ fastembed）。
 
-    ``local_files_only=True`` + ``cache_dir`` 取 ``PRA_EMBED_CACHE_DIR``：只读本地缓存，模型未缓存
-    即抛、绝不联网下载；失败转成带指引的 ``RuntimeError``，不静默回退任何编码器。
-    ``FastEmbedEmbedding`` 的 import 必须留在 ``try`` 内，否则「缺 rag extra」会裸抛
-    ``ModuleNotFoundError``、拿不到安装指引。
     :param cache_dir: 模型缓存目录；None → 取 ``PRA_EMBED_CACHE_DIR``，未设则由 fastembed 定。
     """
     import os

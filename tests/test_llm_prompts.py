@@ -1,20 +1,4 @@
-"""llm_prompts 渲染层确定性测试（real LLM prompt 约束守护，全部纯字符串断言）。
-
-四节点 prompt 约束：
-
-- hypothesize：禁重复提出既有假设（system 规则 + user 上下文渲染「既有假设清单」）；
-  假设必须可取证、允许少提；
-- plan：政策条款/先例一次性适用性判定（不重复安排同类检索）；证据已充分（高优先假设已
-  全部结论化、无未解决高优先级疑点）应提前 conclude，低优先级/边际 UNRESOLVED 与只会
-  重复采集的调用不阻止收尾；
-- decide：证据链充分且无矛盾/缺口时本轮直接裁决，人工只留给真正的证据不足/矛盾/政策模糊/
-  取证失败；
-- reevaluate：每条假设判 SUPPORTED/REFUTED 必须引用上下文真实存在的证据；
-  ``CASE_PRECEDENT`` / ``POLICY_REF`` 只能佐证；``new_hypotheses`` 禁重复、允许为空。
-
-另含输出 schema 契约守护与各节点渲染走查，以及评测用单次调用基线 ``single_call``。
-不联网 / 无 API key / 不调真实 LLM。
-"""
+"""llm_prompts 渲染层确定性测试（real LLM prompt 约束，全部纯字符串断言）。"""
 
 from __future__ import annotations
 
@@ -25,7 +9,7 @@ from pra.agent.llm_prompts import (
     build_user_prompt,
 )
 
-# 简单 JSON Schema（模拟 OutputModel 的 model_json_schema() 形状；只断言分节与文本约束）
+# 简单 JSON Schema（模拟 OutputModel 的 model_json_schema() 形状）
 _SCHEMA = {
     "title": "OutputProposal",
     "type": "object",
@@ -38,8 +22,7 @@ _SCHEMA = {
     "required": ["decision"],
 }
 
-# 带既有假设清单的 hypothesize state：case 与节点 state 同构，
-# 另带 hypotheses（UNRESOLVED / REFUTED / 已新增并存）验证去重清单渲染。
+# 带既有假设清单的 hypothesize state
 _HYP_WITH_EXISTING = {
     "case": {
         "case_id": "CASE_EC_0007",
@@ -92,8 +75,6 @@ def test_hypothesize_user_prompt_renders_existing_hypotheses():
     text = build_user_prompt(
         node="hypothesize", state=_HYP_WITH_EXISTING, json_schema=_SCHEMA
     )
-    # 行为级：每条既有假设的 id / status / statement 值都渲染进上下文（供 LLM 去重），
-    # 不锁具体行格式与分节编号（措辞/排版调整不应误伤）。
     assert "既有假设清单" in text
     assert "H1" in text and "UNRESOLVED" in text
     assert "商家存在系统性改标题重上架行为" in text
@@ -101,8 +82,8 @@ def test_hypothesize_user_prompt_renders_existing_hypotheses():
     assert "商家历史干净无违规记录" in text
     assert "H3" in text and "PENDING" in text
     assert "运行中新发现的品牌字段核验维度" in text
-    assert "输出格式要求" in text  # Schema 要点分节恒在
-    assert "__STATE__" not in text  # 不泄漏 __STATE__ 标记
+    assert "输出格式要求" in text
+    assert "__STATE__" not in text
 
 
 def test_hypothesize_user_prompt_omits_section_when_no_existing():
@@ -110,12 +91,11 @@ def test_hypothesize_user_prompt_omits_section_when_no_existing():
         node="hypothesize", state=_HYP_WITHOUT_EXISTING, json_schema=_SCHEMA
     )
     assert "既有假设清单" not in text
-    assert "云步百搭小白鞋" in text  # case 事实照常渲染
+    assert "云步百搭小白鞋" in text
 
 
 def test_output_schema_contracts_unchanged():
-    """输出 schema 契约守护：``hypotheses`` 仍必填 1..5；``new_hypotheses`` 仍可选无上限；
-    调查队列字段已删（零消费者）。"""
+    """输出 schema 契约：``hypotheses`` 必填 1..5；``new_hypotheses`` 可选无上限。"""
     hypo_schema = HypothesizeOutput.model_json_schema()
     assert hypo_schema["properties"]["hypotheses"]["minItems"] == 1
     assert hypo_schema["properties"]["hypotheses"]["maxItems"] == 5
@@ -127,7 +107,7 @@ def test_output_schema_contracts_unchanged():
 
 
 def test_decide_prompt_budget_caps_two_dims_only():
-    """预算上限文案只剩 LLM / 工具两维：即便 state 仍带旧上限键也不渲染 token/时长维度。"""
+    """预算上限文案只有 LLM / 工具两维。"""
     text = build_user_prompt(
         node="decide",
         state={
@@ -150,7 +130,6 @@ def test_decide_prompt_budget_caps_two_dims_only():
 
 
 def test_prompt_render_smoke_walkthrough():
-    # 一个尽量贴近真实节点 state 的富 state（decide 视角字段齐全）
     rich_state = {
         "case": {
             "case_id": "CASE_EC_0101",
@@ -215,5 +194,5 @@ def test_prompt_render_smoke_walkthrough():
         assert isinstance(sys_prompt, str) and len(sys_prompt) > 100
         user = build_user_prompt(node=node, state=rich_state, json_schema=_SCHEMA)
         assert isinstance(user, str) and user
-        assert "输出格式要求" in user  # Schema 要点分节恒在
-        assert "__STATE__" not in user  # 真实模型上下文不带裸 __STATE__ 标记
+        assert "输出格式要求" in user
+        assert "__STATE__" not in user

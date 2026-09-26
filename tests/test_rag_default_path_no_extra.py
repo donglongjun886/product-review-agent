@@ -1,22 +1,4 @@
-"""默认路径「零额外依赖」契约测试 —— CI 上恒跑。
-
-契约：``import pra.rag`` / ``import pra.tools`` 以及 tests 世界（``tests/inmemory_world.py`` 的
-``build_inmemory_tools()``）装配时，``chromadb`` / ``llama_index`` / ``jieba`` / ``bm25s`` /
-``fastembed`` 一律**不得**进入 ``sys.modules``（真实检索后端统一在「显式装配 chroma 索引」或
-「首次检索」时才延迟 import）。
-
-为什么这是 CI 上唯一跑得动的 RAG 守护：CI 只跑 ``uv sync --frozen``（不装任何 extra），
-真实检索（chroma）的用例需要 ``chromadb`` / ``fastembed`` 与已缓存模型，在 CI 上不执行任何
-一行断言（故不得声称「CI 覆盖了 chroma」）。
-
-注意：``build_policy_index()`` / ``build_case_index()`` **不是零依赖路径** —— 它们只保留
-chroma 后端（缺 rag extra 时构造即抛），故不在本文件的守护范围内；本文件钉的是「tests 世界
-（InMemory）装配与 import 路径不引入重依赖」这条懒加载红线。
-
-断言为什么用子进程：同进程里别的测试文件可能已经 ``import chromadb``，进程内查
-``sys.modules`` 会变成永真/永假的空断言。子进程是全新解释器：先跑上述装配，再查
-``sys.modules``，断言才不是 vacuous。
-"""
+"""默认路径「零额外依赖」契约测试 —— CI 上恒跑。"""
 
 from __future__ import annotations
 
@@ -27,20 +9,16 @@ from pathlib import Path
 
 import pytest
 
-#: 子进程脚本里 ``sys.path.insert`` 的 tests 目录（``inmemory_world`` 是顶层测试模块，
-#: 子进程不继承 pytest 的 ``sys.path`` 注入）。
+#: 子进程脚本里 ``sys.path.insert`` 的 tests 目录。
 _TESTS_DIR = str(Path(__file__).resolve().parents[1] / "tests")
 
-#: 必须**不出现**在默认路径进程 ``sys.modules`` 里的顶层模块名（前缀匹配：
-#: ``llama_index.core`` / ``bm25s.tokenization`` / ``fastembed.…`` 等同属违规）。
+#: 必须**不出现**在默认路径进程 ``sys.modules`` 里的顶层模块名（前缀匹配）。
 _FORBIDDEN_TOP_LEVEL = ("chromadb", "llama_index", "jieba", "bm25s", "fastembed")
 
 _PAYLOAD_MARKER = "PRA_DEFAULT_PATH_GUARD_JSON:"
 
 #: 子进程脚本：跑 tests 世界装配（import 包 + ``build_inmemory_tools()`` + 生产装配），然后检查
-#: sys.modules（同一进程内先后关系，保证「装配跑过之后仍未引入额外依赖」而不是「压根没跑」）。
-#: 用普通字符串 + 占位替换（而非 f-string）—— 脚本里全是 dict/集合字面量，f-string 会把
-#: 它们当格式字段解析（曾因此收集期 NameError）。
+#: ``sys.modules``。
 _CHILD_SCRIPT_TEMPLATE = """
 import importlib.util, json, sys
 
@@ -112,12 +90,11 @@ def _module_installed(name: str) -> bool:
 
     try:
         return importlib.util.find_spec(name) is not None
-    except Exception:  # noqa: BLE001 — 探测失败一律按「不可导入」处理（只降级，不掩盖）
+    except Exception:  # noqa: BLE001
         return False
 
 
 def _run_default_path_child() -> dict:
-    # 全新解释器；子进程 stdout 最后一行回传证据 JSON
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD_SCRIPT],
         capture_output=True,
@@ -136,7 +113,7 @@ def _run_default_path_child() -> dict:
 def test_default_path_pulls_in_no_extra_dependencies() -> None:
     """``import pra.rag`` / ``pra.tools`` + tests 世界装配**与生产装配**之后，
     ``chromadb`` / ``llama_index`` / ``jieba`` / ``bm25s`` / ``fastembed`` 不得进入
-    ``sys.modules``（生产装配经 ``Lazy*Index`` 惰性构建，首次检索才拉起后端）。"""
+    ``sys.modules``。"""
     payload = _run_default_path_child()
     assert payload["forbidden_present"] == {}, (
         "默认路径引入了额外依赖（CI 上 chromadb/llama_index/fastembed 根本没装 → 会 ImportError）："
@@ -145,7 +122,7 @@ def test_default_path_pulls_in_no_extra_dependencies() -> None:
 
 
 def test_default_path_guard_is_not_vacuous() -> None:
-    """反「空断言」守卫：tests 世界装配必须真的 import 了 pra.rag/pra.tools、建了 4 个
+    """tests 世界装配必须真的 import 了 pra.rag/pra.tools、建了 4 个
     InMemory 工具并读出了语料，生产装配注入惰性代理且尚未建库。"""
     payload = _run_default_path_child()
     assert payload["rag_loaded"] and payload["tools_loaded"], (

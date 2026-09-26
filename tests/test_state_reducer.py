@@ -1,10 +1,4 @@
-"""``merge_evidence`` 单测：指纹规则、幂等与保序（行为级，经公开 merge API 锁定）。
-
-覆盖 merge 的 None 入参、right 自去重、同 key 丢弃新增、``ref_id`` 为 None 时回退
-``value``（防同源证据互相吞并）、同 ``ref_id`` 下 weight/extra/value 差异不阻止判重，
-以及结果保序。指纹规则（``_evidence_key``）的语义一律通过 merge 行为间接验证，
-不断言私有函数返回的内部元组形状。
-"""
+"""``merge_evidence`` 单测：指纹规则、幂等与保序（行为级，经公开 merge API 锁定）。"""
 
 from __future__ import annotations
 
@@ -13,12 +7,7 @@ from helpers import ev
 
 
 def test_merge_same_ref_id_ignores_weight_extra_and_value_diffs():
-    """同 ``ref_id`` 下 weight/extra/value 差异不阻止判重（指纹取 ref_id，保留首条）。
-
-    “``ref_id`` 优先于 value、``ref_id`` 为 None 回退 value”两个语义已分别由
-    ``test_merge_same_key_in_right_dropped_idempotent`` 与
-    ``test_merge_ref_none_values_distinct_both_kept`` 以 merge 行为锁定。
-    """
+    """同 ``ref_id`` 下 weight/extra/value 差异不阻止判重（指纹取 ref_id，保留首条）。"""
     a = ev("POLICY_REF", source="PolicySearchTool", value="POLICY_3.2 v2 条款：x",
            weight=0.9, ref_id="POLICY_3.2_v2_c1")
     b = ev("POLICY_REF", source="PolicySearchTool", value="完全不同的内容",
@@ -49,7 +38,7 @@ def test_merge_same_key_in_right_dropped_idempotent():
     left_e = ev("A", source="S", value="left", weight=0.9, ref_id="r1")
     right_e = ev("A", source="S", value="right-new", weight=0.5, ref_id="r1")
     out = merge_evidence([left_e], [right_e])
-    assert out == [left_e]  # 新增被丢，保留左（首条不可篡改）
+    assert out == [left_e]
 
 
 def test_merge_new_key_appended_in_order():

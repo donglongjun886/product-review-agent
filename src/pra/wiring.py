@@ -1,16 +1,8 @@
-"""组合根 —— 生产图装配的唯一处；``get_production_graph`` 返回其编译单例。
-
-首次调用才装配 ``build_agent_graph(tools=build_production_tools(),
-checkpointer=make_memory_checkpointer(), llm=build_llm_backend(tools=...))``（商品与商家读
-MySQL、案例与政策读真实 RAG、LLM 走真实 litellm 网关；凭据经 ``Settings`` 读仓库根
-``.env``，缺 ``DEEPSEEK_API_KEY`` 显式抛 ``RuntimeError`` 而非回落桩），之后复用同一实例。
-
-并发：build_agent_graph / InMemorySaver 均为同步、无 I/O（不 await），同一事件循环内检查与赋值
-之间无协程切换点，故「先查缓存再构建」天然原子，无需加锁。
-"""
+"""组合根 —— 生产图装配；``get_production_graph`` 返回其编译单例。"""
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from pra import tools as tools_pkg
@@ -19,24 +11,64 @@ from pra.agent.graph import build_agent_graph
 from pra.agent.litellm_backend import LiteLLMBackend
 from pra.infra.db import Settings
 
-if TYPE_CHECKING:  # 仅类型：运行时不需要（future annotations 惰性求值）
+if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from pra.agent.guardrails.llm_shell import LLMBackend
 
-__all__ = ["build_llm_backend", "get_production_graph"]
+__all__ = ["build_llm_backend", "get_production_graph", "trace_callbacks"]
+
+logger = logging.getLogger(__name__)
 
 
-# 模块级单例缓存：首次调用 get_production_graph 时装配编译，之后复用（见模块 docstring 并发说明）。
 _graph: CompiledStateGraph | None = None
+
+# 模块级 memo：Langfuse 回调（进程内单例）。None = 尚未装配。
+_trace_callbacks: list | None = None
+
+
+def trace_callbacks() -> list:
+    """返回 Langfuse 回调列表；无凭据或 SDK 不可用时返回空列表。
+
+    :return: 含一个 ``langfuse.langchain.CallbackHandler`` 的列表，或 ``[]``。
+    """
+    global _trace_callbacks
+    if _trace_callbacks is None:
+        _trace_callbacks = _build_trace_callbacks()
+    return _trace_callbacks
+
+
+def _build_trace_callbacks() -> list:
+    """按 ``Settings`` 凭据装配 Langfuse 回调；失败记 warning 并返回空列表。"""
+    settings = Settings()
+    public_key = settings.langfuse_public_key
+    secret_key = settings.langfuse_secret_key
+    if not public_key or not secret_key:
+        return []
+    try:
+        from langfuse import Langfuse
+        from langfuse.langchain import CallbackHandler
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Langfuse SDK 不可用，观测关闭：%s", exc)
+        return []
+    try:
+        Langfuse(
+            public_key=public_key,
+            secret_key=secret_key,
+            host=settings.langfuse_host or "http://localhost:3000",
+        )
+        return [CallbackHandler()]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Langfuse 装配失败，观测关闭：%s", exc)
+        return []
 
 
 def build_llm_backend(*, tools: list | None = None) -> LLMBackend:
-    """构造生产 LLM 后端（真实 litellm 网关），配置来自 ``Settings``（仓库根 ``.env``）。
+    """构造生产 LLM 后端，配置来自 ``Settings``。
 
     :param tools: 取证工具列表 —— 经 ``LiteLLMBackend`` 渲染进 plan 节点的工具目录；
         None → 真实模型看到"无可用工具"。
-    :raises RuntimeError: ``DEEPSEEK_API_KEY`` 缺失或全空白 —— 显式失败。
+    :raises RuntimeError: ``DEEPSEEK_API_KEY`` 缺失或全空白。
     """
     settings = Settings()
     api_key = settings.deepseek_api_key
@@ -54,13 +86,7 @@ def build_llm_backend(*, tools: list | None = None) -> LLMBackend:
 
 
 def get_production_graph() -> CompiledStateGraph:
-    """返回编译图单例（真库商品/商家 + 真实 RAG + 真实 LLM 网关），首次调用时装配。
-
-    工具世界取 ``pra.tools.build_production_tools()``（商品/商家读 MySQL，案例/政策读真实
-    RAG），同一份列表分别交给 LLM 后端（渲染工具目录）与图；LLM 凭据取 ``Settings``（仓库根
-    ``.env``），缺失即抛 ``RuntimeError``。测试/CI 由 ``tests/conftest.py`` 的 autouse fixture
-    把工具装配钉回 ``tests/inmemory_world.py`` 的 InMemory 世界，LLM 后端由各用例自行注入。
-    """
+    """返回编译图单例，首次调用时装配。"""
     global _graph
     if _graph is None:
         tools = tools_pkg.build_production_tools()

@@ -1,16 +1,4 @@
-"""真库落库冒烟（infra 持久化链路）：走默认配置路径，MySQL 不可达时跳过。
-
-既有单测都不碰真库（摘要函数单测、落库层 mock、``process_review`` mock），于是
-「.env 含 DEEPSEEK_* → Settings(extra="forbid") 抛错 → process_review 两分支全挂
-→ HTTP 恒 500」在全绿假象下无人发现。
-
-因此本测试不得注入 ``_env_file=None``、不得 monkeypatch ``db._settings``，必须经
-``get_sessionmaker()`` 默认路径；覆盖 COMPLEX（brand 空缺 → R-301 → Agent 图）与
-PASS（规则直判）各一发，断言五表落库行数与关键列，``finally`` 按 case_id 清理。
-COMPLEX 分支经生产入口图，故由用例注入确定性 LLM 替身（``WalkthroughBackend``）并重置图单例，
-不构造真实 LLM 网关；工具装配仍由 ``tests/conftest.py`` 的 autouse fixture 钉在 InMemory 世界。
-MySQL 未起时跳过，配置层缺陷另有 ``test_infra_settings.py`` 纯单测兜底（恒跑）。
-"""
+"""真库落库冒烟（infra 持久化链路）：走默认配置路径，MySQL 不可达时跳过。"""
 
 from __future__ import annotations
 
@@ -29,11 +17,7 @@ from pra.infra.persist_service import process_review
 
 
 def _mysql_reachable() -> bool:
-    """按 **默认配置路径** 解析 DSN 并做 1s socket 探测（不连库、不建 engine）。
-
-    ``Settings()`` 抛错时**不吞异常**：配置层坏掉就该让本文件变红（收集期报错），
-    而不是伪装成"环境没 DB"跳过。
-    """
+    """按 **默认配置路径** 解析 DSN 并做 1s socket 探测（不连库、不建 engine）。"""
     parsed = urlparse(Settings().database_url)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 3306
@@ -50,14 +34,12 @@ pytestmark = pytest.mark.skipif(
 
 
 def _case(case_id: str, *, brand: str | None) -> ProductReviewCase:
-    """冒烟案件：复用 tests/helpers.make_case（默认标题/描述干净，只有 brand 决定路径）。
-
-    """
+    """冒烟案件：复用 tests/helpers.make_case（默认标题/描述干净，只有 brand 决定路径）。"""
     return make_case(case_id=case_id, brand=brand)
 
 
 async def _cleanup(case_ids: tuple[str, str]) -> None:
-    """按 case_id 清理本测试写入的五表行（先子表后主表；可重复运行、不污染开发库）。"""
+    """按 case_id 清理本测试写入的五表行（先子表后主表）。"""
     sm = get_sessionmaker()
     async with sm() as s:
         await s.execute(
@@ -90,7 +72,6 @@ async def _cleanup(case_ids: tuple[str, str]) -> None:
 
 
 async def test_persist_smoke_two_branches(monkeypatch):
-    # COMPLEX 分支经生产入口图：注入确定性 LLM 替身并重置图单例，免建真实 LLM 网关。
     monkeypatch.setattr(
         wiring, "build_llm_backend", lambda *, tools=None: WalkthroughBackend()
     )

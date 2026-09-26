@@ -1,13 +1,8 @@
-"""plan 去重（guardrails/dedup.py）单测。
-
-``dedup_pending``：ok 命中 → skipped、error 允许重试、同轮自去重、canonical 键序无关。
-"""
+"""plan 去重（guardrails/dedup.py）单测。"""
 
 from __future__ import annotations
 
 from pra.agent.guardrails.dedup import canonical_args, dedup_pending
-
-# dedup_pending：plan 输出确定性去重
 
 
 def _ok_record(tool: str, args: dict, seq: int) -> dict:
@@ -30,7 +25,6 @@ def test_dedup_ok_hit_goes_to_skipped_with_seq_continuing():
     assert cleaned == []
     assert len(skipped) == 1
     record = skipped[0]
-    # 关键字段语义：命中去重、seq 顺延、原因可归因；不锁整条记录的全部键位
     assert record["tool"] == "ProductTool" and record["args"] == {"u": "u1"}
     assert record["status"] == "skipped"
     assert record["seq"] == 2
@@ -50,14 +44,14 @@ def test_dedup_error_record_allows_retry():
     ]
     cleaned, skipped = dedup_pending(state, planned)
     assert skipped == []
-    assert cleaned == planned  # 保留（浅拷贝、内容一致）
+    assert cleaned == planned
 
 
 def test_dedup_same_round_self_dedup_silent():
     state = {"tool_call_history": []}
     planned = [
         {"tool": "ProductTool", "args": {"product_id": "P1"}, "priority": 1},
-        {"tool": "ProductTool", "args": {"product_id": "P1"}, "priority": 1},  # 重复
+        {"tool": "ProductTool", "args": {"product_id": "P1"}, "priority": 1},
         {"tool": "ProductTool", "args": {"product_id": "P2"}, "priority": 2},
     ]
     cleaned, skipped = dedup_pending(state, planned)
@@ -77,7 +71,7 @@ def test_dedup_same_round_duplicate_of_executed_only_one_skipped():
 
 
 def test_dedup_cleaned_keep_content():
-    """cleaned 保留原 dict 的全部内容（后续执行不会因去重丢字段）。"""
+    """cleaned 保留原 dict 的全部内容。"""
 
     planned = [{"tool": "ProductTool", "args": {"product_id": "P1"}, "reason": "r", "priority": 1}]
     cleaned, _ = dedup_pending({"tool_call_history": []}, planned)
@@ -92,7 +86,6 @@ def test_dedup_skipped_seq_monotonic_after_history():
     ]
     cleaned, skipped = dedup_pending(state, planned)
     assert skipped[0]["seq"] == 2
-    # MerchantTool 未执行过 → 进 cleaned（不是 skipped）
     assert [c["tool"] for c in cleaned] == ["MerchantTool"]
 
 

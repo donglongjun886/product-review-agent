@@ -1,7 +1,4 @@
-"""共享测试构造件：领域对象工厂 + LLMBackend 测试替身 + 常用 state 骨架 + 真模型缓存探测。
-
-仅被 tests/* 引用；文件名不含 test_ 前缀，pytest 不收集。
-"""
+"""共享测试构造件：领域对象工厂 + LLMBackend 测试替身 + 常用 state 骨架 + 真模型缓存探测。"""
 
 from __future__ import annotations
 
@@ -31,18 +28,11 @@ from pra.domain.models import (
 from pra.tools import BGE_MODEL as BGE_DEFAULT_MODEL
 from pra.tools.base import Tool
 
-# 真模型缓存探测（只读文件系统；生产路径本身**不做**磁盘预检，靠 fastembed 的
-# ``local_files_only=True`` —— 本探测只用于决定真模型用例是否 skip）
 _BGE_HF_SOURCE_REPO = "Qdrant"
 
 
 def bge_model_cached(cache_dir: Path, model_name: str = BGE_DEFAULT_MODEL) -> bool:
-    """``cache_dir`` 下是否已有该模型的可加载 onnx（只读，不 import fastembed、不联网）。
-
-    fastembed 两种落盘布局都探：HF snapshot（``models--<org>--<name>/``，blobs 为哈希名、不带
-    ``.onnx`` 后缀）与 GCS tar 解包（``fast-<name>/``，onnx 带扩展名）；漏探任一都会在布局不同的
-    机器上误 skip。BGE 模型的 HF 源仓库是 Qdrant 官方 ONNX 仓库（**只是模型来源，与向量库选型无关**）。
-    """
+    """``cache_dir`` 下是否已有该模型的可加载 onnx（只读）。"""
     if not cache_dir.is_dir():
         return False
     layouts = [
@@ -55,21 +45,13 @@ def bge_model_cached(cache_dir: Path, model_name: str = BGE_DEFAULT_MODEL) -> bo
     return any(layout.is_dir() and any(layout.glob("**/*.onnx")) for layout in layouts)
 
 
-# 工具装配辅助：工具列表的**顺序对下游无语义**（tools_node 全程按 name 调度），
-# 只被测试断言引用。故测试一律按名取工具，别再写位置下标（``tools[4]``）—— 那是脆弱
-# 耦合，装配顺序一变就误伤断言。
-
-
 def tool_by_name(tools: list[Tool], name: str) -> Tool:
-    """按 ``tool.name`` 从工具列表取工具；未命中抛 ``KeyError``（附现有工具名，便于定位）。"""
+    """按 ``tool.name`` 从工具列表取工具；未命中抛 ``KeyError``。"""
     for tool in tools:
         if getattr(tool, "name", None) == name:
             return tool
     available = [getattr(t, "name", repr(t)) for t in tools]
     raise KeyError(f"工具列表无此 name：{name!r}；现有工具 = {available}")
-
-
-# domain 对象工厂
 
 
 def ev(
@@ -81,7 +63,6 @@ def ev(
     ref_id: str | None = None,
     extra: dict | None = None,
 ) -> Evidence:
-    # extra 复制为新 dict，防测试间共享引用
     return Evidence(
         type=type_,
         source=source,
@@ -121,7 +102,6 @@ def make_case(
     merchant_id: str = "M_TEST",
     version: int = 3,
 ) -> ProductReviewCase:
-    # 默认 brand=None 不误触品牌黑名单
     product = ProductInfo(
         product_id=product_id,
         title="复古跑鞋",
@@ -130,7 +110,7 @@ def make_case(
         brand=brand,
         sku_list=[SkuInfo(sku_id="S_1", color="米白", size="38", price=219.0)],
         images=[ProductImage(url="https://cdn.example.com/products/P_TEST/img1.jpg", source="主图")],
-        listing_time=datetime(2024, 9, 6, 14, 0, 0),  # naive datetime（DB DATETIME 口径）
+        listing_time=datetime(2024, 9, 6, 14, 0, 0),
         version=version,
     )
     return ProductReviewCase(
@@ -139,9 +119,6 @@ def make_case(
         merchant_id=merchant_id,
         event_type="NEW_LISTING",
     )
-
-
-# 常用 state 骨架（确定性纯函数/节点测试复用）
 
 
 def measurement(
@@ -153,7 +130,7 @@ def measurement(
     weight: float = 0.85,
     value: str = "测量完成",
 ) -> Evidence:
-    """一条 ``MEASUREMENT`` 证据（走领域构造器，保证与生产同形）。"""
+    """一条 ``MEASUREMENT`` 证据。"""
     return make_measurement(
         dimension=dimension,
         source=source,
@@ -165,7 +142,7 @@ def measurement(
 
 
 def all_measureable_caps() -> dict[str, bool]:
-    """全部维度可测的能力表（评测/演示世界口径）。"""
+    """全部维度可测的能力表。"""
     return {dim: True for dim in ALL_DIMENSIONS}
 
 
@@ -175,10 +152,7 @@ def covered_evidence(
     merchant_id: str = "M_TEST",
     merchant_removals: int = 0,
 ) -> list[Evidence]:
-    """一套**覆盖完整**的证据链（required 维度全部有一个测量结论）。
-
-    ``merchant_removals >= MERCHANT_DIRTY_MIN`` → 商家画像阳性（阻塞 PASS 的唯一证据侧阳性）。
-    """
+    """一套**覆盖完整**的证据链（required 维度全部有一个测量结论）。"""
     return [
         ev("PRODUCT_FACT", source="ProductTool", value="brand=山丘, version=3（库中最新）",
            weight=0.6, ref_id=product_id),
@@ -198,7 +172,7 @@ def covered_evidence(
 
 def evasion_case(*, case_id: str = "CASE_TEST_EVASION", product_id: str = "P_88231",
                  merchant_id: str = "M_5512") -> ProductReviewCase:
-    """命中 R-302 规避词（``高仿``）的案件 —— REJECT Gate 的文本确证来源。"""
+    """命中 R-302 规避词（``高仿``）的案件。"""
     case = make_case(case_id=case_id, brand=None, product_id=product_id,
                      merchant_id=merchant_id)
     return case.model_copy(
@@ -211,11 +185,7 @@ def evasion_case(*, case_id: str = "CASE_TEST_EVASION", product_id: str = "P_882
 
 
 def risk_anchor_state() -> dict:
-    """锚点 state：命中 R-302 的文本确证 + 商家脏 + 带 ref_id 的可引用依据。
-
-    required 三维全覆盖 + 一个维度阳性 + 带 ref_id 的 POLICY_REF/CASE_PRECEDENT
-    ⇒ 硬规则不命中、弃权清单全空、REJECT Gate（R-302 ∧ 可引用依据）满足。
-    """
+    """锚点 state：命中 R-302 的文本确证 + 商家脏 + 带 ref_id 的可引用依据。"""
     hypotheses = [
         hp("H1", prior=0.5, status=HypothesisStatus.REFUTED, posterior=0.05,
            evidence_against=["PRODUCT_FACT brand=山丘, version=3（库中最新）"]),
@@ -248,14 +218,12 @@ def budget_exhausted_state() -> dict:
         "case": None,
         "hypotheses": [],
         "evidence": [],
-        "budget": Budget(llm_calls=10),  # BudgetLimits().max_llm_calls == 10
+        "budget": Budget(llm_calls=10),
         "failures": [],
         "tool_call_history": [],
         "degraded": False,
     }
 
-
-# LLMBackend 测试替身（实现 pra.agent.guardrails.llm_shell.LLMBackend Protocol）
 
 _PLAN_CONCLUDE = {"next_action": "conclude", "tools": [], "rationale": "test"}
 
@@ -320,7 +288,7 @@ class SequenceBackend:
     def __init__(self, contents: list, tokens: int = 7) -> None:
         self._contents = list(contents)
         self._tokens = tokens
-        self.calls: list[dict] = []  # 每次 complete 收到的 state
+        self.calls: list[dict] = []
 
     async def complete(
         self, *, node: str, state: dict, json_schema: dict, feedback: list[str] | None = None
@@ -375,13 +343,7 @@ _WALKTHROUGH_DECIDE = {
 
 
 class WalkthroughBackend:
-    """测试用确定性后端：把四节点图驱动到终态（无网络、无真实模型语义，同 state 恒同输出）。
-
-    剧本：``hypothesize`` 固定 2 假设；``plan`` 首轮按案件标识调度 ProductTool + MerchantTool
-    （补齐本 listing 事实通道），其后一律 ``conclude``（保证回环必终止，不依赖收敛判定）；
-    ``reevaluate`` 恒「无更新 / INSUFFICIENT」；``decide`` 固定 HUMAN_REVIEW 提案（Gate 收口）。
-    需真实 MySQL / Chroma 链路或完整调查的用例不适用本替身。
-    """
+    """测试用确定性后端：把四节点图驱动到终态（无网络、无真实模型语义，同 state 恒同输出）。"""
 
     name = "test-walkthrough"
 

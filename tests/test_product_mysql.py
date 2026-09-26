@@ -1,13 +1,4 @@
-"""ProductTool 的 MySQL 数据源（``mysql_repo``）：真库集成（可跳过）+ 恒跑纯单测。
-
-真库部分照抄 ``tests/test_infra_persist_smoke.py`` 的默认配置路径 + 1s socket 探测 ``skipif``，
-**不 mock ``db._settings``、不注 ``_env_file``** —— 专测「.env / DATABASE_URL 配错就连不上」
-这条链；用例自建自删（``PYTEST_PRODUCT_`` 前缀 + ``finally`` 清理），重复跑不污染开发库。
-
-纯单测部分注入假 sessionmaker，覆盖 DB 行 → ``ProductSnapshot`` 的全部边界（``brand`` 为
-SQL NULL 不得归一成空串/``'null'``），并对照「生产装配 = 真库数据源」与「InMemory 世界 =
-进程内数据源」两侧的商品数据源。
-"""
+"""ProductTool 的 MySQL 数据源（``mysql_repo``）：真库集成（可跳过）+ 恒跑纯单测。"""
 
 from __future__ import annotations
 
@@ -50,8 +41,6 @@ from pra.tools.product.tool import (
     ProductTool,
 )
 
-# 模块导入期绑定真身：``tests/conftest.py`` 的 autouse fixture 会把 ``pra.tools`` 上的这个名字
-# 换成 InMemory 装配（测试不连库），此处留住原函数供「生产装配」与真库集成用例显式换回去。
 _REAL_BUILD_PRODUCTION_TOOLS = build_production_tools
 
 
@@ -65,10 +54,6 @@ def _inmemory_policy_index():
     from inmemory_world import InMemoryPolicyIndex
 
     return InMemoryPolicyIndex()
-
-# ---------------------------------------------------------------------------
-# 替身：假 session / 假 sessionmaker（形状与 async_sessionmaker 一致，可 async with）
-# ---------------------------------------------------------------------------
 
 
 class _FakeResult:
@@ -123,11 +108,6 @@ def _repo_with_fake_sessions(results: list, *, error: Exception | None = None):
     return repo, sessionmaker
 
 
-# ---------------------------------------------------------------------------
-# 行构造（用真实 ORM 类：列名/类型漂移会被这里连带测到）
-# ---------------------------------------------------------------------------
-
-
 def _product_row(**overrides: object) -> ProductORM:
     values: dict[str, object] = {
         "product_id": "P_TEST",
@@ -144,11 +124,6 @@ def _ctx() -> ToolContext:
     return ToolContext(run_id="R_TEST", case_id="C_TEST", budget=Budget())
 
 
-# ---------------------------------------------------------------------------
-# 纯单测：DB 行 → ProductSnapshot 映射边界
-# ---------------------------------------------------------------------------
-
-
 def test_to_snapshot_maps_every_field():
     snap = to_snapshot(_product_row(brand="潮动"))
     assert snap.product_id == "P_TEST"
@@ -159,7 +134,7 @@ def test_to_snapshot_maps_every_field():
 
 
 def test_brand_sql_null_is_not_normalised_to_empty_string():
-    """业务红线：brand 真空缺必须原样是 ``None``（不是 ''、不是 'null'）。"""
+    """brand 真空缺必须原样是 ``None``（不是 ''、不是 'null'）。"""
     snap = to_snapshot(_product_row(brand=None))
     assert snap.brand is None
     assert snap.brand != ""
@@ -171,13 +146,8 @@ def test_brand_sql_null_is_not_normalised_to_empty_string():
     assert "brand=null" in facts[0].value
 
 
-# ---------------------------------------------------------------------------
-# 纯单测：查询编排与边界（假 sessionmaker，不连库）
-# ---------------------------------------------------------------------------
-
-
 def test_construction_does_not_touch_the_sessionmaker_provider():
-    """构造期不建 engine / 不取 sessionmaker（engine 延迟到首次 get_latest）。"""
+    """构造期不建 engine / 不取 sessionmaker。"""
     calls: list[int] = []
 
     def provider():
@@ -189,7 +159,7 @@ def test_construction_does_not_touch_the_sessionmaker_provider():
 
 
 async def test_get_latest_assembles_snapshot():
-    """行为不变量：命中商品时 snapshot 非空且字段来自库行。"""
+    """命中商品时 snapshot 非空且字段来自库行。"""
     repo, _ = _repo_with_fake_sessions([_FakeResult(scalar=_product_row(brand="云步"))])
     snap = await repo.get_latest("P_TEST")
     assert snap is not None
@@ -204,7 +174,7 @@ async def test_get_latest_missing_product_returns_none():
 
 
 async def test_infrastructure_error_propagates_and_is_never_swallowed_as_none():
-    """业务红线：连不上库 / SQL 报错必须抛出，不能伪装成「商品不存在」。"""
+    """连不上库 / SQL 报错必须抛出，不能伪装成「商品不存在」。"""
     repo, _ = _repo_with_fake_sessions([_FakeResult(scalar=None)], error=RuntimeError("db down"))
     with pytest.raises(RuntimeError, match="db down"):
         await repo.get_latest("P_TEST")
@@ -220,11 +190,6 @@ async def test_missing_product_flows_to_ok_false_and_no_evidence():
     assert tool.to_evidence(res) == []
 
 
-# ---------------------------------------------------------------------------
-# 守护：生产装配的商品数据源是真库，InMemory 世界的是进程内实现
-# ---------------------------------------------------------------------------
-
-
 def test_production_and_inmemory_world_product_sources_are_distinct():
     """生产装配的 ProductTool 读真库，``build_inmemory_tools()`` 的读进程内种子。"""
     prod = _REAL_BUILD_PRODUCTION_TOOLS()
@@ -233,17 +198,8 @@ def test_production_and_inmemory_world_product_sources_are_distinct():
     assert isinstance(tool_by_name(memory, "ProductTool")._repo, InMemoryProductRepository)
 
 
-# ---------------------------------------------------------------------------
-# 真库集成（MySQL 不可达时跳过）：默认配置路径，自建自删
-# ---------------------------------------------------------------------------
-
-
 def _mysql_reachable() -> bool:
-    """按 **默认配置路径** 解析 DSN 并做 1s socket 探测（不连库、不建 engine）。
-
-    ``Settings()`` 抛错时**不吞异常**：配置层坏掉就该让本文件变红（收集期报错），
-    而不是伪装成「环境没 DB」跳过。
-    """
+    """按 **默认配置路径** 解析 DSN 并做 1s socket 探测（不连库、不建 engine）。"""
     parsed = urlparse(Settings().database_url)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 3306
@@ -255,11 +211,7 @@ def _mysql_reachable() -> bool:
 
 
 async def _insert_seed(product_id: str, seed: dict) -> None:
-    """用**裸 SQL** 写入 P_88231 同构种子（独立 product_id）。
-
-    绕开 ORM 写：这样列名/NULL 口径由手写 DDL 独立钉住，读路径才走 ORM ——
-    DDL 与 ORM 谁漂移了都直接报错。
-    """
+    """用**裸 SQL** 写入 P_88231 同构种子（独立 product_id）。"""
     sm = get_sessionmaker()
     async with sm() as s:
         await s.execute(
@@ -270,7 +222,7 @@ async def _insert_seed(product_id: str, seed: dict) -> None:
             {
                 "pid": product_id,
                 "cat": seed["category"],
-                "brand": seed["brand"],  # None → SQL NULL
+                "brand": seed["brand"],
                 "ver": seed["version"],
                 "status": seed["status"],
             },
@@ -292,10 +244,7 @@ async def _delete_seed(product_id: str) -> None:
     not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库集成"
 )
 async def test_mysql_product_repository_roundtrip_against_real_db():
-    """MySQL → ProductSnapshot → Evidence 全字段往返（种子取自 InMemory 世界种子的 P_88231）。
-
-    独立 product_id + ``finally`` 清理：可重复跑、不污染开发库。
-    """
+    """MySQL → ProductSnapshot → Evidence 全字段往返（种子取自 InMemory 世界种子的 P_88231）。"""
     tag = uuid4().hex[:8]
     product_id = f"PYTEST_PRODUCT_{tag}"
     missing_id = f"PYTEST_PRODUCT_MISSING_{tag}"
@@ -303,7 +252,6 @@ async def test_mysql_product_repository_roundtrip_against_real_db():
     try:
         await _insert_seed(product_id, seed)
 
-        # ① 全字段读回
         snap = await MySQLProductRepository().get_latest(product_id)
         assert snap is not None
         assert snap.product_id == product_id
@@ -314,13 +262,11 @@ async def test_mysql_product_repository_roundtrip_against_real_db():
 
         tool = ProductTool(repo=MySQLProductRepository())
 
-        # ② 不存在的商品 → Repository 返回 None → ProductResult.ok is False
         assert await MySQLProductRepository().get_latest(missing_id) is None
         res_missing = await tool.call(ProductArgs(product_id=missing_id), _ctx())
         assert res_missing.ok is False
         assert res_missing.product is None
 
-        # ③ 命中 → to_evidence() = 1 条 PRODUCT_FACT + 1 条 MEASUREMENT(listing_registry)
         res = await tool.call(ProductArgs(product_id=product_id), _ctx())
         assert res.ok is True
         evs = tool.to_evidence(res)
@@ -337,11 +283,6 @@ async def test_mysql_product_repository_roundtrip_against_real_db():
         await _delete_seed(product_id)
 
 
-# ---------------------------------------------------------------------------
-# 生产装配：HTTP/落库入口读真库，测试期由 conftest 钉回 InMemory 世界
-# ---------------------------------------------------------------------------
-
-
 def test_build_production_tools_swaps_only_the_mysql_backed_sources():
     """生产装配 = 4 件工具，只把 ProductTool / MerchantTool 的数据源换成真库（装配期不连库）。"""
     prod = _REAL_BUILD_PRODUCTION_TOOLS()
@@ -353,11 +294,7 @@ def test_build_production_tools_swaps_only_the_mysql_backed_sources():
 
 
 def test_tests_are_pinned_to_the_inmemory_world():
-    """守护：测试期生产装配必须被 ``tests/conftest.py`` 钉回 InMemory（CI 上没有 MySQL）。
-
-    本用例是那条 autouse fixture 的承重件 —— 删掉 fixture，这里立刻变红，提醒后来者：
-    走到生产入口的用例会真的去连库。真库集成用例自行把真身换回去，不受本守护约束。
-    """
+    """测试期生产装配必须被钉回 InMemory。"""
     import pra.tools as tools_pkg
 
     tools = tools_pkg.build_production_tools()
@@ -370,11 +307,7 @@ def test_tests_are_pinned_to_the_inmemory_world():
 
 
 def test_single_source_assembly_feeds_the_production_world(monkeypatch):
-    """装配唯一处守护：生产图只在组合根 ``pra.wiring.get_production_graph`` 组装一次。
-
-    单点 patch 接缝（``pra.wiring.build_agent_graph``）+ 单份单例重置（``pra.wiring._graph``）即可
-    覆盖全部生产入口；落库入口**不得**再自带装配/单例 —— 重复装配一旦复现，这里立刻变红。
-    """
+    """生产图只在组合根 ``pra.wiring.get_production_graph`` 组装一次。"""
     captured: dict = {}
 
     def fake_build_agent_graph(*, tools=None, checkpointer=None, llm=None):
@@ -383,7 +316,6 @@ def test_single_source_assembly_feeds_the_production_world(monkeypatch):
 
     sentinel = object()
     monkeypatch.setattr("pra.tools.build_production_tools", lambda: sentinel)
-    # LLM 后端按需构造真网关（读 .env 凭据），而本用例只验工具世界的注入接缝。
     monkeypatch.setattr(wiring, "build_llm_backend", lambda *, tools=None: AlwaysRaiseBackend())
     monkeypatch.setattr(wiring, "build_agent_graph", fake_build_agent_graph)
     monkeypatch.setattr(wiring, "_graph", None)
@@ -391,22 +323,15 @@ def test_single_source_assembly_feeds_the_production_world(monkeypatch):
     wiring.get_production_graph()
     assert captured.pop("tools") is sentinel, "组合根未把生产工具世界注入图装配"
 
-    # 回退反证：落库入口重新自建装配/单例，以下断言即变红。
     assert not hasattr(ps, "_get_graph"), "落库编排又自建了装配入口"
     assert not hasattr(ps, "_compiled_graph"), "落库编排又自带了图单例"
 
 
-# ---------------------------------------------------------------------------
-# 生产路径端到端（真库，可跳过）：HTTP/落库入口 → MySQL → Evidence
-# ---------------------------------------------------------------------------
-
-# 只在真库种子里的商品（``inmemory_world.py`` 的 _DEFAULT_PRODUCTS 只有 P_88231）—— 用它才能在证据层面
-# 区分「读了真库」与「读了 InMemory 世界」。
 _MYSQL_ONLY_PRODUCT = "P_77310"
 
 
 def _case_for_product(case_id: str) -> ProductReviewCase:
-    """COMPLEX 案件（brand 空缺 → R-301），商品只有真库有（与 InMemory 世界可区分）。"""
+    """COMPLEX 案件（brand 空缺 → R-301），商品只有真库有。"""
     return make_case(
         case_id=case_id, brand=None, product_id=_MYSQL_ONLY_PRODUCT, merchant_id="M_5512"
     )
@@ -427,7 +352,7 @@ async def _product_fact_rows(run_id: str) -> list:
 
 
 async def _drop_cases(case_ids: tuple[str, ...]) -> None:
-    """按 case_id 清理本测试写入的五表行（先子表后主表；可重复运行）。"""
+    """按 case_id 清理本测试写入的五表行。"""
     sm = get_sessionmaker()
     async with sm() as s:
         for cid in case_ids:
@@ -455,18 +380,9 @@ async def _drop_cases(case_ids: tuple[str, ...]) -> None:
     not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库集成"
 )
 async def test_production_path_reads_product_fact_from_mysql(monkeypatch):
-    """生产装配 → 落库入口 → 图 → ProductTool → MySQL → PRODUCT_FACT 落 review_evidence。
-
-    同一案件跑两遍做**回退反证**：生产装配（真库）应取到只存在于库中的商品并落证据；换回
-    InMemory 世界后该商品不存在，同一位置不应有 PRODUCT_FACT —— 若有人把生产装配改回
-    InMemory，前一半会立刻变红。
-    """
+    """生产装配 → 落库入口 → 图 → ProductTool → MySQL → PRODUCT_FACT 落 review_evidence。"""
     monkeypatch.setattr("pra.tools.build_production_tools", _REAL_BUILD_PRODUCTION_TOOLS)
-    # 图装配期按需构造真 LLM 网关（读 .env 凭据）；本用例只验证 MySQL 取证链路，
-    # 故注入确定性假后端（不联网、无真实模型）。
     monkeypatch.setattr(wiring, "build_llm_backend", lambda *, tools=None: WalkthroughBackend())
-    # 本用例只验证 MySQL 链路：把生产装配的 RAG 侧钉回 InMemory 种子（真实 RAG 在缺 rag extra /
-    # 模型缓存时会尝试联网下载模型而阻塞，与「读真库商品」这一被测目标无关）。
     monkeypatch.setattr("pra.tools._build_production_case_index", _inmemory_case_index)
     monkeypatch.setattr("pra.tools._build_production_policy_index", _inmemory_policy_index)
     tag = uuid4().hex[:8]
