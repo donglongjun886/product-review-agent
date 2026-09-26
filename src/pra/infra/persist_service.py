@@ -22,11 +22,11 @@ review_result（source_run_id 指向被采纳的 run），命中证据挂 review
   到达墙钟差（近似）。
 - 时间：所有时间列写 naive UTC（``_utcnow``），MySQL DATETIME(3) 存 naive。
 - 错误：图执行/落库异常向上抛出（HTTP 层转 500），已 commit 的 run/trace 行保留 —— 不吞异常、
-  不做部分回滚（crash 可查优先于 all-or-nothing）。Agent 路径抛出前先落**显式终态**：
-  review_result 写 HUMAN_REVIEW + overrides 归因码 R6_INFRA_UNAVAILABLE，异常前真实出现的
-  evidence 照常落 review_evidence（hypotheses 只进该 ReviewDecision，无落库列），review_trace
-  追加一条 step_type="infra_error" 行承载错误摘要、R6 归因与两类计数（review_result 无 overrides
-  列），run/case 状态保持 RUNNING/INVESTIGATING。
+  不做部分回滚（crash 可查优先于 all-or-nothing）。**图执行或终态提取**抛出时先落显式终态：
+  review_result 写 HUMAN_REVIEW，异常前已观测到的 evidence 照常落 review_evidence，review_trace
+  追加一条 step_type="infra_error" 行承载错误摘要、R6 归因码与证据条数（review_result 无 overrides
+  列），run/case 状态保持 RUNNING/INVESTIGATING。正常落库段（evidence / result / 收尾）不在该
+  保护内 —— 该段抛出即原样上抛，run 留 RUNNING。
 """
 
 from __future__ import annotations
@@ -42,12 +42,11 @@ from uuid import uuid4
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
 from pra.agent.guardrails.gate import R6_INFRA_UNAVAILABLE
-from pra.agent.state import build_initial_state
+from pra.agent.state import build_initial_state, merge_evidence
 from pra.domain.models import (
     Budget,
     Decision,
     Evidence,
-    Hypothesis,
     ProductReviewCase,
     ReviewDecision,
     RiskLevel,
@@ -314,9 +313,9 @@ async def run_and_persist(
     节点名大写）→ ``aget_state`` 终态 decision 落 review_result + decision.evidence 全量落
     review_evidence → run/case 收尾 DECIDED。
 
-    异常里程碑：图执行或终态提取抛出时，先落 HUMAN_REVIEW + R6 归因的 review_result 与一条
-    ``step_type="infra_error"`` 的 review_trace 行（两者各自 commit），再原样向上抛出；run/case
-    状态不动，保留「悬空 run」语义供事后定位。
+    异常里程碑：**图执行或终态提取**抛出时，先落 HUMAN_REVIEW 的 review_result 与一条
+    ``step_type="infra_error"`` 的 review_trace 行（承载 R6 归因码；两者各自 commit），再原样
+    向上抛出；run/case 状态不动，保留「悬空 run」语义供事后定位。正常落库段不在该保护内。
     """
     resolved_run_id = run_id or uuid4().hex
     case_id = case.case_id
@@ -387,9 +386,8 @@ async def run_and_persist(
             tags=["env:local", "source:http"],
             input={"case_id": case_id},
         )
-        # 异常前最近一次真实出现的证据/假设（异常终态用）。初始为空：缺失即缺失，不造证据。
+        # 异常前已观测到的证据（异常终态用）。初始为空：缺失即缺失，不造证据。
         latest_evidence: list[Evidence] = []
-        latest_hypotheses: list[Hypothesis] = []
         try:
             with get_tracer().trace_root(root_ctx) as root:
                 async for chunk in app.astream(
@@ -410,19 +408,16 @@ async def run_and_persist(
                             step_tokens = max(new_tokens - prev_budget_tokens, 0)  # 差分：首步用其值
                             prev_budget_tokens = new_tokens  # 只对带 budget 的 update 更新基线
 
-                        # stream_mode="updates" 下单节点 update 只带自己返回的键（decide 步只有
-                        # decision），故按「键存在且非空即覆盖」累积，取异常前最后一次真实出现的
-                        # 列表；元素只认本域模型实例，过滤而非构造/补齐。
+                        # stream_mode="updates" 下 update 只带节点返回的 delta，而 tools_node 只返回
+                        # 本 visit 新增证据（evidence channel 由 merge_evidence 合并）—— 故用同一
+                        # reducer 逐次合并，得到与图 channel 一致的「异常前已观测证据」；元素只认
+                        # 本域模型实例，过滤而非构造/补齐。
                         raw_evidence = update.get("evidence")
                         if raw_evidence:
-                            latest_evidence = [
-                                e for e in raw_evidence if isinstance(e, Evidence)
-                            ]
-                        raw_hypotheses = update.get("hypotheses")
-                        if raw_hypotheses:
-                            latest_hypotheses = [
-                                h for h in raw_hypotheses if isinstance(h, Hypothesis)
-                            ]
+                            latest_evidence = merge_evidence(
+                                latest_evidence,
+                                [e for e in raw_evidence if isinstance(e, Evidence)],
+                            )
 
                         if node_name == "tools":
                             # tools 节点：每条 audit record 一行 TOOL_CALL（含边际增益 4 字段）；
@@ -492,16 +487,14 @@ async def run_and_persist(
                     f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
                 )
         except Exception as exc:
-            # 图执行/终态提取失败：先落显式终态（HUMAN_REVIEW + R6 归因）再原样上抛。
-            # review_result 无 overrides 列，R6 归因码落在 infra_error trace 的 output_json。
+            # 图执行/终态提取失败：先落显式终态（HUMAN_REVIEW）再原样上抛。review_result 无
+            # overrides 列，R6 归因码与证据条数落在 infra_error trace 的 output_json。
             error_decision = ReviewDecision(
                 decision=Decision.HUMAN_REVIEW,
                 risk_level=RiskLevel.NONE,
                 risk_type=[],
                 decision_confidence=1.0,
                 evidence=latest_evidence,
-                hypothesis_trace=latest_hypotheses,
-                overrides=[R6_INFRA_UNAVAILABLE],
             )
             await _upsert_result(
                 session, _result_payload(error_decision, case_id, resolved_run_id)
@@ -526,7 +519,6 @@ async def run_and_persist(
                             "error": f"{type(exc).__name__}: {exc}",
                             "overrides": [R6_INFRA_UNAVAILABLE],
                             "evidence_count": len(error_decision.evidence),
-                            "hypotheses_count": len(error_decision.hypothesis_trace),
                         }
                     ),
                     tokens=0,

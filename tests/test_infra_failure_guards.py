@@ -1,4 +1,4 @@
-"""B 段失败路径守护三条（**净新增**：旧 ``tools_node`` 失败分支此前零覆盖）。
+"""B 段失败路径守护四条（**净新增**：旧 ``tools_node`` 失败分支此前零覆盖）。
 
 守护 1：工具 ``call`` 抛 infra 异常 → 恰好重试 1 次后**裸抛**，且不写 ``severity=warn`` 的
 failure。它防的回归 = 旧行为吞掉异常、转 warn 并 ``continue``（或重试次数变成 0 / 多次）。
@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from helpers import make_case
+from helpers import ev, make_case
 from sqlalchemy import text
 
 from pra.agent import tools_node as tools_node_mod
@@ -218,5 +218,53 @@ async def test_run_and_persist_graph_failure_writes_terminal_state(monkeypatch):
                 )
             ).scalar()
             assert status == "RUNNING", "悬空 run 语义：异常路径不改 run 状态"
+    finally:
+        await _cleanup(case_id, run_id)
+
+
+class _FakeTwoVisitFailingGraph:
+    """假图替身：两轮 tools visit 各带 1 条证据，随后抛图执行异常。"""
+
+    async def astream(
+        self, state: dict, config: dict, *, stream_mode: str
+    ) -> AsyncIterator[dict]:
+        """按 ``stream_mode="updates"`` 产出两轮 tools delta（各带 1 条证据）后抛异常。"""
+        yield {"tools": {"evidence": [ev("PRODUCT_FACT", ref_id="P_88231")]}}
+        yield {"tools": {"evidence": [ev("MERCHANT_HISTORY", ref_id="M_5512")]}}
+        raise RuntimeError("injected graph failure after two visits")
+
+    async def aget_state(self, config: dict) -> Any:
+        """不该被调用（``astream`` 已抛出）；被调用即测试前提失效。"""
+        raise AssertionError("aget_state 不应被调用：astream 已抛异常")
+
+
+@pytest.mark.skipif(
+    not _mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库终态守护"
+)
+async def test_run_and_persist_failure_keeps_evidence_of_all_visits(monkeypatch):
+    """守护 4：异常前每一轮 tools visit 的证据都要落 review_evidence（跨 visit 累积）。"""
+    tag = uuid4().hex[:8]
+    case_id = f"PYTEST_INFRA_EVIDENCE_{tag}"
+    run_id = f"PYTEST_INFRA_EVIDENCE_RUN_{tag}"
+    monkeypatch.setattr(
+        persist_service, "get_production_graph", lambda: _FakeTwoVisitFailingGraph()
+    )
+    try:
+        with pytest.raises(RuntimeError, match="injected graph failure after two visits"):
+            await run_and_persist(make_case(case_id=case_id), run_id=run_id)
+
+        sm = get_sessionmaker()
+        async with sm() as s:
+            refs = (
+                await s.execute(
+                    text(
+                        "select ref_id from review_evidence where run_id = :r order by ref_id"
+                    ),
+                    {"r": run_id},
+                )
+            ).scalars().all()
+            assert refs == ["M_5512", "P_88231"], (
+                f"两轮 visit 的证据都要落库（覆盖式累积会只剩最后一轮）: {refs}"
+            )
     finally:
         await _cleanup(case_id, run_id)
