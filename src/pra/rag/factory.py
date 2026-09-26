@@ -6,11 +6,11 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from pra.rag.corpus import load_cases, load_policies
+from pra.rag.dto import CaseIndex, PolicyIndex
+from pra.rag.index import ChromaCaseIndex, ChromaPolicyIndex
 
 if TYPE_CHECKING:
     from pra.rag.chroma_store import ChromaConfig
-    from pra.tools.case_search.tool import CaseIndex
-    from pra.tools.policy_search.tool import PolicyIndex
 
 __all__ = [
     "build_case_index",
@@ -43,8 +43,6 @@ def build_policy_index(
     config: ChromaConfig | None = None,
 ) -> PolicyIndex:
     """构造 PolicyIndex（语料 = rag/corpus/policies.json；``rows`` 注入时优先）。"""
-    from pra.rag.index import ChromaPolicyIndex
-
     return _build_index(
         ChromaPolicyIndex,
         loader=load_policies,
@@ -61,8 +59,6 @@ def build_case_index(
     config: ChromaConfig | None = None,
 ) -> CaseIndex:
     """构造 CaseIndex（语料 = rag/corpus/cases.json）；参数语义同 ``build_policy_index``。"""
-    from pra.rag.index import ChromaCaseIndex
-
     return _build_index(
         ChromaCaseIndex,
         loader=load_cases,

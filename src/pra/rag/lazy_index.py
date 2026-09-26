@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
-    from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
+from pra.rag.dto import CaseHit, CaseSearchFilters, PolicyClauseHit, PolicySearchFilters
 
 __all__ = ["LazyCaseIndex", "LazyPolicyIndex"]
 

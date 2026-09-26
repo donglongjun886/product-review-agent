@@ -20,9 +20,8 @@ from pra.rag.chroma_store import (
 )
 from pra.rag.corpus.schema import CasePrecedentRecord, PolicyClauseRecord
 from pra.rag.deps import llama
+from pra.rag.dto import CaseHit, CaseSearchFilters, PolicyClauseHit, PolicySearchFilters
 from pra.rag.retrieval import _RetrievalContext
-from pra.tools.case_search.tool import CaseHit, CaseSearchFilters
-from pra.tools.policy_search.tool import PolicyClauseHit, PolicySearchFilters
 
 __all__ = ["ChromaCaseIndex", "ChromaPolicyIndex"]
 

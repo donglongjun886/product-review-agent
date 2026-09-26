@@ -2,49 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from pydantic import Field
 
-from pydantic import BaseModel, Field
+from pra.rag.dto import CaseHit, CaseIndex, CaseSearchFilters
 
-from ...domain.models import Decision, Evidence, RiskLevel, RiskType
+from ...domain.models import Evidence
 from ..base import ToolArgs, ToolContext, ToolResult
 
 # ---- 受控证据类型 ----
 CASE_PRECEDENT_TYPE = "CASE_PRECEDENT"
-
-
-# ---------------------------------------------------------------------------
-# 数据访问契约
-# ---------------------------------------------------------------------------
-
-
-class CaseSearchFilters(BaseModel):
-
-    category: str | None = Field(default=None, description="类目过滤，如 女鞋/运动鞋")
-    risk_type: list[RiskType] | None = Field(default=None, description="风险类型过滤（受控词表）")
-
-
-class CaseHit(BaseModel):
-
-    case_id: str = Field(description="回案库引用主键（脱敏文本只含摘要）")
-    retrieval_score: float = Field(
-        description=(
-            "检索分（**不是语义相似度**，不做量纲适配）：生产口径恒 hybrid = RRF 融合分 "
-            "Σ1/(k+rank)；bm25s 原始分（无界）/ exp(-distance) 只是 hybrid 内部两路的原始分。"
-            "取值域由检索后端定义"
-        ),
-    )
-    decision: Decision = Field(description="人工裁决：PASS / REJECT / HUMAN_REVIEW")
-    risk_level: RiskLevel = Field(default=RiskLevel.NONE)
-    risk_type: list[RiskType] = Field(default_factory=list)
-    summary: str = Field(default="", description="案件摘要（检索文本，脱敏）")
-    key_evidence: list[str] = Field(default_factory=list, description="关键证据摘要，如 image_similarity>=0.85")
-    policy_refs: list[str] = Field(default_factory=list, description="适用政策，如 POLICY_3.2")
-
-
-class CaseIndex(Protocol):
-
-    async def search(self, query: str, filters: CaseSearchFilters, top_k: int) -> list[CaseHit]: ...
 
 
 # ---------------------------------------------------------------------------

@@ -1,15 +1,16 @@
 # 4 个 Tool + 统一 Tool 接口。
 from __future__ import annotations
 
+from pra.rag.dto import CaseIndex, PolicyIndex
 from pra.rag.embedding import BGE_MODEL, production_embedder
 from pra.rag.factory import build_case_index, build_policy_index
 from pra.rag.lazy_index import LazyCaseIndex, LazyPolicyIndex
 
 from .base import Tool, ToolArgs, ToolContext, ToolResult
-from .case_search.tool import CaseIndex, CaseSearchTool
+from .case_search.tool import CaseSearchTool
 from .merchant.mysql_repo import MySQLMerchantRepository
 from .merchant.tool import MerchantTool
-from .policy_search.tool import PolicyIndex, PolicySearchTool
+from .policy_search.tool import PolicySearchTool
 from .product.mysql_repo import MySQLProductRepository
 from .product.tool import ProductTool
 

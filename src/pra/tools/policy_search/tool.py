@@ -2,54 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date
-from typing import Protocol
+from pydantic import Field
 
-from pydantic import BaseModel, Field
+from pra.rag.dto import PolicyClauseHit, PolicyIndex, PolicySearchFilters
 
 from ...domain.measurement import DEFAULT_EVIDENCE_WEIGHT
-from ...domain.models import Evidence, RiskType
+from ...domain.models import Evidence
 from ..base import ToolArgs, ToolContext, ToolResult
 
 # ---- 受控证据类型 ----
 POLICY_REF_TYPE = "POLICY_REF"
 POLICY_TEXT_MAX_CHARS = 120  # value 内嵌条款原文的截断上限
-
-
-# ---------------------------------------------------------------------------
-# 数据访问契约
-# ---------------------------------------------------------------------------
-
-
-class PolicySearchFilters(BaseModel):
-
-    category: str | None = Field(default=None, description="类目过滤，如 女鞋/运动鞋")
-    risk_type: list[RiskType] | None = Field(default=None, description="风险类型过滤（受控词表）")
-
-
-class PolicyClauseHit(BaseModel):
-    """单个政策条款命中（``status`` 取 EFFECTIVE / EXPIRED）。"""
-
-    policy_id: str
-    version: int
-    clause_id: str = Field(description="条款 ID —— Policy KB 检索/分块的最小单元")
-    title: str = Field(default="", description="条款标题")
-    text: str = Field(description="条款原文")
-    category: str | None = Field(default=None)
-    risk_type: list[RiskType] = Field(default_factory=list)
-    status: str = Field(default="EFFECTIVE", description="EFFECTIVE / EXPIRED")
-    effective_date: date | None = Field(default=None)
-
-
-class PolicyIndex(Protocol):
-
-    async def search(
-        self,
-        query: str,
-        filters: PolicySearchFilters,
-        top_k: int,
-        effective_only: bool,
-    ) -> list[PolicyClauseHit]: ...
 
 
 # ---------------------------------------------------------------------------
