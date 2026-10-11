@@ -15,12 +15,16 @@ from evaluation.dataset.schema import (
     MerchantFactsV3,
     RegistryFactsV3,
 )
-from evaluation.metrics.business import DecisionEvaluator
+from evaluation.grading.grader import grade_records
+from evaluation.metrics.assertions import load_citation_index
+from evaluation.metrics.diagnostics import evaluate_diagnostics
 from evaluation.metrics.engineering import EngineeringEvaluator
+from evaluation.metrics.selective import evaluate_selective
 from evaluation.record import EvalRecord
-from helpers import SCRIPTS_DIR, load_script, make_case
+from helpers import REPO_ROOT, SCRIPTS_DIR, load_script, make_case
 
 SCRIPT = SCRIPTS_DIR / "run_evaluation.py"
+CORPUS_DIR = REPO_ROOT / "src" / "pra" / "rag" / "corpus"
 _FAIL_CASE_ID = "EC_T2"
 _FAIL_TYPE = "RuntimeError"
 _FAIL_MESSAGE = "injected infra failure"
@@ -114,13 +118,13 @@ async def test_single_case_failure_keeps_arm_alive(script) -> None:
     records = [rec for rec, _ in results]
     assert _FAIL_CASE_ID not in {rec.eval_case_id for rec in records}
     assert not any(rec.decision == "HUMAN_REVIEW" for rec in records), (
-        "失败案不得被伪装成 HUMAN_REVIEW（会污染混淆矩阵与 human_review_rate）"
+        "失败案不得被伪装成 HUMAN_REVIEW（会压低 coverage 并污染分母）"
     )
 
-    exp = script._expected_index(truth)
-    metrics = DecisionEvaluator.evaluate(records, exp)
-    assert (metrics.total, metrics.human_pred_total) == (2, 0)
-    assert metrics.human_review_rate == 0.0
+    gradings = grade_records(records, truth)
+    metrics = evaluate_selective(gradings)
+    assert (metrics.total, metrics.auto_decided) == (2, 2)
+    assert metrics.coverage == 1.0
     latencies = [ms for _, ms in results]
     engineering = EngineeringEvaluator.evaluate(records, latency_ms=latencies)
     assert engineering.total_records == 2
@@ -142,22 +146,30 @@ async def test_failed_count_and_reason_reach_report_text(script) -> None:
 
     results, failures = await script._run_arm(cases, run_one, concurrency=1, progress=False)
 
-    exp = script._expected_index(truth)
     records = [rec for rec, _ in results]
     latencies = [ms for _, ms in results]
-    metrics = {arm: DecisionEvaluator.evaluate(records, exp) for arm in script.ARMS}
+    gradings = {arm: grade_records(records, truth) for arm in script.ARMS}
+    selective = {arm: evaluate_selective(gradings[arm]) for arm in script.ARMS}
     engineering = {
         arm: EngineeringEvaluator.evaluate(records, latency_ms=latencies) for arm in script.ARMS
     }
     failures_by_arm = {arm: (failures if arm == "rule" else []) for arm in script.ARMS}
+    citations = load_citation_index(CORPUS_DIR)
+    assertions = {arm: [] for arm in script.ARMS}
 
     report = script._render_report(
         data_path="tests-injected",
         model="test-model",
         cases=cases,
-        metrics=metrics,
+        selective=selective,
+        diagnostics=evaluate_diagnostics(gradings["agent"], records),
+        assertions=assertions,
         engineering=engineering,
         failures=failures_by_arm,
+        excluded=set(),
+        metamorphic=None,
+        pass_k=None,
+        pass_k_runs=1,
         llm_config={"thinking": None, "reasoning_effort": None},
         out_path=None,
     )
@@ -168,3 +180,4 @@ async def test_failed_count_and_reason_reach_report_text(script) -> None:
         for line in report.splitlines()
     ), "失败案 id / 异常类型短名 / 异常消息必须在报告里同现"
     assert "不含失败案" in report
+    assert citations.policy_refs  # 语料索引非空（防呆：断言失败不应来自空索引）

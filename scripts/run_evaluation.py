@@ -17,15 +17,28 @@ from pathlib import Path
 from typing import Any
 
 from evaluation.dataset.loader import load_dataset_v3
-from evaluation.dataset.schema import EvalCaseV3, EvalTruthV3
+from evaluation.dataset.schema import EvalCaseV3
 from evaluation.grading.grader import grade_records
-from evaluation.metrics.agent import AgentMetricsBundle
-from evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
+from evaluation.metamorphic import (
+    MetamorphicFailure,
+    PassKMetrics,
+    check_metamorphic,
+    pass_k_consistency,
+    perturb_risk_amplifying,
+    perturb_semantics_preserving,
+)
+from evaluation.metrics.assertions import (
+    AssertionFailure,
+    check_process_assertions,
+    load_citation_index,
+)
+from evaluation.metrics.diagnostics import AgentDiagnostics, evaluate_diagnostics
 from evaluation.metrics.engineering import (
     DistributionMetrics,
     EngineeringEvaluator,
     EngineeringMetrics,
 )
+from evaluation.metrics.selective import SelectiveMetrics, evaluate_selective
 from evaluation.record import EvalRecord
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,6 +48,7 @@ from pra.agent.guardrails.budget import budget_exceeded
 from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
 from pra.agent.state import build_initial_state
 from pra.domain import Decision, ReviewDecision, RiskLevel, RiskType
+from pra.domain.models import BudgetLimits
 from pra.screening.engine import Verdict, triage
 
 DEFAULT_DATA = "eval_data/v3"
@@ -43,6 +57,7 @@ ENV_API_KEY = "DEEPSEEK_API_KEY"
 ENV_BASE_URL = "DEEPSEEK_BASE_URL"
 ARMS: tuple[str, ...] = ("rule", "single", "agent")
 NOTE = "单次运行产物：真实 LLM 非确定性、不可重放（同数据重跑结果可不同），数字只代表本次抽样"
+CORPUS_DIR = Path(__file__).resolve().parents[1] / "src" / "pra" / "rag" / "corpus"
 
 __all__ = [
     "DEFAULT_DATA",
@@ -165,22 +180,27 @@ def _make_real_backend(
     )
 
 
-def _expected_index(truth: list[EvalTruthV3]) -> dict[str, dict]:
-    """由 v3 真值行构造指标层共用的真值索引 ``{eval_case_id: {decision, abstain_label, ...}}``。
+def _load_exclude_ids(raw: str | None, known_ids: set[str]) -> set[str]:
+    """读入疑问篮子清单（JSON 字符串数组文件），校验 id 都在当前数据集中。
 
-    含业务指标（decision / abstain_label）与 Agent 级指标（expected_tools / risk_type /
-    risk_level）两类真值字段。
+    :raises ValueError: 文件缺失 / 非 JSON 字符串数组 / 含数据集外的 id（显式失败，不静默跳过）。
     """
-    return {
-        t.eval_case_id: {
-            "decision": t.expected.decision,
-            "abstain_label": t.expected.abstain_label,
-            "expected_tools": list(t.expected.expected_tools),
-            "risk_type": list(t.expected.risk_type),
-            "risk_level": t.expected.risk_level,
-        }
-        for t in truth
-    }
+    if not raw:
+        return set()
+    path = Path(raw)
+    if not path.is_file():
+        raise ValueError(f"--exclude-ids 文件不存在: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"--exclude-ids 不是合法 JSON 数组文件: {path}（{exc}）") from exc
+    if not isinstance(data, list) or not all(isinstance(x, str) and x.strip() for x in data):
+        raise ValueError(f"--exclude-ids 必须是 JSON 字符串数组（eval_case_id 列表）: {path}")
+    excluded = {x.strip() for x in data}
+    unknown = excluded - known_ids
+    if unknown:
+        raise ValueError(f"--exclude-ids 有 {len(unknown)} 个不在当前数据集中: {sorted(unknown)}")
+    return excluded
 
 
 # ---------------------------------------------------------------------------
@@ -422,35 +442,25 @@ def _ratio_cell(value: float | None, numer: int, denom: int) -> str:
     return f"{value:.3f}({numer}/{denom})"
 
 
-def _metrics_row(
-    arm: str, m: DecisionMetrics, eng: EngineeringMetrics, failed: int
+def _headline_row(
+    arm: str, m: SelectiveMetrics, eng: EngineeringMetrics, failed: int
 ) -> list[str]:
-    """三臂并排表的一行：业务比率（带分子/分母）+ 混淆计数 + 失败案数 + 成本均值。"""
+    """头条表的一行：selective prediction 三指标（带分子/分母）+ 失败案数 + 成本均值。"""
     return [
         arm,
-        _ratio_cell(m.accuracy, m.tp + m.tn, m.auto_decidable_total),
-        _ratio_cell(m.precision, m.tp, m.tp + m.fp),
-        _ratio_cell(m.recall, m.tp, m.reject_truth),
-        _ratio_cell(m.wrong_auto_decision_rate, m.fp + m.fn, m.tp + m.fp + m.tn + m.fn),
-        _ratio_cell(m.reject_unhandled, m.reject_human, m.reject_truth),
-        _ratio_cell(m.human_review_rate, m.human_pred_total, m.total),
-        _ratio_cell(m.automation_coverage, m.total - m.human_pred_total, m.total),
-        f"{m.tp}/{m.fp}/{m.tn}/{m.fn}",
+        _ratio_cell(m.coverage, m.auto_decided, m.total),
+        _ratio_cell(m.selective_risk, m.auto_wrong, m.auto_decided),
+        _ratio_cell(m.false_reject_rate, m.false_rejects, m.truth_pass_total),
         f"{failed}",
         f"llm={_num(eng.llm_calls.mean)} tool={_num(eng.tool_calls.mean)} tok={_num(eng.tokens.mean)}",
     ]
 
 
-_METRIC_HEADERS = [
+_HEADLINE_HEADERS = [
     "arm",
-    "accuracy",
-    "precision",
-    "recall",
-    "wrong_auto_decision_rate",
-    "reject_unhandled",
-    "human_review_rate",
-    "automation_coverage",
-    "TP/FP/TN/FN",
+    "coverage",
+    "selective_risk",
+    "false_reject_rate",
     "failed",
     "成本均值(llm/tool/tok)",
 ]
@@ -476,16 +486,23 @@ def _render_report(
     data_path: str,
     model: str,
     cases: list[EvalCaseV3],
-    metrics: dict[str, DecisionMetrics],
+    selective: dict[str, SelectiveMetrics],
+    diagnostics: AgentDiagnostics,
+    assertions: dict[str, list[AssertionFailure]],
     engineering: dict[str, EngineeringMetrics],
     failures: dict[str, list["_ArmFailure"]],
+    excluded: set[str],
+    metamorphic: dict | None,
+    pass_k: PassKMetrics | None,
+    pass_k_runs: int,
     llm_config: dict,
     out_path: str | None,
 ) -> str:
-    """渲染 Console 报告：结论边界 + 三臂并排指标表 + 分母/失败案/墙钟注记。"""
+    """渲染 Console 报告：头条（selective prediction 三指标）+ 诊断区 + 过程断言 +
+    可选蜕变/pass^k + 工程指标 + 失败案明细。"""
     out: list[str] = []
     add = out.append
-    m0 = metrics["rule"]
+    m0 = selective["rule"]
     add("=" * 100)
     add("商品审核 Agent · Evaluation 跑分：rule（确定性初筛）/ single（单次 LLM 直判）/ agent（完整调查）")
     add("=" * 100)
@@ -501,19 +518,66 @@ def _render_report(
     else:
         add("思考配置: 网关默认（thinking=enabled / reasoning_effort=high，本次未覆盖）")
     add("-" * 100)
-    add("指标口径: accuracy/precision/wrong_auto_decision_rate 与 TP/FP/TN/FN 只在 AUTO_DECIDABLE 案；")
-    add("  recall/reject_unhandled 分母 = 真值 REJECT 案；human_review_rate/automation_coverage 分母 = 全量")
-    add("  比率形如 值(分子/分母)；分母为 0 → '-'（不硬造 0/∞）")
-    add("  失败案（单案基础设施异常）不产出记录：全部分母均**不含失败案**，分母口径见上方分子/分母")
-    add("-" * 100)
+    add("头条指标（selective prediction 口径，docs/02 §5.1；比率形如 值(分子/分母)，分母为 0 → '-'）:")
+    add(f"  coverage = 自动决策案 / 全部案（剔除疑问篮子 {len(excluded)} 案）")
+    add("  selective_risk = 自动决策中判错案 / 被自动决策的案（转人工不进分母，只压低 coverage）")
+    add("  false_reject_rate = 真值 PASS 被自动 REJECT 案 / 真值 PASS 案")
+    add("  失败案（单案基础设施异常）不产出记录：全部分母均**不含失败案**")
     rows = [
-        _metrics_row(arm, metrics[arm], engineering[arm], len(failures[arm])) for arm in ARMS
+        _headline_row(arm, selective[arm], engineering[arm], len(failures[arm])) for arm in ARMS
     ]
-    add(_table(_METRIC_HEADERS, rows))
+    add(_table(_HEADLINE_HEADERS, rows))
     add(
-        f"  分母注记: AUTO_DECIDABLE 案 {m0.auto_decidable_total} / 真值 REJECT 案 {m0.reject_truth} / "
-        f"全量 {m0.total} —— 三组分母不同，勿混读（均不含失败案）"
+        f"  分母注记: 全部案 {m0.total} / 被自动决策案（各臂不同）/ 真值 PASS 案 "
+        f"{m0.truth_pass_total} —— 三组分母不同，勿混读（均不含失败案、已剔除疑问篮子）"
     )
+    add("-" * 100)
+    add("诊断区（agent 臂；不进头条 —— 回答'结论对了，理由对不对'，docs/02 §5.2）:")
+    add(
+        "  工具选择准确率 "
+        f"{_ratio_cell(diagnostics.tool_selection_accuracy, diagnostics.tool_covered_cases, diagnostics.tool_expected_cases)}"
+        "（分母=标注期望工具的案）  多余调用率 "
+        f"{_ratio_cell(diagnostics.redundant_tool_rate, diagnostics.tool_redundant_cases, diagnostics.tool_expected_cases)}"
+        "（同分母）"
+    )
+    add(
+        "  风险类型命中率 "
+        f"{_ratio_cell(diagnostics.risk_type_hit_rate, diagnostics.risk_type_hit_cases, diagnostics.risk_type_labeled_cases)}"
+        "（分母=标注期望风险类型的案）  有效取证率 "
+        f"{_ratio_cell(diagnostics.evidence_gain_rate, diagnostics.calls_with_new_evidence, diagnostics.ok_tool_calls)}"
+        "（分母=成功的工具调用）"
+    )
+    add("-" * 100)
+    add("过程断言（无证据引用的拒绝 / 应触发 Gate 未触发 / 超预算 / 引用不可解析）:")
+    for arm in ARMS:
+        arm_failures = assertions[arm]
+        if not arm_failures:
+            add(f"  {arm:<7} 无断言失败")
+            continue
+        counts: dict[str, int] = {}
+        for failure in arm_failures:
+            counts[failure.code] = counts.get(failure.code, 0) + 1
+        add(
+            f"  {arm:<7} 断言失败 {len(arm_failures)} 条: "
+            + ", ".join(f"{code}×{n}" for code, n in sorted(counts.items()))
+        )
+        for failure in arm_failures:
+            add(f"    {failure.eval_case_id:<12} {failure.code}: {failure.detail[:80]}")
+    if metamorphic is not None:
+        add("-" * 100)
+        add("蜕变测试（agent 臂；保语义扰动裁决不得翻转 / 风险增强扰动裁决不得变松）:")
+        mm_failures: list[MetamorphicFailure] = metamorphic["failures"]
+        add(f"  比对案数 {metamorphic['compared_cases']}，违例 {len(mm_failures)} 条")
+        for failure in mm_failures:
+            add(f"    {failure.eval_case_id:<12} {failure.kind}: {failure.original}→{failure.perturbed}")
+    if pass_k is not None:
+        add("-" * 100)
+        add(f"pass^k（agent 臂重复 {pass_k_runs} 次，裁决一致率）:")
+        add(
+            f"  consistency_rate "
+            f"{_ratio_cell(pass_k.consistency_rate, pass_k.consistent_cases, pass_k.compared_cases)}"
+            "（分母=有 ≥2 次运行记录的案）"
+        )
     add("-" * 100)
     add("失败案明细（单案异常只废该案；不写成任何业务判定）:")
     for arm in ARMS:
@@ -620,6 +684,31 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "指标/数据"
         ),
     )
+    parser.add_argument(
+        "--exclude-ids",
+        default=None,
+        help=(
+            "疑问篮子清单文件（JSON 字符串数组，元素为 eval_case_id；默认 None = 空）。"
+            "清单内案从头条指标全部分母剔除；id 不在数据集中会报错"
+        ),
+    )
+    parser.add_argument(
+        "--metamorphic",
+        action="store_true",
+        help=(
+            "蜕变测试：agent 臂对每案加跑保语义 / 风险增强两类扰动，比对裁决是否翻转/变松"
+            "（2× 案数的真实 LLM 调用，费用自负；rule 臂确定性无需重复）"
+        ),
+    )
+    parser.add_argument(
+        "--pass-k",
+        type=int,
+        default=1,
+        help=(
+            "pass^k：agent 臂共重复运行 k 次，统计逐案裁决一致率"
+            "（默认 1 = 不重复；k>1 时真实 LLM 调用费用 ×k，费用自负）"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -702,7 +791,11 @@ async def _main(argv: list[str] | None = None) -> int:
     )
     print("-" * 100)
 
-    exp = _expected_index(truth)
+    excluded = _load_exclude_ids(args.exclude_ids, {c.eval_case_id for c in dataset.cases})
+    if args.pass_k < 1:
+        raise ValueError(f"--pass-k 必须 ≥ 1（实际 {args.pass_k}）")
+    budget_limits = BudgetLimits()
+    citations = load_citation_index(CORPUS_DIR)
     arm_runs: dict[str, tuple[list[tuple[EvalRecord, float]], list[_ArmFailure]]] = {}
 
     async def _run_and_report(
@@ -736,12 +829,73 @@ async def _main(argv: list[str] | None = None) -> int:
     records = {arm: [rec for rec, _ in arm_runs[arm][0]] for arm in ARMS}
     latencies = {arm: [ms for _, ms in arm_runs[arm][0]] for arm in ARMS}
     failures = {arm: arm_runs[arm][1] for arm in ARMS}
-    metrics = {arm: DecisionEvaluator.evaluate(records[arm], exp) for arm in ARMS}
+    gradings = {arm: grade_records(records[arm], truth) for arm in ARMS}
+    selective = {arm: evaluate_selective(gradings[arm], exclude=excluded) for arm in ARMS}
+    diagnostics = evaluate_diagnostics(gradings["agent"], records["agent"])
+    assertions = {
+        arm: check_process_assertions(
+            records[arm],
+            truth,
+            citations=citations,
+            max_llm_calls=budget_limits.max_llm_calls,
+            max_tool_calls=budget_limits.max_tool_calls,
+        )
+        for arm in ARMS
+    }
     engineering = {
         arm: EngineeringEvaluator.evaluate(records[arm], latency_ms=latencies[arm]) for arm in ARMS
     }
-    agent_level = AgentMetricsBundle.evaluate(records["agent"], exp)
-    gradings = {arm: grade_records(records[arm], truth) for arm in ARMS}
+
+    metamorphic_result: dict | None = None
+    if args.metamorphic:
+        agent_orig = {rec.eval_case_id: rec for rec in records["agent"]}
+        perturbed_cases = [c for c in cases if c.eval_case_id in agent_orig]
+        print("-" * 100)
+        print(f"④ 蜕变测试（agent 臂 · {len(perturbed_cases)} 案 × 2 类扰动 · 真实 LLM 调用）")
+        neutral_runs, _ = await _run_arm(
+            [perturb_semantics_preserving(c) for c in perturbed_cases],
+            lambda case: _run_agent(case, graph=graph),
+            concurrency=args.concurrency,
+            progress=True,
+        )
+        amplified_runs, _ = await _run_arm(
+            [perturb_risk_amplifying(c) for c in perturbed_cases],
+            lambda case: _run_agent(case, graph=graph),
+            concurrency=args.concurrency,
+            progress=True,
+        )
+        neutral_by_id = {rec.eval_case_id: rec for rec, _ in neutral_runs}
+        amplified_by_id = {rec.eval_case_id: rec for rec, _ in amplified_runs}
+        mm_failures: list[MetamorphicFailure] = []
+        compared = 0
+        for cid, original in agent_orig.items():
+            neutral = neutral_by_id.get(cid)
+            amplified = amplified_by_id.get(cid)
+            if neutral is None or amplified is None:
+                continue
+            compared += 1
+            mm_failures.extend(check_metamorphic(original, neutral, amplified))
+        metamorphic_result = {"compared_cases": compared, "failures": mm_failures}
+        print(f"  → 比对 {compared} 案 / 违例 {len(mm_failures)} 条")
+
+    pass_k_metrics: PassKMetrics | None = None
+    if args.pass_k > 1:
+        print("-" * 100)
+        print(f"⑤ pass^k（agent 臂再重复 {args.pass_k - 1} 次 · 真实 LLM 调用）")
+        decisions: dict[str, list[str]] = {
+            rec.eval_case_id: [rec.decision] for rec in records["agent"]
+        }
+        for round_i in range(2, args.pass_k + 1):
+            rerun, _ = await _run_arm(
+                cases,
+                lambda case: _run_agent(case, graph=graph),
+                concurrency=args.concurrency,
+                progress=True,
+            )
+            for rec, _ in rerun:
+                decisions.setdefault(rec.eval_case_id, []).append(rec.decision)
+            print(f"  → 第 {round_i}/{args.pass_k} 次运行完成（{len(rerun)} 案）")
+        pass_k_metrics = pass_k_consistency(decisions)
 
     payload = {
         "data": str(cases_path),
@@ -749,17 +903,32 @@ async def _main(argv: list[str] | None = None) -> int:
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "count": len(cases),
         "real_llm_config": llm_config,
+        "excluded_ids": sorted(excluded),
         "failed": {arm: len(failures[arm]) for arm in ARMS},
         "records": {arm: [rec.model_dump() for rec in records[arm]] for arm in ARMS},
         "grading": {arm: [g.model_dump() for g in gradings[arm]] for arm in ARMS},
         "metrics": {
             arm: {
-                "decision": metrics[arm].model_dump(),
+                "selective": selective[arm].model_dump(),
                 "engineering": engineering[arm].model_dump(),
-                **({"agent_level": agent_level.model_dump()} if arm == "agent" else {}),
             }
             for arm in ARMS
         },
+        "diagnostics": diagnostics.model_dump(),
+        "assertions": {arm: [f.model_dump() for f in assertions[arm]] for arm in ARMS},
+        "metamorphic": (
+            {
+                "compared_cases": metamorphic_result["compared_cases"],
+                "failures": [f.model_dump() for f in metamorphic_result["failures"]],
+            }
+            if metamorphic_result is not None
+            else None
+        ),
+        "pass_k": (
+            {"k": args.pass_k, **pass_k_metrics.model_dump()}
+            if pass_k_metrics is not None
+            else None
+        ),
         "note": NOTE,
     }
 
@@ -773,9 +942,15 @@ async def _main(argv: list[str] | None = None) -> int:
             data_path=str(cases_path),
             model=args.model,
             cases=cases,
-            metrics=metrics,
+            selective=selective,
+            diagnostics=diagnostics,
+            assertions=assertions,
             engineering=engineering,
             failures=failures,
+            excluded=excluded,
+            metamorphic=metamorphic_result,
+            pass_k=pass_k_metrics,
+            pass_k_runs=args.pass_k,
             llm_config=llm_config,
             out_path=out_path,
         )
