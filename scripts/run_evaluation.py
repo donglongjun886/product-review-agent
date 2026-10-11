@@ -1,10 +1,13 @@
-"""Evaluation 正式跑分（单脚本 · 三臂）：rule（确定性初筛）/ single（单次 LLM 直判）/ agent（完整调查 Agent）。"""
+"""Evaluation 正式跑分（单脚本 · 三臂）：rule（确定性初筛）/ single（单次 LLM 直判）/ agent（完整调查 Agent）。
+
+数据集为 v3 双文件契约（cases_v3.jsonl + truth_v3.jsonl，真值独立成行）；
+判卷是纯代码逐案比对（evaluation.grading），与跑分路径的 LLM 调用完全隔离。
+"""
 
 import argparse
 import asyncio
 import json
 import os
-import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -13,8 +16,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from evaluation.dataset.loader import load_dataset
-from evaluation.dataset.schema import EvalCase
+from evaluation.dataset.loader import load_dataset_v3
+from evaluation.dataset.schema import EvalCaseV3, EvalTruthV3
+from evaluation.grading.grader import grade_records
 from evaluation.metrics.agent import AgentMetricsBundle
 from evaluation.metrics.business import DecisionEvaluator, DecisionMetrics
 from evaluation.metrics.engineering import (
@@ -33,7 +37,7 @@ from pra.agent.state import build_initial_state
 from pra.domain import Decision, ReviewDecision, RiskLevel, RiskType
 from pra.screening.engine import Verdict, triage
 
-DEFAULT_DATA = "eval_data/v2"
+DEFAULT_DATA = "eval_data/v3"
 DEFAULT_MODEL = "deepseek/deepseek-flash"
 ENV_API_KEY = "DEEPSEEK_API_KEY"
 ENV_BASE_URL = "DEEPSEEK_BASE_URL"
@@ -63,22 +67,35 @@ class _ArmFailure:
     reason: str
 
 
-def _resolve_data_path(raw: str) -> Path:
-    """把 ``--data`` 解析为评测 JSONL 路径（直接 JSONL，或按目录名拼
-    ``cases_<目录名>.jsonl``：eval_data/v2 → cases_v2.jsonl）。"""
+def _resolve_data_path(raw: str) -> tuple[Path, Path]:
+    """把 ``--data`` 解析为 v3 双文件 ``(cases, truth)``：v3 目录，或 ``cases_v3.jsonl``
+    文件（同目录自动配对 ``truth_v3.jsonl``）。v2 目录 / 旧格式文件 → 显式报错。"""
     p = Path(raw)
-    if p.is_file():
-        return p
     if p.is_dir():
-        if re.fullmatch(r"v\d+", p.name) is not None:
-            cand = p / f"cases_{p.name}.jsonl"
-            if cand.is_file():
-                return cand
+        cases = p / "cases_v3.jsonl"
+        truth = p / "truth_v3.jsonl"
+        if cases.is_file() and truth.is_file():
+            return cases, truth
+        if (p / "cases_v2.jsonl").is_file():
+            raise ValueError(
+                f"评测数据目录 {p} 是 v2 旧格式：新执行层只接受 v3 双文件"
+                "（cases_v3.jsonl + truth_v3.jsonl），新旧数据契约不兼容、不做静默混用；"
+                "请改用 eval_data/v3"
+            )
         raise ValueError(
-            f"评测数据目录 {p} 无法定位 cases JSONL：目录名按 v<数字> → "
-            f"cases_<目录名>.jsonl（{p.name} 不是 v<数字> 目录名或该文件缺失）"
+            f"评测数据目录 {p} 缺少 v3 双文件 cases_v3.jsonl / truth_v3.jsonl"
         )
-    raise ValueError(f"评测数据路径不存在: {p}（支持 JSONL 文件，或 eval_data/v2 目录）")
+    if p.is_file():
+        if p.name == "cases_v3.jsonl":
+            truth = p.with_name("truth_v3.jsonl")
+            if not truth.is_file():
+                raise ValueError(f"v3 cases 文件 {p} 缺少同目录 truth_v3.jsonl（v3 为双文件契约）")
+            return p, truth
+        raise ValueError(
+            f"评测数据文件 {p} 是旧格式（非 cases_v3.jsonl）：新执行层只接受 v3 数据集，"
+            "请传 eval_data/v3 目录或 cases_v3.jsonl 文件；v1/v2 单文件契约不兼容、不做静默混用"
+        )
+    raise ValueError(f"评测数据路径不存在: {p}（支持 eval_data/v3 目录，或 cases_v3.jsonl 文件）")
 
 
 def _load_dotenv() -> None:
@@ -148,21 +165,21 @@ def _make_real_backend(
     )
 
 
-def _expected_index(cases: list[EvalCase]) -> dict[str, dict]:
-    """由数据集构造指标层共用的真值索引 ``{eval_case_id: {decision, abstain_label, ...}}``。
+def _expected_index(truth: list[EvalTruthV3]) -> dict[str, dict]:
+    """由 v3 真值行构造指标层共用的真值索引 ``{eval_case_id: {decision, abstain_label, ...}}``。
 
     含业务指标（decision / abstain_label）与 Agent 级指标（expected_tools / risk_type /
     risk_level）两类真值字段。
     """
     return {
-        c.eval_case_id: {
-            "decision": c.expected.decision,
-            "abstain_label": c.expected.abstain_label,
-            "expected_tools": list(c.expected.expected_tools),
-            "risk_type": list(c.expected.risk_type),
-            "risk_level": c.expected.risk_level,
+        t.eval_case_id: {
+            "decision": t.expected.decision,
+            "abstain_label": t.expected.abstain_label,
+            "expected_tools": list(t.expected.expected_tools),
+            "risk_type": list(t.expected.risk_type),
+            "risk_level": t.expected.risk_level,
         }
-        for c in cases
+        for t in truth
     }
 
 
@@ -177,7 +194,7 @@ VERDICT_TO_DECISION: dict[Verdict, str] = {
 }
 
 
-async def _run_rule(case: EvalCase) -> EvalRecord:
+async def _run_rule(case: EvalCaseV3) -> EvalRecord:
     """rule 臂：``triage(case.input)`` 三分流映射为 EvalRecord。"""
     result = triage(case.input)
     hits = [{"rule_id": hit.rule_id, "name": hit.name, "detail": hit.detail} for hit in result.hits]
@@ -216,7 +233,7 @@ class SingleCallOutput(BaseModel):
     decision_confidence: float = Field(ge=0.0, le=1.0, description="直判自评把握（0..1，观测字段）")
 
 
-async def _run_single(case: EvalCase, *, llm: LLMBackend) -> EvalRecord:
+async def _run_single(case: EvalCaseV3, *, llm: LLMBackend) -> EvalRecord:
     """single 臂：只喂 case 快照的一次 LLM 直判；不调工具、不过 Gate。
 
     调用失败 → 记为 HUMAN_REVIEW，``detail`` 带 ``error`` 与 ``attempts``。
@@ -258,7 +275,7 @@ async def _run_single(case: EvalCase, *, llm: LLMBackend) -> EvalRecord:
     )
 
 
-def _transcribe_agent(case: EvalCase, final_state: dict, decision: ReviewDecision) -> EvalRecord:
+def _transcribe_agent(case: EvalCaseV3, final_state: dict, decision: ReviewDecision) -> EvalRecord:
     """agent 臂终态 → EvalRecord（只读 ReviewDecision / state 摘要）。"""
     history = final_state.get("tool_call_history") or []
     ok_calls = [r for r in history if isinstance(r, dict) and r.get("status") == "ok"]
@@ -318,7 +335,7 @@ def _transcribe_agent(case: EvalCase, final_state: dict, decision: ReviewDecisio
     )
 
 
-async def _run_agent(case: EvalCase, *, graph: Any) -> EvalRecord:
+async def _run_agent(case: EvalCaseV3, *, graph: Any) -> EvalRecord:
     """agent 臂：完整调查图跑一案，终态 ``ReviewDecision`` 转录 EvalRecord。"""
     initial_state = build_initial_state(case.input)
     final_state = await graph.ainvoke(
@@ -339,8 +356,8 @@ async def _run_agent(case: EvalCase, *, graph: Any) -> EvalRecord:
 
 
 async def _run_arm(
-    cases: list[EvalCase],
-    run_one: Callable[[EvalCase], Awaitable[EvalRecord]],
+    cases: list[EvalCaseV3],
+    run_one: Callable[[EvalCaseV3], Awaitable[EvalRecord]],
     *,
     concurrency: int,
     progress: bool,
@@ -350,7 +367,7 @@ async def _run_arm(
     total = len(cases)
     done = 0
 
-    async def _one(case: EvalCase) -> tuple[EvalRecord, float] | _ArmFailure:
+    async def _one(case: EvalCaseV3) -> tuple[EvalRecord, float] | _ArmFailure:
         nonlocal done
         async with sem:
             t0 = time.monotonic()
@@ -458,7 +475,7 @@ def _render_report(
     *,
     data_path: str,
     model: str,
-    cases: list[EvalCase],
+    cases: list[EvalCaseV3],
     metrics: dict[str, DecisionMetrics],
     engineering: dict[str, EngineeringMetrics],
     failures: dict[str, list["_ArmFailure"]],
@@ -540,7 +557,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--data",
         default=DEFAULT_DATA,
-        help=f"评测集：JSONL 路径或目录（默认 {DEFAULT_DATA} → cases_v2.jsonl）",
+        help=f"评测集：v3 目录或 cases_v3.jsonl 文件（默认 {DEFAULT_DATA} → cases_v3.jsonl + truth_v3.jsonl）",
     )
     parser.add_argument(
         "--model", default=DEFAULT_MODEL, help=f"LLM 模型（默认 {DEFAULT_MODEL}）"
@@ -583,7 +600,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ids",
         default=None,
         help=(
-            '只跑指定 eval_case_id（逗号分隔，如 "EC_V2_0007,EC_V2_0101"；默认 None = 不过滤）。'
+            '只跑指定 eval_case_id（逗号分隔，如 "EC_V3_0007,EC_V3_0101"；默认 None = 不过滤）。'
             "加载后按 eval_case_id 过滤，可与 --limit 叠加（先 --ids 过滤、再 --limit 截断）；"
             "id 不在数据集中会报错提示"
         ),
@@ -615,12 +632,12 @@ def _write_payload(path: Path, payload: dict) -> None:
         fh.write("\n")
 
 
-def _select_cases(cases: list[EvalCase], *, ids: str | None, limit: int | None) -> list[EvalCase]:
+def _select_cases(cases: list[EvalCaseV3], *, ids: str | None, limit: int | None) -> list[EvalCaseV3]:
     """按 ``--ids`` 过滤、按 ``--limit`` 截断（先过滤后截断）；结果为空即报错。"""
     if ids:
         wanted = {s.strip() for s in ids.split(",") if s.strip()}
         if not wanted:
-            raise ValueError('--ids 为空：请用逗号分隔的 eval_case_id，如 --ids "EC_V2_0007,EC_V2_0101"')
+            raise ValueError('--ids 为空：请用逗号分隔的 eval_case_id，如 --ids "EC_V3_0007,EC_V3_0101"')
         missing = wanted - {c.eval_case_id for c in cases}
         if missing:
             raise ValueError(f"--ids 有 {len(missing)} 个不在当前数据集中: {sorted(missing)}")
@@ -635,8 +652,11 @@ def _select_cases(cases: list[EvalCase], *, ids: str | None, limit: int | None) 
 async def _main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _load_dotenv()
-    data_path = _resolve_data_path(args.data)
-    cases = _select_cases(load_dataset(data_path), ids=args.ids, limit=args.limit)
+    cases_path, truth_path = _resolve_data_path(args.data)
+    dataset = load_dataset_v3(cases_path, truth_path)
+    cases = _select_cases(dataset.cases, ids=args.ids, limit=args.limit)
+    selected_ids = {c.eval_case_id for c in cases}
+    truth = [t for t in dataset.truth if t.eval_case_id in selected_ids]
 
     api_key = _resolve_api_key(args.api_key)
     base_url = args.base_url or os.environ.get(ENV_BASE_URL, "") or None
@@ -662,7 +682,7 @@ async def _main(argv: list[str] | None = None) -> int:
     print("=" * 100)
     print("商品审核 Agent · Evaluation 跑分（rule / single / agent 三臂）")
     print("=" * 100)
-    print(f"数据集: {data_path}（{len(cases)} 条）| 模型: {args.model}")
+    print(f"数据集: {cases_path}（{len(cases)} 条）| 模型: {args.model}")
     print("工具世界: 生产装配（真 MySQL + 真 RAG；rule / single 臂不使用工具）")
     print(
         "思考配置: "
@@ -682,11 +702,11 @@ async def _main(argv: list[str] | None = None) -> int:
     )
     print("-" * 100)
 
-    exp = _expected_index(cases)
+    exp = _expected_index(truth)
     arm_runs: dict[str, tuple[list[tuple[EvalRecord, float]], list[_ArmFailure]]] = {}
 
     async def _run_and_report(
-        arm: str, run_one: Callable[[EvalCase], Awaitable[EvalRecord]], *, progress: bool
+        arm: str, run_one: Callable[[EvalCaseV3], Awaitable[EvalRecord]], *, progress: bool
     ) -> None:
         """跑一臂并打印完成/失败计数与失败原因（含异常类型短名，同时进报告）。"""
         results, failures = await _run_arm(
@@ -721,15 +741,17 @@ async def _main(argv: list[str] | None = None) -> int:
         arm: EngineeringEvaluator.evaluate(records[arm], latency_ms=latencies[arm]) for arm in ARMS
     }
     agent_level = AgentMetricsBundle.evaluate(records["agent"], exp)
+    gradings = {arm: grade_records(records[arm], truth) for arm in ARMS}
 
     payload = {
-        "data": str(data_path),
+        "data": str(cases_path),
         "model": args.model,
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "count": len(cases),
         "real_llm_config": llm_config,
         "failed": {arm: len(failures[arm]) for arm in ARMS},
         "records": {arm: [rec.model_dump() for rec in records[arm]] for arm in ARMS},
+        "grading": {arm: [g.model_dump() for g in gradings[arm]] for arm in ARMS},
         "metrics": {
             arm: {
                 "decision": metrics[arm].model_dump(),
@@ -748,7 +770,7 @@ async def _main(argv: list[str] | None = None) -> int:
     print()
     print(
         _render_report(
-            data_path=str(data_path),
+            data_path=str(cases_path),
             model=args.model,
             cases=cases,
             metrics=metrics,

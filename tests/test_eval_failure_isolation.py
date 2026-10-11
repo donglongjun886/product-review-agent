@@ -6,7 +6,15 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from evaluation.dataset.schema import EvalCase, EvalExpected
+from evaluation.dataset.schema import (
+    CaseManifestV3,
+    EvalCaseV3,
+    EvalConstructionV3,
+    EvalExpectedV3,
+    EvalTruthV3,
+    MerchantFactsV3,
+    RegistryFactsV3,
+)
 from evaluation.metrics.business import DecisionEvaluator
 from evaluation.metrics.engineering import EngineeringEvaluator
 from evaluation.record import EvalRecord
@@ -18,13 +26,57 @@ _FAIL_TYPE = "RuntimeError"
 _FAIL_MESSAGE = "injected infra failure"
 
 
-def _eval_case(eval_case_id: str, case_id: str) -> EvalCase:
-    """造一条真 ``EvalCase``（真值 PASS）。"""
-    return EvalCase(
+def _eval_case(eval_case_id: str, case_id: str) -> EvalCaseV3:
+    """造一条 v3 案件行（干净案输入）。"""
+    return EvalCaseV3(
         eval_case_id=eval_case_id,
         scene="normal",
+        construction=EvalConstructionV3(pattern="clean", params={}),
         input=make_case(case_id=case_id),
-        expected=EvalExpected(decision="PASS"),
+    )
+
+
+def _eval_truth(eval_case_id: str) -> EvalTruthV3:
+    """造一条 v3 真值行（PASS / AUTO_DECIDABLE）。"""
+    return EvalTruthV3(
+        eval_case_id=eval_case_id,
+        manifest=CaseManifestV3(
+            text_hits=[],
+            snapshot_brand="潮动",
+            snapshot_gaps=[],
+            registry_mismatch=False,
+            merchant=MerchantFactsV3(
+                merchant_id="M_TEST",
+                removals=0,
+                title_relisting_count=0,
+                similar_product_count=0,
+                credit_score=90,
+            ),
+            registry=RegistryFactsV3(
+                product_id="P_TEST",
+                category="女鞋/运动鞋",
+                brand="潮动",
+                version=3,
+                status="ON_SALE",
+            ),
+        ),
+        expected=EvalExpectedV3(
+            decision="PASS",
+            abstain_label="AUTO_DECIDABLE",
+            risk_level="NONE",
+            risk_type=[],
+            expected_tools=[],
+            expected_policies=[],
+        ),
+    )
+
+
+def _cases_and_truth() -> tuple[list[EvalCaseV3], list[EvalTruthV3]]:
+    """三案数据集：中间一案将注入基础设施异常。"""
+    ids = [("EC_T1", "CASE_T1"), (_FAIL_CASE_ID, "CASE_T2"), ("EC_T3", "CASE_T3")]
+    return (
+        [_eval_case(eid, cid) for eid, cid in ids],
+        [_eval_truth(eid) for eid, _ in ids],
     )
 
 
@@ -36,13 +88,9 @@ def script() -> Iterator[Any]:
 
 async def test_single_case_failure_keeps_arm_alive(script) -> None:
     """中间一案抛异常 → 该臂仍出数据，失败只废该案且不进指标分母。"""
-    cases = [
-        _eval_case("EC_T1", "CASE_T1"),
-        _eval_case(_FAIL_CASE_ID, "CASE_T2"),
-        _eval_case("EC_T3", "CASE_T3"),
-    ]
+    cases, truth = _cases_and_truth()
 
-    async def run_one(case: EvalCase) -> EvalRecord:
+    async def run_one(case: EvalCaseV3) -> EvalRecord:
         if case.eval_case_id == _FAIL_CASE_ID:
             raise RuntimeError(_FAIL_MESSAGE)
         return EvalRecord(
@@ -69,7 +117,7 @@ async def test_single_case_failure_keeps_arm_alive(script) -> None:
         "失败案不得被伪装成 HUMAN_REVIEW（会污染混淆矩阵与 human_review_rate）"
     )
 
-    exp = script._expected_index(cases)
+    exp = script._expected_index(truth)
     metrics = DecisionEvaluator.evaluate(records, exp)
     assert (metrics.total, metrics.human_pred_total) == (2, 0)
     assert metrics.human_review_rate == 0.0
@@ -80,13 +128,9 @@ async def test_single_case_failure_keeps_arm_alive(script) -> None:
 
 async def test_failed_count_and_reason_reach_report_text(script) -> None:
     """报告必须显式带 ``failed=1`` 与失败原因（含异常类型短名）且注明分母不含失败案。"""
-    cases = [
-        _eval_case("EC_T1", "CASE_T1"),
-        _eval_case(_FAIL_CASE_ID, "CASE_T2"),
-        _eval_case("EC_T3", "CASE_T3"),
-    ]
+    cases, truth = _cases_and_truth()
 
-    async def run_one(case: EvalCase) -> EvalRecord:
+    async def run_one(case: EvalCaseV3) -> EvalRecord:
         if case.eval_case_id == _FAIL_CASE_ID:
             raise RuntimeError(_FAIL_MESSAGE)
         return EvalRecord(
@@ -98,7 +142,7 @@ async def test_failed_count_and_reason_reach_report_text(script) -> None:
 
     results, failures = await script._run_arm(cases, run_one, concurrency=1, progress=False)
 
-    exp = script._expected_index(cases)
+    exp = script._expected_index(truth)
     records = [rec for rec, _ in results]
     latencies = [ms for _, ms in results]
     metrics = {arm: DecisionEvaluator.evaluate(records, exp) for arm in script.ARMS}
