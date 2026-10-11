@@ -19,7 +19,6 @@ POLICIES_FILE = CORPUS_DIR / "policies.json"
 CASES_FILE = CORPUS_DIR / "cases.json"
 
 EVAL_FILES = [
-    REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl",
     REPO_ROOT / "eval_data" / "v3" / "cases_v3.jsonl",
 ]
 
@@ -395,7 +394,7 @@ def _finalize_cases(curated: list[dict], variants: list[dict]) -> list[dict]:
 
 
 def _eval_case_ids() -> set[str]:
-    """eval_data 各版本全部 case 标识（隔离自检用）。"""
+    """eval_data 全部 case 标识（隔离自检用）。"""
     ids: set[str] = set()
     for path in EVAL_FILES:
         if not path.exists():
@@ -411,9 +410,6 @@ def _eval_case_ids() -> set[str]:
             ids.add(str(obj.get("eval_case_id", "")))
             inp = obj.get("input") or {}
             ids.add(str(inp.get("case_id", "")))
-            lineage = obj.get("lineage") or {}
-            if lineage.get("seed_case_id"):
-                ids.add(str(lineage["seed_case_id"]))
     return {i for i in ids if i}
 
 
@@ -448,7 +444,7 @@ def build() -> tuple[dict, dict]:
     case_meta = {
         "source": "手写种子（demo P_88231/M_5512 剧情改写 + 合成各案型） + 程序化变体（固定 seed）",
         "isolation_declaration": "红线 R-4：Case KB 与 eval_data 的 ground-truth 严格隔离 —— "
-                                 "case_id 统一 RAG_CASE_ 前缀（与 EC_*/EC_V2_*/EC_V3_*/CASE_EC_* 无交集），"
+                                 "case_id 统一 RAG_CASE_ 前缀（与 EC_*/EC_V3_*/CASE_EC_* 无交集），"
                                  "剧情不与任何 eval 违规案一一对应（防检索到 GT = 评测作弊）",
         "generated_by": "scripts/build_rag_corpus.py",
         "seed": GEN_SEED,

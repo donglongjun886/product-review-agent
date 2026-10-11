@@ -15,7 +15,7 @@ class EvalRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    eval_case_id: str = Field(description="评测案 ID（与 EvalCase.eval_case_id 对齐）")
+    eval_case_id: str = Field(description="评测案 ID（与 EvalCaseV3.eval_case_id 对齐）")
     scheme: SchemeName = Field(description="产出本记录的方案名")
     decision: DecisionLabel = Field(description="三分类裁决（归一化后）")
     risk_level: str | None = Field(default=None, description="风险等级（PASS 通常 NONE）")

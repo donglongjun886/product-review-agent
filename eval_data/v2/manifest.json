@@ -1,7 +1,0 @@
-{
-  "schema_version": 2,
-  "dataset_version": "v2",
-  "file": "cases_v2.jsonl",
-  "seed": 42,
-  "total": 320
-}

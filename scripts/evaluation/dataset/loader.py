@@ -6,10 +6,10 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from evaluation.dataset.schema import EvalCase, EvalCaseV3, EvalTruthV3
+from evaluation.dataset.schema import EvalCaseV3, EvalTruthV3
 from pydantic import BaseModel
 
-__all__ = ["EvalDatasetV3", "load_cases_v3", "load_dataset", "load_dataset_v3", "load_truth_v3"]
+__all__ = ["EvalDatasetV3", "load_cases_v3", "load_dataset_v3", "load_truth_v3"]
 
 
 def _load_jsonl[T: BaseModel](path: str | Path, model: type[T]) -> list[T]:
@@ -33,11 +33,6 @@ def _load_jsonl[T: BaseModel](path: str | Path, model: type[T]) -> list[T]:
     if not rows:
         raise ValueError(f"评测集为空（无有效行）: {p}")
     return rows
-
-
-def load_dataset(path: str | Path) -> list[EvalCase]:
-    """读取 v1/v2 JSONL 评测集（EvalCase 契约）。"""
-    return _load_jsonl(path, EvalCase)
 
 
 def load_cases_v3(path: str | Path) -> list[EvalCaseV3]:

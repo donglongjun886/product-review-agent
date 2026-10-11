@@ -15,23 +15,20 @@ from inmemory_world import (
 from pra.rag.corpus import load_cases, load_policies
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EVAL_V2 = REPO_ROOT / "eval_data" / "v2" / "cases_v2.jsonl"
+EVAL_CASES = REPO_ROOT / "eval_data" / "v3" / "cases_v3.jsonl"
 
 
 def _eval_case_ids() -> set[str]:
-    """eval_data/v2 全部 case 标识（eval_case_id / input.case_id / lineage.seed_case_id）。"""
+    """eval_data 全部 case 标识（eval_case_id / input.case_id）。"""
     ids: set[str] = set()
-    if EVAL_V2.exists():
-        for line in EVAL_V2.open(encoding="utf-8"):
+    if EVAL_CASES.exists():
+        for line in EVAL_CASES.open(encoding="utf-8"):
             line = line.strip()
             if not line:
                 continue
             obj = json.loads(line)
             ids.add(obj["eval_case_id"])
             ids.add(obj["input"]["case_id"])
-            lineage = obj.get("lineage") or {}
-            if lineage.get("seed_case_id"):
-                ids.add(lineage["seed_case_id"])
     for row in _DEFAULT_PRECEDENTS:
         ids.add(row["case_id"])
     return ids

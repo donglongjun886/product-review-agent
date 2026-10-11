@@ -19,7 +19,6 @@ from evaluation.dataset.schema import (
 from helpers import REPO_ROOT, SCRIPTS_DIR, load_script, make_case
 
 V3_DIR = REPO_ROOT / "eval_data" / "v3"
-V2_DIR = REPO_ROOT / "eval_data" / "v2"
 SCRIPT = SCRIPTS_DIR / "run_evaluation.py"
 
 
@@ -158,15 +157,18 @@ class TestOldFormatExplicitFailure:
         assert truth_path.name == "truth_v3.jsonl"
         assert cases_path.is_file() and truth_path.is_file()
 
-    def test_resolve_v2_directory_rejected(self) -> None:
+    def test_resolve_v2_directory_rejected(self, tmp_path: Path) -> None:
         mod = load_script(SCRIPT)
+        (tmp_path / "cases_v2.jsonl").write_text("{}\n", encoding="utf-8")
         with pytest.raises(ValueError, match="v2 旧格式"):
-            mod._resolve_data_path(str(V2_DIR))
+            mod._resolve_data_path(str(tmp_path))
 
-    def test_resolve_v2_file_rejected(self) -> None:
+    def test_resolve_v2_file_rejected(self, tmp_path: Path) -> None:
         mod = load_script(SCRIPT)
+        v2_file = tmp_path / "cases_v2.jsonl"
+        v2_file.write_text("{}\n", encoding="utf-8")
         with pytest.raises(ValueError, match="旧格式"):
-            mod._resolve_data_path(str(V2_DIR / "cases_v2.jsonl"))
+            mod._resolve_data_path(str(v2_file))
 
     def test_resolve_missing_path_rejected(self, tmp_path: Path) -> None:
         mod = load_script(SCRIPT)
