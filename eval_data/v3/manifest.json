@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "dataset_version": "v3",
+  "seed": 20261012,
+  "total": 320,
+  "rulebook_version": "v3-rulebook-1",
+  "rulebook_sha256": "e71cee6e88c858e796be0990a63b6344dc90287aa523410bf2773b69f17e0d54",
+  "scene_distribution": {
+    "normal": 64,
+    "violation": 64,
+    "boundary": 96,
+    "multi-signal": 64,
+    "evasion": 32
+  },
+  "decision_distribution": {
+    "PASS": 88,
+    "REJECT": 122,
+    "HUMAN_REVIEW": 110
+  },
+  "files": {
+    "cases": "cases_v3.jsonl",
+    "truth": "truth_v3.jsonl",
+    "seed_sql": "seed_v3.sql"
+  },
+  "generated_by": "scripts/build_eval_dataset.py"
+}

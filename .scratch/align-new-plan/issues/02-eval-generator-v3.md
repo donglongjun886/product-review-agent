@@ -4,10 +4,25 @@
 
 **Blocked by:** 01（风险词表收敛为 2 值）
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 生成器一次运行产出 v3 数据集：案件 + 埋点清单 + 由打标函数推导的真值
-- [ ] 打标函数是独立函数：输入埋点清单、输出真值，不依赖生成器内部状态
-- [ ] 规则书冻结为数据文件，同输入必得同真值（可复现性有测试守护）
-- [ ] 难例（强规避、弱证据、近似边界等）可通过构造参数配置生成
-- [ ] 词表只含 `POTENTIAL_IP_RISK` / `EVASION_PATTERN`
+- [x] 生成器一次运行产出 v3 数据集：案件 + 埋点清单 + 由打标函数推导的真值
+- [x] 打标函数是独立函数：输入埋点清单、输出真值，不依赖生成器内部状态
+- [x] 规则书冻结为数据文件，同输入必得同真值（可复现性有测试守护）
+- [x] 难例（强规避、弱证据、近似边界等）可通过构造参数配置生成
+- [x] 词表只含 `POTENTIAL_IP_RISK` / `EVASION_PATTERN`
+
+## Comments
+
+- 实施记录（2026-10-12）：320 案（seed=20261012，场景 64/64/96/64/32，真值 PASS 88 / REJECT 122 / HUMAN_REVIEW 110）。
+  布局：`scripts/evaluation/generator/builder.py`（构造）、`scripts/evaluation/labeling/`（`labeler.py` 纯函数 +
+  冻结 `rulebook.json`，sha256 在 `tests/test_eval_labeling_v3.py` 钉死）、v3 契约模型在
+  `scripts/evaluation/dataset/schema.py`（v2 模型未动）、CLI `scripts/build_eval_dataset.py`（自检 +
+  `--no-write` + 退出码）。产物 `eval_data/v3/`：cases/truth 双文件（埋点只在真值侧）+ `seed_v3.sql`
+  （P_V3_* / M_V3_* 各 320 行，幂等约定同 migrations/003、004）+ manifest.json（含规则书版本/哈希）。
+  `build_rag_corpus.py` 的 EVAL_FILES 纳入 v3，隔离自检继续通过。
+- 打标判定优先级：黑名单品牌 > 规避词（商家脏从重 POLICY_4.5 / 干净 POLICY_1.2） > 快照缺口与在库不一致 >
+  品牌词（可叠加商家脏）> 商家脏 > 干净放行。文本命中归类、商家脏判定均由打标函数从原始事实 + 规则书推导
+  （埋点清单只记原始事实，不记结论），构造期"文本自证"校验（重扫 == 植入清单）会拦住模板词表污染。
+- 偏离说明：HUMAN_REVIEW 案的 risk_level 统一 MEDIUM、expected_policies 为空（弃权不需要引用依据，
+  正确性契约只要求 REJECT 具备可引用依据，该不变量已进 `EvalExpectedV3` 校验器）。
