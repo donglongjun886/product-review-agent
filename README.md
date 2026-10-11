@@ -65,8 +65,7 @@ uv run python scripts/run_evaluation.py --limit 10 --out /tmp/eval.json   # 三�
 评测只有一个脚本，跑三条臂：`rule`（确定性初筛，零模型零工具）、`single`（一次模型直判，只喂案件
 快照）、`agent`（完整调查，允许调工具）。事实来源是**生产装配**：商品与商家读真 MySQL，案例与政策
 走真 RAG。只有 `agent` 用工具，`rule` 与 `single` 只看案件快照。真实调用有费用、结果不确定、不可
-重放，不进 CI。案源是 `eval_data/v2/cases_v2.jsonl`，它的真值仍是旧口径标的，**待按规则书重标**。
-评测口径见 [docs/02-evaluation.md](docs/02-evaluation.md)。
+重放，不进 CI。评测口径见 [docs/02-evaluation.md](docs/02-evaluation.md)。
 
 ## 目录
 
@@ -74,19 +73,20 @@ uv run python scripts/run_evaluation.py --limit 10 --out /tmp/eval.json   # 三�
 src/pra/
   agent/        调查流程：状态、图、节点、护栏、检查点
   tools/        四个取证工具：商品 / 商家 / 案例 / 政策
-  screening/    规则初筛与三分流
+  screening/    规则初筛与三分流（上游机审替身）
   rag/          政策库与案例库检索
-  evaluation/   评测：数据集、指标、记录
-  api/  infra/  domain/  observability/
-docs/  migrations/  scripts/  tests/  deploy/
+  api/  infra/  domain/
+scripts/        评测入口与评测包、RAG 语料构建
+docs/  migrations/  tests/  deploy/
 ```
 
 需要落库、向量库或观测服务时：建表 SQL 在 [`migrations/`](migrations/)，本地部署见 [`deploy/`](deploy/)。
 
 ## 文档
 
-- [docs/00-system-design.md](docs/00-system-design.md) —— 系统设计与判定规则
-- [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测口径：三臂、事实来源与真值路线
+- [docs/01-requirements.md](docs/01-requirements.md) —— 需求方案：解决什么问题、边界、范围、验收口径
+- [docs/00-system-design.md](docs/00-system-design.md) —— 技术方案：架构、调查流程、决策机制
+- [docs/02-evaluation.md](docs/02-evaluation.md) —— 评测口径细节
 
 ## 许可证
 
