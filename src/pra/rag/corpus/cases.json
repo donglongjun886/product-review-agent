@@ -5,8 +5,8 @@
     "generated_by": "scripts/build_rag_corpus.py",
     "seed": 20260908,
     "counts": {
-      "total": 67,
-      "curated": 25,
+      "total": 61,
+      "curated": 19,
       "variants": 42
     }
   },
@@ -255,91 +255,6 @@
     {
       "case_id": "RAG_CASE_0015",
       "category": "女鞋/运动鞋",
-      "decision": "REJECT",
-      "risk_level": "HIGH",
-      "risk_type": [
-        "FALSE_CLAIM"
-      ],
-      "summary": "普通运动鞋宣称“增高 5cm”“磁疗缓解疲劳”，无任何临床或检测依据，功效夸大且涉医疗暗示，拒绝。",
-      "key_evidence": [
-        "claim_no_evidence",
-        "medical_word"
-      ],
-      "policy_refs": [
-        "POLICY_2.1"
-      ]
-    },
-    {
-      "case_id": "RAG_CASE_0016",
-      "category": "服装/卫衣",
-      "decision": "REJECT",
-      "risk_level": "MEDIUM",
-      "risk_type": [
-        "FALSE_CLAIM"
-      ],
-      "summary": "卫衣宣称“抑菌 90 天”“自发热”但无法提供对应检测报告，功能宣称无依据，判定虚假宣传。",
-      "key_evidence": [
-        "claim_no_report"
-      ],
-      "policy_refs": [
-        "POLICY_2.2"
-      ]
-    },
-    {
-      "case_id": "RAG_CASE_0017",
-      "category": "箱包/女包",
-      "decision": "HUMAN_REVIEW",
-      "risk_level": "MEDIUM",
-      "risk_type": [
-        "FALSE_CLAIM"
-      ],
-      "summary": "背包宣称“军工级防弹面料”且商家无法出具报告，宣传夸大属实但需人工确认材质与话术定性后处置。",
-      "key_evidence": [
-        "claim_no_report",
-        "extreme_word"
-      ],
-      "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_5.3"
-      ]
-    },
-    {
-      "case_id": "RAG_CASE_0018",
-      "category": "女鞋/运动鞋",
-      "decision": "REJECT",
-      "risk_level": "MEDIUM",
-      "risk_type": [
-        "FIELD_CONFLICT",
-        "FALSE_CLAIM"
-      ],
-      "summary": "详情页宣称“头层牛皮”的鞋，质检实为 PU 合成革；材质标识与实物冲突且构成以次充好。",
-      "key_evidence": [
-        "material_conflict_leather_pu"
-      ],
-      "policy_refs": [
-        "POLICY_3.1",
-        "POLICY_2.3"
-      ]
-    },
-    {
-      "case_id": "RAG_CASE_0019",
-      "category": "服装/卫衣",
-      "decision": "REJECT",
-      "risk_level": "MEDIUM",
-      "risk_type": [
-        "FIELD_CONFLICT"
-      ],
-      "summary": "卫衣洗标标注棉含量 100%，实检棉 60% 聚酯 40%；面料成分标注与实检不符。",
-      "key_evidence": [
-        "fabric_conflict_cotton_60"
-      ],
-      "policy_refs": [
-        "POLICY_3.4"
-      ]
-    },
-    {
-      "case_id": "RAG_CASE_0020",
-      "category": "女鞋/运动鞋",
       "decision": "PASS",
       "risk_level": "NONE",
       "risk_type": [],
@@ -351,7 +266,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0021",
+      "case_id": "RAG_CASE_0016",
       "category": "女鞋/运动鞋",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -369,7 +284,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0022",
+      "case_id": "RAG_CASE_0017",
       "category": "服装/卫衣",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -386,7 +301,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0023",
+      "case_id": "RAG_CASE_0018",
       "category": "箱包/女包",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -403,23 +318,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0024",
-      "category": "女鞋/运动鞋",
-      "decision": "REJECT",
-      "risk_level": "LOW",
-      "risk_type": [
-        "FIELD_CONFLICT"
-      ],
-      "summary": "普通休闲鞋挂载“增高鞋”类目获取错误流量，商品本身无违规但类目错挂，勒令改挂正确类目。",
-      "key_evidence": [
-        "category_misplaced"
-      ],
-      "policy_refs": [
-        "POLICY_3.5"
-      ]
-    },
-    {
-      "case_id": "RAG_CASE_0025",
+      "case_id": "RAG_CASE_0019",
       "category": "箱包/女包",
       "decision": "HUMAN_REVIEW",
       "risk_level": "LOW",
@@ -436,7 +335,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0026",
+      "case_id": "RAG_CASE_0020",
       "category": "箱包/女包",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -457,7 +356,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0027",
+      "case_id": "RAG_CASE_0021",
       "category": "服装/卫衣",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -475,24 +374,27 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0028",
+      "case_id": "RAG_CASE_0022",
       "category": "女鞋/运动鞋",
-      "decision": "REJECT",
+      "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
       "risk_type": [
-        "FALSE_CLAIM"
+        "POTENTIAL_IP_RISK"
       ],
-      "summary": "休闲鞋宣称“增高 3cm”但无任何检测或临床依据，功效夸大",
+      "summary": "休闲鞋与某品牌款外观相似度 0.72（临界区间），商家历史 1 次下架，证据不足以判定高度模仿，转人工复核",
       "key_evidence": [
-        "claim_no_report"
+        "image_similarity=0.72",
+        "merchant_removals=1"
       ],
       "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_2.2"
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
       ]
     },
     {
-      "case_id": "RAG_CASE_0029",
+      "case_id": "RAG_CASE_0023",
       "category": "箱包/女包",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -505,7 +407,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0030",
+      "case_id": "RAG_CASE_0024",
       "category": "服装/卫衣",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -524,7 +426,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0031",
+      "case_id": "RAG_CASE_0025",
       "category": "女鞋/运动鞋",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -545,7 +447,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0032",
+      "case_id": "RAG_CASE_0026",
       "category": "箱包/女包",
       "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
@@ -565,24 +467,27 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0033",
+      "case_id": "RAG_CASE_0027",
       "category": "服装/卫衣",
-      "decision": "REJECT",
+      "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
       "risk_type": [
-        "FALSE_CLAIM"
+        "POTENTIAL_IP_RISK"
       ],
-      "summary": "基础款卫衣宣称“自发热保暖”但无任何检测或临床依据，功效夸大",
+      "summary": "基础款卫衣与某品牌款外观相似度 0.81（临界区间），商家历史 1 次下架，证据不足以判定高度模仿，转人工复核",
       "key_evidence": [
-        "claim_no_report"
+        "image_similarity=0.81",
+        "merchant_removals=1"
       ],
       "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_2.2"
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
       ]
     },
     {
-      "case_id": "RAG_CASE_0034",
+      "case_id": "RAG_CASE_0028",
       "category": "女鞋/运动鞋",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -595,7 +500,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0035",
+      "case_id": "RAG_CASE_0029",
       "category": "箱包/女包",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -614,7 +519,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0036",
+      "case_id": "RAG_CASE_0030",
       "category": "服装/卫衣",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -635,7 +540,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0037",
+      "case_id": "RAG_CASE_0031",
       "category": "女鞋/运动鞋",
       "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
@@ -655,24 +560,27 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0038",
+      "case_id": "RAG_CASE_0032",
       "category": "箱包/女包",
-      "decision": "REJECT",
+      "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
       "risk_type": [
-        "FALSE_CLAIM"
+        "POTENTIAL_IP_RISK"
       ],
-      "summary": "斜挎小方包宣称“增高 3cm”但无任何检测或临床依据，功效夸大",
+      "summary": "斜挎小方包与某品牌款外观相似度 0.72（临界区间），商家历史 1 次下架，证据不足以判定高度模仿，转人工复核",
       "key_evidence": [
-        "claim_no_report"
+        "image_similarity=0.72",
+        "merchant_removals=1"
       ],
       "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_2.2"
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
       ]
     },
     {
-      "case_id": "RAG_CASE_0039",
+      "case_id": "RAG_CASE_0033",
       "category": "服装/卫衣",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -685,7 +593,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0040",
+      "case_id": "RAG_CASE_0034",
       "category": "女鞋/运动鞋",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -704,7 +612,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0041",
+      "case_id": "RAG_CASE_0035",
       "category": "箱包/女包",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -725,7 +633,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0042",
+      "case_id": "RAG_CASE_0036",
       "category": "服装/卫衣",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -743,24 +651,27 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0043",
+      "case_id": "RAG_CASE_0037",
       "category": "女鞋/运动鞋",
-      "decision": "REJECT",
+      "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
       "risk_type": [
-        "FALSE_CLAIM"
+        "POTENTIAL_IP_RISK"
       ],
-      "summary": "休闲鞋宣称“自发热保暖”但无任何检测或临床依据，功效夸大",
+      "summary": "休闲鞋与某品牌款外观相似度 0.81（临界区间），商家历史 1 次下架，证据不足以判定高度模仿，转人工复核",
       "key_evidence": [
-        "claim_no_report"
+        "image_similarity=0.81",
+        "merchant_removals=1"
       ],
       "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_2.2"
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
       ]
     },
     {
-      "case_id": "RAG_CASE_0044",
+      "case_id": "RAG_CASE_0038",
       "category": "箱包/女包",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -773,7 +684,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0045",
+      "case_id": "RAG_CASE_0039",
       "category": "服装/卫衣",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -792,7 +703,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0046",
+      "case_id": "RAG_CASE_0040",
       "category": "女鞋/运动鞋",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -813,7 +724,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0047",
+      "case_id": "RAG_CASE_0041",
       "category": "箱包/女包",
       "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
@@ -833,24 +744,27 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0048",
+      "case_id": "RAG_CASE_0042",
       "category": "服装/卫衣",
-      "decision": "REJECT",
+      "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
       "risk_type": [
-        "FALSE_CLAIM"
+        "POTENTIAL_IP_RISK"
       ],
-      "summary": "印花外套宣称“防紫外线 50+”但无任何检测或临床依据，功效夸大",
+      "summary": "印花外套与某品牌款外观相似度 0.88（临界区间），商家历史 1 次下架，证据不足以判定高度模仿，转人工复核",
       "key_evidence": [
-        "claim_no_report"
+        "image_similarity=0.88",
+        "merchant_removals=1"
       ],
       "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_2.2"
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
       ]
     },
     {
-      "case_id": "RAG_CASE_0049",
+      "case_id": "RAG_CASE_0043",
       "category": "女鞋/运动鞋",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -863,7 +777,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0050",
+      "case_id": "RAG_CASE_0044",
       "category": "箱包/女包",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -882,7 +796,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0051",
+      "case_id": "RAG_CASE_0045",
       "category": "服装/卫衣",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -903,7 +817,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0052",
+      "case_id": "RAG_CASE_0046",
       "category": "女鞋/运动鞋",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -921,24 +835,27 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0053",
+      "case_id": "RAG_CASE_0047",
       "category": "箱包/女包",
-      "decision": "REJECT",
+      "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
       "risk_type": [
-        "FALSE_CLAIM"
+        "POTENTIAL_IP_RISK"
       ],
-      "summary": "通勤手提包宣称“抗菌 90 天”但无任何检测或临床依据，功效夸大",
+      "summary": "通勤手提包与某品牌款外观相似度 0.76（临界区间），商家历史 1 次下架，证据不足以判定高度模仿，转人工复核",
       "key_evidence": [
-        "claim_no_report"
+        "image_similarity=0.76",
+        "merchant_removals=1"
       ],
       "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_2.2"
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
       ]
     },
     {
-      "case_id": "RAG_CASE_0054",
+      "case_id": "RAG_CASE_0048",
       "category": "服装/卫衣",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -951,7 +868,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0055",
+      "case_id": "RAG_CASE_0049",
       "category": "女鞋/运动鞋",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -970,7 +887,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0056",
+      "case_id": "RAG_CASE_0050",
       "category": "箱包/女包",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -991,7 +908,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0057",
+      "case_id": "RAG_CASE_0051",
       "category": "服装/卫衣",
       "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
@@ -1011,24 +928,27 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0058",
+      "case_id": "RAG_CASE_0052",
       "category": "女鞋/运动鞋",
-      "decision": "REJECT",
+      "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
       "risk_type": [
-        "FALSE_CLAIM"
+        "POTENTIAL_IP_RISK"
       ],
-      "summary": "休闲鞋宣称“抗菌 90 天”但无任何检测或临床依据，功效夸大",
+      "summary": "休闲鞋与某品牌款外观相似度 0.76（临界区间），商家历史 1 次下架，证据不足以判定高度模仿，转人工复核",
       "key_evidence": [
-        "claim_no_report"
+        "image_similarity=0.76",
+        "merchant_removals=1"
       ],
       "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_2.2"
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
       ]
     },
     {
-      "case_id": "RAG_CASE_0059",
+      "case_id": "RAG_CASE_0053",
       "category": "箱包/女包",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -1041,7 +961,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0060",
+      "case_id": "RAG_CASE_0054",
       "category": "服装/卫衣",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -1060,7 +980,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0061",
+      "case_id": "RAG_CASE_0055",
       "category": "女鞋/运动鞋",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -1081,7 +1001,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0062",
+      "case_id": "RAG_CASE_0056",
       "category": "箱包/女包",
       "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
@@ -1101,24 +1021,27 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0063",
+      "case_id": "RAG_CASE_0057",
       "category": "服装/卫衣",
-      "decision": "REJECT",
+      "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",
       "risk_type": [
-        "FALSE_CLAIM"
+        "POTENTIAL_IP_RISK"
       ],
-      "summary": "宽松卫衣宣称“防紫外线 50+”但无任何检测或临床依据，功效夸大",
+      "summary": "宽松卫衣与某品牌款外观相似度 0.88（临界区间），商家历史 1 次下架，证据不足以判定高度模仿，转人工复核",
       "key_evidence": [
-        "claim_no_report"
+        "image_similarity=0.88",
+        "merchant_removals=1"
       ],
       "policy_refs": [
-        "POLICY_2.1",
-        "POLICY_2.2"
+        "POLICY_1.4",
+        "POLICY_1.5",
+        "POLICY_1.6",
+        "POLICY_5.3"
       ]
     },
     {
-      "case_id": "RAG_CASE_0064",
+      "case_id": "RAG_CASE_0058",
       "category": "女鞋/运动鞋",
       "decision": "PASS",
       "risk_level": "NONE",
@@ -1131,7 +1054,7 @@
       "policy_refs": []
     },
     {
-      "case_id": "RAG_CASE_0065",
+      "case_id": "RAG_CASE_0059",
       "category": "箱包/女包",
       "decision": "REJECT",
       "risk_level": "MEDIUM",
@@ -1150,7 +1073,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0066",
+      "case_id": "RAG_CASE_0060",
       "category": "服装/卫衣",
       "decision": "REJECT",
       "risk_level": "HIGH",
@@ -1171,7 +1094,7 @@
       ]
     },
     {
-      "case_id": "RAG_CASE_0067",
+      "case_id": "RAG_CASE_0061",
       "category": "女鞋/运动鞋",
       "decision": "HUMAN_REVIEW",
       "risk_level": "MEDIUM",

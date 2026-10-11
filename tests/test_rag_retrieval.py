@@ -237,11 +237,11 @@ async def test_vector_recalls_semantically_matching_clause(policy_hybrid: Any) -
     """Vector 路能按语义把「措辞不同但同义」的条款召回进 Top-K。"""
     ranked = _ranked(
         policy_hybrid, "policy", "vector",
-        "商品把 PU 材质宣称为真皮，属于成分虚假宣传",
+        "商品被平台下架后，商家换个标题又重新发布销售",
         PolicySearchFilters(), effective_only=True, top_k=5,
     )
     ids = _policy_ids(policy_hybrid, ranked)
-    assert "POLICY_2.3_v1_c1" in ids, f"Vector 未召回语义相关条款；实际 Top-5={ids}"
+    assert "POLICY_4.2_v2_c1" in ids, f"Vector 未召回语义相关条款；实际 Top-5={ids}"
 
 
 async def test_hybrid_scores_are_rrf_fusion_not_similarity(case_hybrid: Any) -> None:
@@ -316,16 +316,16 @@ async def test_policy_risk_type_filter_is_overlap_not_equality(
 ) -> None:
     """``risk_type`` 过滤是**交叠非空**，不是相等匹配。"""
     ranked = _ranked(
-        policy_hybrid, "policy", "bm25", "材质成分虚假宣传 PU 冒充实皮",
-        PolicySearchFilters(risk_type=["FALSE_CLAIM"]), effective_only=True,
+        policy_hybrid, "policy", "bm25", "规避审核叠加品牌模仿从重处置",
+        PolicySearchFilters(risk_type=["POTENTIAL_IP_RISK"]), effective_only=True,
         top_k=len(policy_rows),
     )
     assert ranked, "risk_type 过滤后应仍有命中"
     assert all(
-        {t.value for t in policy_hybrid._rows[i].risk_type} & {"FALSE_CLAIM"}
+        {t.value for t in policy_hybrid._rows[i].risk_type} & {"POTENTIAL_IP_RISK"}
         for i, _ in ranked
     ), "存在与过滤类型无交集的条款"
-    assert "POLICY_2.3_v1_c1" in _policy_ids(policy_hybrid, ranked), (
+    assert "POLICY_4.5_v1_c1" in _policy_ids(policy_hybrid, ranked), (
         "多风险类型条款应被交叠匹配命中"
     )
 
@@ -367,7 +367,7 @@ async def test_policy_where_pushdown_equals_python_candidates(
 
     for category in (None, "女鞋/运动鞋", "箱包/女包", "全类目", "不存在的类目"):
         for effective_only in (False, True):
-            for risks in (None, ["FALSE_CLAIM"], ["EVASION_PATTERN", "FALSE_CLAIM"]):
+            for risks in (None, ["POTENTIAL_IP_RISK"], ["EVASION_PATTERN", "POTENTIAL_IP_RISK"]):
                 filters = PolicySearchFilters(category=category, risk_type=risks)
                 expected = {
                     policy_rows[i].clause_id
@@ -375,7 +375,7 @@ async def test_policy_where_pushdown_equals_python_candidates(
                 }
                 ranked = _ranked(
                     policy_hybrid, "policy", "vector",
-                    "外观高度模仿知名品牌 / 材质虚假宣传 / 改标题重上架",
+                    "外观高度模仿知名品牌 / 改标题重上架",
                     filters, effective_only=effective_only, top_k=len(policy_rows),
                 )
                 assert set(_policy_ids(policy_hybrid, ranked)) == expected, (
@@ -391,7 +391,7 @@ async def test_case_where_pushdown_equals_python_candidates(
     from pra.rag.index import _case_candidates
 
     for category in (None, "女鞋/运动鞋", "箱包/女包", "不存在的类目"):
-        for risks in (None, ["EVASION_PATTERN"], ["FALSE_CLAIM", "EVASION_PATTERN"]):
+        for risks in (None, ["EVASION_PATTERN"], ["POTENTIAL_IP_RISK", "EVASION_PATTERN"]):
             filters = CaseSearchFilters(category=category, risk_type=risks)
             expected = {
                 case_rows[i].case_id for i in _case_candidates(case_rows, filters)

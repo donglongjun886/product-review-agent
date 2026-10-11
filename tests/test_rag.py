@@ -41,7 +41,7 @@ def test_corpus_data_integrity() -> None:
     policies, pmeta = load_policies()
     cases, cmeta = load_cases()
 
-    assert 20 <= len(policies) <= 40, f"Policy KB 条款数须 20~40，实际 {len(policies)}"
+    assert 10 <= len(policies) <= 40, f"Policy KB 条款数须 10~40，实际 {len(policies)}"
     assert 50 <= len(cases) <= 100, f"Case KB 条数须 50~100，实际 {len(cases)}"
 
     expired = [p for p in policies if p.status == "EXPIRED"]

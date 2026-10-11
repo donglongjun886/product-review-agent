@@ -33,7 +33,7 @@ __all__ = [
 
 DIM_LISTING_REGISTRY = "listing_registry"  # 商品在库可核验（品牌/类目/版本事实）
 DIM_MERCHANT_PROFILE = "merchant_profile"  # 商家行为模式（removals / title-relisting）
-DIM_TEXT_COMPLIANCE = "text_compliance"  # 标题/描述合规（品牌词、规避词、绝对化用语）
+DIM_TEXT_COMPLIANCE = "text_compliance"  # 标题/描述合规（品牌词、规避词）
 DIM_POLICY_CITATION = "policy_citation"  # 可引用依据（政策条款 / 人工先例）
 
 ALL_DIMENSIONS: tuple[str, ...] = (

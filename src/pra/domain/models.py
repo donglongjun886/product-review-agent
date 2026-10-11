@@ -45,8 +45,6 @@ class RiskType(str, Enum):
 
     POTENTIAL_IP_RISK = "POTENTIAL_IP_RISK"  # 疑似 IP / 品牌模仿
     EVASION_PATTERN = "EVASION_PATTERN"      # 规避审核行为模式
-    FALSE_CLAIM = "FALSE_CLAIM"              # 虚假 / 无依据宣传
-    FIELD_CONFLICT = "FIELD_CONFLICT"        # 商品字段信息冲突
 
 
 class HypothesisStatus(str, Enum):

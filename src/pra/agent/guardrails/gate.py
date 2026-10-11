@@ -116,8 +116,6 @@ def _finalize_risk_type(state, proposal) -> list:
     risk: list = []
     if DIM_MERCHANT_PROFILE in positive_dims:
         risk.append(RiskType.EVASION_PATTERN)
-    if DIM_TEXT_COMPLIANCE in positive_dims:
-        risk.append(RiskType.FALSE_CLAIM)
     return risk
 
 

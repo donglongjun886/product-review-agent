@@ -85,64 +85,6 @@ _POLICY_ROWS: list[dict] = [
         "category": "服装/卫衣", "risk_type": ["POTENTIAL_IP_RISK"],
         "status": "EFFECTIVE", "effective_date": "2024-06-01",
     },
-    # ---- 2.x 虚假宣传 / 功效夸大 ----
-    {
-        "policy_id": "POLICY_2.1", "version": 1,
-        "clause_id": "POLICY_2.1_v1_c1", "title": "功效夸大禁止（旧版）",
-        "text": "禁止功效类夸大表述，如“永久去皱”“根治脚气”等绝对化功效词（旧版，已失效）。",
-        "category": "全类目", "risk_type": ["FALSE_CLAIM"],
-        "status": "EXPIRED", "effective_date": "2023-05-01",
-    },
-    {
-        "policy_id": "POLICY_2.1", "version": 2,
-        "clause_id": "POLICY_2.1_v2_c1", "title": "无依据功效夸大禁止",
-        "text": "禁止无依据的功效夸大宣称：如鞋类“增高 5cm”“磁疗改善循环”、服装“抑菌 90 天”、箱包“防弹”等；宣称须能出具权威检测或临床依据，否则下架处理。",
-        "category": "全类目", "risk_type": ["FALSE_CLAIM"],
-        "status": "EFFECTIVE", "effective_date": "2024-04-01",
-    },
-    {
-        "policy_id": "POLICY_2.2", "version": 1,
-        "clause_id": "POLICY_2.2_v1_c1", "title": "服饰功能宣称需检测依据",
-        "text": "服饰商品宣称抗菌、防紫外线、发热、凉感等功能须提供对应检测报告；无报告仅以功能词描述视为虚假宣传。",
-        "category": "服装/卫衣", "risk_type": ["FALSE_CLAIM"],
-        "status": "EFFECTIVE", "effective_date": "2024-05-01",
-    },
-    {
-        "policy_id": "POLICY_2.3", "version": 1,
-        "clause_id": "POLICY_2.3_v1_c1", "title": "材质/成分虚假声称",
-        "text": "商品宣称材质或成分与实际不符视为虚假宣传：如将 PU 标注为真皮、将混纺标注为纯棉、以次充好，按违规处置。",
-        "category": "全类目", "risk_type": ["FALSE_CLAIM", "FIELD_CONFLICT"],
-        "status": "EFFECTIVE", "effective_date": "2024-02-01",
-    },
-    # ---- 3.x 类目准入 / 材质标识 ----
-    {
-        "policy_id": "POLICY_3.1", "version": 1,
-        "clause_id": "POLICY_3.1_v1_c1", "title": "鞋类真皮标识凭证",
-        "text": "鞋类商品标题/详情宣称“真皮”“头层牛皮”的，须提交材质质检或授权标识凭证；无法证明真皮却宣称的，判定虚假标识。",
-        "category": "女鞋/运动鞋", "risk_type": ["FIELD_CONFLICT"],
-        "status": "EFFECTIVE", "effective_date": "2024-03-01",
-    },
-    {
-        "policy_id": "POLICY_3.3", "version": 1,
-        "clause_id": "POLICY_3.3_v1_c1", "title": "箱包材质与五金标识一致",
-        "text": "箱包材质（真皮/PU/帆布）与五金材质标注须与实物及质检一致；“纯皮”“原版五金”等表述需可核验凭证。",
-        "category": "箱包/女包", "risk_type": ["FIELD_CONFLICT"],
-        "status": "EFFECTIVE", "effective_date": "2024-05-01",
-    },
-    {
-        "policy_id": "POLICY_3.4", "version": 1,
-        "clause_id": "POLICY_3.4_v1_c1", "title": "服装面料成分标注规范",
-        "text": "服装须按洗标与质检标注面料成分及含量（如棉含量百分比）；标注与实检不符判定违规。",
-        "category": "服装/卫衣", "risk_type": ["FIELD_CONFLICT"],
-        "status": "EFFECTIVE", "effective_date": "2024-01-01",
-    },
-    {
-        "policy_id": "POLICY_3.5", "version": 1,
-        "clause_id": "POLICY_3.5_v1_c1", "title": "类目错挂/蹭类目流量",
-        "text": "商品须按真实属性挂载正确类目；借他类目流量（如普通鞋挂“增高鞋”类目、普通服饰挂“防护服”类目）判定类目错挂违规。",
-        "category": "全类目", "risk_type": ["FIELD_CONFLICT"],
-        "status": "EFFECTIVE", "effective_date": "2024-01-01",
-    },
     # ---- 4.x 规避行为 ----
     {
         "policy_id": "POLICY_4.2", "version": 1,
@@ -175,7 +117,7 @@ _POLICY_ROWS: list[dict] = [
     {
         "policy_id": "POLICY_4.5", "version": 1,
         "clause_id": "POLICY_4.5_v1_c1", "title": "规避叠加仿冒从重处置",
-        "text": "规避审核行为与品牌模仿、虚假宣传等风险叠加出现时（如高仿鞋改标题重上架），按从重档处置：直接拒绝并累计商家信用分扣减。",
+        "text": "规避审核行为与品牌模仿风险叠加出现时（如高仿鞋改标题重上架），按从重档处置：直接拒绝并累计商家信用分扣减。",
         "category": "全类目", "risk_type": ["EVASION_PATTERN", "POTENTIAL_IP_RISK"],
         "status": "EFFECTIVE", "effective_date": "2024-03-01",
     },
@@ -310,43 +252,6 @@ _CASE_SEEDS: list[dict] = [
         "key_evidence": ["image_similarity>=0.9", "own_brand_claimed"],
         "policy_refs": ["POLICY_1.6", "POLICY_1.1"],
     },
-    # 虚假宣传 / 功效夸大
-    {
-        "category": "女鞋/运动鞋", "decision": "REJECT", "risk_level": "HIGH",
-        "risk_type": ["FALSE_CLAIM"],
-        "summary": "普通运动鞋宣称“增高 5cm”“磁疗缓解疲劳”，无任何临床或检测依据，功效夸大且涉医疗暗示，拒绝。",
-        "key_evidence": ["claim_no_evidence", "medical_word"],
-        "policy_refs": ["POLICY_2.1"],
-    },
-    {
-        "category": "服装/卫衣", "decision": "REJECT", "risk_level": "MEDIUM",
-        "risk_type": ["FALSE_CLAIM"],
-        "summary": "卫衣宣称“抑菌 90 天”“自发热”但无法提供对应检测报告，功能宣称无依据，判定虚假宣传。",
-        "key_evidence": ["claim_no_report"],
-        "policy_refs": ["POLICY_2.2"],
-    },
-    {
-        "category": "箱包/女包", "decision": "HUMAN_REVIEW", "risk_level": "MEDIUM",
-        "risk_type": ["FALSE_CLAIM"],
-        "summary": "背包宣称“军工级防弹面料”且商家无法出具报告，宣传夸大属实但需人工确认材质与话术定性后处置。",
-        "key_evidence": ["claim_no_report", "extreme_word"],
-        "policy_refs": ["POLICY_2.1", "POLICY_5.3"],
-    },
-    # 材质虚假 / 标识冲突
-    {
-        "category": "女鞋/运动鞋", "decision": "REJECT", "risk_level": "MEDIUM",
-        "risk_type": ["FIELD_CONFLICT", "FALSE_CLAIM"],
-        "summary": "详情页宣称“头层牛皮”的鞋，质检实为 PU 合成革；材质标识与实物冲突且构成以次充好。",
-        "key_evidence": ["material_conflict_leather_pu"],
-        "policy_refs": ["POLICY_3.1", "POLICY_2.3"],
-    },
-    {
-        "category": "服装/卫衣", "decision": "REJECT", "risk_level": "MEDIUM",
-        "risk_type": ["FIELD_CONFLICT"],
-        "summary": "卫衣洗标标注棉含量 100%，实检棉 60% 聚酯 40%；面料成分标注与实检不符。",
-        "key_evidence": ["fabric_conflict_cotton_60"],
-        "policy_refs": ["POLICY_3.4"],
-    },
     {
         "category": "女鞋/运动鞋", "decision": "PASS", "risk_level": "NONE",
         "risk_type": [],
@@ -354,7 +259,7 @@ _CASE_SEEDS: list[dict] = [
         "key_evidence": ["material_label_ok", "merchant_clean"],
         "policy_refs": [],
     },
-    # 规避（纯规避/类目错挂）
+    # 规避
     {
         "category": "女鞋/运动鞋", "decision": "REJECT", "risk_level": "MEDIUM",
         "risk_type": ["EVASION_PATTERN"],
@@ -375,13 +280,6 @@ _CASE_SEEDS: list[dict] = [
         "summary": "同一违规托特包拆分为 3 个不同 SKU 链接分别上架，图文复用规避单链接处罚，关联链接一并下架。",
         "key_evidence": ["sku_split=3", "multi_link_relisting"],
         "policy_refs": ["POLICY_4.4"],
-    },
-    {
-        "category": "女鞋/运动鞋", "decision": "REJECT", "risk_level": "LOW",
-        "risk_type": ["FIELD_CONFLICT"],
-        "summary": "普通休闲鞋挂载“增高鞋”类目获取错误流量，商品本身无违规但类目错挂，勒令改挂正确类目。",
-        "key_evidence": ["category_misplaced"],
-        "policy_refs": ["POLICY_3.5"],
     },
     {
         "category": "箱包/女包", "decision": "HUMAN_REVIEW", "risk_level": "LOW",
@@ -447,15 +345,16 @@ def _gen_variants(seed: int, target: int) -> list[dict]:
                 "policy_refs": ["POLICY_1.4", "POLICY_1.5", "POLICY_1.6", "POLICY_5.3"],
             })
         elif pattern == 2:
-            claim = rng.choice([
-                "增高 3cm", "抗菌 90 天", "自发热保暖", "磁疗促进循环", "防紫外线 50+",
-            ])
-            summary = f"{item}宣称“{claim}”但无任何检测或临床依据，功效夸大"
+            sim = rng.choice([0.72, 0.76, 0.81, 0.84, 0.88])
+            summary = (
+                f"{item}与某品牌款外观相似度 {sim}（临界区间），商家历史 1 次下架，"
+                f"证据不足以判定高度模仿，转人工复核"
+            )
             rows.append({
-                "category": category, "decision": "REJECT", "risk_level": "MEDIUM",
-                "risk_type": ["FALSE_CLAIM"], "summary": summary,
-                "key_evidence": ["claim_no_report"],
-                "policy_refs": ["POLICY_2.1", "POLICY_2.2"],
+                "category": category, "decision": "HUMAN_REVIEW", "risk_level": "MEDIUM",
+                "risk_type": ["POTENTIAL_IP_RISK"], "summary": summary,
+                "key_evidence": [f"image_similarity={sim}", "merchant_removals=1"],
+                "policy_refs": ["POLICY_1.4", "POLICY_1.5", "POLICY_1.6", "POLICY_5.3"],
             })
         elif pattern == 3:
             summary = f"自有品牌{item}，无相似外观、无风险词、无规避史，商家信用良好，正常放行"
