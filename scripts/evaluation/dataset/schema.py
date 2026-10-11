@@ -17,6 +17,12 @@ AbstainLabel = Literal["AUTO_DECIDABLE", "SHOULD_ABSTAIN"]
 
 RiskTypeV3 = Literal["POTENTIAL_IP_RISK", "EVASION_PATTERN"]
 ToolNameV3 = Literal["ProductTool", "MerchantTool", "CaseSearchTool", "PolicySearchTool"]
+# 证据类型受控词表：与生产证据 type 常量对齐（RULE_HIT=初筛规则命中 / MERCHANT_HISTORY /
+# PRODUCT_FACT / POLICY_REF / CASE_PRECEDENT=四工具 / MEASUREMENT=快照测量），
+# 漂移由 tests/test_eval_rulebook_drift.py 守护。
+EvidenceTypeV3 = Literal[
+    "RULE_HIT", "MERCHANT_HISTORY", "PRODUCT_FACT", "POLICY_REF", "CASE_PRECEDENT", "MEASUREMENT",
+]
 
 
 class TextHitV3(BaseModel):
@@ -87,8 +93,11 @@ class EvalExpectedV3(BaseModel):
 
     decision: TruthDecision
     abstain_label: AbstainLabel = Field(description="v3 数据必填：HUMAN_REVIEW ⇔ SHOULD_ABSTAIN")
-    risk_level: Literal["LOW", "MEDIUM", "HIGH", "NONE"]
     risk_type: list[RiskTypeV3] = Field(default_factory=list)
+    expected_evidence: list[EvidenceTypeV3] = Field(
+        default_factory=list,
+        description="应产出的证据类型集合；空列表 = 未标注，不进证据类型比对分母",
+    )
     expected_tools: list[ToolNameV3] = Field(
         default_factory=list,
         description="Agent 应调用的工具集合；空列表 = 规则层可判、无需工具，不进工具指标分母",
@@ -104,8 +113,8 @@ class EvalExpectedV3(BaseModel):
             raise ValueError("decision=HUMAN_REVIEW 要求 abstain_label=SHOULD_ABSTAIN")
         if self.decision != "HUMAN_REVIEW" and self.abstain_label != "AUTO_DECIDABLE":
             raise ValueError("decision ∈ {PASS, REJECT} 要求 abstain_label=AUTO_DECIDABLE")
-        if self.decision == "PASS" and (self.risk_type or self.risk_level != "NONE" or self.expected_policies):
-            raise ValueError("decision=PASS 要求 risk_type=[] / risk_level=NONE / expected_policies=[]")
+        if self.decision == "PASS" and (self.risk_type or self.expected_policies):
+            raise ValueError("decision=PASS 要求 risk_type=[] / expected_policies=[]")
         if self.decision == "REJECT" and not self.expected_policies:
             raise ValueError("decision=REJECT 要求 expected_policies 非空（自动拒绝须有可引用依据）")
         return self
@@ -140,6 +149,7 @@ __all__ = [
     "EvalConstructionV3",
     "EvalExpectedV3",
     "EvalTruthV3",
+    "EvidenceTypeV3",
     "MerchantFactsV3",
     "RegistryFactsV3",
     "RiskTypeV3",

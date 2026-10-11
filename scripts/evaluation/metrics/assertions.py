@@ -1,18 +1,23 @@
 """过程断言（docs/02 §6）：不依赖标签的过程合规检查，失败清单进报告。
 
-四条断言：
+五条断言：
 - REJECT_WITHOUT_CITATION：自动拒绝（REJECT）但 policy 为空，或证据链无可引用依据
-  （无带 ref_id 的证据、也无规则命中的 rule_id）—— 自动拒绝必须同时具备可引用依据；
-- GATE_NOT_TRIGGERED：真值侧可推导的硬规则情形（manifest.snapshot_brand 命中品牌黑名单），
-  agent 臂 overrides 应含 R1_HARD_RULE，未含即判错（只查 agent 臂：rule/single 无 overrides 通道）；
+  （无带 ref_id 的证据、也无规则命中的 rule_id）—— 自动拒绝必须同时具备可引用依据。
+  只评 agent 臂：rule 臂的可引用依据是规则命中本身，single 臂无证据通道是基线设计；
+- GATE_NOT_TRIGGERED：真值侧可推导的硬规则情形（manifest.snapshot_brand 命中冻结规则书的
+  品牌黑名单），agent 臂 overrides 应含 R1_HARD_RULE，未含即判错
+  （只查 agent 臂：rule/single 无 overrides 通道）；
 - BUDGET_EXCEEDED：record.cost 超过本次运行的预算上限（三臂恒为生产默认档，由调用方传入）；
 - CITATION_UNRESOLVABLE：record.policy 的条款 id（policy_id 或 clause_id）在政策库
-  policies.json 找不回，或 CASE_PRECEDENT 证据的 ref_id 在先例库 cases.json 找不回。
+  policies.json 找不回，或 CASE_PRECEDENT 证据的 ref_id 在先例库 cases.json 找不回；
+- SILENT_DEGRADATION：auto 决策（PASS/REJECT）但 record detail 带 error，
+  或 agent 臂 PASS 但证据链为空 —— 禁止空结果冒充正常。
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,13 +25,12 @@ from evaluation.dataset.schema import EvalTruthV3
 from evaluation.record import EvalRecord
 from pydantic import BaseModel, Field
 
-from pra.screening.rule_engine import terms
-
 __all__ = [
     "BUDGET_EXCEEDED",
     "CITATION_UNRESOLVABLE",
     "GATE_NOT_TRIGGERED",
     "REJECT_WITHOUT_CITATION",
+    "SILENT_DEGRADATION",
     "AssertionFailure",
     "CitationIndex",
     "check_process_assertions",
@@ -37,9 +41,11 @@ REJECT_WITHOUT_CITATION = "REJECT_WITHOUT_CITATION"
 GATE_NOT_TRIGGERED = "GATE_NOT_TRIGGERED"
 BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
 CITATION_UNRESOLVABLE = "CITATION_UNRESOLVABLE"
+SILENT_DEGRADATION = "SILENT_DEGRADATION"
 
 _R1_HARD_RULE = "R1_HARD_RULE"
 _CASE_PRECEDENT = "CASE_PRECEDENT"
+_AUTO_DECISIONS = frozenset({"PASS", "REJECT"})
 
 
 class AssertionFailure(BaseModel):
@@ -101,23 +107,30 @@ def check_process_assertions(
     records: list[EvalRecord],
     truth: list[EvalTruthV3],
     *,
+    scheme: str,
     citations: CitationIndex,
+    blacklisted_brands: Collection[str],
     max_llm_calls: int,
     max_tool_calls: int,
 ) -> list[AssertionFailure]:
-    """对一臂记录跑四条过程断言，返回失败清单（按记录顺序）。
+    """对一臂记录跑五条过程断言，返回失败清单（按记录顺序）。
 
     :param records: 一臂的评测记录；
     :param truth: v3 真值行（GATE_NOT_TRIGGERED 需要 manifest.snapshot_brand）；
+    :param scheme: 本批记录所属臂名（断言的臂范围以此为准，与记录 scheme 字段一致）；
     :param citations: 引用可解析索引（见 ``load_citation_index``）；
+    :param blacklisted_brands: 冻结规则书的品牌黑名单（真值口径单一来源）；
     :param max_llm_calls / max_tool_calls: 本次运行的预算上限。
     """
     manifests = {t.eval_case_id: t.manifest for t in truth}
+    blacklist = set(blacklisted_brands)
     failures: list[AssertionFailure] = []
     for rec in records:
-        cid, scheme = rec.eval_case_id, rec.scheme
+        cid = rec.eval_case_id
 
-        if rec.decision == "REJECT" and (not rec.policy or not _has_citable_evidence(rec)):
+        if scheme == "agent" and rec.decision == "REJECT" and (
+            not rec.policy or not _has_citable_evidence(rec)
+        ):
             failures.append(
                 AssertionFailure(
                     eval_case_id=cid,
@@ -135,7 +148,7 @@ def check_process_assertions(
             scheme == "agent"
             and manifest is not None
             and manifest.snapshot_brand is not None
-            and manifest.snapshot_brand in terms.BLACKLISTED_BRANDS
+            and manifest.snapshot_brand in blacklist
             and _R1_HARD_RULE not in list((rec.detail or {}).get("overrides") or [])
         ):
             failures.append(
@@ -180,6 +193,26 @@ def check_process_assertions(
                     scheme=scheme,
                     code=CITATION_UNRESOLVABLE,
                     detail=f"引用在语料库找不回: {unresolvable}",
+                )
+            )
+
+        error = (rec.detail or {}).get("error")
+        if rec.decision in _AUTO_DECISIONS and error:
+            failures.append(
+                AssertionFailure(
+                    eval_case_id=cid,
+                    scheme=scheme,
+                    code=SILENT_DEGRADATION,
+                    detail=f"自动决策（{rec.decision}）但 detail 带 error: {str(error)[:60]}",
+                )
+            )
+        elif scheme == "agent" and rec.decision == "PASS" and not rec.evidence:
+            failures.append(
+                AssertionFailure(
+                    eval_case_id=cid,
+                    scheme=scheme,
+                    code=SILENT_DEGRADATION,
+                    detail="agent 臂 PASS 但证据链为空（空结果冒充正常）",
                 )
             )
     return failures

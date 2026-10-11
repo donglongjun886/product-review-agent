@@ -67,7 +67,6 @@ def _eval_truth(eval_case_id: str) -> EvalTruthV3:
         expected=EvalExpectedV3(
             decision="PASS",
             abstain_label="AUTO_DECIDABLE",
-            risk_level="NONE",
             risk_type=[],
             expected_tools=[],
             expected_policies=[],

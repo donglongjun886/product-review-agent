@@ -44,10 +44,28 @@
   经 truth 行拿 manifest，效果等同"纳入判卷"（失败清单进报告与 payload）。② 无证据引用拒绝的判定
   按任务书字面取"或"：REJECT ∧（policy 为空 ∨ 证据链无可引用依据）即判错 —— rule 臂 REJECT 只有
   规则命中没有政策引用，会系统性命中此断言；这是口径语义（自动拒绝须同时具备可引用依据），
-  不是实现疏漏。③ 蜕变/pass^k 只接线 agent 臂（任务书"至少覆盖 agent 臂"；rule 确定性无需重复，
-  single 臂未覆盖——如有需要同一开关可扩展）。
+  不是实现疏漏。③ 蜕变/pass^k 只接线 agent 臂（实施时的口头指引是"至少覆盖 agent 臂"，票原文无此句；
+  rule 确定性无需重复，single 臂未覆盖——如有需要同一开关可扩展）。
 - 验证：`uv run pytest -q` 391 passed / 7 skipped；`uv run ruff check` 维持基线 51 个存量 error，
   本票触碰的文件 0 告警。新增测试：test_eval_selective_metrics / test_eval_diagnostics /
   test_eval_process_assertions / test_eval_metamorphic / test_eval_report，重写
   test_eval_failure_isolation，test_eval_run_v3_e2e 增加第二层 CLI 接线格（fake backend 下
   --exclude-ids/--metamorphic/--pass-k 出数）。
+- 修复记录（2026-10-12，code-review 后续修）：
+  - 判卷补证据类型比对（docs/02 §4.1）：`CaseGrading` 新增 expected/actual/missing/extra/
+    match 五格（期望空 → None 不进比对，语义同工具格）；诊断区**不**新增证据命中率指标
+    （docs/02 §5.2 未列，无 spec 依据不造指标）。
+  - 删除无消费者字段 `CaseGrading.truth_abstain_label`（abstain 可由 truth_decision 推导）。
+  - 过程断言口径修正：`REJECT_WITHOUT_CITATION` 收敛为只评 agent 臂（rule 臂可引用依据是
+    规则命中、single 臂无证据通道是基线设计），与 `GATE_NOT_TRIGGERED` 臂 scope 对齐；
+    `check_process_assertions` 签名加 `scheme` 臂参数；新增 `SILENT_DEGRADATION`
+    （auto 决策带 detail.error，或 agent 臂 PASS 但证据链为空）。
+  - "过程断言失败计入判错"兑现：selective risk 分子 = 自动决策 ∧（裁决与真值不一致 ∨
+    命中过程断言），coverage 分母不变；`evaluate_selective` 加 `assertion_failed` 参数，
+    run_evaluation 接线，报告头条注记判错口径。
+  - 跨源一致性：断言的黑名单与蜕变规避词统一改读冻结规则书（真值口径单一来源）；
+    新增 `tests/test_eval_rulebook_drift.py` 守规则书词表/阈值与生产 terms/
+    MERCHANT_DIRTY_MIN 及证据词表与生产 type 常量的一致性，漂移即显式失败。
+  - 蜕变补"换表述"扰动（docs/02 §6）：`perturb_paraphrase` 用生成器模板同义改写映射，
+    匹配不到回退追加中性从句；`check_metamorphic` 收保语义变体列表；--metamorphic
+    接线为 3 类扰动。

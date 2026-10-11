@@ -3,8 +3,8 @@
   "dataset_version": "v3",
   "seed": 20261012,
   "total": 320,
-  "rulebook_version": "v3-rulebook-1",
-  "rulebook_sha256": "e71cee6e88c858e796be0990a63b6344dc90287aa523410bf2773b69f17e0d54",
+  "rulebook_version": "v3-rulebook-2",
+  "rulebook_sha256": "6649a2fcc2b4a7cc6ddf4113bd92af371965b28c04b9d5b8a443eea23615ebda",
   "scene_distribution": {
     "normal": 64,
     "violation": 64,

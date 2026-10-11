@@ -1,8 +1,10 @@
 """蜕变测试与 pass^k（docs/02 §6）：确定性扰动 + 裁决严格度比较 + 重复运行一致率。
 
 蜕变扰动是纯函数（同案同扰动结果一致，可重放）：
-- 保语义扰动：只改不动语义的字段（价格 / SKU ID / 上架时间 / 图片地址），初筛规则命中不变；
-- 风险增强扰动：标题前缀植入规避词，裁决不得变松（严格度序 REJECT > HUMAN_REVIEW > PASS）。
+- 保语义扰动：只改不动语义的字段（价格 / SKU ID / 上架时间 / 图片地址），或换表述
+  （生成器模板的同义改写；匹配不到模板回退追加中性从句），初筛规则命中不变；
+- 风险增强扰动：标题前缀植入规避词（词表取自冻结规则书，真值口径单一来源），
+  裁决不得变松（严格度序 REJECT > HUMAN_REVIEW > PASS）。
 
 pass^k：同一批案重复运行 k 次，逐案比对裁决是否全部一致。
 """
@@ -16,14 +18,16 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from evaluation.dataset.schema import EvalCaseV3
+from evaluation.generator.builder import DESCRIPTION_PARAPHRASES, TITLE_PARAPHRASES
+from evaluation.labeling.labeler import load_rulebook
 from evaluation.record import EvalRecord
-from pra.screening.rule_engine import terms
 
 __all__ = [
     "MetamorphicFailure",
     "PassKMetrics",
     "check_metamorphic",
     "pass_k_consistency",
+    "perturb_paraphrase",
     "perturb_risk_amplifying",
     "perturb_semantics_preserving",
     "strictness",
@@ -34,6 +38,7 @@ _STRICTNESS = {"REJECT": 2, "HUMAN_REVIEW": 1, "PASS": 0}
 _NEUTRAL_SKU_SUFFIX = "_P"
 _NEUTRAL_PRICE_DELTA = 7.5
 _NEUTRAL_TIME_SHIFT = timedelta(days=1)
+_NEUTRAL_CLAUSE = "页面信息持续更新中。"
 _RISK_TERM = "高仿"
 
 
@@ -72,13 +77,38 @@ def perturb_semantics_preserving(case: EvalCaseV3) -> EvalCaseV3:
 def perturb_risk_amplifying(case: EvalCaseV3) -> EvalCaseV3:
     """风险增强扰动：标题前缀植入一个词表规避词（其余字段不动）。"""
     product = case.input.product
-    term = _RISK_TERM if _RISK_TERM in terms.EVASION_TERMS else min(terms.EVASION_TERMS)
+    evasion_terms = [str(t) for t in load_rulebook()["evasion_terms"]]
+    term = _RISK_TERM if _RISK_TERM in evasion_terms else min(evasion_terms)
     return case.model_copy(
         update={
             "input": case.input.model_copy(
                 update={
                     "product": product.model_copy(update={"title": f"{term} {product.title}"})
                 }
+            )
+        }
+    )
+
+
+def perturb_paraphrase(case: EvalCaseV3) -> EvalCaseV3:
+    """保语义"换表述"扰动：命中生成器模板同义改写映射则替换；
+    匹配不到模板回退为描述末尾追加中性从句（不含任何词表词）。"""
+    product = case.input.product
+    title, description = product.title, product.description
+    for src, dst in TITLE_PARAPHRASES.items():
+        if src in title:
+            title = title.replace(src, dst)
+            break
+    for src, dst in DESCRIPTION_PARAPHRASES.items():
+        if src in description:
+            description = description.replace(src, dst)
+            break
+    if title == product.title and description == product.description:
+        description = f"{description}{_NEUTRAL_CLAUSE}"
+    return case.model_copy(
+        update={
+            "input": case.input.model_copy(
+                update={"product": product.model_copy(update={"title": title, "description": description})}
             )
         }
     )
@@ -96,25 +126,26 @@ class MetamorphicFailure(BaseModel):
 
 
 def check_metamorphic(
-    original: EvalRecord, neutral: EvalRecord, amplified: EvalRecord
+    original: EvalRecord, neutrals: list[EvalRecord], amplified: EvalRecord
 ) -> list[MetamorphicFailure]:
-    """比对一案的原裁决与两类扰动后的裁决，返回违例清单（可为空）。
+    """比对一案的原裁决与各扰动后的裁决，返回违例清单（可为空）。
 
     :param original: 原案的评测记录；
-    :param neutral: 保语义扰动后的记录（裁决不得翻转）；
+    :param neutrals: 各保语义扰动（改无关字段 / 换表述）后的记录（裁决不得翻转）；
     :param amplified: 风险增强扰动后的记录（裁决不得变松）。
     """
     failures: list[MetamorphicFailure] = []
     cid = original.eval_case_id
-    if neutral.decision != original.decision:
-        failures.append(
-            MetamorphicFailure(
-                eval_case_id=cid,
-                kind="NEUTRAL_FLIP",
-                original=original.decision,
-                perturbed=neutral.decision,
+    for neutral in neutrals:
+        if neutral.decision != original.decision:
+            failures.append(
+                MetamorphicFailure(
+                    eval_case_id=cid,
+                    kind="NEUTRAL_FLIP",
+                    original=original.decision,
+                    perturbed=neutral.decision,
+                )
             )
-        )
     if strictness(amplified.decision) < strictness(original.decision):
         failures.append(
             MetamorphicFailure(

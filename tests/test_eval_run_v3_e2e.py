@@ -98,8 +98,8 @@ def _write_v3_dataset(tmp_path: Path) -> Path:
                 expected=EvalExpectedV3(
                     decision="PASS",
                     abstain_label="AUTO_DECIDABLE",
-                    risk_level="NONE",
                     risk_type=[],
+                    expected_evidence=["MERCHANT_HISTORY", "PRODUCT_FACT"],
                     expected_tools=["MerchantTool", "ProductTool"],
                     expected_policies=[],
                 ),
@@ -123,7 +123,7 @@ async def test_main_e2e_produces_per_case_grading(script, tmp_path, monkeypatch,
     """小规模 v3 数据集 + fake backend：三臂跑通，payload 每臂带逐案判卷行。"""
     data_dir = _write_v3_dataset(tmp_path)
     out_path = tmp_path / "result.json"
-    monkeypatch.setattr(script, "_load_dotenv", lambda: None)  # 不把仓库 .env 注进进程环境
+    monkeypatch.setattr(script, "load_dotenv_keys", lambda *a, **k: None)  # 不把仓库 .env 注进进程环境
     monkeypatch.setattr(
         script, "_make_real_backend", lambda **kwargs: _E2EBackend()
     )
@@ -150,7 +150,6 @@ async def test_main_e2e_produces_per_case_grading(script, tmp_path, monkeypatch,
         assert [row["eval_case_id"] for row in rows] == ["EC_E2E_1", "EC_E2E_2"]
         for row in rows:
             assert row["truth_decision"] == "PASS"
-            assert row["truth_abstain_label"] == "AUTO_DECIDABLE"
             # 真值未标注 risk_type / 政策 → 该两项不进比对（None）
             assert row["risk_type_match"] is None
             assert row["policies_match"] is None
@@ -172,7 +171,7 @@ async def test_main_e2e_second_layer_wiring(script, tmp_path, monkeypatch, capsy
     exclude_file = tmp_path / "exclude.json"
     exclude_file.write_text(json.dumps(["EC_E2E_2"]), encoding="utf-8")
     out_path = tmp_path / "result2.json"
-    monkeypatch.setattr(script, "_load_dotenv", lambda: None)  # 不把仓库 .env 注进进程环境
+    monkeypatch.setattr(script, "load_dotenv_keys", lambda *a, **k: None)  # 不把仓库 .env 注进进程环境
     monkeypatch.setattr(
         script, "_make_real_backend", lambda **kwargs: _E2EBackend()
     )
@@ -236,7 +235,7 @@ def test_exclude_ids_validation(script, tmp_path) -> None:
 
 async def test_main_rejects_v2_data_with_readable_error(script, tmp_path, monkeypatch) -> None:
     """v2 目录喂给新执行层 → 显式报错（给人读的原因），不静默混用。"""
-    monkeypatch.setattr(script, "_load_dotenv", lambda: None)  # 不把仓库 .env 注进进程环境
+    monkeypatch.setattr(script, "load_dotenv_keys", lambda *a, **k: None)  # 不把仓库 .env 注进进程环境
     v2_like = tmp_path / "v2"
     v2_like.mkdir()
     (v2_like / "cases_v2.jsonl").write_text("{}\n", encoding="utf-8")

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from evaluation.cli_utils import resolve_v3_data_paths
 from evaluation.dataset.loader import load_dataset_v3
 from evaluation.dataset.schema import (
     CaseManifestV3,
@@ -16,10 +17,9 @@ from evaluation.dataset.schema import (
     MerchantFactsV3,
     RegistryFactsV3,
 )
-from helpers import REPO_ROOT, SCRIPTS_DIR, load_script, make_case
+from helpers import REPO_ROOT, make_case
 
 V3_DIR = REPO_ROOT / "eval_data" / "v3"
-SCRIPT = SCRIPTS_DIR / "run_evaluation.py"
 
 
 def _case(eval_case_id: str) -> EvalCaseV3:
@@ -37,7 +37,6 @@ def _truth(eval_case_id: str, *, decision: str = "PASS") -> EvalTruthV3:
     expected = EvalExpectedV3(
         decision=decision,
         abstain_label="SHOULD_ABSTAIN" if decision == "HUMAN_REVIEW" else "AUTO_DECIDABLE",
-        risk_level="NONE" if decision == "PASS" else "HIGH",
         risk_type=[] if decision == "PASS" else ["POTENTIAL_IP_RISK"],
         expected_tools=[] if decision == "REJECT" else ["MerchantTool", "ProductTool"],
         expected_policies=["POLICY_1.1"] if decision == "REJECT" else [],
@@ -151,26 +150,28 @@ class TestOldFormatExplicitFailure:
         assert "v3" in str(exc_info.value)
 
     def test_resolve_v3_directory(self) -> None:
-        mod = load_script(SCRIPT)
-        cases_path, truth_path = mod._resolve_data_path(str(V3_DIR))
+        cases_path, truth_path = resolve_v3_data_paths(str(V3_DIR))
         assert cases_path.name == "cases_v3.jsonl"
         assert truth_path.name == "truth_v3.jsonl"
         assert cases_path.is_file() and truth_path.is_file()
 
+    def test_resolve_cases_file_auto_pairs_truth(self, tmp_path: Path) -> None:
+        """``--data`` 传 cases_v3.jsonl 文件：同目录自动配对 truth_v3.jsonl。"""
+        cases_path, truth_path = _write_pair(tmp_path, [_case("EC_A1")], [_truth("EC_A1")])
+        resolved = resolve_v3_data_paths(str(cases_path))
+        assert resolved == (cases_path, truth_path)
+
     def test_resolve_v2_directory_rejected(self, tmp_path: Path) -> None:
-        mod = load_script(SCRIPT)
         (tmp_path / "cases_v2.jsonl").write_text("{}\n", encoding="utf-8")
         with pytest.raises(ValueError, match="v2 旧格式"):
-            mod._resolve_data_path(str(tmp_path))
+            resolve_v3_data_paths(str(tmp_path))
 
     def test_resolve_v2_file_rejected(self, tmp_path: Path) -> None:
-        mod = load_script(SCRIPT)
         v2_file = tmp_path / "cases_v2.jsonl"
         v2_file.write_text("{}\n", encoding="utf-8")
         with pytest.raises(ValueError, match="旧格式"):
-            mod._resolve_data_path(str(v2_file))
+            resolve_v3_data_paths(str(v2_file))
 
     def test_resolve_missing_path_rejected(self, tmp_path: Path) -> None:
-        mod = load_script(SCRIPT)
         with pytest.raises(ValueError, match="不存在"):
-            mod._resolve_data_path(str(tmp_path / "nowhere"))
+            resolve_v3_data_paths(str(tmp_path / "nowhere"))

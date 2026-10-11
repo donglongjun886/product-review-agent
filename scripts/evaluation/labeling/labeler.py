@@ -76,64 +76,102 @@ def _hit_kinds(manifest: CaseManifestV3, rulebook: dict) -> tuple[bool, bool]:
     return has_evasion, has_brand
 
 
+def _derive_expected_evidence(
+    manifest: CaseManifestV3,
+    *,
+    decision: str,
+    expected_tools: list[str],
+    rule_hit: bool,
+    rulebook: dict,
+) -> list[str]:
+    """按规则书 ``evidence_rules`` 推导期望证据类型集合（去重保序）。
+
+    信号映射：规则命中（词表词 / 黑名单品牌）→ RULE_HIT；快照缺口 → MEASUREMENT；
+    REJECT → 可引用依据类 POLICY_REF；期望工具 → 该工具产出的证据类型。
+    """
+    rules = rulebook["evidence_rules"]
+    out: list[str] = []
+    if rule_hit:
+        out.append(str(rules["rule_text_hit"]))
+    if manifest.snapshot_gaps:
+        out.append(str(rules["snapshot_gap"]))
+    if decision == "REJECT":
+        out.append(str(rules["reject_citable"]))
+    for tool in expected_tools:
+        out.append(str(rules["tool_to_evidence"][tool]))
+    return list(dict.fromkeys(out))
+
+
 def label_case(manifest: CaseManifestV3, rulebook: dict) -> EvalExpectedV3:
     """按冻结规则书从埋点清单推导真值（同输入必得同真值）。
 
     :param manifest: 埋点清单（生成器产出的原始事实，所有判定由此推导）。
     :param rulebook: ``load_rulebook`` 返回的规则书 dict。
-    :return: 真值（decision / abstain_label / risk_level / risk_type / 期望工具 / 应引政策）。
+    :return: 真值（decision / abstain_label / risk_type / 期望证据类型 / 期望工具 / 应引政策）。
     """
     policies = rulebook["policy_refs"]
     blacklist = {str(b) for b in rulebook["blacklisted_brands"]}
     has_evasion, has_brand_word = _hit_kinds(manifest, rulebook)
     dirty = _merchant_dirty(manifest, rulebook)
     gap = bool(manifest.snapshot_gaps) or manifest.registry_mismatch
+    blacklist_hit = manifest.snapshot_brand is not None and manifest.snapshot_brand in blacklist
 
-    if manifest.snapshot_brand is not None and manifest.snapshot_brand in blacklist:
+    if blacklist_hit:
         # R1 硬规则：黑名单品牌强制拒绝，规则层可判、无需工具。
-        return EvalExpectedV3(
-            decision="REJECT", abstain_label="AUTO_DECIDABLE", risk_level="HIGH",
-            risk_type=["POTENTIAL_IP_RISK"], expected_tools=[],
-            expected_policies=list(policies["blacklist_brand"]),
-        )
-
-    if has_evasion:
+        decision = "REJECT"
+        risk_type: list[str] = ["POTENTIAL_IP_RISK"]
+        tools: list[str] = []
+        policy_refs = list(policies["blacklist_brand"])
+    elif has_evasion:
         # R-302 文本自证 + 可引用依据 → REJECT；商家脏叠加从重。
+        decision = "REJECT"
         if dirty:
-            return EvalExpectedV3(
-                decision="REJECT", abstain_label="AUTO_DECIDABLE", risk_level="HIGH",
-                risk_type=["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
-                expected_tools=["MerchantTool", "PolicySearchTool"],
-                expected_policies=list(policies["evasion_word_aggravated"]),
-            )
-        return EvalExpectedV3(
-            decision="REJECT", abstain_label="AUTO_DECIDABLE", risk_level="HIGH",
-            risk_type=["POTENTIAL_IP_RISK"], expected_tools=["PolicySearchTool"],
-            expected_policies=list(policies["evasion_word"]),
-        )
-
-    if gap:
+            risk_type = ["POTENTIAL_IP_RISK", "EVASION_PATTERN"]
+            tools = ["MerchantTool", "PolicySearchTool"]
+            policy_refs = list(policies["evasion_word_aggravated"])
+        else:
+            risk_type = ["POTENTIAL_IP_RISK"]
+            tools = ["PolicySearchTool"]
+            policy_refs = list(policies["evasion_word"])
+    elif gap:
         # 测量缺口 / 在库事实冲突：禁止推测补齐，转人工。
-        tools = ["ProductTool"] if manifest.registry_mismatch and not manifest.snapshot_gaps else ["MerchantTool", "ProductTool"]
-        return EvalExpectedV3(
-            decision="HUMAN_REVIEW", abstain_label="SHOULD_ABSTAIN", risk_level="MEDIUM",
-            risk_type=[], expected_tools=tools, expected_policies=[],
+        decision = "HUMAN_REVIEW"
+        risk_type = []
+        tools = (
+            ["ProductTool"]
+            if manifest.registry_mismatch and not manifest.snapshot_gaps
+            else ["MerchantTool", "ProductTool"]
         )
-
-    if has_brand_word or dirty:
+        policy_refs = []
+    elif has_brand_word or dirty:
         # R-102 只挡 PASS 撑不起 REJECT；商家历史画像不得单独构成自动拒绝依据。
-        risk: list[str] = []
+        decision = "HUMAN_REVIEW"
+        risk_type = []
         if has_brand_word:
-            risk.append("POTENTIAL_IP_RISK")
+            risk_type.append("POTENTIAL_IP_RISK")
         if dirty:
-            risk.append("EVASION_PATTERN")
-        return EvalExpectedV3(
-            decision="HUMAN_REVIEW", abstain_label="SHOULD_ABSTAIN", risk_level="MEDIUM",
-            risk_type=risk, expected_tools=["MerchantTool", "ProductTool"], expected_policies=[],
-        )
+            risk_type.append("EVASION_PATTERN")
+        tools = ["MerchantTool", "ProductTool"]
+        policy_refs = []
+    else:
+        # 干净案：必需测量维度（在库事实 / 商家画像）靠工具覆盖后放行。
+        decision = "PASS"
+        risk_type = []
+        tools = ["MerchantTool", "ProductTool"]
+        policy_refs = []
 
-    # 干净案：必需测量维度（在库事实 / 商家画像）靠工具覆盖后放行。
+    evidence = _derive_expected_evidence(
+        manifest,
+        decision=decision,
+        expected_tools=tools,
+        rule_hit=bool(manifest.text_hits) or blacklist_hit,
+        rulebook=rulebook,
+    )
     return EvalExpectedV3(
-        decision="PASS", abstain_label="AUTO_DECIDABLE", risk_level="NONE",
-        risk_type=[], expected_tools=["MerchantTool", "ProductTool"], expected_policies=[],
+        decision=decision,
+        abstain_label="SHOULD_ABSTAIN" if decision == "HUMAN_REVIEW" else "AUTO_DECIDABLE",
+        risk_type=risk_type,
+        expected_evidence=evidence,
+        expected_tools=tools,
+        expected_policies=policy_refs,
     )

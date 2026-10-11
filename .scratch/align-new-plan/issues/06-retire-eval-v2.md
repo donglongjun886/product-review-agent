@@ -31,3 +31,5 @@
   - 验证：`uv run pytest -q` 393 passed / 7 skipped；`uv run ruff check` 51 errors（与基线持平）；
     `build_rag_corpus.py --no-write` 与 `build_eval_dataset.py --no-write` 退出码 0；
     全仓 grep `eval_data/v2|EC_V2_|SEED_V2_` 无残留（`.cache/`、`.scratch/` 票档案除外）。
+- 补充说明（2026-10-12）：`.memory/` 为历史档案，其中对 v2 的提及属历史记录，
+  不按存活指针清理（"无指向旧资产的存活指针"一条只覆盖代码与 docs/README）。

@@ -99,7 +99,6 @@ def _write_dataset(tmp_path: Path, ids: tuple[str, ...], decisions: tuple[str, .
                 expected=EvalExpectedV3(
                     decision=decision,
                     abstain_label="AUTO_DECIDABLE",
-                    risk_level="NONE" if decision == "PASS" else "HIGH",
                     risk_type=[] if decision == "PASS" else ["POTENTIAL_IP_RISK"],
                     expected_tools=[],
                     expected_policies=[] if decision == "PASS" else ["POLICY_1.2"],
@@ -218,7 +217,7 @@ async def test_main_e2e_writes_report_and_never_relabels(script, tmp_path, monke
     report_path = tmp_path / "report.json"
     basket_path = tmp_path / "basket.json"
     backend = _MappingBackend({"EC_CC_1": "PASS", "EC_CC_2": "REJECT", "EC_CC_3": "REJECT"})
-    monkeypatch.setattr(script, "_load_dotenv", lambda *a, **k: None)  # 不把仓库 .env 注进进程环境
+    monkeypatch.setattr(script, "load_dotenv_keys", lambda *a, **k: None)  # 不把仓库 .env 注进进程环境
     monkeypatch.setattr(script, "_make_check_backend", lambda **kwargs: backend)
 
     rc = await script._main(
@@ -268,7 +267,7 @@ async def test_failed_call_isolated_into_failed_list(script, tmp_path, monkeypat
             None,  # EC_F_2 重试仍失败
         ]
     )
-    monkeypatch.setattr(script, "_load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(script, "load_dotenv_keys", lambda *a, **k: None)
     monkeypatch.setattr(script, "_make_check_backend", lambda **kwargs: backend)
     out_path = tmp_path / "report.json"
 
@@ -306,7 +305,7 @@ def test_provider_guard(script) -> None:
 
 async def test_main_rejects_same_provider_model(script, tmp_path, monkeypatch) -> None:
     """CLI 面：显式传入 deepseek 系模型 → 人读报错，不进入数据加载与调用。"""
-    monkeypatch.setattr(script, "_load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(script, "load_dotenv_keys", lambda *a, **k: None)
     with pytest.raises(ValueError, match="不同源"):
         await script._main(
             ["--data", str(tmp_path), "--model", "deepseek/deepseek-chat", "--api-key", "sk-test"]
@@ -315,7 +314,7 @@ async def test_main_rejects_same_provider_model(script, tmp_path, monkeypatch) -
 
 async def test_main_requires_api_key(script, tmp_path, monkeypatch) -> None:
     """缺 API key（CLI/环境变量/.env 均无）→ 人读报错（key 值永不入日志与输出）。"""
-    monkeypatch.setattr(script, "_load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(script, "load_dotenv_keys", lambda *a, **k: None)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     data_dir = _write_dataset(tmp_path, ids=("EC_K_1",), decisions=("PASS",))
     with pytest.raises(ValueError, match="API key"):

@@ -26,3 +26,13 @@
   （埋点清单只记原始事实，不记结论），构造期"文本自证"校验（重扫 == 植入清单）会拦住模板词表污染。
 - 偏离说明：HUMAN_REVIEW 案的 risk_level 统一 MEDIUM、expected_policies 为空（弃权不需要引用依据，
   正确性契约只要求 REJECT 具备可引用依据，该不变量已进 `EvalExpectedV3` 校验器）。
+- 修复记录（2026-10-12，code-review 后续修）：
+  - 真值补"期望证据类型"（docs/02 §3.1）：`EvalExpectedV3` 新增 `expected_evidence`
+    （受控词表 RULE_HIT / MERCHANT_HISTORY / PRODUCT_FACT / POLICY_REF / CASE_PRECEDENT /
+    MEASUREMENT，对齐生产证据 type 常量）；规则书新增 `evidence_rules` 推导数据
+    （规则命中→RULE_HIT、快照缺口→MEASUREMENT、REJECT→POLICY_REF、期望工具→对应证据类型），
+    打标函数据此推导，320 案全量标注；规则书版本升 v3-rulebook-2，sha256 钉值同步更新。
+  - 删除无消费者字段 `EvalExpectedV3.risk_level`（判卷不比对、指标层不消费、docs/02 §3.1
+    本无此项），连同 schema 校验器中涉及它的不变量一起删。
+  - 数据集按同默认 seed 重生成：规模 320 案不变，真值分布 PASS 88 / REJECT 122 /
+    HUMAN_REVIEW 110 不变（risk_level 删除与 expected_evidence 新增不影响裁决推导）。

@@ -16,12 +16,16 @@ def _grading(case_id: str, truth: str, pred: str) -> CaseGrading:
         eval_case_id=case_id,
         scheme="agent",
         truth_decision=truth,
-        truth_abstain_label="SHOULD_ABSTAIN" if truth == "HUMAN_REVIEW" else "AUTO_DECIDABLE",
         predicted_decision=pred,
         decision_match=pred == truth,
         truth_risk_type=[],
         predicted_risk_type=[],
         risk_type_match=None,
+        expected_evidence=[],
+        actual_evidence=[],
+        evidence_missing=[],
+        evidence_extra=[],
+        evidence_match=None,
         expected_tools=[],
         actual_tools=[],
         tools_missing=[],
@@ -103,3 +107,51 @@ def test_empty_denominators_are_none_not_zero() -> None:
     m3 = evaluate_selective([], exclude=set())
     assert m3.total == 0
     assert m3.coverage is None
+
+
+class TestAssertionFailuresCountAsWrong:
+    """过程断言失败计入判错（票 04 验收兑现）：selective risk 分子 =
+    自动决策 ∧（裁决与真值不一致 ∨ 命中过程断言）；coverage 分母不变。"""
+
+    def test_assertion_failed_auto_decided_case_counts_as_wrong(self) -> None:
+        """裁决与真值一致但命中过程断言的自动决策案 → 计入 auto_wrong。"""
+        gradings = [
+            _grading("c1", "PASS", "PASS"),
+            _grading("c2", "REJECT", "REJECT"),
+        ]
+        m = evaluate_selective(gradings, assertion_failed={"c2"})
+        assert m.auto_decided == 2
+        assert m.auto_wrong == 1
+        assert m.selective_risk == pytest.approx(1 / 2)
+        assert m.coverage == 1.0  # coverage 口径不变
+
+    def test_assertion_failed_human_review_case_not_counted(self) -> None:
+        """转人工案即使命中过程断言也不进 selective risk（不在自动决策分母）。"""
+        gradings = [
+            _grading("c1", "PASS", "PASS"),
+            _grading("c2", "PASS", "HUMAN_REVIEW"),
+        ]
+        m = evaluate_selective(gradings, assertion_failed={"c2"})
+        assert m.auto_decided == 1
+        assert m.auto_wrong == 0
+        assert m.selective_risk == 0.0
+
+    def test_assertion_failed_and_decision_wrong_counted_once(self) -> None:
+        """裁决错且命中断言的案只计一次（集合语义，不重复计数）。"""
+        gradings = [
+            _grading("c1", "PASS", "PASS"),
+            _grading("c2", "REJECT", "PASS"),
+        ]
+        m = evaluate_selective(gradings, assertion_failed={"c2"})
+        assert m.auto_wrong == 1
+        assert m.selective_risk == pytest.approx(1 / 2)
+
+    def test_excluded_case_assertion_not_counted(self) -> None:
+        """疑问篮子剔除案的断言失败同步不进分子（分母纪律一致）。"""
+        gradings = [
+            _grading("c1", "PASS", "PASS"),
+            _grading("c2", "REJECT", "REJECT"),
+        ]
+        m = evaluate_selective(gradings, exclude={"c2"}, assertion_failed={"c2"})
+        assert m.auto_decided == 1
+        assert m.auto_wrong == 0

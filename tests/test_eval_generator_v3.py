@@ -22,6 +22,9 @@ MANIFEST_PATH = V3_DIR / "manifest.json"
 _SCENE_PCT = {"normal": 0.20, "violation": 0.20, "boundary": 0.30,
               "multi-signal": 0.20, "evasion": 0.10}
 _TOOL_VOCAB = {"ProductTool", "MerchantTool", "CaseSearchTool", "PolicySearchTool"}
+_EVIDENCE_VOCAB = {
+    "RULE_HIT", "MERCHANT_HISTORY", "PRODUCT_FACT", "POLICY_REF", "CASE_PRECEDENT", "MEASUREMENT",
+}
 
 _PRODUCT_ROW = re.compile(
     r"^\s*\('(?P<pid>P_V3_\d+)', '(?P<cat>[^']*)', (?P<brand>NULL|'(?:[^']|'')*'), "
@@ -174,7 +177,8 @@ def test_v3_image_urls_carry_no_class_semantics() -> None:
 
 
 def test_v3_truth_vocab_and_policy_availability() -> None:
-    """风险类型只含 2 值；期望工具只含生产四工具；应引政策在 RAG 政策库中可得且生效。"""
+    """风险类型只含 2 值；期望工具只含生产四工具；期望证据只含受控六值且全量标注；
+    应引政策在 RAG 政策库中可得且生效。"""
     corpus = json.loads(
         (REPO_ROOT / "src" / "pra" / "rag" / "corpus" / "policies.json").read_text(encoding="utf-8")
     )
@@ -183,6 +187,8 @@ def test_v3_truth_vocab_and_policy_availability() -> None:
         exp = truth.expected
         assert set(exp.risk_type) <= {"POTENTIAL_IP_RISK", "EVASION_PATTERN"}
         assert set(exp.expected_tools) <= _TOOL_VOCAB
+        assert exp.expected_evidence, truth.eval_case_id
+        assert set(exp.expected_evidence) <= _EVIDENCE_VOCAB
         assert set(exp.expected_policies) <= effective, truth.eval_case_id
 
 

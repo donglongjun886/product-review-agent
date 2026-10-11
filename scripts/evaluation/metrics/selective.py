@@ -1,8 +1,9 @@
 """头条指标：selective prediction 口径（coverage / selective risk / 错误拒绝率，docs/02 §5.1）。
 
 三条分母纪律：coverage 分母 = 全部案（剔除疑问篮子）；selective risk 分母 = 被自动决策的案
-（转人工不进分母，只压低 coverage）；错误拒绝率分母 = 真值 PASS 案。输入为判卷结果
-（``CaseGrading`` 已携带真值侧 decision），失败案不产出记录、天然不进任何分母。
+（转人工不进分母，只压低 coverage），分子 = 自动决策中判错案（裁决与真值不一致 ∨ 命中过程断言）；
+错误拒绝率分母 = 真值 PASS 案。输入为判卷结果（``CaseGrading`` 已携带真值侧 decision），
+失败案不产出记录、天然不进任何分母。
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ class SelectiveMetrics(BaseModel):
 
     total: int = Field(description="coverage 分母：全部案（已剔除疑问篮子）")
     auto_decided: int = Field(description="自动决策（PASS/REJECT）案数：coverage 分子、selective risk 分母")
-    auto_wrong: int = Field(description="自动决策中与真值不一致的案数：selective risk 分子")
+    auto_wrong: int = Field(description="自动决策中判错的案数（裁决与真值不一致 ∨ 命中过程断言）：selective risk 分子")
     truth_pass_total: int = Field(description="真值 PASS 案数：错误拒绝率分母")
     false_rejects: int = Field(description="真值 PASS 被自动 REJECT 的案数：错误拒绝率分子")
     coverage: float | None = None
@@ -35,15 +36,23 @@ def _ratio(numer: int, denom: int) -> float | None:
 
 
 def evaluate_selective(
-    gradings: list[CaseGrading], *, exclude: Collection[str] = ()
+    gradings: list[CaseGrading],
+    *,
+    exclude: Collection[str] = (),
+    assertion_failed: Collection[str] = (),
 ) -> SelectiveMetrics:
     """从一臂的逐案判卷结果聚合同头条三指标。
 
+    selective risk 分子口径：自动决策（PASS/REJECT）案中，裁决与真值不一致
+    **或命中过程断言**的案（两因同现只计一次）；coverage 分母不变。
+
     :param gradings: 一臂的判卷结果；
-    :param exclude: 疑问篮子 eval_case_id 集合，从全部分母剔除。
+    :param exclude: 疑问篮子 eval_case_id 集合，从全部分母剔除；
+    :param assertion_failed: 命中过程断言的 eval_case_id 集合（计入判错分子）。
     """
     total = auto_decided = auto_wrong = truth_pass_total = false_rejects = 0
     excluded = set(exclude)
+    failed = set(assertion_failed)
     for g in gradings:
         if g.eval_case_id in excluded:
             continue
@@ -54,7 +63,7 @@ def evaluate_selective(
                 false_rejects += 1
         if g.predicted_decision in _AUTO_DECISIONS:
             auto_decided += 1
-            if not g.decision_match:
+            if not g.decision_match or g.eval_case_id in failed:
                 auto_wrong += 1
     return SelectiveMetrics(
         total=total,

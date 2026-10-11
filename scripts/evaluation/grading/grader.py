@@ -10,20 +10,26 @@ __all__ = ["CaseGrading", "grade_case", "grade_records"]
 
 
 class CaseGrading(BaseModel):
-    """单案判卷结果：裁决 / 风险类型 / 工具调用 / 政策引用四项比对 + 真值侧聚合字段。"""
+    """单案判卷结果：裁决 / 风险类型 / 证据类型 / 工具调用 / 政策引用五项比对 + 真值侧聚合字段。"""
 
     model_config = ConfigDict(extra="forbid")
 
     eval_case_id: str
     scheme: str = Field(description="产出被判记录的臂名（rule / single / agent）")
-    truth_decision: str = Field(description="真值裁决（指标层聚合用）")
-    truth_abstain_label: str = Field(description="真值 abstention 标签（指标层聚合用）")
+    truth_decision: str = Field(description="真值裁决（指标层聚合用；abstain 语义可由它推导）")
     predicted_decision: str
     decision_match: bool
     truth_risk_type: list[str]
     predicted_risk_type: list[str]
     risk_type_match: bool | None = Field(
         description="risk_type 集合是否一致；None = 真值未标注风险类型（不进比对）"
+    )
+    expected_evidence: list[str]
+    actual_evidence: list[str]
+    evidence_missing: list[str] = Field(description="应产出未产出的证据类型")
+    evidence_extra: list[str] = Field(description="产出了期望外的证据类型")
+    evidence_match: bool | None = Field(
+        description="证据类型集合是否一致；None = expected_evidence 为空（未标注，不进比对）"
     )
     expected_tools: list[str]
     actual_tools: list[str]
@@ -55,6 +61,18 @@ def grade_case(record: EvalRecord, expected: EvalExpectedV3) -> CaseGrading:
     :param record: 某一臂产出的预测记录；
     :param expected: 同案 v3 真值（打标函数产物）。
     """
+    actual_evidence = list(
+        dict.fromkeys(
+            str(item["type"])
+            for item in record.evidence
+            if isinstance(item, dict) and item.get("type")
+        )
+    )
+    evidence_missing, evidence_extra = (
+        _set_diff(list(expected.expected_evidence), actual_evidence)
+        if expected.expected_evidence
+        else ([], [])
+    )
     tools_missing, tools_extra = (
         _set_diff(list(expected.expected_tools), record.tool_calls_actual)
         if expected.expected_tools
@@ -69,13 +87,19 @@ def grade_case(record: EvalRecord, expected: EvalExpectedV3) -> CaseGrading:
         eval_case_id=record.eval_case_id,
         scheme=record.scheme,
         truth_decision=expected.decision,
-        truth_abstain_label=expected.abstain_label,
         predicted_decision=record.decision,
         decision_match=record.decision == expected.decision,
         truth_risk_type=list(expected.risk_type),
         predicted_risk_type=list(record.risk_type),
         risk_type_match=(
             set(record.risk_type) == set(expected.risk_type) if expected.risk_type else None
+        ),
+        expected_evidence=list(expected.expected_evidence),
+        actual_evidence=actual_evidence,
+        evidence_missing=evidence_missing,
+        evidence_extra=evidence_extra,
+        evidence_match=(
+            (not evidence_missing and not evidence_extra) if expected.expected_evidence else None
         ),
         expected_tools=list(expected.expected_tools),
         actual_tools=list(record.tool_calls_actual),

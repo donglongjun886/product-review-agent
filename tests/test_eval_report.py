@@ -24,12 +24,16 @@ def _grading(case_id: str, truth: str, pred: str, **over) -> CaseGrading:
         "eval_case_id": case_id,
         "scheme": "agent",
         "truth_decision": truth,
-        "truth_abstain_label": "SHOULD_ABSTAIN" if truth == "HUMAN_REVIEW" else "AUTO_DECIDABLE",
         "predicted_decision": pred,
         "decision_match": pred == truth,
         "truth_risk_type": [],
         "predicted_risk_type": [],
         "risk_type_match": None,
+        "expected_evidence": [],
+        "actual_evidence": [],
+        "evidence_missing": [],
+        "evidence_extra": [],
+        "evidence_match": None,
         "expected_tools": [],
         "actual_tools": [],
         "tools_missing": [],
@@ -80,6 +84,7 @@ def test_headline_shows_three_metrics_with_fractions(script) -> None:
     assert "0.750(3/4)" in report  # coverage
     assert "0.333(1/3)" in report  # selective_risk
     assert "0.500(1/2)" in report  # false_reject_rate
+    assert "命中过程断言" in report  # 判错口径注记（裁决不一致 ∨ 过程断言）
 
 
 def test_diagnostics_and_assertions_in_their_own_sections(script) -> None:

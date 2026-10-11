@@ -1,5 +1,5 @@
 {
-  "rulebook_version": "v3-rulebook-1",
+  "rulebook_version": "v3-rulebook-2",
   "risk_type_vocab": ["POTENTIAL_IP_RISK", "EVASION_PATTERN"],
   "blacklisted_brands": ["某违禁品牌", "山寨"],
   "brand_terms": ["ADIDAS", "GUCCI", "LOUIS VUITTON", "LV", "NIKE"],
@@ -9,5 +9,16 @@
     "blacklist_brand": ["POLICY_1.1"],
     "evasion_word": ["POLICY_1.2"],
     "evasion_word_aggravated": ["POLICY_1.2", "POLICY_4.5"]
+  },
+  "evidence_rules": {
+    "rule_text_hit": "RULE_HIT",
+    "snapshot_gap": "MEASUREMENT",
+    "reject_citable": "POLICY_REF",
+    "tool_to_evidence": {
+      "ProductTool": "PRODUCT_FACT",
+      "MerchantTool": "MERCHANT_HISTORY",
+      "CaseSearchTool": "CASE_PRECEDENT",
+      "PolicySearchTool": "POLICY_REF"
+    }
   }
 }

@@ -39,3 +39,7 @@
   ② prompt 测试里构造模式名 `blacklist_brand` 与规则书 policy_refs 键词面重叠，该名的反向断言
   跳过（其余 13 个模式名照常断言）。③ `--data` 只接受 v3 目录（不支持 cases 文件形式），
   交叉检查没有单文件入口的真实消费者，从简。
+- 修复记录（2026-10-12，code-review 后续修）：与 run_evaluation 的重复小件
+  （dotenv 注入 / `--data` 解析 / 比率渲染 / JSON 落盘）收敛到共享模块
+  `scripts/evaluation/cli_utils.py`，两边统一用同一实现；`--data` 口径统一为
+  收 v3 目录或 cases_v3.jsonl 文件（上方偏离③随之失效）。

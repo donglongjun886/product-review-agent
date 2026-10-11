@@ -16,14 +16,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from evaluation.cli_utils import (
+    load_dotenv_keys,
+    ratio_cell,
+    resolve_v3_data_paths,
+    write_json_file,
+)
 from evaluation.dataset.loader import load_dataset_v3
 from evaluation.dataset.schema import EvalCaseV3
 from evaluation.grading.grader import grade_records
+from evaluation.labeling.labeler import load_rulebook
 from evaluation.metamorphic import (
     MetamorphicFailure,
     PassKMetrics,
     check_metamorphic,
     pass_k_consistency,
+    perturb_paraphrase,
     perturb_risk_amplifying,
     perturb_semantics_preserving,
 )
@@ -80,65 +88,6 @@ class _ArmFailure:
     eval_case_id: str
     error_type: str
     reason: str
-
-
-def _resolve_data_path(raw: str) -> tuple[Path, Path]:
-    """把 ``--data`` 解析为 v3 双文件 ``(cases, truth)``：v3 目录，或 ``cases_v3.jsonl``
-    文件（同目录自动配对 ``truth_v3.jsonl``）。v2 目录 / 旧格式文件 → 显式报错。"""
-    p = Path(raw)
-    if p.is_dir():
-        cases = p / "cases_v3.jsonl"
-        truth = p / "truth_v3.jsonl"
-        if cases.is_file() and truth.is_file():
-            return cases, truth
-        if (p / "cases_v2.jsonl").is_file():
-            raise ValueError(
-                f"评测数据目录 {p} 是 v2 旧格式：新执行层只接受 v3 双文件"
-                "（cases_v3.jsonl + truth_v3.jsonl），新旧数据契约不兼容、不做静默混用；"
-                "请改用 eval_data/v3"
-            )
-        raise ValueError(
-            f"评测数据目录 {p} 缺少 v3 双文件 cases_v3.jsonl / truth_v3.jsonl"
-        )
-    if p.is_file():
-        if p.name == "cases_v3.jsonl":
-            truth = p.with_name("truth_v3.jsonl")
-            if not truth.is_file():
-                raise ValueError(f"v3 cases 文件 {p} 缺少同目录 truth_v3.jsonl（v3 为双文件契约）")
-            return p, truth
-        raise ValueError(
-            f"评测数据文件 {p} 是旧格式（非 cases_v3.jsonl）：新执行层只接受 v3 数据集，"
-            "请传 eval_data/v3 目录或 cases_v3.jsonl 文件；v1/v2 单文件契约不兼容、不做静默混用"
-        )
-    raise ValueError(f"评测数据路径不存在: {p}（支持 eval_data/v3 目录，或 cases_v3.jsonl 文件）")
-
-
-def _load_dotenv() -> None:
-    """把仓库根 ``.env`` 的 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL 注入进程环境。
-
-    以 setdefault 语义注入（真实环境变量优先）；找不到 .env 或键缺失 → 跳过。
-    """
-    here = Path(__file__).resolve()
-    env_file: Path | None = None
-    for parent in here.parents:
-        if (parent / "pyproject.toml").is_file():
-            env_file = parent / ".env"
-            break
-    if env_file is None or not env_file.is_file():
-        return
-    try:
-        lines = env_file.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, _, value = stripped.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key in (ENV_API_KEY, ENV_BASE_URL) and value:
-            os.environ.setdefault(key, value)
 
 
 def _resolve_api_key(cli_value: str | None) -> str | None:
@@ -435,22 +384,15 @@ def _num(v: float | None) -> str:
     return "-" if v is None else f"{v:g}"
 
 
-def _ratio_cell(value: float | None, numer: int, denom: int) -> str:
-    """比率单元格 ``0.850(233/274)``；分母为 0（value 为 None）→ ``-``。"""
-    if value is None:
-        return "-"
-    return f"{value:.3f}({numer}/{denom})"
-
-
 def _headline_row(
     arm: str, m: SelectiveMetrics, eng: EngineeringMetrics, failed: int
 ) -> list[str]:
     """头条表的一行：selective prediction 三指标（带分子/分母）+ 失败案数 + 成本均值。"""
     return [
         arm,
-        _ratio_cell(m.coverage, m.auto_decided, m.total),
-        _ratio_cell(m.selective_risk, m.auto_wrong, m.auto_decided),
-        _ratio_cell(m.false_reject_rate, m.false_rejects, m.truth_pass_total),
+        ratio_cell(m.coverage, m.auto_decided, m.total),
+        ratio_cell(m.selective_risk, m.auto_wrong, m.auto_decided),
+        ratio_cell(m.false_reject_rate, m.false_rejects, m.truth_pass_total),
         f"{failed}",
         f"llm={_num(eng.llm_calls.mean)} tool={_num(eng.tool_calls.mean)} tok={_num(eng.tokens.mean)}",
     ]
@@ -520,7 +462,8 @@ def _render_report(
     add("-" * 100)
     add("头条指标（selective prediction 口径，docs/02 §5.1；比率形如 值(分子/分母)，分母为 0 → '-'）:")
     add(f"  coverage = 自动决策案 / 全部案（剔除疑问篮子 {len(excluded)} 案）")
-    add("  selective_risk = 自动决策中判错案 / 被自动决策的案（转人工不进分母，只压低 coverage）")
+    add("  selective_risk = 自动决策中判错案 / 被自动决策的案（转人工不进分母，只压低 coverage；")
+    add("      判错 = 裁决与真值不一致 ∨ 命中过程断言 —— 无证据引用的拒绝、应触发的 Gate 未触发均判错）")
     add("  false_reject_rate = 真值 PASS 被自动 REJECT 案 / 真值 PASS 案")
     add("  失败案（单案基础设施异常）不产出记录：全部分母均**不含失败案**")
     rows = [
@@ -535,20 +478,20 @@ def _render_report(
     add("诊断区（agent 臂；不进头条 —— 回答'结论对了，理由对不对'，docs/02 §5.2）:")
     add(
         "  工具选择准确率 "
-        f"{_ratio_cell(diagnostics.tool_selection_accuracy, diagnostics.tool_covered_cases, diagnostics.tool_expected_cases)}"
+        f"{ratio_cell(diagnostics.tool_selection_accuracy, diagnostics.tool_covered_cases, diagnostics.tool_expected_cases)}"
         "（分母=标注期望工具的案）  多余调用率 "
-        f"{_ratio_cell(diagnostics.redundant_tool_rate, diagnostics.tool_redundant_cases, diagnostics.tool_expected_cases)}"
+        f"{ratio_cell(diagnostics.redundant_tool_rate, diagnostics.tool_redundant_cases, diagnostics.tool_expected_cases)}"
         "（同分母）"
     )
     add(
         "  风险类型命中率 "
-        f"{_ratio_cell(diagnostics.risk_type_hit_rate, diagnostics.risk_type_hit_cases, diagnostics.risk_type_labeled_cases)}"
+        f"{ratio_cell(diagnostics.risk_type_hit_rate, diagnostics.risk_type_hit_cases, diagnostics.risk_type_labeled_cases)}"
         "（分母=标注期望风险类型的案）  有效取证率 "
-        f"{_ratio_cell(diagnostics.evidence_gain_rate, diagnostics.calls_with_new_evidence, diagnostics.ok_tool_calls)}"
+        f"{ratio_cell(diagnostics.evidence_gain_rate, diagnostics.calls_with_new_evidence, diagnostics.ok_tool_calls)}"
         "（分母=成功的工具调用）"
     )
     add("-" * 100)
-    add("过程断言（无证据引用的拒绝 / 应触发 Gate 未触发 / 超预算 / 引用不可解析）:")
+    add("过程断言（无证据引用的拒绝 / 应触发 Gate 未触发 / 超预算 / 引用不可解析 / 静默降级；命中计入 selective_risk 判错）:")
     for arm in ARMS:
         arm_failures = assertions[arm]
         if not arm_failures:
@@ -565,7 +508,7 @@ def _render_report(
             add(f"    {failure.eval_case_id:<12} {failure.code}: {failure.detail[:80]}")
     if metamorphic is not None:
         add("-" * 100)
-        add("蜕变测试（agent 臂；保语义扰动裁决不得翻转 / 风险增强扰动裁决不得变松）:")
+        add("蜕变测试（agent 臂；保语义扰动（改无关字段 / 换表述）裁决不得翻转 / 风险增强扰动裁决不得变松）:")
         mm_failures: list[MetamorphicFailure] = metamorphic["failures"]
         add(f"  比对案数 {metamorphic['compared_cases']}，违例 {len(mm_failures)} 条")
         for failure in mm_failures:
@@ -575,7 +518,7 @@ def _render_report(
         add(f"pass^k（agent 臂重复 {pass_k_runs} 次，裁决一致率）:")
         add(
             f"  consistency_rate "
-            f"{_ratio_cell(pass_k.consistency_rate, pass_k.consistent_cases, pass_k.compared_cases)}"
+            f"{ratio_cell(pass_k.consistency_rate, pass_k.consistent_cases, pass_k.compared_cases)}"
             "（分母=有 ≥2 次运行记录的案）"
         )
     add("-" * 100)
@@ -696,8 +639,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--metamorphic",
         action="store_true",
         help=(
-            "蜕变测试：agent 臂对每案加跑保语义 / 风险增强两类扰动，比对裁决是否翻转/变松"
-            "（2× 案数的真实 LLM 调用，费用自负；rule 臂确定性无需重复）"
+            "蜕变测试：agent 臂对每案加跑保语义（改无关字段 / 换表述）与风险增强三类扰动，"
+            "比对裁决是否翻转/变松（3× 案数的真实 LLM 调用，费用自负；rule 臂确定性无需重复）"
         ),
     )
     parser.add_argument(
@@ -710,15 +653,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     return parser.parse_args(argv)
-
-
-def _write_payload(path: Path, payload: dict) -> None:
-    """把结果 JSON 写入 ``path``（父目录须已存在，缺失即报错）。"""
-    if not path.parent.exists():
-        raise ValueError(f"--out 父目录不存在: {path.parent}（请先创建目录）")
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
 
 
 def _select_cases(cases: list[EvalCaseV3], *, ids: str | None, limit: int | None) -> list[EvalCaseV3]:
@@ -740,8 +674,8 @@ def _select_cases(cases: list[EvalCaseV3], *, ids: str | None, limit: int | None
 
 async def _main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _load_dotenv()
-    cases_path, truth_path = _resolve_data_path(args.data)
+    load_dotenv_keys((ENV_API_KEY, ENV_BASE_URL))
+    cases_path, truth_path = resolve_v3_data_paths(args.data)
     dataset = load_dataset_v3(cases_path, truth_path)
     cases = _select_cases(dataset.cases, ids=args.ids, limit=args.limit)
     selected_ids = {c.eval_case_id for c in cases}
@@ -830,18 +764,28 @@ async def _main(argv: list[str] | None = None) -> int:
     latencies = {arm: [ms for _, ms in arm_runs[arm][0]] for arm in ARMS}
     failures = {arm: arm_runs[arm][1] for arm in ARMS}
     gradings = {arm: grade_records(records[arm], truth) for arm in ARMS}
-    selective = {arm: evaluate_selective(gradings[arm], exclude=excluded) for arm in ARMS}
-    diagnostics = evaluate_diagnostics(gradings["agent"], records["agent"])
+    blacklisted_brands = [str(b) for b in load_rulebook()["blacklisted_brands"]]
     assertions = {
         arm: check_process_assertions(
             records[arm],
             truth,
+            scheme=arm,
             citations=citations,
+            blacklisted_brands=blacklisted_brands,
             max_llm_calls=budget_limits.max_llm_calls,
             max_tool_calls=budget_limits.max_tool_calls,
         )
         for arm in ARMS
     }
+    selective = {
+        arm: evaluate_selective(
+            gradings[arm],
+            exclude=excluded,
+            assertion_failed={f.eval_case_id for f in assertions[arm]},
+        )
+        for arm in ARMS
+    }
+    diagnostics = evaluate_diagnostics(gradings["agent"], records["agent"])
     engineering = {
         arm: EngineeringEvaluator.evaluate(records[arm], latency_ms=latencies[arm]) for arm in ARMS
     }
@@ -851,9 +795,15 @@ async def _main(argv: list[str] | None = None) -> int:
         agent_orig = {rec.eval_case_id: rec for rec in records["agent"]}
         perturbed_cases = [c for c in cases if c.eval_case_id in agent_orig]
         print("-" * 100)
-        print(f"④ 蜕变测试（agent 臂 · {len(perturbed_cases)} 案 × 2 类扰动 · 真实 LLM 调用）")
+        print(f"④ 蜕变测试（agent 臂 · {len(perturbed_cases)} 案 × 3 类扰动 · 真实 LLM 调用）")
         neutral_runs, _ = await _run_arm(
             [perturb_semantics_preserving(c) for c in perturbed_cases],
+            lambda case: _run_agent(case, graph=graph),
+            concurrency=args.concurrency,
+            progress=True,
+        )
+        paraphrase_runs, _ = await _run_arm(
+            [perturb_paraphrase(c) for c in perturbed_cases],
             lambda case: _run_agent(case, graph=graph),
             concurrency=args.concurrency,
             progress=True,
@@ -865,16 +815,18 @@ async def _main(argv: list[str] | None = None) -> int:
             progress=True,
         )
         neutral_by_id = {rec.eval_case_id: rec for rec, _ in neutral_runs}
+        paraphrase_by_id = {rec.eval_case_id: rec for rec, _ in paraphrase_runs}
         amplified_by_id = {rec.eval_case_id: rec for rec, _ in amplified_runs}
         mm_failures: list[MetamorphicFailure] = []
         compared = 0
         for cid, original in agent_orig.items():
             neutral = neutral_by_id.get(cid)
+            paraphrased = paraphrase_by_id.get(cid)
             amplified = amplified_by_id.get(cid)
-            if neutral is None or amplified is None:
+            if neutral is None or paraphrased is None or amplified is None:
                 continue
             compared += 1
-            mm_failures.extend(check_metamorphic(original, neutral, amplified))
+            mm_failures.extend(check_metamorphic(original, [neutral, paraphrased], amplified))
         metamorphic_result = {"compared_cases": compared, "failures": mm_failures}
         print(f"  → 比对 {compared} 案 / 违例 {len(mm_failures)} 条")
 
@@ -935,7 +887,7 @@ async def _main(argv: list[str] | None = None) -> int:
     out_path: str | None = None
     if args.out:
         out_path = str(args.out)
-        _write_payload(Path(out_path), payload)
+        write_json_file(Path(out_path), payload)
     print()
     print(
         _render_report(

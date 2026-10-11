@@ -17,6 +17,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import run_evaluation
+from evaluation.cli_utils import (
+    load_dotenv_keys,
+    ratio_cell,
+    resolve_v3_data_paths,
+    write_json_file,
+)
 from evaluation.dataset.loader import load_dataset_v3
 from evaluation.dataset.schema import EvalCaseV3, EvalTruthV3, TruthDecision
 from evaluation.labeling.labeler import load_rulebook
@@ -126,49 +132,12 @@ def guard_check_model(model: str) -> str:
     return provider
 
 
-def _load_dotenv(key_names: tuple[str, ...]) -> None:
-    """把仓库根 ``.env`` 的指定键注入进程环境（setdefault 语义；找不到或键缺失 → 跳过）。"""
-    here = Path(__file__).resolve()
-    env_file: Path | None = None
-    for parent in here.parents:
-        if (parent / "pyproject.toml").is_file():
-            env_file = parent / ".env"
-            break
-    if env_file is None or not env_file.is_file():
-        return
-    try:
-        lines = env_file.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, _, value = stripped.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key in key_names and value:
-            os.environ.setdefault(key, value)
-
-
 def _resolve_api_key(cli_value: str | None, *, provider: str) -> str | None:
     """API key 解析：``--api-key`` 优先，否则读环境变量 ``{PROVIDER}_API_KEY``。"""
     if cli_value:
         return cli_value
     env_value = os.environ.get(f"{provider.upper()}_API_KEY", "")
     return env_value.strip() or None
-
-
-def _resolve_data_path(raw: str) -> tuple[Path, Path]:
-    """把 ``--data`` 解析为 v3 双文件 ``(cases, truth)``；非 v3 目录 → 显式报错。"""
-    p = Path(raw)
-    cases = p / "cases_v3.jsonl"
-    truth = p / "truth_v3.jsonl"
-    if p.is_dir() and cases.is_file() and truth.is_file():
-        return cases, truth
-    raise ValueError(
-        f"--data 必须是含 v3 双文件的目录（cases_v3.jsonl + truth_v3.jsonl），实际: {p}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -350,13 +319,6 @@ async def _run_checks(
 # ---------------------------------------------------------------------------
 
 
-def _ratio_text(value: float | None, numer: int, denom: int) -> str:
-    """比率文本 ``0.950(285/300)``；分母为 0（value 为 None）→ ``-``。"""
-    if value is None:
-        return "-"
-    return f"{value:.3f}({numer}/{denom})"
-
-
 def _render_report(
     *,
     cases_path: Path,
@@ -378,7 +340,7 @@ def _render_report(
     add("一致率（检查模型 vs 打标函数真值，三分类逐案比对）:")
     add(
         f"  agreement_rate = "
-        f"{_ratio_text(summary['agreement_rate'], summary['agreed'], summary['compared'])}"
+        f"{ratio_cell(summary['agreement_rate'], summary['agreed'], summary['compared'])}"
         f"（分母 = 成功比对案；失败案 {len(summary['failed'])} 单列、不进分母）"
     )
     add("-" * 100)
@@ -423,7 +385,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--data",
         default=DEFAULT_DATA,
-        help=f"评测集 v3 目录（含 cases_v3.jsonl + truth_v3.jsonl；默认 {DEFAULT_DATA}）",
+        help=f"评测集：v3 目录或 cases_v3.jsonl 文件（同 run_evaluation；默认 {DEFAULT_DATA}）",
     )
     parser.add_argument(
         "--model",
@@ -476,22 +438,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _write_json(path: Path, payload: object) -> None:
-    """把 JSON 写入 ``path``（父目录须已存在，缺失即报错）。"""
-    if not path.parent.exists():
-        raise ValueError(f"输出父目录不存在: {path.parent}（请先创建目录）")
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
-
-
 async def _main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     provider = guard_check_model(args.model)
     env_key = f"{provider.upper()}_API_KEY"
     env_base = f"{provider.upper()}_BASE_URL"
-    _load_dotenv((env_key, env_base))
-    cases_path, truth_path = _resolve_data_path(args.data)
+    load_dotenv_keys((env_key, env_base))
+    cases_path, truth_path = resolve_v3_data_paths(args.data)
     dataset = load_dataset_v3(cases_path, truth_path)
     cases = run_evaluation._select_cases(dataset.cases, ids=args.ids, limit=args.limit)
     truth_index = {t.eval_case_id: t for t in dataset.truth}
@@ -537,11 +490,11 @@ async def _main(argv: list[str] | None = None) -> int:
     out_path: str | None = None
     if args.out:
         out_path = str(args.out)
-        _write_json(Path(out_path), payload)
+        write_json_file(Path(out_path), payload)
     basket_path: str | None = None
     if args.basket_out:
         basket_path = str(args.basket_out)
-        _write_json(Path(basket_path), [entry["eval_case_id"] for entry in summary["basket"]])
+        write_json_file(Path(basket_path), [entry["eval_case_id"] for entry in summary["basket"]])
 
     print()
     print(

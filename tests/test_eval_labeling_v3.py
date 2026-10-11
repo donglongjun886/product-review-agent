@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RULEBOOK_PATH = REPO_ROOT / "scripts" / "evaluation" / "labeling" / "rulebook.json"
 
 # 规则书冻结：任何改动都会打破该哈希，必须连同标签口径评审一起改。
-RULEBOOK_SHA256 = "e71cee6e88c858e796be0990a63b6344dc90287aa523410bf2773b69f17e0d54"
+RULEBOOK_SHA256 = "6649a2fcc2b4a7cc6ddf4113bd92af371965b28c04b9d5b8a443eea23615ebda"
 
 
 def _manifest(**over) -> CaseManifestV3:
@@ -61,33 +61,33 @@ class TestRulebookTypicalCases:
     """规则书判定表：每种典型情形一格。"""
 
     def test_blacklist_brand_reject(self, rulebook) -> None:
-        """黑名单品牌 → REJECT / HIGH / [POTENTIAL_IP_RISK] / POLICY_1.1 / 无需工具。"""
+        """黑名单品牌 → REJECT / [POTENTIAL_IP_RISK] / POLICY_1.1 / 无需工具 / 规则命中+可引用证据。"""
         exp = label_case(_manifest(snapshot_brand="某违禁品牌"), rulebook)
         assert exp.decision == "REJECT"
-        assert exp.risk_level == "HIGH"
         assert exp.risk_type == ["POTENTIAL_IP_RISK"]
         assert exp.expected_policies == ["POLICY_1.1"]
         assert exp.expected_tools == []
+        assert exp.expected_evidence == ["RULE_HIT", "POLICY_REF"]
 
     def test_evasion_word_dirty_merchant_aggravated(self, rulebook) -> None:
         """规避词 + 商家脏 → 从重 REJECT / [IP, EVASION] / POLICY_1.2 + POLICY_4.5。"""
         m = _dirty(_manifest(text_hits=[_hit("高仿")]), removals=5, title=3)
         exp = label_case(m, rulebook)
         assert exp.decision == "REJECT"
-        assert exp.risk_level == "HIGH"
         assert exp.risk_type == ["POTENTIAL_IP_RISK", "EVASION_PATTERN"]
         assert exp.expected_policies == ["POLICY_1.2", "POLICY_4.5"]
         assert "MerchantTool" in exp.expected_tools
         assert "PolicySearchTool" in exp.expected_tools
+        assert exp.expected_evidence == ["RULE_HIT", "POLICY_REF", "MERCHANT_HISTORY"]
 
     def test_evasion_word_clean_merchant_reject(self, rulebook) -> None:
         """规避词 + 商家干净 → REJECT（文本自证 + POLICY_1.2 可引）/ [IP]。"""
         exp = label_case(_manifest(text_hits=[_hit("同款", "description")]), rulebook)
         assert exp.decision == "REJECT"
-        assert exp.risk_level == "HIGH"
         assert exp.risk_type == ["POTENTIAL_IP_RISK"]
         assert exp.expected_policies == ["POLICY_1.2"]
         assert exp.expected_tools == ["PolicySearchTool"]
+        assert exp.expected_evidence == ["RULE_HIT", "POLICY_REF"]
 
     def test_brand_word_only_human_review(self, rulebook) -> None:
         """只命中品牌词（无规避词、非黑名单）→ HUMAN_REVIEW / [IP] / SHOULD_ABSTAIN。"""
@@ -96,6 +96,7 @@ class TestRulebookTypicalCases:
         assert exp.abstain_label == "SHOULD_ABSTAIN"
         assert exp.risk_type == ["POTENTIAL_IP_RISK"]
         assert exp.expected_policies == []
+        assert exp.expected_evidence == ["RULE_HIT", "MERCHANT_HISTORY", "PRODUCT_FACT"]
 
     def test_dirty_merchant_only_human_review(self, rulebook) -> None:
         """只有商家脏（无文本命中）→ HUMAN_REVIEW / [EVASION_PATTERN]（画像不得单独拒）。"""
@@ -103,6 +104,7 @@ class TestRulebookTypicalCases:
         assert exp.decision == "HUMAN_REVIEW"
         assert exp.risk_type == ["EVASION_PATTERN"]
         assert exp.expected_policies == []
+        assert exp.expected_evidence == ["MERCHANT_HISTORY", "PRODUCT_FACT"]
 
     def test_brand_word_plus_dirty_merchant(self, rulebook) -> None:
         """品牌词 + 商家脏（多信号）→ HUMAN_REVIEW / [IP, EVASION]。"""
@@ -118,6 +120,7 @@ class TestRulebookTypicalCases:
         assert exp.decision == "HUMAN_REVIEW"
         assert exp.abstain_label == "SHOULD_ABSTAIN"
         assert exp.risk_type == []
+        assert exp.expected_evidence == ["MEASUREMENT", "MERCHANT_HISTORY", "PRODUCT_FACT"]
 
     def test_category_gap_human_review(self, rulebook) -> None:
         """类目空缺 → HUMAN_REVIEW（测量缺口）。"""
@@ -132,14 +135,15 @@ class TestRulebookTypicalCases:
         exp = label_case(m, rulebook)
         assert exp.decision == "HUMAN_REVIEW"
         assert "ProductTool" in exp.expected_tools
+        assert exp.expected_evidence == ["PRODUCT_FACT"]
 
     def test_merchant_count_two_passes(self, rulebook) -> None:
         """临界：商家计数正好 2（阈值下）且无文本命中 → PASS。"""
         exp = label_case(_dirty(_manifest(), removals=2, title=2), rulebook)
         assert exp.decision == "PASS"
-        assert exp.risk_level == "NONE"
         assert exp.risk_type == []
         assert exp.expected_tools == ["MerchantTool", "ProductTool"]
+        assert exp.expected_evidence == ["MERCHANT_HISTORY", "PRODUCT_FACT"]
 
     def test_merchant_count_three_is_dirty(self, rulebook) -> None:
         """临界：商家计数正好 3 → 商家脏 → 无文本时 HUMAN_REVIEW。"""
@@ -153,14 +157,14 @@ class TestRulebookTypicalCases:
         assert exp.decision == "HUMAN_REVIEW"
 
     def test_clean_case_pass(self, rulebook) -> None:
-        """干净案 → PASS / NONE / [] / 必需维度工具 [MerchantTool, ProductTool]。"""
+        """干净案 → PASS / [] / 必需维度工具 [MerchantTool, ProductTool]。"""
         exp = label_case(_manifest(), rulebook)
         assert exp.decision == "PASS"
         assert exp.abstain_label == "AUTO_DECIDABLE"
-        assert exp.risk_level == "NONE"
         assert exp.risk_type == []
         assert exp.expected_policies == []
         assert exp.expected_tools == ["MerchantTool", "ProductTool"]
+        assert exp.expected_evidence == ["MERCHANT_HISTORY", "PRODUCT_FACT"]
 
     def test_blacklist_dominates_evasion_word(self, rulebook) -> None:
         """黑名单品牌 + 规避词叠加 → 硬规则支配（REJECT / [IP] / POLICY_1.1 / 无工具）。"""
@@ -171,6 +175,7 @@ class TestRulebookTypicalCases:
         assert exp.risk_type == ["POTENTIAL_IP_RISK"]
         assert exp.expected_policies == ["POLICY_1.1"]
         assert exp.expected_tools == []
+        assert exp.expected_evidence == ["RULE_HIT", "POLICY_REF"]
 
 
 class TestTruthInvariants:
@@ -202,21 +207,20 @@ class TestTruthInvariants:
                 assert exp.abstain_label == "AUTO_DECIDABLE"
 
     def test_pass_has_no_risk(self, rulebook) -> None:
-        """PASS ⇒ risk_type=[] / risk_level=NONE / 无应引政策。"""
+        """PASS ⇒ risk_type=[] / 无应引政策。"""
         for m in self._battery():
             exp = label_case(m, rulebook)
             if exp.decision == "PASS":
                 assert exp.risk_type == []
-                assert exp.risk_level == "NONE"
                 assert exp.expected_policies == []
 
     def test_reject_has_citable_policy(self, rulebook) -> None:
-        """REJECT ⇒ 必有可引用政策依据（正确性契约）且 risk_level=HIGH。"""
+        """REJECT ⇒ 必有可引用政策依据（正确性契约），且期望证据含可引用依据类。"""
         for m in self._battery():
             exp = label_case(m, rulebook)
             if exp.decision == "REJECT":
                 assert exp.expected_policies
-                assert exp.risk_level == "HIGH"
+                assert "POLICY_REF" in exp.expected_evidence
 
     def test_risk_type_vocab_is_two_values(self, rulebook) -> None:
         """风险类型词表只有 POTENTIAL_IP_RISK / EVASION_PATTERN 两值。"""
@@ -230,6 +234,16 @@ class TestTruthInvariants:
             exp = label_case(m, rulebook)
             assert set(exp.expected_tools) <= {
                 "ProductTool", "MerchantTool", "CaseSearchTool", "PolicySearchTool",
+            }
+
+    def test_expected_evidence_vocab_and_nonempty(self, rulebook) -> None:
+        """期望证据只从受控词表六值中取，且每个真值案都有标注（全量进比对）。"""
+        for m in self._battery():
+            exp = label_case(m, rulebook)
+            assert exp.expected_evidence
+            assert set(exp.expected_evidence) <= {
+                "RULE_HIT", "MERCHANT_HISTORY", "PRODUCT_FACT",
+                "POLICY_REF", "CASE_PRECEDENT", "MEASUREMENT",
             }
 
 
