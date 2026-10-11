@@ -81,3 +81,17 @@
   不必逐项等价。
 - 文档记录决策与约定，不镜像实现现状：字段、结构、目录、配置值等具体信息以代码和版本库为准，
   不在文档里重复维护。运行产物只保留最近一次结果，重跑即覆盖，历史由版本控制系统承担。
+
+## Agent skills
+
+### Issue tracker
+
+issue 与 spec 以本地 markdown 文件管理，放在 `.scratch/<feature>/` 下。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+五个角色标签：`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+single-context 布局：根目录 `GLOSSARY.md` + `docs/adr/`（按需惰性创建）。见 `docs/agents/domain.md`。
