@@ -129,6 +129,25 @@ def test_decide_prompt_budget_caps_two_dims_only():
     assert "token≤" not in text and "时长≤" not in text
 
 
+def test_decide_prompt_renders_measurement_coverage():
+    """decide 上下文带覆盖清单时渲染「本案必需测量覆盖」小节（与 Gate 同源）。"""
+    text = build_user_prompt(
+        node="decide",
+        state={
+            "required_measurement_coverage": [
+                "- 必需测量覆盖：3/3",
+                "  - text_compliance：已测（阴性）",
+            ],
+        },
+        json_schema=_SCHEMA,
+    )
+    assert "本案必需测量覆盖" in text
+    assert "text_compliance：已测（阴性）" in text
+    assert "以此为准" in text
+    without = build_user_prompt(node="decide", state={}, json_schema=_SCHEMA)
+    assert "本案必需测量覆盖" not in without
+
+
 def test_prompt_render_smoke_walkthrough():
     rich_state = {
         "case": {

@@ -29,6 +29,7 @@ __all__ = [
     "RULE_EVASION_WORD",
     "CoverageReport",
     "capabilities_from_tools",
+    "coverage_gap_lines",
     "coverage_report",
     "positive_dimensions",
     "required_dimensions",
@@ -129,6 +130,38 @@ def coverage_report(
         positive=positive_dimensions(evs),
         capabilities=caps,
     )
+
+
+def coverage_gap_lines(state: dict) -> list[str]:
+    """本案必需测量的覆盖清单（人读行，注入 plan / decide 上下文）；有阳性证据且无可引用依据时额外列出 ``policy_citation`` 缺口。"""
+    evidence = list(state.get("evidence") or [])
+    cov = coverage_report(
+        state.get("case"),
+        evidence,
+        state.get("measurement_capabilities"),
+    )
+    covered = [d for d in cov.required if d in cov.covered]
+    lines = [f"- 必需测量覆盖：{len(covered)}/{len(cov.required)}"]
+    for dim in cov.required:
+        if dim in cov.covered:
+            verdict = "阳性" if dim in cov.positive else "阴性"
+            lines.append(f"  - {dim}：已测（{verdict}）")
+        elif dim in cov.unmeasurable:
+            lines.append(f"  - {dim}：本环境不可测（不要再安排该类工具，重跑无用）")
+        else:
+            lines.append(f"  - {dim}：**尚未取得** —— 优先安排能补齐它的工具")
+    has_citable = any(
+        e.type in ("POLICY_REF", "CASE_PRECEDENT") and e.ref_id for e in evidence
+    )
+    if cov.positive and not has_citable:
+        if (state.get("measurement_capabilities") or {}).get(DIM_POLICY_CITATION, True):
+            lines.append(
+                "  - policy_citation：**尚未取得** —— 已存在阳性证据，自动拒绝必须能引用政策"
+                "条款或同类先例，**请安排先例/政策检索**"
+            )
+        else:
+            lines.append("  - policy_citation：本环境不可测（无检索数据源）")
+    return lines
 
 
 def rule_hit_ids(case: ProductReviewCase | None) -> frozenset[str]:

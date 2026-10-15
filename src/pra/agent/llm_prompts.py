@@ -160,7 +160,8 @@ _NODE_SYSTEM_SUFFIX: dict[str, str] = {
         "**两条硬性边界**：① 只有弱信号（例如仅命中品牌词而无法核验"
         "授权）时**不得**提 REJECT，应转人工复核；② 存在未取得的关键测量时**不得**提 "
         "PASS（「没查到」不等于「证明不存在」）。裁决依据只能取自上下文真实存在的证据"
-        "（引用串 / 条款号 / 先例）；\n"
+        "（引用串 / 条款号 / 先例）；「本案必需测量覆盖」小节与确定性 Gate 同源，"
+        "各维度已测 / 尚未取得 / 不可测以该小节为准，不要凭证据列表自行推断缺口；\n"
         "硬性约束：\n"
         "1. decision ∈ PASS | REJECT | HUMAN_REVIEW；risk_level ∈ NONE | LOW | MEDIUM | "
         "HIGH；risk_type 只能从 POTENTIAL_IP_RISK / EVASION_PATTERN 中选择且必须与"
@@ -626,6 +627,15 @@ def build_user_prompt(
             )
         )
         parts.append(_section("三、其余证据链（全量）", "\n".join(_evidence_lines(others))))
+        gap = state.get("required_measurement_coverage")
+        if isinstance(gap, list) and gap:
+            parts.append(
+                _section(
+                    "四、本案必需测量覆盖（与确定性 Gate 同源 —— 判断「必需测量是否已取得」"
+                    "以此为准，不要凭证据列表自行推断缺口）",
+                    "\n".join(str(line) for line in gap),
+                )
+            )
         status_lines: list[str] = []
         degraded = bool(state.get("degraded"))
         status_lines.append(
@@ -635,8 +645,8 @@ def build_user_prompt(
                else "：正常")
         )
         status_lines += _failure_lines(state.get("failures"))
-        parts.append(_section("四、运行状态（degraded / failures）", "\n".join(status_lines)))
-        parts.append(_section("五、预算摘要", "\n".join(_budget_lines(state.get("budget")))))
+        parts.append(_section("五、运行状态（degraded / failures）", "\n".join(status_lines)))
+        parts.append(_section("六、预算摘要", "\n".join(_budget_lines(state.get("budget")))))
     elif node == "single_call":
         parts.append(_section("案件与商品事实", "\n".join(_case_lines(state))))
     else:

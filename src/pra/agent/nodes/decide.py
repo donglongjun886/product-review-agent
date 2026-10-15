@@ -10,13 +10,14 @@ from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, make_failure
 from pra.agent.guardrails.gate import run_decision_overlay
 from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
+from pra.agent.guardrails.measurements import coverage_gap_lines
 from pra.agent.guardrails.schemas import DecisionProposal
 
 __all__ = ["decide_node"]
 
 
 def _state_payload(state: dict) -> dict:
-    """LLM 入参 state 子集：hypotheses / evidence 全量 + degraded + failures + budget 摘要。"""
+    """LLM 入参 state 子集：hypotheses / evidence 全量 + degraded + failures + budget 摘要 + ``required_measurement_coverage`` 覆盖清单。"""
     budget = state.get("budget")
     if budget is not None:
         budget_summary = {
@@ -38,6 +39,7 @@ def _state_payload(state: dict) -> dict:
         "degraded": bool(state.get("degraded")),
         "failures": state.get("failures") or [],
         "budget": budget_summary,
+        "required_measurement_coverage": coverage_gap_lines(state),
     }
 
 

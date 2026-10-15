@@ -82,9 +82,17 @@ def test_reevaluate_state_payload_has_no_queue_key():
 
 def test_decide_state_payload_budget_summary_two_dims_only():
     payload = decide_mod._state_payload(_payload_state())
-    assert set(payload) == {"hypotheses", "evidence", "degraded", "failures", "budget"}
+    assert set(payload) == {
+        "hypotheses",
+        "evidence",
+        "degraded",
+        "failures",
+        "budget",
+        "required_measurement_coverage",
+    }
     assert payload["budget"]["llm_calls"] == 2 and payload["budget"]["tokens"] == 100
     assert payload["budget"]["limits"] == {"max_llm_calls": 10, "max_tool_calls": 15}
+    assert payload["required_measurement_coverage"][0].startswith("- 必需测量覆盖：")
 
 
 async def test_plan_short_circuit_when_degraded():

@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_base_url: str | None = None
 
+    # 可选：异源交叉检查模型凭据（scripts/cross_check_labels.py，如 dashscope/qwen3.8-flash）。
+    dashscope_api_key: str | None = None
+
     # 可选：Langfuse 可观测性。
     langfuse_public_key: str | None = None  # LANGFUSE_PUBLIC_KEY（缺失 = 观测关闭）
     langfuse_secret_key: str | None = None  # LANGFUSE_SECRET_KEY（**勿提交**）
