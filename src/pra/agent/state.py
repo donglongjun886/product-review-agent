@@ -49,6 +49,10 @@ class AgentState(TypedDict, total=False):
     failures: Annotated[list[dict], add]  # 步骤失败审计（元素 {step_type, severity, reason}）
     measurement_capabilities: dict[str, bool]  # 测量环境能力（维度 → 是否可测）
 
+    # ---- LLM 对话历史（append-only，前缀缓存的载体）----
+    llm_messages: Annotated[list[dict], add]  # 已发送的 user/assistant 消息（{"role","content"}）
+    llm_evidence_cursor: int  # 已讲进对话历史的证据条数（reevaluate 增量渲染用；覆盖写）
+
 
 def build_initial_state(case: ProductReviewCase) -> AgentState:
     """每次 invoke 的完整初始输入：所有 channel 有值，``budget`` 取 ``BudgetLimits`` 默认值。"""
@@ -63,4 +67,6 @@ def build_initial_state(case: ProductReviewCase) -> AgentState:
         degraded=False,
         failures=[],
         measurement_capabilities={},
+        llm_messages=[],
+        llm_evidence_cursor=0,
     )

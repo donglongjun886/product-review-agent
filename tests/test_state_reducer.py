@@ -71,3 +71,32 @@ def test_merge_left_unchanged_mutation_safety():
     merge_evidence(l, r)
     assert len(l) == snapshot[0].__len__() and l[0].value == "a"
     assert r[0].value == "b"
+
+
+def test_initial_state_carries_llm_history_channels():
+    """``build_initial_state`` 带 append-only 对话历史 channel 初值（空历史 + 游标 0）。"""
+    from helpers import make_case
+
+    from pra.agent.state import build_initial_state
+
+    state = build_initial_state(make_case())
+    assert state["llm_messages"] == []
+    assert state["llm_evidence_cursor"] == 0
+
+
+def test_llm_history_channels_survive_checkpoint_serde():
+    """llm_messages / llm_evidence_cursor 经 checkpointer serde 往返不丢（纯 dict/int 原生支持）。"""
+    from pra.agent.checkpointer import make_serde
+
+    serde = make_serde()
+    data = {
+        "llm_messages": [
+            {"role": "user", "content": "案件事实…"},
+            {"role": "assistant", "content": '{"hypotheses": []}'},
+        ],
+        "llm_evidence_cursor": 3,
+    }
+    _, blob = serde.dumps_typed(data)
+    restored = serde.loads_typed(serde.dumps_typed(data))
+    assert restored == data
+    assert isinstance(blob, bytes)
