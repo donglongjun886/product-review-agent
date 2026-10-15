@@ -201,3 +201,49 @@ async def test_truncated_but_valid_content_succeeds():
     assert outcome.attempts == 1
     assert outcome.error is None
     assert outcome.tokens == 5
+
+
+class _MessagesBackend:
+    """按序返回 (content, messages) 的替身；content 为 None → 抛后端异常。"""
+
+    name = "test-messages"
+
+    def __init__(self, turns: list) -> None:
+        self._turns = list(turns)
+
+    async def complete(
+        self, *, node: str, state: dict, json_schema: dict, feedback: list[str] | None = None
+    ) -> LLMResponse:
+        content, messages = self._turns.pop(0)
+        if content is None:
+            raise LLMBackendError("injected backend failure")
+        return LLMResponse(content=content, tokens=1, messages=messages)
+
+
+async def test_outcome_messages_single_attempt():
+    """一次成功：outcome.messages = 本次响应追加的消息；后端不给 messages → 空列表。"""
+    msgs = [{"role": "user", "content": "u1"}, {"role": "assistant", "content": "a1"}]
+    outcome = await _call(_MessagesBackend([(plan_conclude_json(), msgs)]))
+    assert outcome.model is not None
+    assert outcome.messages == msgs
+    no_msgs = await _call(_MessagesBackend([(plan_conclude_json(), None)]))
+    assert no_msgs.messages == []
+
+
+async def test_outcome_messages_retry_aggregates_both_attempts():
+    """重试成功：messages 跨 attempt 聚合（attempt1 的 user+bad assistant + attempt2 修正对）。"""
+    m1 = [{"role": "user", "content": "u1"}, {"role": "assistant", "content": "bad"}]
+    m2 = [{"role": "user", "content": "修正提示"}, {"role": "assistant", "content": "good"}]
+    outcome = await _call(_MessagesBackend([(_SCHEMA_BAD, m1), (plan_conclude_json(), m2)]))
+    assert outcome.model is not None
+    assert outcome.attempts == 2
+    assert outcome.messages == m1 + m2
+
+
+async def test_outcome_messages_two_failures_still_aggregated():
+    """两次均失败：model=None 但 messages 仍聚合已发生的消息（失败回合也是调查轨迹）。"""
+    m1 = [{"role": "user", "content": "u1"}, {"role": "assistant", "content": "bad1"}]
+    m2 = [{"role": "user", "content": "修正提示"}, {"role": "assistant", "content": "bad2"}]
+    outcome = await _call(_MessagesBackend([(_SCHEMA_BAD, m1), (_SCHEMA_BAD, m2)]))
+    assert outcome.model is None
+    assert outcome.messages == m1 + m2

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -22,6 +22,7 @@ class LLMResponse:
     tokens: int
     truncated: bool = False  # finish_reason=="length"（校验失败不重试）
     usage: dict | None = None  # 可选 token 拆分，形状 {"input","output","total"}；取不到为 None
+    messages: list[dict] | None = None  # 本次调用追加的对话消息（append-only 历史；None = 后端不提供）
 
 
 @runtime_checkable
@@ -50,6 +51,7 @@ class LLMCallOutcome:
     attempts: int  # 实际尝试次数（1 或 2；截断等不可恢复失败为 1）
     tokens: int  # 已累计 token 数；全失败可能为 0
     error: str | None  # 最后一次失败原因；成功为 None
+    messages: list[dict] = field(default_factory=list)  # 跨 attempt 聚合的新增对话消息；无则空列表
 
 
 # transport 类失败重试的指数退避底数（秒）
@@ -104,6 +106,7 @@ async def call_structured_llm(
     feedback: list[str] = []  # schema 修正提示，重试时以 feedback= 回喂
     total_tokens = 0
     last_error: str | None = None
+    messages: list[dict] = []  # 跨 attempt 聚合的新增对话消息
 
     for attempt in (1, 2):
         resp: LLMResponse | None = None
@@ -120,6 +123,7 @@ async def call_structured_llm(
                 await _transport_backoff(failure_index=attempt)
             continue
         total_tokens += resp.tokens
+        messages.extend(resp.messages or [])
         try:
             model = OutputModel.model_validate_json(resp.content)
         except Exception as exc:  # noqa: BLE001 - 校验失败
@@ -132,12 +136,13 @@ async def call_structured_llm(
                         attempts=1,
                         tokens=total_tokens,
                         error=f"模型输出被截断（finish_reason=length）且校验失败: {exc}",
+                        messages=messages,
                     )
                 # schema 修正类：收集非法输出原文 + 校验错误，重试时回喂
                 feedback.append(_correction_message(resp.content, exc))
             continue
         return LLMCallOutcome(
-            model=model, attempts=attempt, tokens=total_tokens, error=None
+            model=model, attempts=attempt, tokens=total_tokens, error=None, messages=messages
         )
 
     return LLMCallOutcome(
@@ -145,6 +150,7 @@ async def call_structured_llm(
         attempts=2,
         tokens=total_tokens,
         error=last_error or "LLM 调用失败（无错误信息）",
+        messages=messages,
     )
 
 
