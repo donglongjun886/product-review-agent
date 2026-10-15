@@ -17,6 +17,7 @@ from pra.domain.measurement import (
     MERCHANT_DIRTY_MIN,
     VERDICT_POSITIVE,
     VERDICTS,
+    make_measurement,
     measurement_dimension,
     measurement_verdict,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "positive_dimensions",
     "required_dimensions",
     "rule_hit_ids",
+    "rule_hit_measurement",
 ]
 
 ALWAYS_COVERED_DIMENSIONS: frozenset[str] = frozenset({DIM_TEXT_COMPLIANCE})
@@ -171,3 +173,30 @@ def rule_hit_ids(case: ProductReviewCase | None) -> frozenset[str]:
     from pra.screening.engine import triage  # 延迟 import
 
     return frozenset(hit.rule_id for hit in triage(case).hits)
+
+
+def rule_hit_measurement(case: ProductReviewCase | None) -> Evidence | None:
+    """R-102 / R-302 命中 → ``text_compliance`` 阳性测量证据（value 含命中词与规则明细）；无命中或 ``case`` 缺失返回 None。"""
+    if case is None:
+        return None
+    from pra.screening.engine import (  # 延迟 import
+        RULE_EVIDENCE_SOURCE,
+        RULE_EVIDENCE_WEIGHT,
+        triage,
+    )
+
+    hits = [
+        h for h in triage(case).hits if h.rule_id in (RULE_BRAND_WORD, RULE_EVASION_WORD)
+    ]
+    if not hits:
+        return None
+    detail = "；".join(f"{h.rule_id} {h.name}: {h.detail}" for h in hits)
+    return make_measurement(
+        dimension=DIM_TEXT_COMPLIANCE,
+        source=RULE_EVIDENCE_SOURCE,
+        source_ref=case.product.product_id,
+        verdict=VERDICT_POSITIVE,
+        weight=RULE_EVIDENCE_WEIGHT,
+        value=f"规则层文本扫描命中：{detail}",
+        extra={"rule_ids": [h.rule_id for h in hits]},
+    )

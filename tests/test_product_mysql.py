@@ -27,6 +27,7 @@ from pra.domain.measurement import (
     DIM_LISTING_REGISTRY,
     MEASUREMENT_TYPE,
     VERDICT_NEGATIVE,
+    VERDICT_POSITIVE,
 )
 from pra.domain.models import Budget, ProductReviewCase
 from pra.infra import persist_service as ps
@@ -125,7 +126,85 @@ def _product_row(**overrides: object) -> ProductORM:
 
 
 def _ctx() -> ToolContext:
-    return ToolContext(run_id="R_TEST", case_id="C_TEST", budget=Budget())
+    return ToolContext(run_id="R_TEST", case_id="C_TEST", budget=Budget(), case=make_case())
+
+
+def _ctx_with_case(case: ProductReviewCase) -> ToolContext:
+    return ToolContext(run_id="R_TEST", case_id=case.case_id, budget=Budget(), case=case)
+
+
+def _seeded_repo(**row_overrides: object) -> InMemoryProductRepository:
+    row: dict[str, object] = {
+        "product_id": "P_REG",
+        "category": "女鞋/运动鞋",
+        "brand": "山丘",
+        "version": 1,
+        "status": "ON_SALE",
+    }
+    row.update(row_overrides)
+    return InMemoryProductRepository({"P_REG": row})
+
+
+def _measurement_of(tool: ProductTool, res: ProductResult):
+    measurements = [e for e in tool.to_evidence(res) if e.type == MEASUREMENT_TYPE]
+    assert len(measurements) == 1
+    return measurements[0]
+
+
+async def test_listing_registry_confirmed_when_snapshot_matches_registry():
+    """快照 brand/category 与在库行一致 ⇒ CONFIRMED ⇒ 测量阴性。"""
+    case = make_case(brand="山丘", product_id="P_REG")
+    tool = ProductTool(repo=_seeded_repo())
+    res = await tool.call(ProductArgs(product_id="P_REG"), _ctx_with_case(case))
+    assert res.ok is True and res.consistency == "CONFIRMED"
+    m = _measurement_of(tool, res)
+    assert m.extra["dimension"] == DIM_LISTING_REGISTRY
+    assert m.extra["verdict"] == VERDICT_NEGATIVE
+
+
+async def test_listing_registry_mismatch_is_positive():
+    """快照 brand 与在库 brand 不一致 ⇒ MISMATCH ⇒ 测量阳性且 value 含两侧事实。"""
+    case = make_case(brand="山丘", product_id="P_REG")
+    tool = ProductTool(repo=_seeded_repo(brand="云步"))
+    res = await tool.call(ProductArgs(product_id="P_REG"), _ctx_with_case(case))
+    assert res.ok is True and res.consistency == "MISMATCH"
+    m = _measurement_of(tool, res)
+    assert m.extra["verdict"] == VERDICT_POSITIVE
+    assert "山丘" in m.value and "云步" in m.value
+
+
+async def test_listing_registry_unknown_when_snapshot_gap():
+    """快照 brand 真空缺 ⇒ UNKNOWN ⇒ 测量阳性且 value 说明缺口。"""
+    case = make_case(brand=None, product_id="P_REG")
+    tool = ProductTool(repo=_seeded_repo())
+    res = await tool.call(ProductArgs(product_id="P_REG"), _ctx_with_case(case))
+    assert res.ok is True and res.consistency == "UNKNOWN"
+    m = _measurement_of(tool, res)
+    assert m.extra["verdict"] == VERDICT_POSITIVE
+    assert "brand" in m.value
+
+
+async def test_listing_registry_unknown_when_registry_brand_null():
+    """在库 brand 为 null（快照有 brand）⇒ UNKNOWN ⇒ 测量阳性。"""
+    case = make_case(brand="山丘", product_id="P_REG")
+    tool = ProductTool(repo=_seeded_repo(brand=None))
+    res = await tool.call(ProductArgs(product_id="P_REG"), _ctx_with_case(case))
+    assert res.ok is True and res.consistency == "UNKNOWN"
+    m = _measurement_of(tool, res)
+    assert m.extra["verdict"] == VERDICT_POSITIVE
+    assert "null" in m.value
+
+
+async def test_listing_registry_skips_consistency_for_other_product():
+    """查的不是本案商品（args.product_id ≠ case.product.product_id）⇒ 不做一致性判定、不发阳性。
+
+    在库行 brand 与本案快照冲突也不得产生虚假 MISMATCH。
+    """
+    case = make_case(brand="山丘", product_id="P_CASE")
+    tool = ProductTool(repo=_seeded_repo(brand="云步"))
+    res = await tool.call(ProductArgs(product_id="P_REG"), _ctx_with_case(case))
+    assert res.ok is True and res.consistency == "CONFIRMED"
+    assert _measurement_of(tool, res).extra["verdict"] == VERDICT_NEGATIVE
 
 
 def test_to_snapshot_maps_every_field():

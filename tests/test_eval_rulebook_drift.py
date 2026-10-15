@@ -30,6 +30,19 @@ def test_rulebook_terms_and_threshold_mirror_production() -> None:
     assert rulebook["merchant_dirty_min"] == MERCHANT_DIRTY_MIN
 
 
+def test_blacklist_policy_mapping_mirrors_rulebook() -> None:
+    """生产黑名单→政策条款映射必须落在规则书 ``policy_refs["blacklist_brand"]`` 内。"""
+    rulebook = load_rulebook()
+    assert terms.BLACKLIST_POLICY_ID in rulebook["policy_refs"]["blacklist_brand"]
+
+
+def test_evasion_policy_mapping_mirrors_rulebook() -> None:
+    """生产规避词→政策条款映射必须落在规则书 ``policy_refs`` 对应键内（普通 / 商家脏从重）。"""
+    rulebook = load_rulebook()
+    assert terms.EVASION_POLICY_ID in rulebook["policy_refs"]["evasion_word"]
+    assert terms.EVASION_AGGRAVATED_POLICY_ID in rulebook["policy_refs"]["evasion_word_aggravated"]
+
+
 def test_evidence_type_vocab_mirrors_production() -> None:
     """真值期望证据类型词表 = 生产证据 type 常量全集（初筛规则命中 + 四工具 + 测量）。"""
     production_vocab = {

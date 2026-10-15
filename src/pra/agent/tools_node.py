@@ -111,7 +111,7 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
             snap_before = _snapshot()
             before_gate = gate_probe(snap_before)
 
-            ctx = ToolContext(run_id=run_id, case_id=case_id, budget=budget_w)
+            ctx = ToolContext(run_id=run_id, case_id=case_id, budget=budget_w, case=case)
 
             t0 = time.perf_counter()
             try:

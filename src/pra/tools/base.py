@@ -6,7 +6,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from ..domain.models import Budget
+from ..domain.models import Budget, ProductReviewCase
 
 
 class ToolArgs(BaseModel):
@@ -32,6 +32,7 @@ class ToolContext(BaseModel):
     run_id: str
     case_id: str
     budget: Budget
+    case: ProductReviewCase = Field(description="案件快照（供快照×在库一致性比对等判定）")
 
 
 @runtime_checkable

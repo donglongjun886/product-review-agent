@@ -134,9 +134,13 @@ def _case_ids(index: Any, ranked: list[tuple[int, float]]) -> list[str]:
 
 
 def _tool_ctx() -> ToolContext:
+    from helpers import make_case
+
     from pra.domain.models import Budget
 
-    return ToolContext(run_id="rag-retrieval-test", case_id="CASE_TEST_RAG", budget=Budget())
+    return ToolContext(
+        run_id="rag-retrieval-test", case_id="CASE_TEST_RAG", budget=Budget(), case=make_case()
+    )
 
 
 def test_reseed_on_existing_collection_overwrites_same_id(

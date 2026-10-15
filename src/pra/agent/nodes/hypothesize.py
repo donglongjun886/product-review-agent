@@ -2,6 +2,8 @@
 
 把 ``ProductReviewCase`` 转为初始假设集（``prior`` 为未经调查的怀疑度 0..1）；
 返回 hypotheses / degraded / failures / budget（failures 只含本次新增）。
+入口确定性注入：规则层 R-102/R-302 命中 → text_compliance 阳性测量证据（重入由
+evidence reducer 去重，幂等）。
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 from pra.agent.guardrails.budget import budget_exceeded, bump_llm_usage
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_HYPOTHESIZE, make_failure
 from pra.agent.guardrails.llm_shell import LLMBackend, call_structured_llm
+from pra.agent.guardrails.measurements import rule_hit_measurement
 from pra.agent.guardrails.schemas import HypothesizeOutput
 from pra.domain.models import Hypothesis, HypothesisStatus
 
@@ -42,6 +45,8 @@ def _apply_hypotheses(out: HypothesizeOutput) -> list[Hypothesis]:
 
 async def hypothesize_node(state: dict, config, *, llm: LLMBackend) -> dict:
     """hypothesize 图节点：生成初始假设集；``llm`` 由装配期显式注入。"""
+    rule_hit = rule_hit_measurement(state.get("case"))
+    rule_evidence = [rule_hit] if rule_hit is not None else []
     if budget_exceeded(state["budget"]) is not None:
         return {
             "hypotheses": [],
@@ -54,6 +59,7 @@ async def hypothesize_node(state: dict, config, *, llm: LLMBackend) -> dict:
                 )
             ],
             "budget": state["budget"],
+            "evidence": rule_evidence,
         }
 
     outcome = await call_structured_llm(
@@ -77,9 +83,11 @@ async def hypothesize_node(state: dict, config, *, llm: LLMBackend) -> dict:
                 )
             ],
             "budget": budget,
+            "evidence": rule_evidence,
         }
     return {
         "hypotheses": _apply_hypotheses(outcome.model),
         "degraded": False,
         "budget": budget,
+        "evidence": rule_evidence,
     }

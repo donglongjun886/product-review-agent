@@ -16,18 +16,24 @@ from pra.agent.guardrails.measurements import (
     coverage_report,
     rule_hit_ids,
 )
+from pra.agent.state import merge_evidence
 from pra.domain.measurement import (
     CITABLE_TYPES,
+    DEFAULT_EVIDENCE_WEIGHT,
     DIM_MERCHANT_PROFILE,
     DIM_TEXT_COMPLIANCE,
 )
 from pra.domain.models import (
     Budget,
     Decision,
+    Evidence,
     ReviewDecision,
     RiskLevel,
     RiskType,
 )
+from pra.screening.engine import RULE_EVIDENCE_SOURCE, triage
+from pra.screening.rule_engine import terms
+from pra.tools.policy_search.tool import POLICY_REF_TYPE
 
 DECISION_CONFIDENCE = 1.0
 
@@ -180,12 +186,59 @@ def _human_review(state, proposal, overrides: list) -> ReviewDecision:
     )
 
 
+def _policy_citation(*, policy_id: str, value: str) -> Evidence:
+    """规则层确定性引用的 POLICY_REF 证据（source=ScreeningRuleEngine）。"""
+    return Evidence(
+        type=POLICY_REF_TYPE,
+        source=RULE_EVIDENCE_SOURCE,
+        value=value,
+        weight=DEFAULT_EVIDENCE_WEIGHT,
+        ref_id=policy_id,
+        extra={"policy_id": policy_id},
+    )
+
+
+def _hard_rule_citation(case) -> Evidence:
+    """R1 命中的可引用依据：黑名单命中 → ``terms.BLACKLIST_POLICY_ID`` 的 POLICY_REF 证据。"""
+    brand = getattr(getattr(case, "product", None), "brand", None)
+    policy_id = terms.BLACKLIST_POLICY_ID
+    return _policy_citation(
+        policy_id=policy_id, value=f"品牌黑名单命中：brand={brand!r}，依据 {policy_id}"
+    )
+
+
+def _evasion_citations(state) -> list[Evidence]:
+    """R-302 规避词命中的可引用依据：``terms.EVASION_POLICY_ID``；merchant_profile 阳性叠加从重条款。"""
+    case = state.get("case")
+    hits = [h for h in triage(case).hits if h.rule_id == RULE_EVASION_WORD] if case else []
+    if not hits:
+        return []
+    policy_id = terms.EVASION_POLICY_ID
+    citations = [
+        _policy_citation(
+            policy_id=policy_id,
+            value=f"R-302 规避模糊词命中：{hits[0].detail}，依据 {policy_id}",
+        )
+    ]
+    if DIM_MERCHANT_PROFILE in coverage_of(state).positive:
+        aggravated = terms.EVASION_AGGRAVATED_POLICY_ID
+        citations.append(
+            _policy_citation(
+                policy_id=aggravated,
+                value=f"R-302 规避词命中且商家历史画像阳性（叠加从重），依据 {aggravated}",
+            )
+        )
+    return citations
+
+
 def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
     """decide 收口主函数：``proposal`` 为 None 表示无提案（预算耗尽 / 降级 / LLM 失败）。"""
     hit = hard_rule_hit(state)
     if hit is not None:
+        citations = [_hard_rule_citation(state.get("case")), *_evasion_citations(state)]
+        evidence = merge_evidence(list(state.get("evidence") or []), citations)
         return _build_decision(
-            state,
+            {**state, "evidence": evidence},
             decision=Decision.REJECT,
             risk_level=RiskLevel.HIGH,
             risk_type=list(hit.risk_types),
@@ -209,6 +262,13 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
             codes.append(R3_POSITIVE_INSUFFICIENT)
         return _human_review(state, proposal, codes)
 
+    if proposal.decision == "REJECT":
+        state = {
+            **state,
+            "evidence": merge_evidence(
+                list(state.get("evidence") or []), _evasion_citations(state)
+            ),
+        }
     return _build_decision(
         state,
         decision=Decision(proposal.decision),

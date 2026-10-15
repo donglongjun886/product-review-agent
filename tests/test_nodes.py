@@ -6,8 +6,10 @@ from helpers import (
     AlwaysRaiseBackend,
     NodePayloadBackend,
     SequenceBackend,
+    all_measureable_caps,
     budget_exhausted_state,
     decide_reject_json,
+    evasion_case,
     hp,
     hypothesize_json,
     make_case,
@@ -16,6 +18,7 @@ from helpers import (
 )
 
 from pra.agent.guardrails.errors import SEV_CRITICAL, STEP_DECIDE, STEP_HYPOTHESIZE
+from pra.agent.guardrails.measurements import coverage_gap_lines
 from pra.agent.guardrails.schemas import (
     HypothesisProposal,
     HypothesisUpdate,
@@ -30,6 +33,14 @@ from pra.agent.nodes.decide import decide_node
 from pra.agent.nodes.hypothesize import hypothesize_node
 from pra.agent.nodes.plan import plan_node
 from pra.agent.nodes.reevaluate import reevaluate_node
+from pra.agent.state import merge_evidence
+from pra.domain.measurement import (
+    DIM_TEXT_COMPLIANCE,
+    MEASUREMENT_TYPE,
+    VERDICT_POSITIVE,
+    measurement_dimension,
+    measurement_verdict,
+)
 from pra.domain.models import Budget, Decision, HypothesisStatus, RiskLevel, RiskType
 
 _CONFIG: dict = {}
@@ -159,6 +170,53 @@ async def test_hypothesize_llm_failure_degrades():
     assert failure["severity"] == SEV_CRITICAL
     assert "校验" in failure["reason"]
     assert out["budget"].llm_calls == 2
+
+
+async def test_hypothesize_injects_text_compliance_measurement_on_rule_hit():
+    """R-302 命中 → 节点确定性追加 text_compliance 阳性测量证据（含命中词明细）。"""
+    backend = NodePayloadBackend(payloads={"hypothesize": hypothesize_json()})
+    out = await hypothesize_node(
+        {"case": evasion_case(), "budget": Budget()}, _CONFIG, llm=backend
+    )
+    hits = [e for e in out["evidence"] if e.type == MEASUREMENT_TYPE]
+    assert len(hits) == 1
+    m = hits[0]
+    assert measurement_dimension(m) == DIM_TEXT_COMPLIANCE
+    assert measurement_verdict(m) == VERDICT_POSITIVE
+    assert "高仿" in m.value
+
+
+async def test_hypothesize_no_rule_hit_appends_nothing():
+    """无 R-102/R-302 命中 → 不追加证据（阴性由覆盖清单自然呈现）。"""
+    backend = NodePayloadBackend(payloads={"hypothesize": hypothesize_json()})
+    out = await hypothesize_node(_hyp_state(), _CONFIG, llm=backend)
+    assert not out.get("evidence")
+
+
+async def test_hypothesize_rule_hit_injection_is_idempotent():
+    """重入（同一 case 再跑）经 evidence reducer 合并不重复。"""
+    backend = NodePayloadBackend(payloads={"hypothesize": hypothesize_json()})
+    state = {"case": evasion_case(), "budget": Budget()}
+    first = await hypothesize_node(state, _CONFIG, llm=backend)
+    second = await hypothesize_node(state, _CONFIG, llm=backend)
+    merged = merge_evidence(first["evidence"], second["evidence"])
+    assert len([e for e in merged if e.type == MEASUREMENT_TYPE]) == 1
+
+
+async def test_coverage_gap_lines_show_text_compliance_positive_after_injection():
+    """注入后 decide/plan 的覆盖清单应把 text_compliance 呈现为阳性。"""
+    backend = NodePayloadBackend(payloads={"hypothesize": hypothesize_json()})
+    out = await hypothesize_node(
+        {"case": evasion_case(), "budget": Budget()}, _CONFIG, llm=backend
+    )
+    lines = coverage_gap_lines(
+        {
+            "case": evasion_case(),
+            "evidence": out["evidence"],
+            "measurement_capabilities": all_measureable_caps(),
+        }
+    )
+    assert any(DIM_TEXT_COMPLIANCE in line and "阳性" in line for line in lines)
 
 
 async def test_reevaluate_short_circuit_returns_empty():
@@ -309,7 +367,7 @@ async def test_decide_success_path_adopts_reject():
     assert decision.decision_confidence == 1.0
     assert decision.risk_level == RiskLevel.HIGH
     assert decision.risk_type == [RiskType.POTENTIAL_IP_RISK]
-    assert decision.policy == ["POLICY_3.2"]
+    assert decision.policy == ["POLICY_1.2", "POLICY_3.2", "POLICY_4.5"]
     assert out["degraded"] is False
     assert out["budget"].llm_calls == 1
     assert out["failures"] == []

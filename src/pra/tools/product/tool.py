@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -10,13 +10,17 @@ from ...domain.measurement import (
     DEFAULT_EVIDENCE_WEIGHT,
     DIM_LISTING_REGISTRY,
     VERDICT_NEGATIVE,
+    VERDICT_POSITIVE,
     make_measurement,
 )
-from ...domain.models import Evidence
+from ...domain.models import Evidence, ProductInfo
 from ..base import ToolArgs, ToolContext, ToolResult
 
 # ---- 受控证据类型 ----
 PRODUCT_FACT_TYPE = "PRODUCT_FACT"  # EvidenceType 词表
+
+# 快照×在库一致性三态：CONFIRMED=一致 / MISMATCH=两侧均有值但不一致 / UNKNOWN=关键字段真空缺。
+Consistency = Literal["CONFIRMED", "MISMATCH", "UNKNOWN"]
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +69,35 @@ class ProductResult(ToolResult):
     """
 
     product: ProductSnapshot | None = Field(default=None, description="库中最新商品事实快照")
+    consistency: Consistency = Field(
+        default="CONFIRMED",
+        description="快照×在库一致性（查询的不是本案商品时不做判定，保持 CONFIRMED）",
+    )
+    consistency_detail: str = Field(
+        default="", description="非 CONFIRMED 时的缺口/冲突明细（人读）"
+    )
+
+
+def _check_consistency(snapshot: ProductInfo, registry: ProductSnapshot) -> tuple[Consistency, str]:
+    """比对案件快照（brand/category）与在库行，返回 ``(consistency, detail)``。"""
+    gaps = [
+        field
+        for field, blank in (
+            ("brand", snapshot.brand is None or not snapshot.brand.strip()),
+            ("category", not snapshot.category.strip()),
+        )
+        if blank
+    ]
+    if gaps:
+        return "UNKNOWN", f"快照 {', '.join(gaps)} 真空缺"
+    if registry.brand is None:
+        return "UNKNOWN", "在库 brand 为 null（真空缺）"
+    if snapshot.brand != registry.brand or snapshot.category != registry.category:
+        return "MISMATCH", (
+            f"快照 brand={snapshot.brand!r}, category={snapshot.category!r}；"
+            f"在库 brand={registry.brand!r}, category={registry.category!r}"
+        )
+    return "CONFIRMED", ""
 
 
 class ProductTool:
@@ -82,12 +115,17 @@ class ProductTool:
         product = await self._repo.get_latest(args.product_id)
         if product is None:
             return ProductResult(ok=False, error=f"商品不存在或已删除: {args.product_id}")
-        return ProductResult(product=product)
+        consistency: Consistency = "CONFIRMED"
+        detail = ""
+        if args.product_id == ctx.case.product.product_id:
+            consistency, detail = _check_consistency(ctx.case.product, product)
+        return ProductResult(product=product, consistency=consistency, consistency_detail=detail)
 
     def to_evidence(self, result: ProductResult) -> list[Evidence]:
         """结果 → Evidence：1 条 ``PRODUCT_FACT`` + 1 条 ``MEASUREMENT``（listing_registry）。
 
-        ``ok=False`` 时不产任何证据。
+        ``ok=False`` 时不产任何证据。测量 verdict：``CONFIRMED`` → NEGATIVE；
+        ``MISMATCH`` / ``UNKNOWN`` → POSITIVE（value 含缺口/冲突明细）。
         """
         if not result.ok or result.product is None:
             return []
@@ -97,6 +135,14 @@ class ProductTool:
             f"brand={brand_repr}, version={p.version}（库中最新）, "
             f"status={p.status}, category={p.category}"
         )
+        if result.consistency == "CONFIRMED":
+            verdict = VERDICT_NEGATIVE
+            measurement_value = f"商品事实已在库核验：brand={brand_repr}, category={p.category}"
+        else:
+            verdict = VERDICT_POSITIVE
+            measurement_value = (
+                f"快照×在库一致性核验不通过（{result.consistency}）：{result.consistency_detail}"
+            )
         return [
             Evidence(
                 type=PRODUCT_FACT_TYPE,
@@ -109,8 +155,8 @@ class ProductTool:
                 dimension=DIM_LISTING_REGISTRY,
                 source=self.name,
                 source_ref=p.product_id,
-                verdict=VERDICT_NEGATIVE,
+                verdict=verdict,
                 weight=DEFAULT_EVIDENCE_WEIGHT,
-                value=f"商品事实已在库核验：brand={brand_repr}, category={p.category}",
+                value=measurement_value,
             ),
         ]

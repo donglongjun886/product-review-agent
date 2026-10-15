@@ -7,6 +7,7 @@ from helpers import (
     all_measureable_caps,
     budget_exhausted_state,
     covered_evidence,
+    ev,
     evasion_case,
     hp,
     make_case,
@@ -181,7 +182,7 @@ def test_overlay_reject_accepted_when_gate_passes():
         _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"]),
     )
     assert final.decision is Decision.REJECT and final.overrides == []
-    assert final.policy == ["POLICY_3.2"]
+    assert final.policy == ["POLICY_1.2", "POLICY_3.2", "POLICY_4.5"]
     assert final.decision_confidence == 1.0
 
 
@@ -213,6 +214,113 @@ def test_overlay_r1_hard_rule_forces_reject():
     assert final.overrides == [R1_HARD_RULE]
     assert final.decision_confidence == 1.0
     assert final.risk_level is RiskLevel.HIGH
+
+
+def test_overlay_r1_hard_rule_carries_policy_citation():
+    """R1 强制拒绝必须自动携带规则书条款引用（policy + 对应 POLICY_REF 证据）。"""
+    st = _pass_ready_state()
+    st["case"].product.brand = "山寨"
+    final = run_decision_overlay(st, _proposal(decision="PASS"))
+    assert final.decision is Decision.REJECT
+    assert "POLICY_1.1" in final.policy
+    refs = [
+        e for e in final.evidence
+        if e.type == "POLICY_REF" and (e.extra or {}).get("policy_id") == "POLICY_1.1"
+    ]
+    assert len(refs) == 1
+    assert refs[0].ref_id == "POLICY_1.1"
+    assert "山寨" in refs[0].value
+
+
+def test_overlay_r1_citation_is_idempotent():
+    """证据通道已有该引用时不得重复追加。"""
+    st = _pass_ready_state()
+    st["case"].product.brand = "山寨"
+    first = run_decision_overlay(st, _proposal(decision="PASS"))
+    second = run_decision_overlay({**st, "evidence": first.evidence}, _proposal(decision="PASS"))
+    refs = [
+        e for e in second.evidence
+        if e.type == "POLICY_REF" and (e.extra or {}).get("policy_id") == "POLICY_1.1"
+    ]
+    assert len(refs) == 1
+
+
+def _evasion_reject_ready_state(*, merchant_removals: int = 0) -> dict:
+    """R-302 命中 + 可引用先例 + 覆盖完整的 state（reject_gate 通过，无模型侧 POLICY_REF）。"""
+    st = _pass_ready_state()
+    st["case"] = evasion_case()
+    st["evidence"] = [
+        *covered_evidence(
+            product_id="P_88231", merchant_id="M_5512", merchant_removals=merchant_removals
+        ),
+        ev("CASE_PRECEDENT", source="CaseSearchTool",
+           value="case_1001 无品牌标识+外观高度模仿", weight=0.8, ref_id="case_1001"),
+    ]
+    return st
+
+
+def _policy_refs(final, policy_id: str) -> list:
+    return [
+        e for e in final.evidence
+        if e.type == "POLICY_REF" and (e.extra or {}).get("policy_id") == policy_id
+    ]
+
+
+def test_overlay_adopted_reject_carries_evasion_policy_citation():
+    """模型自主 REJECT（过 reject_gate）+ R-302 命中 → 确定性补 POLICY_1.2 引用。"""
+    final = run_decision_overlay(
+        _evasion_reject_ready_state(),
+        _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"]),
+    )
+    assert final.decision is Decision.REJECT and final.overrides == []
+    assert "POLICY_1.2" in final.policy
+    refs = _policy_refs(final, "POLICY_1.2")
+    assert len(refs) == 1
+    assert refs[0].ref_id == "POLICY_1.2"
+    assert "高仿" in refs[0].value
+    assert "POLICY_4.5" not in final.policy
+
+
+def test_overlay_adopted_reject_with_dirty_merchant_also_cites_aggravated():
+    """R-302 命中 + merchant_profile 阳性 → 从重叠加 POLICY_4.5。"""
+    final = run_decision_overlay(
+        _evasion_reject_ready_state(merchant_removals=5),
+        _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"]),
+    )
+    assert final.decision is Decision.REJECT and final.overrides == []
+    assert "POLICY_1.2" in final.policy
+    assert "POLICY_4.5" in final.policy
+
+
+def test_overlay_human_review_does_not_append_evasion_citation():
+    """只在最终 REJECT 时注入：HUMAN_REVIEW 不追加规避词引用。"""
+    final = run_decision_overlay(
+        _evasion_reject_ready_state(merchant_removals=5),
+        _proposal(decision="HUMAN_REVIEW", risk_level="MEDIUM"),
+    )
+    assert final.decision is Decision.HUMAN_REVIEW
+    assert "POLICY_1.2" not in final.policy
+    assert "POLICY_4.5" not in final.policy
+
+
+def test_overlay_r1_with_evasion_hit_carries_both_citations():
+    """R1 分支同时命中 R-302（blacklist_plus_evasion）→ POLICY_1.1 + POLICY_1.2。"""
+    st = _pass_ready_state()
+    st["case"] = make_case(brand="山寨")
+    st["case"].product.title = "高仿 1:1 复古跑鞋"
+    final = run_decision_overlay(st, _proposal(decision="PASS"))
+    assert final.decision is Decision.REJECT and final.overrides == [R1_HARD_RULE]
+    assert "POLICY_1.1" in final.policy
+    assert "POLICY_1.2" in final.policy
+
+
+def test_overlay_evasion_citation_is_idempotent():
+    """证据通道已有规避词引用时不得重复追加。"""
+    st = _evasion_reject_ready_state()
+    proposal = _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"])
+    first = run_decision_overlay(st, proposal)
+    second = run_decision_overlay({**st, "evidence": first.evidence}, proposal)
+    assert len(_policy_refs(second, "POLICY_1.2")) == 1
 
 
 def test_r1_and_r101_share_one_blacklist_source():

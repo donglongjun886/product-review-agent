@@ -113,7 +113,7 @@ def _merchant_row(**overrides: object) -> MerchantORM:
 
 
 def _ctx() -> ToolContext:
-    return ToolContext(run_id="RUN_T", case_id="CASE_T", budget=Budget())
+    return ToolContext(run_id="RUN_T", case_id="CASE_T", budget=Budget(), case=make_case())
 
 
 def test_to_profile_maps_every_field():
