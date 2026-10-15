@@ -1,7 +1,10 @@
-"""确定性生成 v3 评测数据集（构造即标签）并自检。
+"""确定性生成评测数据集（构造即标签）并自检。
 
-一次运行产出 eval_data/v3/ 四件产物：cases_v3.jsonl / truth_v3.jsonl / seed_v3.sql /
-manifest.json。退出码 0 = 生成成功且自检通过，非零 = 自检失败。
+一次运行产出四件产物：cases_v3.jsonl / truth_v3.jsonl / seed_v3.sql / manifest.json。
+退出码 0 = 生成成功且自检通过，非零 = 自检失败。
+
+默认产出考卷（eval_data/v3，320 案）；练习集用 --scale/--seed/--id-tag/--out-dir
+另生成（如 --scale 0.5 --id-tag V3D --out-dir eval_data/v3-dev）。
 """
 
 from __future__ import annotations
@@ -15,14 +18,13 @@ from pathlib import Path
 from evaluation.generator.builder import (
     DEFAULT_SEED,
     POLICIES_PATH,
-    TOTAL,
     BuiltDataset,
     build_dataset,
 )
 from evaluation.labeling.labeler import label_case, load_rulebook, scan_text_hits
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OUT_DIR = REPO_ROOT / "eval_data" / "v3"
+DEFAULT_OUT_DIR = REPO_ROOT / "eval_data" / "v3"
 
 _SCENE_PCT = {"normal": 0.20, "violation": 0.20, "boundary": 0.30,
               "multi-signal": 0.20, "evasion": 0.10}
@@ -34,13 +36,12 @@ def self_check(built: BuiltDataset) -> list[str]:
     errors: list[str] = []
     rulebook = load_rulebook()
     cases, truths = built.cases, built.truths
+    total = len(cases)
 
-    if len(cases) != TOTAL:
-        errors.append(f"案数 {len(cases)} != {TOTAL}")
     by_scene = Counter(c.scene for c in cases)
     for scene, pct in _SCENE_PCT.items():
-        if abs(by_scene[scene] - pct * TOTAL) > 0.05 * TOTAL:
-            errors.append(f"scene={scene} 占比 {by_scene[scene]}/{TOTAL} 超出 ±5pp")
+        if abs(by_scene[scene] - pct * total) > 0.05 * total:
+            errors.append(f"scene={scene} 占比 {by_scene[scene]}/{total} 超出 ±5pp")
 
     effective_policies = {
         p["policy_id"]
@@ -76,21 +77,31 @@ def self_check(built: BuiltDataset) -> list[str]:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="v3 评测数据集确定性生成 + 自检")
+    parser = argparse.ArgumentParser(description="评测数据集确定性生成 + 自检")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="生成种子（默认固定值）")
+    parser.add_argument("--scale", type=float, default=1.0,
+                        help="各构造模式案数缩放（0.5 → 160 案练习集；须整除各模式案数）")
+    parser.add_argument("--id-tag", default="V3",
+                        help="ID 前缀（默认 V3；练习集用 V3D，避免与考卷在同一库撞号）")
+    parser.add_argument("--dataset-version", default="v3",
+                        help="写入 manifest 的数据集版本名（如 v3 / v3-dev）")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
+                        help=f"产物目录（默认 {DEFAULT_OUT_DIR}）")
     parser.add_argument("--no-write", action="store_true", help="只跑校验/自检，不写文件")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    built = build_dataset(args.seed)
+    built = build_dataset(
+        args.seed, scale=args.scale, id_tag=args.id_tag, dataset_version=args.dataset_version
+    )
     errors = self_check(built)
 
     decisions = Counter(t.expected.decision for t in built.truths)
     scenes = Counter(c.scene for c in built.cases)
-    print("v3 评测数据集自检")
-    print(f"  规模      : {len(built.cases)} 案（seed={args.seed}）")
+    print("评测数据集自检")
+    print(f"  规模      : {len(built.cases)} 案（seed={args.seed}, id_tag={args.id_tag}）")
     print(f"  场景分布  : {dict(scenes)}")
     print(f"  真值分布  : {dict(decisions)}")
     if errors:
@@ -103,9 +114,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_write:
         return 0 if not errors else 1
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
     for name, content in built.artifacts.items():
-        path = OUT_DIR / name
+        path = args.out_dir / name
         path.write_text(content, encoding="utf-8")
         print(f"  已写入    : {path}")
     return 0 if not errors else 1

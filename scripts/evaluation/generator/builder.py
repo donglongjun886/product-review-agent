@@ -36,7 +36,6 @@ from pra.domain.models import ProductImage, ProductInfo, ProductReviewCase, SkuI
 
 DEFAULT_SEED = 20261012
 DATASET_VERSION = "v3"
-TOTAL = 320
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 POLICIES_PATH = REPO_ROOT / "src" / "pra" / "rag" / "corpus" / "policies.json"
@@ -181,16 +180,17 @@ def _plant(
 
 def _build_one(
     seq: int, scene: SceneName, pattern: str, ordinal: int,
-    rng: random.Random, rulebook: dict,
+    rng: random.Random, rulebook: dict, id_tag: str,
 ) -> tuple[EvalCaseV3, CaseManifestV3]:
     """构造单案：返回案件（含构造记录）+ 埋点清单。
 
     :param seq: 全数据集 1 起始序号（决定 ID 与图片资源号）。
     :param ordinal: 模式内序号（0 起始，用于确定性轮换）。
+    :param id_tag: ID 前缀（如 V3 / V3D），不同数据集必须用不同前缀避免 DB 撞号。
     """
-    eval_case_id = f"EC_V3_{seq:04d}"
-    product_id = f"P_V3_{seq:04d}"
-    merchant_id = f"M_V3_{seq:04d}"
+    eval_case_id = f"EC_{id_tag}_{seq:04d}"
+    product_id = f"P_{id_tag}_{seq:04d}"
+    merchant_id = f"M_{id_tag}_{seq:04d}"
     category = _CATS[seq % len(_CATS)]
     goods = rng.choice(_GOODS[category])
     own_brand = rng.choice(_OWN_BRANDS)
@@ -296,7 +296,7 @@ def _build_one(
             },
         ),
         input=ProductReviewCase(
-            case_id=f"CASE_EC_V3_{seq:04d}", product=product,
+            case_id=f"CASE_EC_{id_tag}_{seq:04d}", product=product,
             merchant_id=merchant_id, event_type=event_type,
         ),
     )
@@ -313,14 +313,14 @@ def _sql_str(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _render_seed_sql(truths: list[EvalTruthV3]) -> str:
+def _render_seed_sql(truths: list[EvalTruthV3], id_tag: str) -> str:
     """把全部案件引用的 product / merchant 行渲染成幂等种子 SQL。"""
     lines = [
         "-- ============================================================================",
-        "-- eval_data/v3 评测世界种子（scripts/build_eval_dataset.py 生成；重跑即覆盖）",
+        "-- 评测世界种子（scripts/build_eval_dataset.py 生成；重跑即覆盖）",
         "-- 口径与幂等约定同 migrations/003、004：SET NAMES utf8mb4 +",
         "-- INSERT ... AS new ON DUPLICATE KEY UPDATE；brand 真空缺为 SQL NULL。",
-        "-- 表结构由 migrations/003、004 建立；本文件只插评测专用行（P_V3_* / M_V3_*）。",
+        f"-- 表结构由 migrations/003、004 建立；本文件只插评测专用行（P_{id_tag}_* / M_{id_tag}_*）。",
         "-- ============================================================================",
         "",
         "SET NAMES utf8mb4;",
@@ -367,25 +367,47 @@ def _render_seed_sql(truths: list[EvalTruthV3]) -> str:
     return "\n".join(lines)
 
 
-def build_dataset(seed: int = DEFAULT_SEED) -> BuiltDataset:
-    """构建完整 v3 数据集（确定性：同 seed 同输出）。"""
+def _scaled_plan(scale: float) -> list[tuple[SceneName, str, int]]:
+    """按缩放系数得到构造计划；任一模式案数缩放后非整数即显式失败。"""
+    plan: list[tuple[SceneName, str, int]] = []
+    for scene, pattern, count in _PATTERN_PLAN:
+        scaled = count * scale
+        if scaled != int(scaled):
+            raise ValueError(
+                f"构造模式 {pattern} 案数 {count} × scale={scale} = {scaled} 非整数，"
+                "请选用能整除各模式案数的 scale（如 0.5）"
+            )
+        plan.append((scene, pattern, int(scaled)))
+    return plan
+
+
+def build_dataset(
+    seed: int = DEFAULT_SEED,
+    scale: float = 1.0,
+    id_tag: str = "V3",
+    dataset_version: str = DATASET_VERSION,
+) -> BuiltDataset:
+    """构建完整评测数据集（确定性：同 seed / scale / id_tag 同输出）。
+
+    :param scale: 各构造模式案数的缩放系数（0.5 → 160 案练习集）。
+    :param id_tag: ID 前缀；不同数据集必须不同，避免 seed SQL 在同一个库撞号覆盖。
+    :param dataset_version: 写入 manifest 的数据集版本名（如 v3 / v3-dev）。
+    """
     rng = random.Random(seed)
     rulebook = load_rulebook()
     cases: list[EvalCaseV3] = []
     truths: list[EvalTruthV3] = []
     seq = 0
-    for scene, pattern, count in _PATTERN_PLAN:
+    for scene, pattern, count in _scaled_plan(scale):
         for ordinal in range(count):
             seq += 1
-            case, manifest = _build_one(seq, scene, pattern, ordinal, rng, rulebook)
+            case, manifest = _build_one(seq, scene, pattern, ordinal, rng, rulebook, id_tag)
             truths.append(EvalTruthV3(
                 eval_case_id=case.eval_case_id,
                 manifest=manifest,
                 expected=label_case(manifest, rulebook),
             ))
             cases.append(case)
-    if len(cases) != TOTAL:
-        raise RuntimeError(f"构造模式案数合计 {len(cases)} != {TOTAL}")
 
     cases_jsonl = "".join(
         json.dumps(c.model_dump(mode="json"), ensure_ascii=False) + "\n" for c in cases
@@ -393,11 +415,11 @@ def build_dataset(seed: int = DEFAULT_SEED) -> BuiltDataset:
     truth_jsonl = "".join(
         json.dumps(t.model_dump(mode="json"), ensure_ascii=False) + "\n" for t in truths
     )
-    seed_sql = _render_seed_sql(truths)
+    seed_sql = _render_seed_sql(truths, id_tag)
     manifest_json = json.dumps(
         {
             "schema_version": 3,
-            "dataset_version": DATASET_VERSION,
+            "dataset_version": dataset_version,
             "seed": seed,
             "total": len(cases),
             "rulebook_version": rulebook["rulebook_version"],
@@ -425,6 +447,11 @@ def build_dataset(seed: int = DEFAULT_SEED) -> BuiltDataset:
     )
 
 
-def build_artifacts(seed: int = DEFAULT_SEED) -> dict[str, str]:
+def build_artifacts(
+    seed: int = DEFAULT_SEED,
+    scale: float = 1.0,
+    id_tag: str = "V3",
+    dataset_version: str = DATASET_VERSION,
+) -> dict[str, str]:
     """只取四个落盘文件的内容（文件名 → 文本）。"""
-    return build_dataset(seed).artifacts
+    return build_dataset(seed, scale=scale, id_tag=id_tag, dataset_version=dataset_version).artifacts

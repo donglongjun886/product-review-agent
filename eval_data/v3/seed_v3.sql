@@ -1,5 +1,5 @@
 -- ============================================================================
--- eval_data/v3 评测世界种子（scripts/build_eval_dataset.py 生成；重跑即覆盖）
+-- 评测世界种子（scripts/build_eval_dataset.py 生成；重跑即覆盖）
 -- 口径与幂等约定同 migrations/003、004：SET NAMES utf8mb4 +
 -- INSERT ... AS new ON DUPLICATE KEY UPDATE；brand 真空缺为 SQL NULL。
 -- 表结构由 migrations/003、004 建立；本文件只插评测专用行（P_V3_* / M_V3_*）。
