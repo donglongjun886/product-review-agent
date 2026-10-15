@@ -439,6 +439,7 @@ def _render_report(
     pass_k_runs: int,
     llm_config: dict,
     out_path: str | None,
+    cache_stats: tuple[int | None, int | None] | None = None,
 ) -> str:
     """渲染 Console 报告：头条（selective prediction 三指标）+ 诊断区 + 过程断言 +
     可选蜕变/pass^k + 工程指标 + 失败案明细。"""
@@ -542,6 +543,15 @@ def _render_report(
             f"tool_calls={_latency_cell(eng.tool_calls)} tokens={_latency_cell(eng.tokens)} "
             f"latency_ms={_latency_cell(eng.latency_ms)} failed={len(failures[arm])}"
         )
+    if cache_stats is not None:
+        hit, miss = cache_stats
+        if hit is None or miss is None or hit + miss == 0:
+            add("缓存命中: -（提供方未上报缓存字段，缺失即缺失）")
+        else:
+            add(
+                f"缓存命中: {hit / (hit + miss):.1%}（hit={hit} / miss={miss}，"
+                "DeepSeek 上下文缓存，命中价约 1/10）"
+            )
     add("-" * 100)
     out_note = f" | JSON 已写入: {out_path}" if out_path else " | 未写文件（--out 可落盘）"
     add(f"[NOTE] {NOTE}{out_note}")
@@ -849,6 +859,10 @@ async def _main(argv: list[str] | None = None) -> int:
             print(f"  → 第 {round_i}/{args.pass_k} 次运行完成（{len(rerun)} 案）")
         pass_k_metrics = pass_k_consistency(decisions)
 
+    cache_stats = (
+        getattr(backend, "total_cache_hit_tokens", None),
+        getattr(backend, "total_cache_miss_tokens", None),
+    )
     payload = {
         "data": str(cases_path),
         "model": args.model,
@@ -857,6 +871,11 @@ async def _main(argv: list[str] | None = None) -> int:
         "real_llm_config": llm_config,
         "excluded_ids": sorted(excluded),
         "failed": {arm: len(failures[arm]) for arm in ARMS},
+        "cache": (
+            {"hit": cache_stats[0], "miss": cache_stats[1]}
+            if cache_stats is not None
+            else None
+        ),
         "records": {arm: [rec.model_dump() for rec in records[arm]] for arm in ARMS},
         "grading": {arm: [g.model_dump() for g in gradings[arm]] for arm in ARMS},
         "metrics": {
@@ -905,6 +924,7 @@ async def _main(argv: list[str] | None = None) -> int:
             pass_k_runs=args.pass_k,
             llm_config=llm_config,
             out_path=out_path,
+            cache_stats=cache_stats,
         )
     )
     return 0

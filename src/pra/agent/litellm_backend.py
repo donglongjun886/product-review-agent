@@ -31,6 +31,24 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _cache_token_split(usage: Any) -> tuple[int, int] | None:
+    """从 usage 提取 (cache_hit, cache_miss)；提供方未给缓存字段 → None（显式缺失）。
+
+    优先 DeepSeek 原生 ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``；
+    回退 OpenAI 风格 ``prompt_tokens_details.cached_tokens``（miss 由 input - hit 推算）。
+    """
+    hit = _int_or_none(getattr(usage, "prompt_cache_hit_tokens", None))
+    miss = _int_or_none(getattr(usage, "prompt_cache_miss_tokens", None))
+    if hit is not None or miss is not None:
+        return (hit or 0, miss or 0)
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = _int_or_none(getattr(details, "cached_tokens", None)) if details is not None else None
+    if cached is None:
+        return None
+    prompt_tokens = _int_or_none(getattr(usage, "prompt_tokens", None))
+    return (cached, (prompt_tokens - cached) if prompt_tokens is not None else 0)
+
+
 class LiteLLMBackend(LLMBackend):
     """真实 litellm 后端：渲染结构化 state 为 prompt 后调用 API。"""
 
@@ -65,6 +83,19 @@ class LiteLLMBackend(LLMBackend):
         self.reasoning_effort = reasoning_effort
         self._api_key: str | None = (api_key or os.environ.get(_API_KEY_ENV) or None)
         self._tool_catalog: list[dict] = self._extract_tool_catalog(tools)
+        # 实例级缓存命中累计（纯观测，不进 state/预算语义）；None = 提供方从未给过缓存字段
+        self._cache_hit_tokens: int | None = None
+        self._cache_miss_tokens: int | None = None
+
+    @property
+    def total_cache_hit_tokens(self) -> int | None:
+        """累计缓存命中 token；提供方从未上报缓存字段 → None（缺失即缺失）。"""
+        return self._cache_hit_tokens
+
+    @property
+    def total_cache_miss_tokens(self) -> int | None:
+        """累计缓存未命中 token；提供方从未上报缓存字段 → None。"""
+        return self._cache_miss_tokens
 
     @staticmethod
     def _extract_tool_catalog(tools: list | None) -> list[dict]:
@@ -190,6 +221,13 @@ class LiteLLMBackend(LLMBackend):
                 parts["output"] = completion_tokens
             if total_tokens is not None:
                 parts["total"] = total_tokens
+            cache_split = _cache_token_split(usage)
+            if cache_split is not None:
+                hit, miss = cache_split
+                parts["cache_hit"] = hit
+                parts["cache_miss"] = miss
+                self._cache_hit_tokens = (self._cache_hit_tokens or 0) + hit
+                self._cache_miss_tokens = (self._cache_miss_tokens or 0) + miss
             usage_details = parts or None
         return LLMResponse(
             content=self._clean_json_text(content),

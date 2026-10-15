@@ -291,6 +291,75 @@ async def test_complete_usage_details_extraction_matrix(monkeypatch):
         assert resp.tokens == expected_tokens
 
 
+async def test_complete_cache_tokens_deepseek_native_fields(monkeypatch):
+    """DeepSeek 原生缓存字段（prompt_cache_hit/miss_tokens）→ usage 带 cache_hit/cache_miss，
+    实例计数器累计；无缓存字段的响应不产生 cache 键、计数器不变（显式缺失，不填 0）。"""
+    backend = LiteLLMBackend(api_key="sk-test")
+    assert backend.total_cache_hit_tokens is None
+    assert backend.total_cache_miss_tokens is None
+
+    _patch_acompletion_with_usage(
+        monkeypatch,
+        types.SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=10,
+            total_tokens=110,
+            prompt_cache_hit_tokens=64,
+            prompt_cache_miss_tokens=36,
+        ),
+    )
+    resp = await backend.complete(node="hypothesize", state={}, json_schema={})
+    assert resp.usage == {
+        "input": 100,
+        "output": 10,
+        "total": 110,
+        "cache_hit": 64,
+        "cache_miss": 36,
+    }
+    assert backend.total_cache_hit_tokens == 64
+    assert backend.total_cache_miss_tokens == 36
+
+
+async def test_complete_cache_tokens_openai_style_fallback(monkeypatch):
+    """OpenAI 风格回退：prompt_tokens_details.cached_tokens → cache_hit；
+    miss 由 prompt_tokens - cached 推算。"""
+    backend = LiteLLMBackend(api_key="sk-test")
+    _patch_acompletion_with_usage(
+        monkeypatch,
+        types.SimpleNamespace(
+            prompt_tokens=200,
+            completion_tokens=10,
+            total_tokens=210,
+            prompt_tokens_details=types.SimpleNamespace(cached_tokens=128),
+        ),
+    )
+    resp = await backend.complete(node="hypothesize", state={}, json_schema={})
+    assert resp.usage == {
+        "input": 200,
+        "output": 10,
+        "total": 210,
+        "cache_hit": 128,
+        "cache_miss": 72,
+    }
+    assert backend.total_cache_hit_tokens == 128
+    assert backend.total_cache_miss_tokens == 72
+
+
+async def test_complete_cache_counters_absent_when_provider_omits(monkeypatch):
+    """提供方完全不给缓存字段：usage 无 cache 键，实例计数器保持 None（缺失即缺失）。"""
+    backend = LiteLLMBackend(api_key="sk-test")
+    _patch_acompletion_with_usage(
+        monkeypatch,
+        types.SimpleNamespace(prompt_tokens=10, completion_tokens=4, total_tokens=14),
+    )
+    resp = await backend.complete(node="hypothesize", state={}, json_schema={})
+    assert resp.usage is not None
+    assert "cache_hit" not in resp.usage
+    assert "cache_miss" not in resp.usage
+    assert backend.total_cache_hit_tokens is None
+    assert backend.total_cache_miss_tokens is None
+
+
 async def test_thinking_config_kwargs_only_when_set(monkeypatch):
     """思考配置显式入口：为 None 不下发（用网关默认），非 None 才进 kwargs。"""
     fake = _patch_acompletion(monkeypatch, contents=['{"foo": 1}', '{"foo": 1}'], tokens=7)
