@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from helpers import make_case
 
 from pra.api.app import create_app
-from pra.domain.models import Decision, RiskLevel, RiskType, ReviewDecision
-from helpers import make_case
+from pra.domain.models import Decision, ReviewDecision, RiskLevel, RiskType
 
 _CASE = make_case(case_id="CASE_API_001", brand=None)
 

@@ -152,7 +152,7 @@ def make_case(
         brand=brand,
         sku_list=[SkuInfo(sku_id="S_1", color="米白", size="38", price=219.0)],
         images=[ProductImage(url="https://cdn.example.com/products/P_TEST/img1.jpg", source="主图")],
-        listing_time=datetime(2024, 9, 6, 14, 0, 0),
+        listing_time=datetime(2024, 9, 6, 14, 0, 0),  # noqa: DTZ001 - 镜像 MySQL naive DATETIME
         version=version,
     )
     return ProductReviewCase(

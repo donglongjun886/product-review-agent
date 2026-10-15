@@ -6,7 +6,7 @@ from fastapi import FastAPI
 
 from pra.api.routes import router
 
-__all__ = ["create_app", "app"]
+__all__ = ["app", "create_app"]
 
 
 def create_app() -> FastAPI:

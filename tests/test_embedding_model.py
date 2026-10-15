@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from helpers import bge_model_cached
+
 from pra.tools import production_embedder
 
 _MODEL_CACHE = os.environ.get(

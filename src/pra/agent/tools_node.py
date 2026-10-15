@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -116,7 +117,7 @@ def make_tools_node(tools: list[Tool]) -> Callable[[dict, dict], Awaitable[dict]
             t0 = time.perf_counter()
             try:
                 result = await tool.call(parsed, ctx)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 首次异常 infra 重试 1 次；重试仍抛则上抛
                 result = await tool.call(parsed, ctx)
             latency_ms = _elapsed_ms(t0)
 

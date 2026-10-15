@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -140,7 +140,7 @@ class Budget(_StrictModel):
     tool_calls: int = Field(default=0, ge=0, description="已用 Tool 调用次数")
     tokens: int = Field(default=0, ge=0, description="已用 Token 数")
     latency_ms: int = Field(default=0, ge=0, description="已耗时（毫秒，可由 start_time 推算，亦支持逐步累加）")
-    start_time: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="本轮调查启动时间（UTC）")
+    start_time: datetime = Field(default_factory=lambda: datetime.now(UTC), description="本轮调查启动时间（UTC）")
     limits: BudgetLimits = Field(default_factory=BudgetLimits, description="本次调查的限额配置")
 
 

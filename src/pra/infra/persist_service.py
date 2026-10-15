@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -59,7 +59,7 @@ _NODE_STEP_TYPE = {
 
 def _utcnow() -> datetime:
     """当前 naive UTC 时间。"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _enum_value(v: Any) -> Any:
@@ -394,7 +394,7 @@ async def run_and_persist(
             decision = final_state.get("decision")
 
             if not isinstance(decision, ReviewDecision):
-                raise RuntimeError(
+                raise RuntimeError(  # noqa: TRY004 - 图终态契约违例，非入参类型错误
                     f"调查图执行完成但终态缺少 decision（run_id={resolved_run_id}, "
                     f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
                 )

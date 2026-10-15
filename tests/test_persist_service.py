@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from helpers import ev, hp
+
 from pra.domain.models import (
     Budget,
     Decision,
     Hypothesis,
     HypothesisStatus,
+    ReviewDecision,
     RiskLevel,
     RiskType,
-    ReviewDecision,
 )
 from pra.infra.persist_service import (
     _enum_value,
@@ -19,7 +21,6 @@ from pra.infra.persist_service import (
     _node_output_summary,
     _token_count,
 )
-from helpers import ev, hp
 
 
 def test_enum_value_maps_enum_to_value():

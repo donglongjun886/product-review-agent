@@ -36,7 +36,7 @@ def _case(
         category=category,
         brand=brand,
         images=[ProductImage(url="https://cdn.example.com/img1.jpg", source="主图")],
-        listing_time=datetime(2024, 9, 6, 14, 0, 0),
+        listing_time=datetime(2024, 9, 6, 14, 0, 0),  # noqa: DTZ001 - 镜像 MySQL naive DATETIME
         version=1,
     )
     return ProductReviewCase(

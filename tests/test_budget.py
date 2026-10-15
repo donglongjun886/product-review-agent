@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from pra.agent.guardrails.budget import (
     DIM_LLM_CALLS,
@@ -17,7 +17,7 @@ from pra.domain.models import Budget, BudgetLimits
 
 def _old_budget(start_age_seconds: int = 90) -> Budget:
     """start_time 置于过去 start_age_seconds 秒的 Budget（其余字段默认 0/默认限额）。"""
-    start = datetime.now(timezone.utc) - timedelta(seconds=start_age_seconds)
+    start = datetime.now(UTC) - timedelta(seconds=start_age_seconds)
     return Budget(start_time=start)
 
 

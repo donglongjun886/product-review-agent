@@ -336,7 +336,7 @@ async def test_complete_cleans_model_content_three_states(monkeypatch):
         monkeypatch, contents=[clean, fenced, no_brace, None, ""]
     )
     backend = LiteLLMBackend(api_key="sk-test")
-    call = dict(node="hypothesize", state=_PRODUCT_STATE, json_schema={})
+    call = {"node": "hypothesize", "state": _PRODUCT_STATE, "json_schema": {}}
     assert (await backend.complete(**call)).content == clean
     assert (await backend.complete(**call)).content == '{"a": 1, "b": [1,2]}'
     assert (await backend.complete(**call)).content == no_brace

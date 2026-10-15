@@ -8,6 +8,7 @@ JSON Schema 要点承载）。
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 __all__ = ["BASE_PROMPT", "SYSTEM_PROMPTS", "build_system_prompt", "build_user_prompt"]
@@ -37,7 +38,7 @@ def _num(value: Any) -> str:
         f = float(value)
     except (TypeError, ValueError):
         return _text(value)
-    if f != f:  # NaN
+    if math.isnan(f):
         return "NaN"
     return f"{f:.3f}".rstrip("0").rstrip(".")
 

@@ -5,7 +5,7 @@ failures 元素 shape ``{step_type, tool?, severity, reason, ts}``（``tool`` / 
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 # 受控 step_type / severity
@@ -22,7 +22,7 @@ SEV_CRITICAL = "critical"
 
 def now_iso() -> str:
     """UTC ISO8601（failures.ts）。"""
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def make_failure(

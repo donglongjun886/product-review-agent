@@ -81,7 +81,7 @@ class LiteLLMBackend(LLMBackend):
                 args_schema = (
                     args_model.model_json_schema() if args_model is not None else {}
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - 单个工具提取失败则跳过
                 args_schema = {}
             catalog.append(
                 {
@@ -173,7 +173,7 @@ class LiteLLMBackend(LLMBackend):
             message = choice.message
             content = message.content or ""
             truncated = str(getattr(choice, "finish_reason", "") or "") == "length"
-        except Exception:
+        except Exception:  # noqa: BLE001 - 响应结构防御性解析
             content = ""
         tokens = 0
         usage_details: dict[str, int] | None = None

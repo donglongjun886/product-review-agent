@@ -28,7 +28,12 @@ def llama() -> SimpleNamespace:
         from llama_index.core.llms import MockLLM
         from llama_index.core.retrievers import BaseRetriever, QueryFusionRetriever
         from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
-        from llama_index.core.schema import MetadataMode, NodeWithScore, QueryBundle, TextNode
+        from llama_index.core.schema import (
+            MetadataMode,
+            NodeWithScore,
+            QueryBundle,
+            TextNode,
+        )
         from llama_index.core.vector_stores import (
             FilterCondition,
             FilterOperator,

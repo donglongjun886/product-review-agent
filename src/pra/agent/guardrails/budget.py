@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pra.domain.models import Budget
 
@@ -15,8 +15,8 @@ def elapsed_ms(budget: Budget) -> int:
     """已耗时（毫秒）：从 ``start_time`` 按墙钟推算。"""
     start = budget.start_time
     if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    return max(int((datetime.now(timezone.utc) - start).total_seconds() * 1000), 0)
+        start = start.replace(tzinfo=UTC)
+    return max(int((datetime.now(UTC) - start).total_seconds() * 1000), 0)
 
 
 def budget_exceeded(budget: Budget) -> str | None:

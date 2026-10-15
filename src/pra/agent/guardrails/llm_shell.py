@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class LLMBackendError(RuntimeError):
@@ -46,10 +46,10 @@ class LLMBackend(Protocol):
 class LLMCallOutcome:
     """一次 ``call_structured_llm`` 的结果（成功 / 失败统一携带）。"""
 
-    model: Optional[Any]  # 校验通过的 OutputModel 实例；失败为 None
+    model: Any | None  # 校验通过的 OutputModel 实例；失败为 None
     attempts: int  # 实际尝试次数（1 或 2；截断等不可恢复失败为 1）
     tokens: int  # 已累计 token 数；全失败可能为 0
-    error: Optional[str]  # 最后一次失败原因；成功为 None
+    error: str | None  # 最后一次失败原因；成功为 None
 
 
 # transport 类失败重试的指数退避底数（秒）
@@ -92,7 +92,7 @@ async def call_structured_llm(
 
     try:
         json_schema: dict = OutputModel.model_json_schema()
-    except Exception as exc:  # pragma: no cover - OutputModel 恒为 pydantic 模型
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - OutputModel 恒为 pydantic 模型
         return LLMCallOutcome(
             model=None,
             attempts=1,
@@ -103,7 +103,7 @@ async def call_structured_llm(
     backend = llm
     feedback: list[str] = []  # schema 修正提示，重试时以 feedback= 回喂
     total_tokens = 0
-    last_error: Optional[str] = None
+    last_error: str | None = None
 
     for attempt in (1, 2):
         resp: LLMResponse | None = None
@@ -114,7 +114,7 @@ async def call_structured_llm(
                 json_schema=json_schema,
                 feedback=feedback or None,
             )
-        except Exception as exc:  # transport / 后端失败
+        except Exception as exc:  # noqa: BLE001 - transport / 后端失败
             last_error = str(exc)
             if attempt == 1:
                 await _transport_backoff(failure_index=attempt)
@@ -122,7 +122,7 @@ async def call_structured_llm(
         total_tokens += resp.tokens
         try:
             model = OutputModel.model_validate_json(resp.content)
-        except Exception as exc:  # 校验失败
+        except Exception as exc:  # noqa: BLE001 - 校验失败
             last_error = str(exc)
             if attempt == 1:
                 if resp.truncated:

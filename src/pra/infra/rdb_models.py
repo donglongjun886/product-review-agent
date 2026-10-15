@@ -6,8 +6,6 @@ review_case 1:1 review_result（source_run_id → review_run）。
 
 from __future__ import annotations
 
-from typing import Optional
-
 from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import BIGINT, DATETIME, DOUBLE, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -15,10 +13,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 __all__ = [
     "Base",
     "ReviewCaseORM",
-    "ReviewRunORM",
-    "ReviewTraceORM",
     "ReviewEvidenceORM",
     "ReviewResultORM",
+    "ReviewRunORM",
+    "ReviewTraceORM",
 ]
 
 
@@ -43,15 +41,15 @@ class ReviewCaseORM(Base):
         String(16), nullable=False, default="PENDING"
     )  # PENDING/INVESTIGATING/DECIDED
     version: Mapped[int] = mapped_column(nullable=False)
-    triage_result: Mapped[Optional[str]] = mapped_column(
+    triage_result: Mapped[str | None] = mapped_column(
         String(16), nullable=True
     )  # PASS/REJECT/COMPLEX（Screening 三分流结果，NULL=分流前）
     case_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # 输入全量快照
     created_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
     updated_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
 
-    runs: Mapped[list["ReviewRunORM"]] = relationship(back_populates="case")
-    result: Mapped[Optional["ReviewResultORM"]] = relationship(
+    runs: Mapped[list[ReviewRunORM]] = relationship(back_populates="case")
+    result: Mapped[ReviewResultORM | None] = relationship(
         back_populates="case", uselist=False
     )
 
@@ -73,13 +71,13 @@ class ReviewRunORM(Base):
         String(32), nullable=False, default="INITIAL"
     )  # Agent 调查 INITIAL/RE_REVIEW/... 或规则直判 SCREENING_DIRECT
     started_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
-    ended_at: Mapped[Optional[object]] = mapped_column(DATETIME(fsp=3), nullable=True)
+    ended_at: Mapped[object | None] = mapped_column(DATETIME(fsp=3), nullable=True)
 
-    case: Mapped["ReviewCaseORM"] = relationship(back_populates="runs")
-    traces: Mapped[list["ReviewTraceORM"]] = relationship(
+    case: Mapped[ReviewCaseORM] = relationship(back_populates="runs")
+    traces: Mapped[list[ReviewTraceORM]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
-    evidences: Mapped[list["ReviewEvidenceORM"]] = relationship(
+    evidences: Mapped[list[ReviewEvidenceORM]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
 
@@ -101,14 +99,14 @@ class ReviewTraceORM(Base):
     )
     seq: Mapped[int] = mapped_column(nullable=False)
     step_type: Mapped[str] = mapped_column(String(24), nullable=False)
-    tool_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    input_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    output_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 含边际增益 4 字段
+    tool_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    output_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 含边际增益 4 字段
     tokens: Mapped[int] = mapped_column(nullable=False, default=0)
     latency_ms: Mapped[int] = mapped_column(nullable=False, default=0)
     created_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
 
-    run: Mapped["ReviewRunORM"] = relationship(back_populates="traces")
+    run: Mapped[ReviewRunORM] = relationship(back_populates="traces")
 
 
 class ReviewEvidenceORM(Base):
@@ -127,11 +125,11 @@ class ReviewEvidenceORM(Base):
     source_tool: Mapped[str] = mapped_column(String(64), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     weight: Mapped[float] = mapped_column(DOUBLE, nullable=False)
-    ref_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # 稳定引用（去重/回溯）
-    extra_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 结构化附加数值
+    ref_id: Mapped[str | None] = mapped_column(String(255), nullable=True)  # 稳定引用（去重/回溯）
+    extra_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 结构化附加数值
     created_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
 
-    run: Mapped["ReviewRunORM"] = relationship(back_populates="evidences")
+    run: Mapped[ReviewRunORM] = relationship(back_populates="evidences")
 
 
 class ReviewResultORM(Base):
@@ -143,16 +141,16 @@ class ReviewResultORM(Base):
     case_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("review_case.case_id"), primary_key=True
     )
-    source_run_id: Mapped[Optional[str]] = mapped_column(
+    source_run_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("review_run.run_id"), nullable=True
     )
     decision: Mapped[str] = mapped_column(String(16), nullable=False)  # PASS/REJECT/HUMAN_REVIEW
     risk_level: Mapped[str] = mapped_column(String(16), nullable=False, default="NONE")
     risk_type_json: Mapped[list] = mapped_column(JSON, nullable=False)
     decision_confidence: Mapped[float] = mapped_column(DOUBLE, nullable=False)
-    policy_refs_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    policy_refs_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
     updated_at: Mapped[object] = mapped_column(DATETIME(fsp=3), nullable=False)
 
-    case: Mapped["ReviewCaseORM"] = relationship(back_populates="result")
-    source_run: Mapped[Optional["ReviewRunORM"]] = relationship()
+    case: Mapped[ReviewCaseORM] = relationship(back_populates="result")
+    source_run: Mapped[ReviewRunORM | None] = relationship()

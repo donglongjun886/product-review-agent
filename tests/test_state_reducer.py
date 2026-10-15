@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from pra.agent.state import merge_evidence
 from helpers import ev
+
+from pra.agent.state import merge_evidence
 
 
 def test_merge_same_ref_id_ignores_weight_extra_and_value_diffs():
