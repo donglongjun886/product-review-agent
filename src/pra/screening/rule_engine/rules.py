@@ -36,7 +36,7 @@ def _fold(text: str) -> str:
 
 
 def _title_desc_text(case: ProductReviewCase) -> str:
-    """R-102/R-302 的扫描文本：标题 + 描述（折叠后）。"""
+    """品牌词 / 规避词（R-102 / R-302）的扫描文本：标题 + 描述（折叠后）。"""
     return _fold(f"{case.product.title}\n{case.product.description}")
 
 

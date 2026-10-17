@@ -38,15 +38,15 @@ from pra.tools.policy_search.tool import POLICY_REF_TYPE
 DECISION_CONFIDENCE = 1.0
 
 # overrides 原因码
-R1_HARD_RULE = "R1_HARD_RULE"
-R2_REJECT_GATE_FAIL = "R2_REJECT_GATE_FAIL"
-R3_BUDGET_EXHAUSTED = "R3_BUDGET_EXHAUSTED"
-R3_MEASUREMENT_MISSING = "R3_MEASUREMENT_MISSING"
-R3_DIMENSION_UNMEASURABLE = "R3_DIMENSION_UNMEASURABLE"
-R3_POSITIVE_INSUFFICIENT = "R3_POSITIVE_INSUFFICIENT"
-R4_PASS_GATE_FAIL = "R4_PASS_GATE_FAIL"
-R5_DEGRADED_OR_FAILED_STEP = "R5_DEGRADED_OR_FAILED_STEP"
-R6_INFRA_UNAVAILABLE = "R6_INFRA_UNAVAILABLE"
+R1_HARD_RULE = "R1_HARD_RULE"  # 命中硬规则（黑名单/硬违禁），强制改判 REJECT
+R2_REJECT_GATE_FAIL = "R2_REJECT_GATE_FAIL"  # 提案 REJECT 但未过 REJECT Gate
+R3_BUDGET_EXHAUSTED = "R3_BUDGET_EXHAUSTED"  # 预算超限，带已有证据转人工
+R3_MEASUREMENT_MISSING = "R3_MEASUREMENT_MISSING"  # 必需维度可测却没测（含阳性时缺可引用依据）
+R3_DIMENSION_UNMEASURABLE = "R3_DIMENSION_UNMEASURABLE"  # 必需维度在本环境不可测
+R3_POSITIVE_INSUFFICIENT = "R3_POSITIVE_INSUFFICIENT"  # 有阳性证据但未命中规避词规则（R-302），达不到自动拒绝条件
+R4_PASS_GATE_FAIL = "R4_PASS_GATE_FAIL"  # 提案 PASS 但未过 PASS Gate
+R5_DEGRADED_OR_FAILED_STEP = "R5_DEGRADED_OR_FAILED_STEP"  # 任一步降级/失败，或无提案时的兜底归因
+R6_INFRA_UNAVAILABLE = "R6_INFRA_UNAVAILABLE"  # 基础设施不可用（由持久化层写入，见 persist_service）
 
 
 # 谓词
@@ -62,7 +62,7 @@ def coverage_of(state) -> CoverageReport:
 
 
 def _rule_positive_dims(case) -> frozenset[str]:
-    """规则侧阳性维度：R-102 / R-302 命中 → ``text_compliance``。"""
+    """规则侧阳性维度：品牌词 / 规避词命中（R-102 / R-302）→ ``text_compliance``。"""
     hits = rule_hit_ids(case)
     return (
         frozenset({DIM_TEXT_COMPLIANCE})
@@ -93,7 +93,7 @@ def reject_gate(state) -> bool:
 
 
 def _finalize_risk_level(state, proposal) -> RiskLevel:
-    """风险等级：提案声明 ``risk_level`` 则用之，否则按阳性证据的最高权重派生。"""
+    """风险等级：提案声明 ``risk_level`` 则用之，否则按阳性证据的最高权重派生（≥0.8 HIGH / ≥0.5 MEDIUM / ≥0.2 LOW / 否则 NONE）。"""
     if proposal is not None and proposal.risk_level:
         return RiskLevel(proposal.risk_level)
     top = max(
@@ -228,6 +228,7 @@ def _evasion_citations(state) -> list[Evidence]:
 
 def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
     """decide 收口主函数：``proposal`` 为 None 表示无提案（预算耗尽 / 降级 / LLM 失败）。"""
+    # 1) 硬规则兜底：先于一切提案校验，命中即强制 REJECT 并注入确定性引用
     hit = hard_rule_hit(state)
     if hit is not None:
         citations = [_hard_rule_citation(state.get("case")), *_evasion_citations(state)]
@@ -240,6 +241,7 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
             overrides=[R1_HARD_RULE],
         )
 
+    # 2) 弃权归因：任一命中即转人工，不再校验提案
     cov = coverage_of(state)
     overrides = abstention_codes(state, cov)
 
@@ -249,6 +251,7 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
     if overrides:
         return _human_review(state, proposal, overrides)
 
+    # 3) 提案校验：过不了对应 Gate 的提案改判转人工
     if proposal.decision == "PASS" and not pass_gate(state):
         return _human_review(state, proposal, [R4_PASS_GATE_FAIL])
     if proposal.decision == "REJECT" and not reject_gate(state):
@@ -257,6 +260,7 @@ def run_decision_overlay(state: dict, proposal) -> ReviewDecision:
             codes.append(R3_POSITIVE_INSUFFICIENT)
         return _human_review(state, proposal, codes)
 
+    # 4) 采纳：REJECT 采纳时补注入规避条款的确定性引用
     if proposal.decision == "REJECT":
         state = {
             **state,

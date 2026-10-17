@@ -168,7 +168,7 @@ def rule_hit_ids(case: ProductReviewCase | None) -> frozenset[str]:
 
 
 def rule_hit_measurement(case: ProductReviewCase | None) -> Evidence | None:
-    """R-102 / R-302 命中 → ``text_compliance`` 阳性测量证据（value 含命中词与规则明细）；无命中或 ``case`` 缺失返回 None。"""
+    """品牌词 / 规避词（R-102 / R-302）命中 → ``text_compliance`` 阳性测量证据（value 含命中词与规则明细）；无命中或 ``case`` 缺失返回 None。"""
     if case is None:
         return None
     from pra.screening.engine import (  # 延迟 import
