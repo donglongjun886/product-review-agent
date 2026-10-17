@@ -194,11 +194,25 @@ def test_overlay_pass_gate_fail_gets_r4():
     assert final.overrides == [R4_PASS_GATE_FAIL]
 
 
-def test_overlay_reject_gate_fail_without_citation_gets_r2_and_positive_insufficient():
-    """R-302 命中但无可引用依据 ⇒ R2 + 阳性不足（模型提案不足以自动拒绝）。"""
+def test_overlay_positive_without_citation_gets_measurement_missing():
+    """有阳性但无可引用依据 ⇒ ``policy_citation`` 必需且未覆盖 ⇒ 按测量缺口归因。"""
     st = _pass_ready_state()
     st["case"] = evasion_case()
     st["evidence"] = covered_evidence(merchant_removals=5)
+    final = run_decision_overlay(
+        st, _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"])
+    )
+    assert final.decision is Decision.HUMAN_REVIEW
+    assert final.overrides == [R3_MEASUREMENT_MISSING]
+
+
+def test_overlay_reject_gate_fail_with_citation_but_no_evasion_hit():
+    """有阳性且已有可引用依据、但未命中 R-302 ⇒ 仍不得自动拒绝（R2 + 阳性不足）。"""
+    st = _pass_ready_state()
+    st["evidence"] = [
+        *covered_evidence(merchant_removals=5),
+        ev("POLICY_REF", value="POLICY_3.2 v2 条款：x", weight=0.9, ref_id="POLICY_3.2_v2_c1"),
+    ]
     final = run_decision_overlay(
         st, _proposal(decision="REJECT", risk_level="HIGH", risk_type=["POTENTIAL_IP_RISK"])
     )

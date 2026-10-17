@@ -9,12 +9,12 @@ from typing import Any
 
 from pra.domain.measurement import (
     ALL_DIMENSIONS,
+    CITABLE_TYPES,
     DIM_LISTING_REGISTRY,
     DIM_MERCHANT_PROFILE,
     DIM_POLICY_CITATION,
     DIM_TEXT_COMPLIANCE,
     MEASUREMENT_TYPE,
-    MERCHANT_DIRTY_MIN,
     VERDICT_POSITIVE,
     VERDICTS,
     make_measurement,
@@ -22,7 +22,6 @@ from pra.domain.measurement import (
     measurement_verdict,
 )
 from pra.domain.models import Evidence, ProductReviewCase
-from pra.tools.merchant.tool import MERCHANT_HISTORY_TYPE
 
 __all__ = [
     "ALWAYS_COVERED_DIMENSIONS",
@@ -32,6 +31,7 @@ __all__ = [
     "capabilities_from_tools",
     "coverage_gap_lines",
     "coverage_report",
+    "has_citable_evidence",
     "positive_dimensions",
     "required_dimensions",
     "rule_hit_ids",
@@ -47,35 +47,32 @@ RULE_EVASION_WORD = "R-302"
 _CITATION_TOOLS: frozenset[str] = frozenset({"CaseSearchTool", "PolicySearchTool"})
 
 
-def _merchant_is_dirty(e: Evidence) -> bool:
-    """``MERCHANT_HISTORY`` 是否达到 ``MERCHANT_DIRTY_MIN``（读 extra 的 removals / title）。"""
-    extra = e.extra or {}
-    removals = extra.get("removals")
-    title = extra.get("title")
-    if removals is None or title is None:
-        return False
-    return bool(removals >= MERCHANT_DIRTY_MIN or title >= MERCHANT_DIRTY_MIN)
+def has_citable_evidence(evidence: Iterable[Evidence]) -> bool:
+    """是否存在带 ``ref_id`` 的可引用依据（POLICY_REF / CASE_PRECEDENT）。"""
+    return any(e.type in CITABLE_TYPES and e.ref_id for e in evidence)
 
 
 def positive_dimensions(evidence: Iterable[Evidence]) -> dict[str, list[Evidence]]:
-    """风险阳性证据按维度归类：``MERCHANT_HISTORY`` 达 ``MERCHANT_DIRTY_MIN`` → ``merchant_profile``，``MEASUREMENT`` 且 verdict 阳性 → 该测量维度。"""
+    """阳性测量证据按维度归类：``MEASUREMENT`` 且 verdict 阳性 → 该测量维度（原始统计不直接构成阳性）。"""
     out: dict[str, list[Evidence]] = defaultdict(list)
     for e in evidence or []:
-        if e.type == MERCHANT_HISTORY_TYPE:
-            if _merchant_is_dirty(e):
-                out[DIM_MERCHANT_PROFILE].append(e)
-        elif e.type == MEASUREMENT_TYPE:
+        if e.type == MEASUREMENT_TYPE:
             dim = measurement_dimension(e)
             if measurement_verdict(e) == VERDICT_POSITIVE and dim:
                 out[dim].append(e)
     return dict(out)
 
 
-def required_dimensions(case: ProductReviewCase | None) -> tuple[str, ...]:
-    """本案必需的测量维度；``case`` 缺失返回空元组。"""
+def required_dimensions(
+    case: ProductReviewCase | None, evidence: Iterable[Evidence]
+) -> tuple[str, ...]:
+    """本案必需的测量维度；``case`` 缺失返回空元组。存在阳性证据时追加 ``policy_citation``（自动拒绝必须可引用）。"""
     if case is None:
         return ()
-    return (DIM_LISTING_REGISTRY, DIM_MERCHANT_PROFILE, DIM_TEXT_COMPLIANCE)
+    required = [DIM_LISTING_REGISTRY, DIM_MERCHANT_PROFILE, DIM_TEXT_COMPLIANCE]
+    if positive_dimensions(evidence):
+        required.append(DIM_POLICY_CITATION)
+    return tuple(required)
 
 
 def capabilities_from_tools(tools: Sequence[Any]) -> dict[str, bool]:
@@ -114,14 +111,17 @@ def coverage_report(
     caps: Mapping[str, bool] = capabilities if capabilities is not None else {
         dim: True for dim in ALL_DIMENSIONS
     }
-    required = required_dimensions(case)
+    positive = positive_dimensions(evs)
+    required = required_dimensions(case, evs)
     covered: set[str] = set(ALWAYS_COVERED_DIMENSIONS)
-    covered |= set(positive_dimensions(evs))
+    covered |= set(positive)
     for e in evs:
         if e.type == MEASUREMENT_TYPE and measurement_verdict(e) in VERDICTS:
             dim = measurement_dimension(e)
             if dim:
                 covered.add(dim)
+    if has_citable_evidence(evs):
+        covered.add(DIM_POLICY_CITATION)
     missing = tuple(d for d in required if d not in covered and caps.get(d, True))
     unmeasurable = tuple(d for d in required if d not in covered and not caps.get(d, True))
     return CoverageReport(
@@ -129,13 +129,13 @@ def coverage_report(
         covered=frozenset(covered),
         missing=missing,
         unmeasurable=unmeasurable,
-        positive=positive_dimensions(evs),
+        positive=positive,
         capabilities=caps,
     )
 
 
 def coverage_gap_lines(state: dict) -> list[str]:
-    """本案必需测量的覆盖清单（人读行，注入 plan / decide 上下文）；有阳性证据且无可引用依据时额外列出 ``policy_citation`` 缺口。"""
+    """本案必需测量的覆盖清单（人读行，注入 plan / decide 上下文）。"""
     evidence = list(state.get("evidence") or [])
     cov = coverage_report(
         state.get("case"),
@@ -146,23 +146,15 @@ def coverage_gap_lines(state: dict) -> list[str]:
     lines = [f"- 必需测量覆盖：{len(covered)}/{len(cov.required)}"]
     for dim in cov.required:
         if dim in cov.covered:
-            verdict = "阳性" if dim in cov.positive else "阴性"
-            lines.append(f"  - {dim}：已测（{verdict}）")
+            if dim == DIM_POLICY_CITATION:
+                lines.append(f"  - {dim}：已取得可引用依据")
+            else:
+                verdict = "阳性" if dim in cov.positive else "阴性"
+                lines.append(f"  - {dim}：已测（{verdict}）")
         elif dim in cov.unmeasurable:
             lines.append(f"  - {dim}：本环境不可测（不要再安排该类工具，重跑无用）")
         else:
             lines.append(f"  - {dim}：**尚未取得** —— 优先安排能补齐它的工具")
-    has_citable = any(
-        e.type in ("POLICY_REF", "CASE_PRECEDENT") and e.ref_id for e in evidence
-    )
-    if cov.positive and not has_citable:
-        if (state.get("measurement_capabilities") or {}).get(DIM_POLICY_CITATION, True):
-            lines.append(
-                "  - policy_citation：**尚未取得** —— 已存在阳性证据，自动拒绝必须能引用政策"
-                "条款或同类先例，**请安排先例/政策检索**"
-            )
-        else:
-            lines.append("  - policy_citation：本环境不可测（无检索数据源）")
     return lines
 
 

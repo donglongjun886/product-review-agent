@@ -85,8 +85,8 @@ def test_gate_probe_agrees_with_overlay_outcome():
     reject_prop = DecisionProposal(decision="REJECT", risk_level="HIGH", confidence=0.9)  # type: ignore[arg-type]
     risk_final = run_decision_overlay(risk, reject_prop)
     assert risk_final.decision.value == "HUMAN_REVIEW"
-    assert risk_final.overrides == ["R2_REJECT_GATE_FAIL", "R3_POSITIVE_INSUFFICIENT"]
-    assert gate_probe(risk) == "UNDECIDED"
+    assert risk_final.overrides == ["R3_MEASUREMENT_MISSING"]
+    assert gate_probe(risk) == "HUMAN"
 
     assert run_decision_overlay(risk_anchor_state(), reject_prop).decision.value == "REJECT"
     assert gate_probe(risk_anchor_state()) == "REJECT"

@@ -14,11 +14,11 @@ from pra.agent.guardrails.measurements import (
     RULE_EVASION_WORD,
     CoverageReport,
     coverage_report,
+    has_citable_evidence,
     rule_hit_ids,
 )
 from pra.agent.state import merge_evidence
 from pra.domain.measurement import (
-    CITABLE_TYPES,
     DEFAULT_EVIDENCE_WEIGHT,
     DIM_MERCHANT_PROFILE,
     DIM_TEXT_COMPLIANCE,
@@ -47,11 +47,6 @@ R3_POSITIVE_INSUFFICIENT = "R3_POSITIVE_INSUFFICIENT"
 R4_PASS_GATE_FAIL = "R4_PASS_GATE_FAIL"
 R5_DEGRADED_OR_FAILED_STEP = "R5_DEGRADED_OR_FAILED_STEP"
 R6_INFRA_UNAVAILABLE = "R6_INFRA_UNAVAILABLE"
-
-
-def _has_citable(evidence) -> bool:
-    """是否存在带 ``ref_id`` 的可引用依据（POLICY_REF / CASE_PRECEDENT）。"""
-    return any(e.type in CITABLE_TYPES and e.ref_id for e in evidence)
 
 
 # 谓词
@@ -94,7 +89,7 @@ def reject_gate(state) -> bool:
         return False
     if RULE_EVASION_WORD not in rule_hit_ids(state.get("case")):
         return False
-    return _has_citable(state.get("evidence") or [])
+    return has_citable_evidence(state.get("evidence") or [])
 
 
 def _finalize_risk_level(state, proposal) -> RiskLevel:

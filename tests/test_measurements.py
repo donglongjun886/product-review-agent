@@ -39,7 +39,12 @@ from pra.domain.measurement import (
     measurement_ref_id,
     measurement_verdict,
 )
-from pra.tools.merchant.tool import MerchantTool
+from pra.tools.merchant.tool import (
+    MERCHANT_HISTORY_TYPE,
+    MerchantProfile,
+    MerchantResult,
+    MerchantTool,
+)
 from pra.tools.product.tool import ProductTool
 
 MEASUREMENTS_MODULE = Path("src/pra/agent/guardrails/measurements.py")
@@ -81,11 +86,16 @@ def test_measurement_dedup_key_keeps_positive_apart_from_negative():
     assert (negative.type, negative.ref_id) != (positive.type, positive.ref_id)
 
 
-def test_dirty_merchant_is_positive():
-    assert positive_dimensions(
-        [ev("MERCHANT_HISTORY", value="1 similar / 3 removals / 0 title-relisting, credit=60",
-            ref_id="M_1", extra={"removals": 3, "title": 0})]
-    )[DIM_MERCHANT_PROFILE]
+def test_dirty_merchant_positive_comes_from_tool_measurement():
+    """商家达阈值的阳性结论只由工具的 ``MEASUREMENT`` 证据承载；原始 ``MERCHANT_HISTORY`` 统计不直接构成阳性。"""
+    tool = MerchantTool(repo=InMemoryMerchantRepository())
+    result = MerchantResult(
+        profile=MerchantProfile(merchant_id="M_1", removals=5, credit_score=60)
+    )
+    evs = tool.to_evidence(result)
+    assert DIM_MERCHANT_PROFILE in positive_dimensions(evs)
+    raw_only = [e for e in evs if e.type == MERCHANT_HISTORY_TYPE]
+    assert raw_only and positive_dimensions(raw_only) == {}
 
 
 def test_positive_measurement_declares_dimension_positive():
@@ -155,9 +165,30 @@ def test_capability_defaults_to_measurable_so_missing_is_not_hidden():
     assert cov.missing and not cov.unmeasurable
 
 
-def test_policy_citation_is_not_pass_required():
-    """``policy_citation`` 不进 PASS 必需集。"""
-    assert DIM_POLICY_CITATION not in required_dimensions(make_case())
+def test_policy_citation_required_only_when_positive_exists():
+    """``policy_citation`` 是条件必需：无阳性证据不进必需集；有阳性证据则必须补齐可引用依据。"""
+    assert DIM_POLICY_CITATION not in required_dimensions(make_case(), covered_evidence())
+    assert DIM_POLICY_CITATION in required_dimensions(
+        make_case(), covered_evidence(merchant_removals=5)
+    )
+
+
+def test_positive_without_citable_makes_policy_citation_missing():
+    cov = coverage_report(
+        make_case(), covered_evidence(merchant_removals=5), all_measureable_caps()
+    )
+    assert DIM_POLICY_CITATION in cov.required
+    assert DIM_POLICY_CITATION in cov.missing
+
+
+def test_citable_evidence_covers_policy_citation():
+    evs = [
+        *covered_evidence(merchant_removals=5),
+        ev("POLICY_REF", value="POLICY_3.2 v2 条款：x", weight=0.9, ref_id="POLICY_3.2_v2_c1"),
+    ]
+    cov = coverage_report(make_case(), evs, all_measureable_caps())
+    assert DIM_POLICY_CITATION in cov.covered
+    assert cov.missing == ()
 
 
 def test_text_compliance_is_always_covered():
@@ -167,7 +198,8 @@ def test_text_compliance_is_always_covered():
 
 
 def test_missing_case_requires_nothing():
-    assert required_dimensions(None) == ()
+    assert required_dimensions(None, []) == ()
+    assert required_dimensions(None, covered_evidence(merchant_removals=5)) == ()
     cov = coverage_report(None, [], None)
     assert cov.required == () and cov.missing == () and cov.unmeasurable == ()
 
@@ -241,6 +273,7 @@ def test_required_dimension_sources_do_not_reference_ground_truth():
 def test_all_declared_dimensions_have_a_requiredness_source():
     """新增维度必须能被 required 派生或能力表识别。"""
     case = make_case()
-    required = set(required_dimensions(case))
-    assert required | {DIM_POLICY_CITATION} == set(ALL_DIMENSIONS)
-    assert DIM_POLICY_CITATION not in required
+    assert set(required_dimensions(case, covered_evidence(merchant_removals=5))) == set(
+        ALL_DIMENSIONS
+    )
+    assert DIM_POLICY_CITATION not in required_dimensions(case, covered_evidence())
