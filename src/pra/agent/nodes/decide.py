@@ -17,7 +17,7 @@ __all__ = ["decide_node"]
 
 
 def _state_payload(state: dict) -> dict:
-    """LLM 入参 state 子集：hypotheses / evidence 全量 + degraded + failures + budget 摘要 + ``required_measurement_coverage`` 覆盖清单。"""
+    """LLM 入参 state 子集：hypotheses / evidence 全量 + degraded + failures + budget 摘要 + ``required_measurement_coverage`` 覆盖清单 + ``llm_messages`` 对话历史。"""
     budget = state.get("budget")
     if budget is not None:
         budget_summary = {
@@ -40,6 +40,7 @@ def _state_payload(state: dict) -> dict:
         "failures": state.get("failures") or [],
         "budget": budget_summary,
         "required_measurement_coverage": coverage_gap_lines(state),
+        "llm_messages": state.get("llm_messages") or [],
     }
 
 
@@ -80,9 +81,12 @@ async def decide_node(state: dict, config, *, llm: LLMBackend) -> dict:
         overlay_state["failures"] = [*state["failures"], failure]
 
     final = run_decision_overlay(overlay_state, proposal)
-    return {
+    result: dict = {
         "decision": final,
         "degraded": False,
         "budget": budget,
         "failures": [failure] if decide_llm_failed else [],
     }
+    if can_llm:
+        result["llm_messages"] = outcome.messages
+    return result

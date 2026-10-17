@@ -13,6 +13,7 @@ from pra.agent.guardrails.llm_shell import (
 from pra.agent.llm_prompts import (
     SYSTEM_PROMPTS,
     build_system_prompt,
+    build_turn_message,
     build_user_prompt,
 )
 
@@ -42,7 +43,11 @@ def _cache_token_split(usage: Any) -> tuple[int, int] | None:
     if hit is not None or miss is not None:
         return (hit or 0, miss or 0)
     details = getattr(usage, "prompt_tokens_details", None)
-    cached = _int_or_none(getattr(details, "cached_tokens", None)) if details is not None else None
+    cached = (
+        _int_or_none(getattr(details, "cached_tokens", None))
+        if details is not None
+        else None
+    )
     if cached is None:
         return None
     prompt_tokens = _int_or_none(getattr(usage, "prompt_tokens", None))
@@ -81,7 +86,7 @@ class LiteLLMBackend(LLMBackend):
         self.base_url = base_url
         self.thinking = thinking
         self.reasoning_effort = reasoning_effort
-        self._api_key: str | None = (api_key or os.environ.get(_API_KEY_ENV) or None)
+        self._api_key: str | None = api_key or os.environ.get(_API_KEY_ENV) or None
         self._tool_catalog: list[dict] = self._extract_tool_catalog(tools)
         # 实例级缓存命中累计（纯观测，不进 state/预算语义）；None = 提供方从未给过缓存字段
         self._cache_hit_tokens: int | None = None
@@ -123,6 +128,29 @@ class LiteLLMBackend(LLMBackend):
             )
         return catalog
 
+    @staticmethod
+    def _validated_history(state: dict) -> list[dict]:
+        """``state["llm_messages"]`` 原样返回；形状非法 → ``LLMBackendError``（显式失败）。
+
+        历史由本后端自行产出，形状恒合法；发现坏条目（非 list / 条目非 dict /
+        content 缺失或空）即 state 损坏或代码 bug，显式失败走节点降级，不静默截断。
+        """
+        history = state.get("llm_messages")
+        if history is None:
+            return []
+        if not isinstance(history, list):
+            raise LLMBackendError(
+                f"state[\"llm_messages\"] 应为 list，实为 {type(history).__name__}"
+            )
+        for m in history:
+            if not (
+                isinstance(m, dict)
+                and isinstance(m.get("content"), str)
+                and m["content"]
+            ):
+                raise LLMBackendError(f"llm_messages 含非法条目（非 dict 或 content 为空）：{m!r}")
+        return history
+
     def _render(
         self,
         *,
@@ -130,19 +158,40 @@ class LiteLLMBackend(LLMBackend):
         state: dict,
         json_schema: dict,
         feedback: list[str] | None = None,
-    ) -> tuple[str, str]:
-        """组装 (system, user) 消息：system = 角色约束指令，user = 分节上下文 + Schema 要点
-        + 可选修正提示。
+    ) -> tuple[list[dict], list[dict]]:
+        """组装本轮消息：返回 ``(发送消息, 本轮新增待持久化消息)``。
+
+        发送消息 = [system, *对话历史, *本轮 user 消息]；agent 节点走增量轮次消息
+        （``build_turn_message``），修正反馈以独立 user 消息追加（重试时轮次消息已在
+        历史里，只把反馈计入新增）；single_call 一次性全量渲染（``build_user_prompt``），
+        忽略对话历史、修正反馈内嵌同一条 user。
         """
-        system = build_system_prompt(node)
-        user = build_user_prompt(
-            node=node,
-            state=state,
-            json_schema=json_schema,
-            tool_catalog=self._tool_catalog,
-            feedbacks=feedback,
-        )
-        return system, user
+        system = {"role": "system", "content": build_system_prompt(node)}
+        if node == "single_call":
+            user = {
+                "role": "user",
+                "content": build_user_prompt(
+                    node=node, state=state, json_schema=json_schema, feedbacks=feedback
+                ),
+            }
+            return [system, user], [user]
+        turn_user = {
+            "role": "user",
+            "content": build_turn_message(
+                node=node,
+                state=state,
+                json_schema=json_schema,
+                tool_catalog=self._tool_catalog,
+            ),
+        }
+        sent: list[dict] = [system, *self._validated_history(state), turn_user]
+        new_messages: list[dict] = [turn_user]
+        if feedback:
+            correction = {"role": "user", "content": "\n\n".join(feedback)}
+            sent.append(correction)
+            # 重试：轮次消息已在历史（首试已上报），本轮新增只计修正反馈
+            new_messages = [correction]
+        return sent, new_messages
 
     async def complete(
         self,
@@ -158,20 +207,18 @@ class LiteLLMBackend(LLMBackend):
         ``finish_reason == "length"``；``node`` 词表外或无 key / 调用失败 → ``LLMBackendError``。
         """
         if node not in SYSTEM_PROMPTS:
-            raise LLMBackendError(
-                f"未知 node: {node!r}，应为 {sorted(SYSTEM_PROMPTS)}"
-            )
+            raise LLMBackendError(f"未知 node: {node!r}，应为 {sorted(SYSTEM_PROMPTS)}")
         if not self._api_key:
             raise LLMBackendError(
                 f"未配置 DeepSeek API key：请在构造 LiteLLMBackend(api_key=...) 时传入，"
                 f"或设置环境变量 {_API_KEY_ENV} 后重试（当前 model={self.model}）。"
             )
-        system, user = self._render(
+        sent_messages, new_messages = self._render(
             node=node, state=state, json_schema=json_schema, feedback=feedback
         )
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "messages": sent_messages,
             "temperature": self.temperature,
             "timeout": self.timeout_s,
             "response_format": {"type": "json_object"},
@@ -229,11 +276,18 @@ class LiteLLMBackend(LLMBackend):
                 self._cache_hit_tokens = (self._cache_hit_tokens or 0) + hit
                 self._cache_miss_tokens = (self._cache_miss_tokens or 0) + miss
             usage_details = parts or None
+        clean = self._clean_json_text(content)
+        # 空 content 的 assistant 消息不持久化：形状非法（发回 API 会被拒），
+        # 且该次输出必然校验失败、由修正反馈取代
+        assistant = (
+            [{"role": "assistant", "content": clean}] if clean.strip() else []
+        )
         return LLMResponse(
-            content=self._clean_json_text(content),
+            content=clean,
             tokens=tokens,
             truncated=truncated,
             usage=usage_details,
+            messages=[*new_messages, *assistant],
         )
 
     @staticmethod

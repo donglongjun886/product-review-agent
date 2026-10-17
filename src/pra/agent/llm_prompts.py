@@ -1,9 +1,12 @@
-"""四个 LLM 节点的 prompt 渲染（纯函数、无 IO）：system 为角色约束指令，
-user 为人读中文上下文 + 输出 Schema 要点。
+"""LLM 节点的 prompt 渲染（纯函数、无 IO）—— append-only 对话架构。
 
-system 约束按归属分两层：跨节点通用纪律由 ``_SYSTEM_BASE`` 单点承载，
-节点特有约束放 ``_NODE_SYSTEM_SUFFIX``；输出字段声明不进 system（由 user 末尾的
-JSON Schema 要点承载）。
+四个 agent 节点（hypothesize / plan / reevaluate / decide）共用同一份 system
+（``AGENT_SYSTEM_PROMPT``：跨节点通用纪律 + 轮次工作方式说明）；每轮只追加一条
+**增量** user 消息（``build_turn_message``：本轮新内容 → 本轮角色指令 → 输出
+Schema 要点），旧消息逐字节不动以保证前缀缓存命中。
+
+``single_call``（评测 single 臂）不参与对话历史：保留独立 system（``BASE_PROMPT``
++ 单节点约束）与一次性全量 user（``build_user_prompt``）。
 """
 
 from __future__ import annotations
@@ -11,7 +14,15 @@ from __future__ import annotations
 import math
 from typing import Any
 
-__all__ = ["BASE_PROMPT", "SYSTEM_PROMPTS", "build_system_prompt", "build_user_prompt"]
+__all__ = [
+    "AGENT_NODES",
+    "AGENT_SYSTEM_PROMPT",
+    "BASE_PROMPT",
+    "SYSTEM_PROMPTS",
+    "build_system_prompt",
+    "build_turn_message",
+    "build_user_prompt",
+]
 
 _POLICY_REF = "POLICY_REF"  # 政策条款证据类型
 _CASE_PRECEDENT = "CASE_PRECEDENT"  # 人工先例证据类型
@@ -55,7 +66,7 @@ def _section(title: str, body: str) -> str:
     return f"## {title}\n{body}"
 
 
-# 跨节点通用纪律（单点定义；节点特有约束见文件末尾 _NODE_SYSTEM_SUFFIX）。
+# 跨节点通用纪律（单点定义；agent 节点角色指令见 _NODE_TURN_INSTRUCTION）。
 BASE_PROMPT = (
     "硬性纪律（所有节点通用）：\n"
     "1. **禁止臆造**：判断与引用只能依据 user 上下文真实给出的事实/数值/来源/条款，"
@@ -66,8 +77,20 @@ BASE_PROMPT = (
     "Schema 要点；除 JSON 外不要输出任何解释文字。"
 )
 
-# 节点特有 system 后缀；与 BASE_PROMPT 拼接成完整 system（拼接见文件末尾）。
-_NODE_SYSTEM_SUFFIX: dict[str, str] = {
+# 四个走对话历史的 agent 节点（共用 AGENT_SYSTEM_PROMPT）。
+AGENT_NODES: tuple[str, ...] = ("hypothesize", "plan", "reevaluate", "decide")
+
+# agent 节点统一 system：通用纪律 + 轮次工作方式说明（逐字节稳定，前缀缓存的共享根）。
+AGENT_SYSTEM_PROMPT = (
+    BASE_PROMPT
+    + "\n\n你是电商商品上架审核的调查 Agent，按**多轮对话**工作：对话历史是本案的完整"
+    "调查记录（案件事实、各轮增量证据、你此前的输出）；每轮最新的 user 消息给出"
+    "「本轮新内容 + 本轮角色指令 + 输出 Schema 要点」，你只回应当前这一轮的任务，"
+    "历史消息中的旧角色指令不适用于本轮。"
+)
+
+# 节点角色指令（随各节点轮次消息末尾下发）。
+_NODE_TURN_INSTRUCTION: dict[str, str] = {
     "hypothesize": (
         "你是电商商品上架审核的「初始风险假设生成器」。本轮输入是一起待审核案件的完整"
         "商品事实（商品快照、商家、事件类型）。你的任务：建立**待验证的风险假设集**，"
@@ -173,22 +196,25 @@ _NODE_SYSTEM_SUFFIX: dict[str, str] = {
         "3. policy 只能填上下文中 POLICY_REF 证据里真实出现的条款号/政策 ID；\n"
         "4. confidence ∈ [0,1] 是提案自评的把握（参考值，确定性 overlay 既不读也不据它判定）。"
     ),
-    "single_call": (
-        "你是电商商品内容审核员。本次审核**只看案件快照**（商品事实：标题/描述/类目/品牌/"
-        "属性/SKU；商家 ID；事件类型），**不调用任何工具、不做额外取证**，"
-        "也**不得假设快照之外的事实**，直接给出裁决。\n"
-        "三分类语义：\n"
-        "1) PASS：快照中不存在任何风险信号（品牌/类目/文本均正常）；\n"
-        "2) REJECT：快照中存在**明确**的违规确证（如标题/描述含规避或仿冒用语）；\n"
-        "3) HUMAN_REVIEW：风险信号存在但快照不足以确证（如品牌字段空缺、商家可疑却无本 "
-        "listing 确证）—— **拿不准一律 HUMAN_REVIEW**。"
-    ),
 }
 
+# single_call（评测 single 臂）独立 system 后缀：一次性直判，不走对话历史。
+_SINGLE_CALL_SYSTEM_SUFFIX = (
+    "你是电商商品内容审核员。本次审核**只看案件快照**（商品事实：标题/描述/类目/品牌/"
+    "属性/SKU；商家 ID；事件类型），**不调用任何工具、不做额外取证**，"
+    "也**不得假设快照之外的事实**，直接给出裁决。\n"
+    "三分类语义：\n"
+    "1) PASS：快照中不存在任何风险信号（品牌/类目/文本均正常）；\n"
+    "2) REJECT：快照中存在**明确**的违规确证（如标题/描述含规避或仿冒用语）；\n"
+    "3) HUMAN_REVIEW：风险信号存在但快照不足以确证（如品牌字段空缺、商家可疑却无本 "
+    "listing 确证）—— **拿不准一律 HUMAN_REVIEW**。"
+)
 
-# 完整 system prompt = 通用纪律 + 节点特有约束。
+
+# 完整 system prompt：agent 四节点共用 AGENT_SYSTEM_PROMPT；single_call 独立。
 SYSTEM_PROMPTS: dict[str, str] = {
-    node: BASE_PROMPT + "\n" + suffix for node, suffix in _NODE_SYSTEM_SUFFIX.items()
+    **{node: AGENT_SYSTEM_PROMPT for node in AGENT_NODES},
+    "single_call": BASE_PROMPT + "\n" + _SINGLE_CALL_SYSTEM_SUFFIX,
 }
 
 
@@ -563,7 +589,12 @@ def _feedback_section(feedbacks: Any) -> str:
     )
 
 
-def build_user_prompt(
+def _turn_instruction_section(node: str) -> str:
+    """节点角色指令小节（随轮次消息末尾下发）。"""
+    return _section("本轮角色与输出要求", _NODE_TURN_INSTRUCTION[node])
+
+
+def build_turn_message(
     *,
     node: str,
     state: dict,
@@ -571,21 +602,24 @@ def build_user_prompt(
     tool_catalog: Any = None,
     feedbacks: Any = None,
 ) -> str:
-    """按 node 组装 user 消息正文（人读中文上下文 + 输出 Schema 要点）。
+    """按 node 组装本轮**增量** user 消息（append-only：只放本轮新内容）。
 
-    :param state: 节点传入的结构化 state dict；
+    结构：增量内容小节 → 本轮角色指令 → 输出 Schema 要点 → 可选修正反馈。
+    旧内容（案件事实、已讲过的证据）在对话历史里，不重复渲染。
+
+    :param state: 节点传入的结构化 state dict；reevaluate 读 ``llm_evidence_cursor``
+        只渲染该游标之后的新增证据；
     :param json_schema: OutputModel 的 ``model_json_schema()`` dict；
     :param tool_catalog: 工具目录 ``[{name, description, args_schema}]``；None → 空目录；
     :param feedbacks: 修正提示文本列表（可选）。
     """
+    if node not in AGENT_NODES:
+        raise ValueError(
+            f"build_turn_message 只服务 agent 节点 {sorted(AGENT_NODES)}，收到 {node!r}"
+        )
     state = state if isinstance(state, dict) else {}
     catalog = tool_catalog if isinstance(tool_catalog, list) else []
-    parts: list[str] = [
-        (
-            "本次商品审核的完整上下文如下（下文的商品事实 / 证据 / 假设是唯一允许引用的"
-            "依据；直接输出最终 JSON，不要复述本上下文）："
-        )
-    ]
+    parts: list[str] = [f"【本轮节点：{node}】"]
     if node == "hypothesize":
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
         existing = state.get("hypotheses")
@@ -597,44 +631,66 @@ def build_user_prompt(
                 )
             )
     elif node == "plan":
-        parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
-        parts.append(_section("二、假设仪表盘", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
-        parts.append(_section("三、已收集证据摘要", "\n".join(_evidence_lines(state.get("evidence"), full_value=False, limit=120))))
-        parts.append(_section("四、可用取证工具目录", _tool_catalog_text(catalog)))
+        parts.append(
+            _section(
+                "一、当前假设仪表盘（快照；证据详情见对话历史，不重复列出）",
+                "\n".join(_hypothesis_lines(state.get("hypotheses"))),
+            )
+        )
         gap = state.get("required_measurement_coverage")
         if isinstance(gap, list) and gap:
             parts.append(
                 _section(
-                    "五、本案必需测量覆盖（Missing = 必须补测；不可测的不要再安排）",
+                    "二、本案必需测量覆盖（Missing = 必须补测；不可测的不要再安排）",
                     "\n".join(str(line) for line in gap),
                 )
             )
+        parts.append(_section("三、可用取证工具目录", _tool_catalog_text(catalog)))
     elif node == "reevaluate":
-        parts.append(_section("一、假设仪表盘", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
-        parts.append(_section("二、本轮已收集证据（全部）", "\n".join(_evidence_lines(state.get("evidence")))))
-        parts.append(_section("三、上一轮待执行工具（供参考，本轮不执行）", "\n".join(_pending_tool_lines(state.get("pending_tool_calls")))))
+        evidence = state.get("evidence")
+        evidence = [e for e in (evidence or []) if isinstance(e, dict)]
+        cursor = state.get("llm_evidence_cursor")
+        cursor = cursor if isinstance(cursor, int) and 0 <= cursor <= len(evidence) else 0
+        new_evidence = evidence[cursor:]
+        parts.append(
+            _section(
+                "一、本轮新增证据（全部；既往证据见对话历史）",
+                "\n".join(_evidence_lines(new_evidence))
+                if new_evidence
+                else "（本轮无新增证据）",
+            )
+        )
+        parts.append(
+            _section(
+                "二、上一轮待执行工具（供参考，本轮不执行）",
+                "\n".join(_pending_tool_lines(state.get("pending_tool_calls"))),
+            )
+        )
     elif node == "decide":
-        parts.append(_section("一、假设仪表盘（含支持/反驳证据引用）", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
+        parts.append(
+            _section(
+                "一、假设仪表盘（含支持/反驳证据引用）",
+                "\n".join(_hypothesis_lines(state.get("hypotheses"))),
+            )
+        )
         evidence = state.get("evidence")
         evidence = [e for e in (evidence or []) if isinstance(e, dict)]
         policy_pre = [e for e in evidence if e.get("type") in (_POLICY_REF, _CASE_PRECEDENT)]
-        others = [e for e in evidence if e.get("type") not in (_POLICY_REF, _CASE_PRECEDENT)]
         parts.append(
             _section(
                 "二、可引用政策与先例（POLICY_REF / CASE_PRECEDENT 全量 —— REJECT 的"
-                "条款/先例来源）",
+                "条款/先例来源；其余证据见对话历史）",
                 "\n".join(_evidence_lines(policy_pre))
                 if policy_pre
                 else "（无 —— 没有政策/先例证据时，REJECT 缺少可引用依据，应倾向"
                 " HUMAN_REVIEW）",
             )
         )
-        parts.append(_section("三、其余证据链（全量）", "\n".join(_evidence_lines(others))))
         gap = state.get("required_measurement_coverage")
         if isinstance(gap, list) and gap:
             parts.append(
                 _section(
-                    "四、本案必需测量覆盖（与确定性 Gate 同源 —— 判断「必需测量是否已取得」"
+                    "三、本案必需测量覆盖（与确定性 Gate 同源 —— 判断「必需测量是否已取得」"
                     "以此为准，不要凭证据列表自行推断缺口）",
                     "\n".join(str(line) for line in gap),
                 )
@@ -648,14 +704,45 @@ def build_user_prompt(
                else "：正常")
         )
         status_lines += _failure_lines(state.get("failures"))
-        parts.append(_section("五、运行状态（degraded / failures）", "\n".join(status_lines)))
-        parts.append(_section("六、预算摘要", "\n".join(_budget_lines(state.get("budget")))))
-    elif node == "single_call":
-        parts.append(_section("案件与商品事实", "\n".join(_case_lines(state))))
-    else:
-        parts.append(_section("案件与商品事实", "\n".join(_case_lines(state))))
-        parts.append(_section("假设", "\n".join(_hypothesis_lines(state.get("hypotheses")))))
-        parts.append(_section("证据", "\n".join(_evidence_lines(state.get("evidence")))))
+        parts.append(_section("四、运行状态（degraded / failures）", "\n".join(status_lines)))
+        parts.append(_section("五、预算摘要", "\n".join(_budget_lines(state.get("budget")))))
+    parts.append(_turn_instruction_section(node))
+    parts.append(_schema_guide(json_schema))
+    fb = _feedback_section(feedbacks)
+    if fb:
+        parts.append(fb)
+    return "\n\n".join(parts)
+
+
+def build_user_prompt(
+    *,
+    node: str,
+    state: dict,
+    json_schema: dict,
+    feedbacks: Any = None,
+) -> str:
+    """single_call 臂的一次性全量 user 消息（案件事实 + 输出 Schema 要点）。
+
+    只服务 ``single_call``（评测 single 臂，不走对话历史）；agent 四节点用
+    ``build_turn_message``。
+
+    :param state: 含 ``case`` 的结构化 state dict；
+    :param json_schema: OutputModel 的 ``model_json_schema()`` dict；
+    :param feedbacks: 修正提示文本列表（可选）。
+    """
+    if node != "single_call":
+        raise ValueError(
+            f"build_user_prompt 只服务 single_call（一次性直判），收到 {node!r}；"
+            "agent 节点请用 build_turn_message"
+        )
+    state = state if isinstance(state, dict) else {}
+    parts: list[str] = [
+        (
+            "本次商品审核的完整上下文如下（下文的商品事实是唯一允许引用的"
+            "依据；直接输出最终 JSON，不要复述本上下文）："
+        ),
+        _section("案件与商品事实", "\n".join(_case_lines(state))),
+    ]
     fb = _feedback_section(feedbacks)
     if fb:
         parts.append(fb)

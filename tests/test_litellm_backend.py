@@ -19,7 +19,6 @@ from pra.agent.guardrails.llm_shell import (
 from pra.agent.guardrails.schemas import PlanOutput
 from pra.agent.litellm_backend import LiteLLMBackend
 from pra.agent.llm_prompts import (
-    SYSTEM_PROMPTS,
     build_system_prompt,
     build_user_prompt,
 )
@@ -431,7 +430,7 @@ async def test_unknown_node_raises_without_calling_litellm(monkeypatch):
 
 
 async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypatch):
-    """全链路重试闭环：第 1 次非法 JSON → 修正提示回喂 → 第 2 次合法 → 成功。"""
+    """全链路重试闭环：第 1 次非法 JSON → 修正提示以独立 user 消息回喂 → 第 2 次合法。"""
     fake = _patch_acompletion(monkeypatch, contents=[_SCHEMA_BAD, plan_conclude_json()])
     backend = LiteLLMBackend(api_key="sk-test")
     outcome = await call_structured_llm(
@@ -445,13 +444,18 @@ async def test_call_structured_llm_schema_fail_then_success_full_chain(monkeypat
     assert outcome.tokens == 14
     assert len(fake.calls) == 2
 
-    second_user = fake.calls[1]["messages"][1]["content"]
-    assert "上一轮输出校验反馈" in second_user
-    assert "重新输出" in second_user
-    assert '"next_action": "SOMETHING_ELSE"' in second_user
-    assert "validation error" in second_user.lower()
-    first_user = fake.calls[0]["messages"][1]["content"]
-    assert "上一轮输出校验反馈" not in first_user
+    # attempt 2 = [system, 重渲染的轮次 user, 独立修正反馈 user]
+    second_msgs = fake.calls[1]["messages"]
+    assert [m["role"] for m in second_msgs] == ["system", "user", "user"]
+    feedback_msg = second_msgs[2]["content"]
+    assert "输出不满足 JSON Schema" in feedback_msg
+    assert '"next_action": "SOMETHING_ELSE"' in feedback_msg
+    assert "validation error" in feedback_msg.lower()
+    # attempt 1 无修正反馈
+    assert len(fake.calls[0]["messages"]) == 2
+    # 持久化的对话历史：轮次 user + bad assistant + 修正 user + final assistant
+    assert [m["role"] for m in outcome.messages] == ["user", "assistant", "user", "assistant"]
+    assert outcome.messages[1]["content"] == _SCHEMA_BAD
 
 
 async def test_call_structured_llm_backend_raise_then_success_full_chain(monkeypatch):
@@ -560,138 +564,109 @@ async def test_call_structured_llm_two_invalid_schema_failures(monkeypatch):
     assert len(fake.calls) == 2
 
 
-def test_build_user_prompt_hypothesize_readable_and_no_raw_marker():
-    """hypothesize user prompt：分节中文上下文含商品事实。"""
+async def test_complete_appends_history_and_returns_new_messages(monkeypatch):
+    """append-only：state 带 llm_messages → 发送 [system, *历史, 本轮 user]；
+    resp.messages = 本轮新增的 [user, assistant]；历史原样不动。"""
+    history = [
+        {"role": "user", "content": "【本轮节点：hypothesize】\n案件事实…"},
+        {"role": "assistant", "content": '{"hypotheses": []}'},
+    ]
+    fake = _patch_acompletion(monkeypatch, contents=['{"foo": 1}'], tokens=9)
+    backend = LiteLLMBackend(api_key="sk-test")
+    state = {**_PRODUCT_STATE, "llm_messages": history}
+    resp = await backend.complete(
+        node="plan", state=state, json_schema=_SIMPLE_SCHEMA
+    )
+    sent = fake.calls[0]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
+    assert sent[0]["content"] == build_system_prompt("plan")
+    assert sent[1] == history[0] and sent[2] == history[1]  # 历史逐字节原样
+    assert sent[3]["content"] == resp.messages[0]["content"]
+    assert resp.messages == [
+        {"role": "user", "content": sent[3]["content"]},
+        {"role": "assistant", "content": '{"foo": 1}'},
+    ]
+    assert state["llm_messages"] is history  # 入参 state 不被污染
+
+
+async def test_complete_malformed_history_raises(monkeypatch):
+    """llm_messages 形状非法（非 list / 条目非 dict / 缺 content / 空 content）→
+    LLMBackendError 显式失败（不静默截断历史），且不触发 litellm 调用。"""
+
+    async def should_not_be_called(**kwargs):
+        pytest.fail("历史非法不应触发 litellm 调用")
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "acompletion", should_not_be_called)
+    backend = LiteLLMBackend(api_key="sk-test")
+    bad_histories = [
+        "not-a-list",
+        ["garbage"],
+        [{"role": "assistant"}],  # 缺 content
+        [{"role": "user", "content": ""}],  # 空 content
+    ]
+    for history in bad_histories:
+        with pytest.raises(LLMBackendError):
+            await backend.complete(
+                node="plan", state={"llm_messages": history}, json_schema=_SIMPLE_SCHEMA
+            )
+
+
+async def test_complete_empty_assistant_content_not_persisted(monkeypatch):
+    """模型返回空 content（必然校验失败、由修正反馈取代）→ resp.messages 不含空 assistant。"""
+    fake = _patch_acompletion(monkeypatch, contents=[None, ""])
+    backend = LiteLLMBackend(api_key="sk-test")
+    call = {"node": "plan", "state": {}, "json_schema": _SIMPLE_SCHEMA}
+    for _ in range(2):
+        resp = await backend.complete(**call)
+        assert resp.content == ""
+        assert [m["role"] for m in resp.messages] == ["user"]
+    assert len(fake.calls) == 2
+
+
+async def test_single_call_ignores_history_and_feedback_inline(monkeypatch):
+    """single_call 臂：不发对话历史（state 即使带 llm_messages 也忽略），
+    修正反馈仍内嵌在同一条全量 user 里。"""
+    fake = _patch_acompletion(monkeypatch, contents=['{"foo": 1}'])
+    backend = LiteLLMBackend(api_key="sk-test")
+    state = {
+        **_PRODUCT_STATE,
+        "llm_messages": [{"role": "user", "content": "不应出现"}],
+    }
+    resp = await backend.complete(
+        node="single_call",
+        state=state,
+        json_schema=_SIMPLE_SCHEMA,
+        feedback=["JSON 校验失败：decision 缺失"],
+    )
+    sent = fake.calls[0]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user"]
+    assert "不应出现" not in sent[1]["content"]
+    assert "decision 缺失" in sent[1]["content"]
+    assert resp.messages is not None and len(resp.messages) == 2
+
+
+def test_build_user_prompt_single_call_readable():
+    """single_call user prompt：案件事实 + 输出 Schema 要点。"""
     text = build_user_prompt(
-        node="hypothesize", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
+        node="single_call", state=_PRODUCT_STATE, json_schema=_SIMPLE_SCHEMA
     )
     assert "P_MOCK_99" in text
     assert "复古跑鞋（高仿嫌疑样）" in text
     assert "decision" in text and "HUMAN_REVIEW" in text
 
 
-def test_build_user_prompt_decide_sections():
-    """decide user prompt：假设仪表盘/政策先例/预算分节；证据引用串保真。"""
-    state = {
-        "hypotheses": [
-            {
-                "id": "H1",
-                "statement": "商家存在系统性规避行为",
-                "status": "SUPPORTED",
-                "prior": 0.8,
-                "posterior": 0.91,
-                "evidence_for": ["MERCHANT_HISTORY 5 removals / 3 title-relisting"],
-                "evidence_against": [],
-            },
-            {
-                "id": "H2",
-                "statement": "普通设计非品牌款",
-                "status": "REFUTED",
-                "prior": 0.3,
-                "posterior": 0.05,
-                "evidence_for": [],
-                "evidence_against": [],
-            },
-        ],
-        "evidence": [
-            {
-                "type": "MERCHANT_HISTORY",
-                "weight": 0.85,
-                "source": "MerchantTool",
-                "ref_id": "M_5512",
-                "value": "5 removals / 3 title-relisting, credit=38",
-                "extra": {"removals": 5, "title": 3},
-            },
-            {
-                "type": "POLICY_REF",
-                "weight": 0.9,
-                "source": "PolicySearchTool",
-                "ref_id": "POLICY_3.2_v2_c1",
-                "value": "POLICY_3.2 v2：外观高度模仿知名品牌",
-                "extra": {"policy_id": "POLICY_3.2"},
-            },
-        ],
-        "degraded": False,
-        "failures": [
-            {"step_type": "tools", "severity": "WARN", "reason": "某工具超时"},
-        ],
-        "budget": {
-            "llm_calls": 5,
-            "tool_calls": 2,
-            "tokens": 1000,
-            "limits": {
-                "max_llm_calls": 10,
-                "max_tool_calls": 20,
-            },
-        },
-    }
-    text = build_user_prompt(node="decide", state=state, json_schema=_SIMPLE_SCHEMA)
-    assert "H1" in text and "SUPPORTED" in text
-    assert "商家存在系统性规避行为" in text
-    assert "POLICY_REF" in text
-    assert "degraded" in text
-    assert "1000" in text
-    assert "LLM≤10" in text and "工具≤20" in text
-
-
-def test_build_user_prompt_plan_tool_catalog_and_feedback():
-    """plan user prompt：可用工具目录（入参必填要点）+ 修正反馈回喂分节；空目录兜底。"""
-    args_schema = {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "检索描述"},
-            "top_k": {"type": "integer", "description": "返回条数"},
-        },
-        "required": ["query"],
-    }
-    state = {
-        "hypotheses": [],
-        "evidence": [
-            {
-                "type": "PRODUCT_FACT",
-                "weight": 0.6,
-                "source": "ProductTool",
-                "ref_id": "P_1",
-                "value": "brand=null, version=3",
-                "extra": {"a": 1},
-            }
-        ],
-    }
-    catalog = [
-        {"name": "PolicySearchTool", "description": "政策条款检索", "args_schema": args_schema}
-    ]
-    text = build_user_prompt(
-        node="plan",
-        state=state,
-        json_schema=_SIMPLE_SCHEMA,
-        tool_catalog=catalog,
-        feedbacks=["JSON 校验失败：decision 字段缺失，请补全后重新输出"],
-    )
-    assert "PolicySearchTool" in text
-    assert "query" in text and "top_k" in text
-    assert "必填" in text and "可选" in text
-    assert "decision 字段缺失" in text
-    assert "上一轮输出校验反馈" in text
-    empty = build_user_prompt(node="plan", state={}, json_schema={})
-    assert "conclude" in empty
-    assert "无可用取证工具" in empty
-
-
-def test_build_user_prompt_empty_state_all_nodes_robust():
-    """空 state / 缺键：四个节点都不崩、返回非空文本。"""
-    for node in SYSTEM_PROMPTS:
-        text = build_user_prompt(node=node, state={}, json_schema={})
-        assert isinstance(text, str) and text
-        assert "## 输出格式要求" in text
-    text = build_user_prompt(
-        node="decide", state={"hypotheses": "not-a-list"}, json_schema={}
-    )
-    assert isinstance(text, str) and text
+def test_build_user_prompt_rejects_agent_nodes():
+    """build_user_prompt 只服务 single_call；agent 节点走 build_turn_message。"""
+    for node in ("hypothesize", "plan", "reevaluate", "decide"):
+        with pytest.raises(ValueError, match="build_turn_message"):
+            build_user_prompt(node=node, state={}, json_schema={})
 
 
 def test_build_user_prompt_schema_enum_and_required_fields():
     """输出格式要点来自 json_schema：schema 的标题/字段/枚举值/必填可选信息均渲染。"""
-    text = build_user_prompt(node="decide", state={}, json_schema=_SIMPLE_SCHEMA)
+    text = build_user_prompt(node="single_call", state={}, json_schema=_SIMPLE_SCHEMA)
     assert "DecisionProposal" in text
     assert "decision" in text
     assert "PASS" in text and "REJECT" in text and "HUMAN_REVIEW" in text

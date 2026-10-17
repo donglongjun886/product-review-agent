@@ -9,10 +9,12 @@ from helpers import (
     all_measureable_caps,
     budget_exhausted_state,
     decide_reject_json,
+    ev,
     evasion_case,
     hp,
     hypothesize_json,
     make_case,
+    plan_conclude_json,
     reevaluate_json,
     risk_anchor_state,
 )
@@ -67,8 +69,9 @@ def _payload_state() -> dict:
 
 def test_hypothesize_state_payload_is_case_only():
     payload = hypothesize_mod._state_payload(_payload_state())
-    assert set(payload) == {"case"}
+    assert set(payload) == {"case", "llm_messages"}
     assert payload["case"] == _payload_state()["case"].model_dump(mode="json")
+    assert payload["llm_messages"] == []
 
 
 def test_plan_state_payload_passes_full_case():
@@ -80,6 +83,7 @@ def test_plan_state_payload_passes_full_case():
         "evidence",
         "case",
         "required_measurement_coverage",
+        "llm_messages",
     }
     assert payload["case"] == state["case"].model_dump(mode="json")
     assert not hasattr(plan_mod, "_case_subset")
@@ -87,8 +91,16 @@ def test_plan_state_payload_passes_full_case():
 
 def test_reevaluate_state_payload_has_no_queue_key():
     payload = reevaluate_mod._state_payload(_payload_state())
-    assert set(payload) == {"hypotheses", "evidence", "pending_tool_calls"}
+    assert set(payload) == {
+        "hypotheses",
+        "evidence",
+        "pending_tool_calls",
+        "llm_messages",
+        "llm_evidence_cursor",
+    }
     assert set(payload["pending_tool_calls"][0]) == {"tool", "priority", "reason"}
+    assert payload["llm_messages"] == []
+    assert payload["llm_evidence_cursor"] == 0
 
 
 def test_decide_state_payload_budget_summary_two_dims_only():
@@ -100,6 +112,7 @@ def test_decide_state_payload_budget_summary_two_dims_only():
         "failures",
         "budget",
         "required_measurement_coverage",
+        "llm_messages",
     }
     assert payload["budget"]["llm_calls"] == 2 and payload["budget"]["tokens"] == 100
     assert payload["budget"]["limits"] == {"max_llm_calls": 10, "max_tool_calls": 15}
@@ -371,3 +384,81 @@ async def test_decide_success_path_adopts_reject():
     assert out["degraded"] is False
     assert out["budget"].llm_calls == 1
     assert out["failures"] == []
+
+
+_TURN_MESSAGES = [
+    {"role": "user", "content": "【本轮节点：x】"},
+    {"role": "assistant", "content": "{}"},
+]
+
+
+async def test_hypothesize_writes_back_llm_messages():
+    """LLM 调用后 out 带 ``llm_messages``（outcome 聚合的本轮新增消息）。"""
+    backend = NodePayloadBackend(
+        payloads={"hypothesize": hypothesize_json()}, messages=list(_TURN_MESSAGES)
+    )
+    out = await hypothesize_node(_hyp_state(), _CONFIG, llm=backend)
+    assert out["llm_messages"] == _TURN_MESSAGES
+
+
+async def test_plan_writes_back_llm_messages():
+    backend = NodePayloadBackend(
+        payloads={"plan": plan_conclude_json()}, messages=list(_TURN_MESSAGES)
+    )
+    out = await plan_node(
+        {"degraded": False, "budget": Budget(), "case": make_case()},
+        _CONFIG,
+        llm=backend,
+    )
+    assert out["llm_messages"] == _TURN_MESSAGES
+
+
+async def test_decide_writes_back_llm_messages():
+    backend = NodePayloadBackend(
+        payloads={"decide": decide_reject_json()}, messages=list(_TURN_MESSAGES)
+    )
+    st = risk_anchor_state()
+    st["degraded"] = False
+    out = await decide_node(st, _CONFIG, llm=backend)
+    assert out["llm_messages"] == _TURN_MESSAGES
+
+
+async def test_decide_no_llm_call_omits_llm_messages():
+    """预算超限不调 LLM → 不写 llm_messages（历史保持不动）。"""
+    backend = _raise_backend()
+    out = await decide_node(budget_exhausted_state(), _CONFIG, llm=backend)
+    assert "llm_messages" not in out
+
+
+async def test_reevaluate_advances_evidence_cursor_when_messages():
+    """增量证据已讲进历史（messages 非空）→ 游标推进到证据全集。"""
+    state = {
+        "hypotheses": [hp("H1", prior=0.5, statement="s")],
+        "evidence": [ev("PRODUCT_FACT", ref_id="P_1"), ev("MERCHANT_HISTORY", ref_id="M_1")],
+        "pending_tool_calls": [],
+        "budget": Budget(),
+        "degraded": False,
+        "llm_evidence_cursor": 1,
+    }
+    backend = NodePayloadBackend(
+        payloads={"reevaluate": reevaluate_json()}, messages=list(_TURN_MESSAGES)
+    )
+    out = await reevaluate_node(state, _CONFIG, llm=backend)
+    assert out["llm_messages"] == _TURN_MESSAGES
+    assert out["llm_evidence_cursor"] == 2
+
+
+async def test_reevaluate_keeps_cursor_when_no_messages():
+    """后端不给 messages（本轮无内容进历史）→ 游标不推进、不写回。"""
+    state = {
+        "hypotheses": [hp("H1", prior=0.5, statement="s")],
+        "evidence": [ev("PRODUCT_FACT", ref_id="P_1")],
+        "pending_tool_calls": [],
+        "budget": Budget(),
+        "degraded": False,
+        "llm_evidence_cursor": 0,
+    }
+    backend = NodePayloadBackend(payloads={"reevaluate": reevaluate_json()})
+    out = await reevaluate_node(state, _CONFIG, llm=backend)
+    assert out["llm_messages"] == []
+    assert "llm_evidence_cursor" not in out

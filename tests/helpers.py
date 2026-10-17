@@ -360,8 +360,9 @@ class AlwaysRaiseBackend:
 class NodePayloadBackend:
     name = "test-node-payload"
 
-    def __init__(self, payloads: dict | None = None) -> None:
+    def __init__(self, payloads: dict | None = None, messages: list[dict] | None = None) -> None:
         self._payloads = dict(payloads or {})
+        self._messages = messages
         self.calls: list[str] = []
 
     async def complete(
@@ -370,7 +371,7 @@ class NodePayloadBackend:
         self.calls.append(node)
         if node not in self._payloads:
             raise LLMBackendError(f"test backend unknown node: {node}")
-        return LLMResponse(content=self._payloads[node], tokens=5)
+        return LLMResponse(content=self._payloads[node], tokens=5, messages=self._messages)
 
 
 _WALKTHROUGH_DECIDE = {

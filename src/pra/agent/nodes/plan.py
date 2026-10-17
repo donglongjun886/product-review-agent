@@ -20,7 +20,7 @@ _DEGRADE_REASON = "schema 校验重试仍失败"
 
 
 def _state_payload(state: dict) -> dict:
-    """LLM 入参 state 子集：hypotheses / evidence / case 全量 + ``required_measurement_coverage`` 覆盖缺口。"""
+    """LLM 入参 state 子集：hypotheses / evidence / case 全量 + ``required_measurement_coverage`` 覆盖缺口 + ``llm_messages`` 对话历史。"""
     return {
         "hypotheses": [
             h.model_dump(mode="json") for h in (state.get("hypotheses") or [])
@@ -28,6 +28,7 @@ def _state_payload(state: dict) -> dict:
         "evidence": [e.model_dump(mode="json") for e in (state.get("evidence") or [])],
         "case": state["case"].model_dump(mode="json"),
         "required_measurement_coverage": coverage_gap_lines(state),
+        "llm_messages": state.get("llm_messages") or [],
     }
 
 
@@ -61,6 +62,7 @@ async def plan_node(state: dict, config, *, llm: LLMBackend) -> dict:
                 )
             ],
             "budget": budget,
+            "llm_messages": outcome.messages,
         }
 
     planned = _apply_plan(outcome.model)
@@ -70,4 +72,5 @@ async def plan_node(state: dict, config, *, llm: LLMBackend) -> dict:
         "tool_call_history": skipped,
         "degraded": False,
         "budget": budget,
+        "llm_messages": outcome.messages,
     }

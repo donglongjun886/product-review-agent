@@ -23,7 +23,8 @@ _DEGRADE_REASON = "schema 校验重试仍失败"
 
 
 def _state_payload(state: dict) -> dict:
-    """LLM 入参 state 子集：hypotheses / evidence 全量 + 上一轮 pending_tool_calls 摘要。"""
+    """LLM 入参 state 子集：hypotheses / evidence 全量 + 上一轮 pending_tool_calls 摘要
+    + ``llm_messages`` 对话历史 + ``llm_evidence_cursor`` 证据增量游标。"""
     return {
         "hypotheses": [h.model_dump(mode="json") for h in state.get("hypotheses") or []],
         "evidence": [e.model_dump(mode="json") for e in state.get("evidence") or []],
@@ -35,6 +36,8 @@ def _state_payload(state: dict) -> dict:
             }
             for c in (state.get("pending_tool_calls") or [])
         ],
+        "llm_messages": state.get("llm_messages") or [],
+        "llm_evidence_cursor": state.get("llm_evidence_cursor") or 0,
     }
 
 
@@ -97,6 +100,10 @@ async def reevaluate_node(state: dict, config, *, llm: LLMBackend) -> dict:
     budget = bump_llm_usage(
         state["budget"], llm_calls=outcome.attempts, tokens=outcome.tokens
     )
+    # 对话历史回写；本轮增量证据已讲进历史（messages 非空）→ 游标推进到证据全集
+    history_update: dict = {"llm_messages": outcome.messages}
+    if outcome.messages:
+        history_update["llm_evidence_cursor"] = len(state.get("evidence") or [])
     if outcome.model is None:
         return {
             "degraded": True,
@@ -108,8 +115,10 @@ async def reevaluate_node(state: dict, config, *, llm: LLMBackend) -> dict:
                 )
             ],
             "budget": budget,
+            **history_update,
         }
     updates = _apply(state, outcome.model)
     updates["degraded"] = False
     updates["budget"] = budget
+    updates.update(history_update)
     return updates

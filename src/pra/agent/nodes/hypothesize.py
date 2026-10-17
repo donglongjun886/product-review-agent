@@ -22,9 +22,12 @@ _DEGRADE_REASON = "schema 校验重试仍失败"
 
 
 def _state_payload(state: dict) -> dict:
-    """LLM 入参 state 子集：仅 case 全量（domain 对象已 ``model_dump(mode="json")``）。"""
+    """LLM 入参 state 子集：case 全量 + ``llm_messages`` 对话历史。"""
     case = state["case"]
-    return {"case": case.model_dump(mode="json")}
+    return {
+        "case": case.model_dump(mode="json"),
+        "llm_messages": state.get("llm_messages") or [],
+    }
 
 
 def _apply_hypotheses(out: HypothesizeOutput) -> list[Hypothesis]:
@@ -84,10 +87,12 @@ async def hypothesize_node(state: dict, config, *, llm: LLMBackend) -> dict:
             ],
             "budget": budget,
             "evidence": rule_evidence,
+            "llm_messages": outcome.messages,
         }
     return {
         "hypotheses": _apply_hypotheses(outcome.model),
         "degraded": False,
         "budget": budget,
         "evidence": rule_evidence,
+        "llm_messages": outcome.messages,
     }
