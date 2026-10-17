@@ -550,7 +550,7 @@ def _render_report(
         else:
             add(
                 f"缓存命中: {hit / (hit + miss):.1%}（hit={hit} / miss={miss}，"
-                "DeepSeek 上下文缓存，命中价约 1/10）"
+                "DeepSeek 上下文缓存，命中价约 1/50）"
             )
     add("-" * 100)
     out_note = f" | JSON 已写入: {out_path}" if out_path else " | 未写文件（--out 可落盘）"
