@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -241,6 +242,264 @@ async def _upsert_result(session: Any, payload: dict) -> None:
     await session.execute(stmt)
 
 
+@dataclass
+class _TraceProgress:
+    """流式 trace 落库进度（异常路径续写 infra_error 行需共享 seq）。"""
+
+    seq: int = 0
+    trace_rows: int = 0
+    latest_evidence: list[Evidence] = field(default_factory=list)
+
+
+async def _open_run(
+    session: Any,
+    case: ProductReviewCase,
+    *,
+    run_id: str,
+    trigger_type: str,
+    triage_result: str | None,
+) -> tuple[ReviewCaseORM, ReviewRunORM]:
+    """建行：case 不存在则建档（存在则置 INVESTIGATING）+ run 建行（RUNNING），一次 commit。"""
+    now = _utcnow()
+    case_row = await session.get(ReviewCaseORM, case.case_id)
+    if case_row is None:
+        case_row = ReviewCaseORM(
+            case_id=case.case_id,
+            product_id=case.product.product_id,
+            merchant_id=case.merchant_id,
+            event_type=case.event_type,
+            status="INVESTIGATING",
+            version=case.product.version,
+            triage_result=triage_result,
+            case_json=case.model_dump(mode="json"),
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(case_row)
+    else:
+        case_row.status = "INVESTIGATING"
+        if triage_result is not None:
+            case_row.triage_result = triage_result
+        case_row.updated_at = now
+
+    run_row = ReviewRunORM(
+        run_id=run_id,
+        case_id=case.case_id,
+        status="RUNNING",
+        trigger_type=trigger_type,
+        started_at=now,
+        ended_at=None,
+    )
+    session.add(run_row)
+    await session.commit()
+    return case_row, run_row
+
+
+async def _persist_extra_evidence(
+    session: Any, run_id: str, extra_evidence: list[Evidence] | None
+) -> int:
+    """分流 RULE_HIT 证据落库（有行则 commit），返回落库行数。"""
+    rows = 0
+    for ev in extra_evidence or []:
+        _evidence_row(session, run_id, ev)
+        rows += 1
+    if rows:
+        await session.commit()
+    return rows
+
+
+async def _stream_and_trace(
+    session: Any,
+    app: Any,
+    config: dict,
+    case: ProductReviewCase,
+    run_id: str,
+    progress: _TraceProgress,
+) -> None:
+    """流式执行调查图并逐步落 trace（每节点一次 commit）；证据累积进 ``progress.latest_evidence``。"""
+    prev_budget_tokens = 0
+    wall_prev = time.perf_counter()
+    async for chunk in app.astream(
+        build_initial_state(case), config, stream_mode="updates"
+    ):
+        for node_name, update in chunk.items():
+            wall_now = time.perf_counter()
+            node_latency_ms = max(int((wall_now - wall_prev) * 1000), 0)
+            wall_prev = wall_now
+
+            budget = update.get("budget")
+            if budget is None:
+                step_tokens = 0
+            else:
+                new_tokens = _token_count(budget)
+                step_tokens = max(new_tokens - prev_budget_tokens, 0)
+                prev_budget_tokens = new_tokens
+
+            raw_evidence = update.get("evidence")
+            if raw_evidence:
+                progress.latest_evidence = merge_evidence(
+                    progress.latest_evidence,
+                    [e for e in raw_evidence if isinstance(e, Evidence)],
+                )
+
+            if node_name == "tools":
+                records = list(update.get("tool_call_history") or [])
+                for rec in records:
+                    progress.seq += 1
+                    session.add(
+                        ReviewTraceORM(
+                            run_id=run_id,
+                            seq=progress.seq,
+                            step_type="TOOL_CALL",
+                            tool_name=rec.get("tool"),
+                            input_json=_json_cap(rec.get("args")) if rec.get("args") else None,
+                            output_json=_json_cap(rec),
+                            tokens=int(rec.get("tokens") or 0),
+                            latency_ms=int(rec.get("latency_ms") or 0),
+                            created_at=_utcnow(),
+                        )
+                    )
+                    progress.trace_rows += 1
+            else:
+                progress.seq += 1
+                session.add(
+                    ReviewTraceORM(
+                        run_id=run_id,
+                        seq=progress.seq,
+                        step_type=_NODE_STEP_TYPE.get(node_name, node_name.upper()),
+                        tool_name=None,
+                        input_json=_json_cap(
+                            _node_input_summary(node_name, update, case.case_id)
+                        ),
+                        output_json=_json_cap(
+                            _node_output_summary(node_name, update)
+                        ),
+                        tokens=step_tokens,
+                        latency_ms=node_latency_ms,
+                        created_at=_utcnow(),
+                    )
+                )
+                progress.trace_rows += 1
+            await session.commit()
+
+    logger.info(
+        "调查图执行完成 case_id=%s run_id=%s trace_rows=%d",
+        case.case_id, run_id, progress.trace_rows,
+    )
+
+
+async def _final_decision(
+    app: Any, config: dict, *, run_id: str, case_id: str
+) -> ReviewDecision:
+    """取图终态 decision；缺失即契约违例（decide 为图唯一终态出口）。"""
+    snapshot = await app.aget_state(config)
+    try:
+        final_state = snapshot["values"]  # type: ignore[index]
+    except TypeError:
+        final_state = snapshot.values  # type: ignore[attr-defined]
+
+    decision = final_state.get("decision")
+    if not isinstance(decision, ReviewDecision):
+        raise RuntimeError(  # noqa: TRY004 - 图终态契约违例，非入参类型错误
+            f"调查图执行完成但终态缺少 decision（run_id={run_id}, "
+            f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
+        )
+    return decision
+
+
+def _assert_no_evidence_overlap(
+    decision: ReviewDecision, extra_evidence: list[Evidence] | None, run_id: str
+) -> None:
+    """契约校验：分流 RULE_HIT 不得进入 AgentState 证据链（违例抛 RuntimeError）。"""
+    extra_keys = {
+        (e.type, e.source, e.value) for e in (extra_evidence or [])
+    }
+    overlap = [
+        ev
+        for ev in decision.evidence
+        if (ev.type, ev.source, ev.value) in extra_keys
+    ]
+    if overlap:
+        raise RuntimeError(
+            f"decision.evidence 与分流 extra_evidence 重叠 {len(overlap)} 条"
+            f"（run_id={run_id}）—— 分流命中不应进入 AgentState 证据链"
+        )
+
+
+async def _persist_failure(
+    session: Any,
+    case_row: ReviewCaseORM,
+    *,
+    run_id: str,
+    case_id: str,
+    exc: Exception,
+    progress: _TraceProgress,
+) -> None:
+    """异常终态收口：HUMAN_REVIEW 裁决 + 已观测证据 + infra_error trace + case 置 DECIDED，一次 commit；run 状态不改。"""
+    error_decision = ReviewDecision(
+        decision=Decision.HUMAN_REVIEW,
+        risk_level=RiskLevel.NONE,
+        risk_type=[],
+        decision_confidence=1.0,
+        evidence=progress.latest_evidence,
+    )
+    await _upsert_result(session, _result_payload(error_decision, case_id, run_id))
+
+    for ev in error_decision.evidence:
+        _evidence_row(session, run_id, ev)
+
+    progress.seq += 1
+    session.add(
+        ReviewTraceORM(
+            run_id=run_id,
+            seq=progress.seq,
+            step_type="infra_error",
+            tool_name=None,
+            input_json=None,
+            output_json=_json_cap(
+                {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "overrides": [R6_INFRA_UNAVAILABLE],
+                    "evidence_count": len(error_decision.evidence),
+                }
+            ),
+            tokens=0,
+            latency_ms=0,
+            created_at=_utcnow(),
+        )
+    )
+    case_row.status = "DECIDED"
+    case_row.updated_at = _utcnow()
+    await session.commit()
+
+
+async def _persist_success(
+    session: Any,
+    case_row: ReviewCaseORM,
+    run_row: ReviewRunORM,
+    decision: ReviewDecision,
+    *,
+    case_id: str,
+    run_id: str,
+    extra_rows: int,
+) -> int:
+    """成功终态收口：decision 证据 + result upsert + run/case 置 DECIDED，一次 commit。"""
+    evidence_rows = extra_rows
+    for ev in decision.evidence:
+        _evidence_row(session, run_id, ev)
+        evidence_rows += 1
+
+    await _upsert_result(session, _result_payload(decision, case_id, run_id))
+
+    end_now = _utcnow()
+    run_row.status = "DECIDED"
+    run_row.ended_at = end_now
+    case_row.status = "DECIDED"
+    case_row.updated_at = end_now
+    await session.commit()
+    return evidence_rows
+
+
 async def run_and_persist(
     case: ProductReviewCase,
     *,
@@ -262,216 +521,56 @@ async def run_and_persist(
     """
     resolved_run_id = run_id or uuid4().hex
     case_id = case.case_id
-    now = _utcnow()
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        case_row = await session.get(ReviewCaseORM, case_id)
-        if case_row is None:
-            case_row = ReviewCaseORM(
-                case_id=case_id,
-                product_id=case.product.product_id,
-                merchant_id=case.merchant_id,
-                event_type=case.event_type,
-                status="INVESTIGATING",
-                version=case.product.version,
-                triage_result=triage_result,
-                case_json=case.model_dump(mode="json"),
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(case_row)
-        else:
-            case_row.status = "INVESTIGATING"
-            if triage_result is not None:
-                case_row.triage_result = triage_result
-            case_row.updated_at = now
-
-        run_row = ReviewRunORM(
+        case_row, run_row = await _open_run(
+            session,
+            case,
             run_id=resolved_run_id,
-            case_id=case_id,
-            status="RUNNING",
             trigger_type=trigger_type,
-            started_at=now,
-            ended_at=None,
+            triage_result=triage_result,
         )
-        session.add(run_row)
-        await session.commit()
-
-        extra_rows = 0
-        for ev in extra_evidence or []:
-            _evidence_row(session, resolved_run_id, ev)
-            extra_rows += 1
-        if extra_rows:
-            await session.commit()
+        extra_rows = await _persist_extra_evidence(session, resolved_run_id, extra_evidence)
 
         app = get_production_graph()
         config = {
             "configurable": {"thread_id": resolved_run_id},
             "callbacks": trace_callbacks(),
         }
-        seq = 0
-        trace_rows = 0
-        prev_budget_tokens = 0
-        wall_prev = time.perf_counter()
-        # 异常前已观测到的证据（异常终态用）。
-        latest_evidence: list[Evidence] = []
+        progress = _TraceProgress()
         try:
-            async for chunk in app.astream(
-                build_initial_state(case), config, stream_mode="updates"
-            ):
-                for node_name, update in chunk.items():
-                    wall_now = time.perf_counter()
-                    node_latency_ms = max(int((wall_now - wall_prev) * 1000), 0)
-                    wall_prev = wall_now
-
-                    budget = update.get("budget")
-                    if budget is None:
-                        step_tokens = 0
-                    else:
-                        new_tokens = _token_count(budget)
-                        step_tokens = max(new_tokens - prev_budget_tokens, 0)
-                        prev_budget_tokens = new_tokens
-
-                    raw_evidence = update.get("evidence")
-                    if raw_evidence:
-                        latest_evidence = merge_evidence(
-                            latest_evidence,
-                            [e for e in raw_evidence if isinstance(e, Evidence)],
-                        )
-
-                    if node_name == "tools":
-                        records = list(update.get("tool_call_history") or [])
-                        for rec in records:
-                            seq += 1
-                            session.add(
-                                ReviewTraceORM(
-                                    run_id=resolved_run_id,
-                                    seq=seq,
-                                    step_type="TOOL_CALL",
-                                    tool_name=rec.get("tool"),
-                                    input_json=_json_cap(rec.get("args")) if rec.get("args") else None,
-                                    output_json=_json_cap(rec),
-                                    tokens=int(rec.get("tokens") or 0),
-                                    latency_ms=int(rec.get("latency_ms") or 0),
-                                    created_at=_utcnow(),
-                                )
-                            )
-                            trace_rows += 1
-                    else:
-                        seq += 1
-                        session.add(
-                            ReviewTraceORM(
-                                run_id=resolved_run_id,
-                                seq=seq,
-                                step_type=_NODE_STEP_TYPE.get(node_name, node_name.upper()),
-                                tool_name=None,
-                                input_json=_json_cap(
-                                    _node_input_summary(node_name, update, case_id)
-                                ),
-                                output_json=_json_cap(
-                                    _node_output_summary(node_name, update)
-                                ),
-                                tokens=step_tokens,
-                                latency_ms=node_latency_ms,
-                                created_at=_utcnow(),
-                            )
-                        )
-                        trace_rows += 1
-                    await session.commit()
-
-            logger.info(
-                "run_and_persist 图执行完成 case_id=%s run_id=%s trace_rows=%d",
-                case_id, resolved_run_id, trace_rows,
+            await _stream_and_trace(session, app, config, case, resolved_run_id, progress)
+            decision = await _final_decision(
+                app, config, run_id=resolved_run_id, case_id=case_id
             )
-
-            snapshot = await app.aget_state(config)
-            try:
-                final_state = snapshot["values"]  # type: ignore[index]
-            except TypeError:
-                final_state = snapshot.values  # type: ignore[attr-defined]
-
-            decision = final_state.get("decision")
-
-            if not isinstance(decision, ReviewDecision):
-                raise RuntimeError(  # noqa: TRY004 - 图终态契约违例，非入参类型错误
-                    f"调查图执行完成但终态缺少 decision（run_id={resolved_run_id}, "
-                    f"case_id={case_id}）—— 违反 'decide 为图唯一终态出口' 契约"
-                )
+            _assert_no_evidence_overlap(decision, extra_evidence, resolved_run_id)
         except Exception as exc:
-            error_decision = ReviewDecision(
-                decision=Decision.HUMAN_REVIEW,
-                risk_level=RiskLevel.NONE,
-                risk_type=[],
-                decision_confidence=1.0,
-                evidence=latest_evidence,
+            await _persist_failure(
+                session,
+                case_row,
+                run_id=resolved_run_id,
+                case_id=case_id,
+                exc=exc,
+                progress=progress,
             )
-            await _upsert_result(
-                session, _result_payload(error_decision, case_id, resolved_run_id)
-            )
-            await session.commit()
-
-            for ev in error_decision.evidence:
-                _evidence_row(session, resolved_run_id, ev)
-
-            seq += 1
-            session.add(
-                ReviewTraceORM(
-                    run_id=resolved_run_id,
-                    seq=seq,
-                    step_type="infra_error",
-                    tool_name=None,
-                    input_json=None,
-                    output_json=_json_cap(
-                        {
-                            "error": f"{type(exc).__name__}: {exc}",
-                            "overrides": [R6_INFRA_UNAVAILABLE],
-                            "evidence_count": len(error_decision.evidence),
-                        }
-                    ),
-                    tokens=0,
-                    latency_ms=0,
-                    created_at=_utcnow(),
-                )
-            )
-            await session.commit()
             raise
 
-        extra_keys = {
-            (e.type, e.source, e.value) for e in (extra_evidence or [])
-        }
-        overlap = [
-            ev
-            for ev in decision.evidence
-            if (ev.type, ev.source, ev.value) in extra_keys
-        ]
-        if overlap:
-            raise RuntimeError(
-                f"decision.evidence 与分流 extra_evidence 重叠 {len(overlap)} 条"
-                f"（run_id={resolved_run_id}）—— 分流命中不应进入 AgentState 证据链"
-            )
-
-        evidence_rows = extra_rows
-        for ev in decision.evidence:
-            _evidence_row(session, resolved_run_id, ev)
-            evidence_rows += 1
-
-        await _upsert_result(
-            session, _result_payload(decision, case_id, resolved_run_id)
+        evidence_rows = await _persist_success(
+            session,
+            case_row,
+            run_row,
+            decision,
+            case_id=case_id,
+            run_id=resolved_run_id,
+            extra_rows=extra_rows,
         )
-
-        end_now = _utcnow()
-        run_row.status = "DECIDED"
-        run_row.ended_at = end_now
-        case_row.status = "DECIDED"
-        case_row.updated_at = end_now
-        await session.commit()
 
     return {
         "case_id": case_id,
         "run_id": resolved_run_id,
         "decision": decision,
-        "counts": {"trace": trace_rows, "evidence": evidence_rows},
+        "counts": {"trace": progress.trace_rows, "evidence": evidence_rows},
     }
 
 

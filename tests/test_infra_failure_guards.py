@@ -12,7 +12,7 @@ from sqlalchemy import text
 from pra.agent import tools_node as tools_node_mod
 from pra.agent.guardrails.errors import SEV_WARN
 from pra.agent.tools_node import make_tools_node
-from pra.domain.models import Budget, Evidence
+from pra.domain.models import Budget, Decision, Evidence, ReviewDecision, RiskLevel
 from pra.infra import persist_service
 from pra.infra.db import get_sessionmaker
 from pra.infra.persist_service import run_and_persist
@@ -185,6 +185,96 @@ async def test_run_and_persist_graph_failure_writes_terminal_state(monkeypatch):
                 )
             ).scalar()
             assert status == "RUNNING", "悬空 run 语义：异常路径不改 run 状态"
+
+            case_status = (
+                await s.execute(
+                    text("select status from review_case where case_id = :c"), {"c": case_id}
+                )
+            ).scalar()
+            assert case_status == "DECIDED", (
+                "异常已写 HUMAN_REVIEW 裁决 → case 与成功路径同语义置 DECIDED"
+            )
+    finally:
+        await _cleanup(case_id, run_id)
+
+
+class _FakeOverlapGraph:
+    """假图替身：正常走完，但终态 decision 携带与分流 extra_evidence 重叠的证据。"""
+
+    def __init__(self, decision: ReviewDecision) -> None:
+        self._decision = decision
+
+    async def astream(
+        self, state: dict, config: dict, *, stream_mode: str
+    ) -> AsyncIterator[dict]:
+        """产出一条 plan update 后正常结束。"""
+        yield {"plan": {"pending_tool_calls": []}}
+
+    async def aget_state(self, config: dict) -> Any:
+        return {"values": {"decision": self._decision}}
+
+
+@pytest.mark.skipif(
+    not mysql_reachable(), reason="MySQL 不可达（未起 mysql-dev 容器）→ 跳过真库终态守护"
+)
+async def test_run_and_persist_overlap_violation_uses_failure_path(monkeypatch):
+    """重叠契约违例 → 走统一异常收口：HUMAN_REVIEW 裁决 + infra_error trace，异常仍穿透。"""
+    tag = uuid4().hex[:8]
+    case_id = f"PYTEST_OVERLAP_{tag}"
+    run_id = f"PYTEST_OVERLAP_RUN_{tag}"
+    leaked = ev("RULE_HIT", source="ScreeningRuleEngine", value="R-302 规避模糊词命中: 高仿")
+    decision = ReviewDecision(
+        decision=Decision.PASS,
+        risk_level=RiskLevel.NONE,
+        risk_type=[],
+        decision_confidence=1.0,
+        evidence=[leaked],
+    )
+    monkeypatch.setattr(
+        persist_service, "get_production_graph", lambda: _FakeOverlapGraph(decision)
+    )
+    try:
+        with pytest.raises(RuntimeError, match="重叠"):
+            await run_and_persist(
+                make_case(case_id=case_id), run_id=run_id, extra_evidence=[leaked]
+            )
+
+        sm = get_sessionmaker()
+        async with sm() as s:
+            decision_row = (
+                await s.execute(
+                    text("select decision from review_result where case_id = :c"),
+                    {"c": case_id},
+                )
+            ).scalar()
+            assert decision_row == "HUMAN_REVIEW", "契约违例也须落显式终态（不得静默）"
+
+            case_status = (
+                await s.execute(
+                    text("select status from review_case where case_id = :c"), {"c": case_id}
+                )
+            ).scalar()
+            assert case_status == "DECIDED", "已写裁决 → case 与成功路径同语义置 DECIDED"
+
+            run_status = (
+                await s.execute(
+                    text("select status from review_run where run_id = :r"), {"r": run_id}
+                )
+            ).scalar()
+            assert run_status == "RUNNING", "悬空 run 语义：异常路径不改 run 状态"
+
+            infra_rows = (
+                await s.execute(
+                    text(
+                        "select output_json from review_trace "
+                        "where run_id = :r and step_type = 'infra_error'"
+                    ),
+                    {"r": run_id},
+                )
+            ).fetchall()
+            assert len(infra_rows) == 1, "契约违例须留恰好 1 条 infra_error trace"
+            out_text = json.dumps(infra_rows[0][0], ensure_ascii=False, default=str)
+            assert "R6_INFRA_UNAVAILABLE" in out_text, "trace 须含 R6 归因码"
     finally:
         await _cleanup(case_id, run_id)
 
