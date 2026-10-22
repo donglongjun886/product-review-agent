@@ -62,10 +62,19 @@ curl http://127.0.0.1:8000/api/v1/health   # {"status":"ok"}
 uv run python scripts/run_evaluation.py --limit 10 --out /tmp/eval.json   # 三臂：single / agent 要 API key，有费用
 ```
 
-评测只有一个脚本，跑三条臂：`rule`（确定性初筛，零模型零工具）、`single`（一次模型直判，只喂案件
+评测跑分只有一个入口脚本，跑三条臂：`rule`（确定性初筛，零模型零工具）、`single`（一次模型直判，只喂案件
 快照）、`agent`（完整调查，允许调工具）。事实来源是**生产装配**：商品与商家读真 MySQL，案例与政策
 走真 RAG。只有 `agent` 用工具，`rule` 与 `single` 只看案件快照。真实调用有费用、结果不确定、不可
 重放，不进 CI。评测口径见 [docs/02-evaluation.md](docs/02-evaluation.md)。
+
+对 holdout（`eval_data/v3`）做封板跑时，先用异源模型审计真值、把分歧案剔除出头条指标：
+
+```bash
+uv run python scripts/cross_check_labels.py --model <异源模型> --basket-out basket.json   # 出疑问篮子
+uv run python scripts/run_evaluation.py --exclude-ids basket.json --out eval.json          # 封板跑
+```
+
+最近一次 holdout 封板结果见 `eval_data/v3/result_latest.json`（重跑即覆盖，历史看 git）。
 
 ## 目录
 
