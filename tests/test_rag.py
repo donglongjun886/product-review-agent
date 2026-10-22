@@ -5,14 +5,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from helpers import tool_by_name
 from inmemory_world import (
     _DEFAULT_PRECEDENTS,
     InMemoryPolicyIndex,
     build_inmemory_tools,
 )
+from pydantic import ValidationError
 
+from pra.domain.models import RiskType
 from pra.rag.corpus import load_cases, load_policies
+from pra.tools.case_search.tool import CaseSearchArgs
+from pra.tools.policy_search.tool import PolicySearchArgs
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_CASES = REPO_ROOT / "eval_data" / "v3" / "cases_v3.jsonl"
@@ -76,3 +81,33 @@ def test_build_inmemory_tools_uses_inmemory_indexes() -> None:
     assert [t.name for t in tools] == _EXPECTED_TOOLS
     assert type(tool_by_name(tools, "CaseSearchTool")._index).__name__ == "InMemoryCaseIndex"
     assert isinstance(tool_by_name(tools, "PolicySearchTool")._index, InMemoryPolicyIndex)
+
+
+@pytest.mark.parametrize("args_model", [CaseSearchArgs, PolicySearchArgs])
+@pytest.mark.parametrize(
+    ("raw_risk_type", "expected"),
+    [
+        ("POTENTIAL_IP_RISK", [RiskType.POTENTIAL_IP_RISK]),
+        (["仿冒侵权", "EVASION_PATTERN"], [RiskType.EVASION_PATTERN]),
+        ("仿冒侵权", None),
+    ],
+)
+def test_search_args_risk_type_tolerates_model_noise(
+    args_model: type[CaseSearchArgs | PolicySearchArgs],
+    raw_risk_type: object,
+    expected: list[RiskType] | None,
+) -> None:
+    """检索工具 args 的 ``risk_type``：裸字符串装箱；词表外值只丢弃不失败。"""
+    args = args_model.model_validate(
+        {"query": "q", "filters": {"risk_type": raw_risk_type}}
+    )
+    assert args.filters.risk_type == expected
+
+
+@pytest.mark.parametrize("args_model", [CaseSearchArgs, PolicySearchArgs])
+def test_search_args_risk_type_rejects_non_string_noise(
+    args_model: type[CaseSearchArgs | PolicySearchArgs],
+) -> None:
+    """``risk_type`` 的非字符串脏数据仍走严格校验失败，不得静默吞掉。"""
+    with pytest.raises(ValidationError):
+        args_model.model_validate({"query": "q", "filters": {"risk_type": 123}})

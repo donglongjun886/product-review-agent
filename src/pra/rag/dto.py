@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Protocol
+from typing import Any, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from pra.domain.models import Decision, RiskLevel, RiskType
 
@@ -18,11 +18,25 @@ __all__ = [
     "PolicySearchFilters",
 ]
 
+_RISK_TYPE_VALUES = frozenset(m.value for m in RiskType)
+
+
+def _coerce_risk_type(v: Any) -> Any:
+    """``risk_type`` 入参容噪：裸字符串装箱为列表；词表外的值丢弃（过滤只收窄，丢弃=不过滤）。"""
+    if isinstance(v, str):
+        v = [v]
+    if isinstance(v, list):
+        valid = [x for x in v if isinstance(x, RiskType) or x in _RISK_TYPE_VALUES]
+        return valid or None
+    return v
+
 
 class CaseSearchFilters(BaseModel):
 
     category: str | None = Field(default=None, description="类目过滤，如 女鞋/运动鞋")
     risk_type: list[RiskType] | None = Field(default=None, description="风险类型过滤（受控词表）")
+
+    _lenient_risk_type = field_validator("risk_type", mode="before")(_coerce_risk_type)
 
 
 class CaseHit(BaseModel):
@@ -52,6 +66,8 @@ class PolicySearchFilters(BaseModel):
 
     category: str | None = Field(default=None, description="类目过滤，如 女鞋/运动鞋")
     risk_type: list[RiskType] | None = Field(default=None, description="风险类型过滤（受控词表）")
+
+    _lenient_risk_type = field_validator("risk_type", mode="before")(_coerce_risk_type)
 
 
 class PolicyClauseHit(BaseModel):
