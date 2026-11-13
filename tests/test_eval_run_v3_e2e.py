@@ -166,10 +166,8 @@ async def test_main_e2e_produces_per_case_grading(script, tmp_path, monkeypatch,
 
 
 async def test_main_e2e_second_layer_wiring(script, tmp_path, monkeypatch, capsys) -> None:
-    """第二层 CLI 接线：--exclude-ids 进头条分母剔除；--metamorphic / --pass-k 出数到 payload。"""
+    """第二层 CLI 接线：--metamorphic / --pass-k 出数到 payload。"""
     data_dir = _write_v3_dataset(tmp_path)
-    exclude_file = tmp_path / "exclude.json"
-    exclude_file.write_text(json.dumps(["EC_E2E_2"]), encoding="utf-8")
     out_path = tmp_path / "result2.json"
     monkeypatch.setattr(script, "load_dotenv_keys", lambda *a, **k: None)  # 不把仓库 .env 注进进程环境
     monkeypatch.setattr(
@@ -184,8 +182,6 @@ async def test_main_e2e_second_layer_wiring(script, tmp_path, monkeypatch, capsy
             "sk-test",
             "--out",
             str(out_path),
-            "--exclude-ids",
-            str(exclude_file),
             "--metamorphic",
             "--pass-k",
             "2",
@@ -194,9 +190,8 @@ async def test_main_e2e_second_layer_wiring(script, tmp_path, monkeypatch, capsy
 
     assert rc == 0
     payload = json.loads(out_path.read_text(encoding="utf-8"))
-    assert payload["excluded_ids"] == ["EC_E2E_2"]
-    # 疑问篮子剔除：头条分母从 2 收缩到 1
-    assert payload["metrics"]["rule"]["selective"]["total"] == 1
+    # 头条分母 = 全部案
+    assert payload["metrics"]["rule"]["selective"]["total"] == 2
     # 蜕变：fake backend 确定性 → 无翻转/变松；两案都完成比对
     assert payload["metamorphic"]["compared_cases"] == 2
     assert payload["metamorphic"]["failures"] == []
@@ -210,27 +205,6 @@ async def test_main_e2e_second_layer_wiring(script, tmp_path, monkeypatch, capsy
     report = capsys.readouterr().out
     assert "蜕变测试" in report
     assert "pass^k" in report
-    assert "剔除疑问篮子 1 案" in report
-
-
-def test_exclude_ids_validation(script, tmp_path) -> None:
-    """疑问篮子清单：非数组 JSON / 数据集外 id → 显式报错；合法清单原样成集合。"""
-    bad_shape = tmp_path / "bad.json"
-    bad_shape.write_text('{"id": "EC_E2E_1"}', encoding="utf-8")
-    with pytest.raises(ValueError, match="JSON 字符串数组"):
-        script._load_exclude_ids(str(bad_shape), {"EC_E2E_1"})
-
-    unknown = tmp_path / "unknown.json"
-    unknown.write_text('["EC_NOPE"]', encoding="utf-8")
-    with pytest.raises(ValueError, match="EC_NOPE"):
-        script._load_exclude_ids(str(unknown), {"EC_E2E_1"})
-
-    ok = tmp_path / "ok.json"
-    ok.write_text('["EC_E2E_1", "EC_E2E_2"]', encoding="utf-8")
-    assert script._load_exclude_ids(str(ok), {"EC_E2E_1", "EC_E2E_2"}) == {"EC_E2E_1", "EC_E2E_2"}
-    assert script._load_exclude_ids(None, {"EC_E2E_1"}) == set()
-    with pytest.raises(ValueError, match="不存在"):
-        script._load_exclude_ids(str(tmp_path / "missing.json"), {"EC_E2E_1"})
 
 
 async def test_main_rejects_v2_data_with_readable_error(script, tmp_path, monkeypatch) -> None:

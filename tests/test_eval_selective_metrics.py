@@ -77,20 +77,6 @@ def test_human_review_is_restraint_not_error() -> None:
     assert m.selective_risk != pytest.approx(3 / 8)
 
 
-def test_exclusion_set_removed_from_all_denominators() -> None:
-    """疑问篮子剔除：c2（误拒）与 c8（转人工）被排除后，三指标分母同步收缩。"""
-    m = evaluate_selective(_sample(), exclude={"c2", "c8"})
-
-    assert m.total == 6
-    assert m.auto_decided == 4
-    assert m.auto_wrong == 2
-    assert m.truth_pass_total == 2
-    assert m.false_rejects == 0
-    assert m.coverage == pytest.approx(4 / 6)
-    assert m.selective_risk == pytest.approx(2 / 4)
-    assert m.false_reject_rate == 0.0
-
-
 def test_empty_denominators_are_none_not_zero() -> None:
     """分母为 0 → None（不硬造 0/∞）；coverage 分母恒非空时照常出数。"""
     all_human = [_grading("h1", "PASS", "HUMAN_REVIEW")]
@@ -104,7 +90,7 @@ def test_empty_denominators_are_none_not_zero() -> None:
     assert m2.selective_risk == 0.0
     assert m2.false_reject_rate is None  # 无真值 PASS 案
 
-    m3 = evaluate_selective([], exclude=set())
+    m3 = evaluate_selective([])
     assert m3.total == 0
     assert m3.coverage is None
 
@@ -145,13 +131,3 @@ class TestAssertionFailuresCountAsWrong:
         m = evaluate_selective(gradings, assertion_failed={"c2"})
         assert m.auto_wrong == 1
         assert m.selective_risk == pytest.approx(1 / 2)
-
-    def test_excluded_case_assertion_not_counted(self) -> None:
-        """疑问篮子剔除案的断言失败同步不进分子（分母纪律一致）。"""
-        gradings = [
-            _grading("c1", "PASS", "PASS"),
-            _grading("c2", "REJECT", "REJECT"),
-        ]
-        m = evaluate_selective(gradings, exclude={"c2"}, assertion_failed={"c2"})
-        assert m.auto_decided == 1
-        assert m.auto_wrong == 0

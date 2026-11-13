@@ -6,7 +6,6 @@
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 import time
@@ -127,29 +126,6 @@ def _make_real_backend(
         thinking=thinking,  # type: ignore[arg-type]
         reasoning_effort=reasoning_effort,  # type: ignore[arg-type]
     )
-
-
-def _load_exclude_ids(raw: str | None, known_ids: set[str]) -> set[str]:
-    """读入疑问篮子清单（JSON 字符串数组文件），校验 id 都在当前数据集中。
-
-    :raises ValueError: 文件缺失 / 非 JSON 字符串数组 / 含数据集外的 id（显式失败，不静默跳过）。
-    """
-    if not raw:
-        return set()
-    path = Path(raw)
-    if not path.is_file():
-        raise ValueError(f"--exclude-ids 文件不存在: {path}")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"--exclude-ids 不是合法 JSON 数组文件: {path}（{exc}）") from exc
-    if not isinstance(data, list) or not all(isinstance(x, str) and x.strip() for x in data):
-        raise ValueError(f"--exclude-ids 必须是 JSON 字符串数组（eval_case_id 列表）: {path}")
-    excluded = {x.strip() for x in data}
-    unknown = excluded - known_ids
-    if unknown:
-        raise ValueError(f"--exclude-ids 有 {len(unknown)} 个不在当前数据集中: {sorted(unknown)}")
-    return excluded
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +409,6 @@ def _render_report(
     assertions: dict[str, list[AssertionFailure]],
     engineering: dict[str, EngineeringMetrics],
     failures: dict[str, list["_ArmFailure"]],
-    excluded: set[str],
     metamorphic: dict | None,
     pass_k: PassKMetrics | None,
     pass_k_runs: int,
@@ -462,7 +437,7 @@ def _render_report(
         add("思考配置: 网关默认（thinking=enabled / reasoning_effort=high，本次未覆盖）")
     add("-" * 100)
     add("头条指标（selective prediction 口径，docs/02 §5.1；比率形如 值(分子/分母)，分母为 0 → '-'）:")
-    add(f"  coverage = 自动决策案 / 全部案（剔除疑问篮子 {len(excluded)} 案）")
+    add("  coverage = 自动决策案 / 全部案")
     add("  selective_risk = 自动决策中判错案 / 被自动决策的案（转人工不进分母，只压低 coverage；")
     add("      判错 = 裁决与真值不一致 ∨ 命中过程断言 —— 无证据引用的拒绝、应触发的 Gate 未触发均判错）")
     add("  false_reject_rate = 真值 PASS 被自动 REJECT 案 / 真值 PASS 案")
@@ -473,7 +448,7 @@ def _render_report(
     add(_table(_HEADLINE_HEADERS, rows))
     add(
         f"  分母注记: 全部案 {m0.total} / 被自动决策案（各臂不同）/ 真值 PASS 案 "
-        f"{m0.truth_pass_total} —— 三组分母不同，勿混读（均不含失败案、已剔除疑问篮子）"
+        f"{m0.truth_pass_total} —— 三组分母不同，勿混读（均不含失败案）"
     )
     add("-" * 100)
     add("诊断区（agent 臂；不进头条 —— 回答'结论对了，理由对不对'，docs/02 §5.2）:")
@@ -638,14 +613,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--exclude-ids",
-        default=None,
-        help=(
-            "疑问篮子清单文件（JSON 字符串数组，元素为 eval_case_id；默认 None = 空）。"
-            "清单内案从头条指标全部分母剔除；id 不在数据集中会报错"
-        ),
-    )
-    parser.add_argument(
         "--metamorphic",
         action="store_true",
         help=(
@@ -735,7 +702,6 @@ async def _main(argv: list[str] | None = None) -> int:
     )
     print("-" * 100)
 
-    excluded = _load_exclude_ids(args.exclude_ids, {c.eval_case_id for c in dataset.cases})
     if args.pass_k < 1:
         raise ValueError(f"--pass-k 必须 ≥ 1（实际 {args.pass_k}）")
     budget_limits = BudgetLimits()
@@ -790,7 +756,6 @@ async def _main(argv: list[str] | None = None) -> int:
     selective = {
         arm: evaluate_selective(
             gradings[arm],
-            exclude=excluded,
             assertion_failed={f.eval_case_id for f in assertions[arm]},
         )
         for arm in ARMS
@@ -869,7 +834,6 @@ async def _main(argv: list[str] | None = None) -> int:
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "count": len(cases),
         "real_llm_config": llm_config,
-        "excluded_ids": sorted(excluded),
         "failed": {arm: len(failures[arm]) for arm in ARMS},
         "cache": (
             {"hit": cache_stats[0], "miss": cache_stats[1]}
@@ -918,7 +882,6 @@ async def _main(argv: list[str] | None = None) -> int:
             assertions=assertions,
             engineering=engineering,
             failures=failures,
-            excluded=excluded,
             metamorphic=metamorphic_result,
             pass_k=pass_k_metrics,
             pass_k_runs=args.pass_k,

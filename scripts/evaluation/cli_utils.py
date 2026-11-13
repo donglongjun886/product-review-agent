@@ -1,7 +1,4 @@
-"""评测入口脚本共享的 CLI 小件：dotenv 注入 / v3 数据路径解析 / 比率渲染 / JSON 落盘。
-
-run_evaluation 与 cross_check_labels 两个入口共用同一实现（同一逻辑只保留一处）。
-"""
+"""评测入口脚本共享的 CLI 小件：dotenv 注入 / v3 数据路径解析 / 比率渲染 / JSON 落盘。"""
 
 from __future__ import annotations
 

@@ -68,7 +68,6 @@
 - prompt 文本调优（本轮一律不动）。
 - evasion 场景中 truth=HUMAN_REVIEW 的 merchant_dirty_only 案的行为变化不做指标承诺。
 - 考卷（eval_data/v3）重跑与最终报告——属后续里程碑，不在本 spec。
-- 疑问篮子 63 案的处置（交叉检查设计内分歧，已留档）。
 
 ## Further Notes
 

@@ -165,7 +165,6 @@ async def test_failed_count_and_reason_reach_report_text(script) -> None:
         assertions=assertions,
         engineering=engineering,
         failures=failures_by_arm,
-        excluded=set(),
         metamorphic=None,
         pass_k=None,
         pass_k_runs=1,

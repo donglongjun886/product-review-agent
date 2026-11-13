@@ -67,11 +67,10 @@ uv run python scripts/run_evaluation.py --limit 10 --out /tmp/eval.json   # 三�
 走真 RAG。只有 `agent` 用工具，`rule` 与 `single` 只看案件快照。真实调用有费用、结果不确定、不可
 重放，不进 CI。评测口径见 [docs/02-evaluation.md](docs/02-evaluation.md)。
 
-对 holdout（`eval_data/v3`）做封板跑时，先用异源模型审计真值、把分歧案剔除出头条指标：
+对 holdout（`eval_data/v3`）做封板跑时，直接全量跑，不剔除样本：
 
 ```bash
-uv run python scripts/cross_check_labels.py --model <异源模型> --basket-out basket.json   # 出疑问篮子
-uv run python scripts/run_evaluation.py --exclude-ids basket.json --out eval.json          # 封板跑
+uv run python scripts/run_evaluation.py --data eval_data/v3 --out eval.json
 ```
 
 最近一次 holdout 封板结果见 `eval_data/v3/result_latest.json`（重跑即覆盖，历史看 git）。

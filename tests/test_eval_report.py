@@ -61,7 +61,6 @@ def _render(script, gradings: list[CaseGrading], assertions: dict) -> str:
         assertions=assertions,
         engineering=engineering,
         failures={arm: [] for arm in script.ARMS},
-        excluded=set(),
         metamorphic=None,
         pass_k=None,
         pass_k_runs=1,
