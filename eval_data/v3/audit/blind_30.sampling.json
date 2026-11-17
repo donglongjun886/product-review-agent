@@ -1,0 +1,45 @@
+{
+  "dataset": "v3",
+  "seed": 20261116,
+  "sample_size": 30,
+  "per_stratum": 3,
+  "strata": {
+    "blacklist+evasion": 3,
+    "blacklist": 3,
+    "evasion+dirty": 3,
+    "evasion clean": 3,
+    "brand+dirty": 3,
+    "brand only": 3,
+    "gap": 3,
+    "mismatch": 3,
+    "dirty only": 3,
+    "clean": 3
+  },
+  "pattern_coverage": 14,
+  "patterns": {
+    "blacklist_brand": 3,
+    "blacklist_plus_evasion": 3,
+    "brand_word_only": 3,
+    "brand_word_plus_dirty_merchant": 3,
+    "clean": 1,
+    "evasion_word_clean_merchant": 2,
+    "evasion_word_dirty_merchant": 1,
+    "hidden_evasion_in_description": 1,
+    "merchant_count_three": 2,
+    "merchant_count_two": 2,
+    "merchant_dirty_only": 1,
+    "registry_mismatch": 3,
+    "snapshot_gap": 3,
+    "strong_evasion": 2
+  },
+  "truth_key_groups": 9,
+  "truth_key_min_per_group": 3,
+  "truth_key_definition": "decision + abstain_label + risk_type + policies + tools",
+  "excluded_by_user": 0,
+  "source": {
+    "cases": "eval_data/v3/cases_v3.jsonl",
+    "truth": "eval_data/v3/truth_v3.jsonl",
+    "rulebook": "scripts/evaluation/labeling/rulebook.json"
+  },
+  "note": "仅聚合统计，不含逐案真值映射"
+}

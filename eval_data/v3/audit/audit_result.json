@@ -1,0 +1,67 @@
+{
+  "sample_size": 30,
+  "agreement": {
+    "decision": 30,
+    "risk_type": 30,
+    "policies": 30,
+    "all": 30
+  },
+  "errors": 0,
+  "error_rate": 0.0,
+  "error_rate_upper_95": 0.09503385285530415,
+  "by_stratum": [
+    {
+      "stratum": "blacklist+evasion",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "blacklist",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "evasion+dirty",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "evasion clean",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "brand+dirty",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "brand only",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "gap",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "mismatch",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "dirty only",
+      "n": 3,
+      "agree": 3
+    },
+    {
+      "stratum": "clean",
+      "n": 3,
+      "agree": 3
+    }
+  ],
+  "truth_key_groups": 9,
+  "disagreements": [],
+  "note": "只比对判定/风险类型/依据条款；expected_tools/evidence 未收集"
+}
