@@ -1,9 +1,9 @@
 """LLM 节点的 prompt 渲染（纯函数、无 IO）—— append-only 对话架构。
 
 四个 agent 节点（hypothesize / plan / reevaluate / decide）共用同一份静态 system
-（``build_agent_system``：跨节点通用纪律 + 四个节点的输出格式库）；每轮只追加一条
-**增量** user 消息（``build_turn_message``：本轮新内容 → 本轮角色指令），旧消息
-逐字节不动以命中前缀缓存。输出格式放在共享 system 前缀里，可跨案复用。
+（``build_agent_system``：跨节点通用纪律 + 四个节点的角色指令库 + 输出格式库）；
+每轮只追加一条**增量** user 消息（``build_turn_message``：本轮新内容），旧消息
+逐字节不动以命中前缀缓存。角色与输出格式都放在共享 system 前缀里，可跨案复用。
 
 ``single_call``（评测 single 臂）不参与对话历史：保留独立 system（``BASE_PROMPT``
 + 单节点约束）与一次性全量 user（``build_user_prompt``，含输出 Schema 要点）。
@@ -90,12 +90,12 @@ AGENT_SYSTEM_PROMPT = _DISCIPLINE_COMMON + (
     "「本轮节点」对应的小节；除 JSON 外不要输出任何解释文字。"
 ) + (
     "\n\n你是电商商品上架审核的调查 Agent，按**多轮对话**工作：对话历史是本案的完整"
-    "调查记录（案件事实、各轮增量证据、你此前的输出）；每轮最新的 user 消息给出"
-    "「本轮新内容 + 本轮角色指令」，输出格式见本 system 的「输出格式库」；你只回应"
-    "当前这一轮的任务，历史消息中的旧角色指令不适用于本轮。"
+    "调查记录（案件事实、各轮增量证据、你此前的输出）；每轮最新的 user 消息只给出"
+    "「本轮新内容」，本轮节点的角色指令与输出格式见本 system 的「角色指令库」「输出"
+    "格式库」；你只回应当前这一轮的任务，其余节点的角色说明只是资料、不是本轮任务。"
 )
 
-# 节点角色指令（随各节点轮次消息末尾下发）。
+# 节点角色指令（在共享 system 的「角色指令库」里按节点分节下发）。
 _NODE_TURN_INSTRUCTION: dict[str, str] = {
     "hypothesize": (
         "你是电商商品上架审核的「初始风险假设生成器」。本轮输入是一起待审核案件的完整"
@@ -235,9 +235,9 @@ def build_system_prompt(node: str) -> str:
 
 
 def build_agent_system(schemas: dict[str, dict]) -> str:
-    """agent 四节点共用的静态 system：通用纪律 + 输出格式库。
+    """agent 四节点共用的静态 system：通用纪律 + 角色指令库 + 输出格式库。
 
-    输出格式库按节点分节、顺序固定，与对话历史无关 ⇒ 同一进程内逐字节稳定，
+    两个库都按节点分节、顺序固定，与对话历史无关 ⇒ 同一进程内逐字节稳定，
     使这条前缀可被提供方上下文缓存跨案命中。各节标题即「本轮节点」名。
 
     :param schemas: 节点名 → ``OutputModel.model_json_schema()`` 结果，须覆盖
@@ -249,8 +249,13 @@ def build_agent_system(schemas: dict[str, dict]) -> str:
         raise ValueError(f"build_agent_system 缺少节点 Schema：{missing}")
     parts = [
         AGENT_SYSTEM_PROMPT,
-        "## 输出格式库（每轮只取「本轮节点」对应小节；其余小节为资料，不是本轮任务）",
+        "## 角色指令库（每轮只执行「本轮节点」对应小节；其余小节为资料，不是本轮任务）",
     ]
+    for node in AGENT_NODES:
+        parts.append(_section(f"{node} 的角色要求", _NODE_TURN_INSTRUCTION[node]))
+    parts.append(
+        "## 输出格式库（每轮只取「本轮节点」对应小节；其余小节为资料，不是本轮任务）"
+    )
     for node in AGENT_NODES:
         parts.append(_schema_guide(schemas[node], heading=f"## {node} 的输出格式"))
     return "\n\n".join(parts)
@@ -617,11 +622,6 @@ def _feedback_section(feedbacks: Any) -> str:
     )
 
 
-def _turn_instruction_section(node: str) -> str:
-    """节点角色指令小节（随轮次消息下发；输出格式在共享 system 里）。"""
-    return _section("本轮角色要求", _NODE_TURN_INSTRUCTION[node])
-
-
 def build_turn_message(
     *,
     node: str,
@@ -631,9 +631,8 @@ def build_turn_message(
 ) -> str:
     """按 node 组装本轮**增量** user 消息（append-only：只放本轮新内容）。
 
-    结构：增量内容小节 → 本轮角色指令 → 可选修正反馈；输出格式在共享 system 的
-    「输出格式库」里，不再逐轮重复下发。旧内容（案件事实、已讲过的证据）在对话
-    历史里，不重复渲染。
+    结构：增量内容小节 → 可选修正反馈；角色指令与输出格式都在共享 system 里，
+    不再逐轮重复下发。旧内容（案件事实、已讲过的证据）在对话历史里，不重复渲染。
 
     :param state: 节点传入的结构化 state dict；reevaluate 读 ``llm_evidence_cursor``
         只渲染该游标之后的新增证据；
@@ -733,7 +732,6 @@ def build_turn_message(
         status_lines += _failure_lines(state.get("failures"))
         parts.append(_section("四、运行状态（degraded / failures）", "\n".join(status_lines)))
         parts.append(_section("五、预算摘要", "\n".join(_budget_lines(state.get("budget")))))
-    parts.append(_turn_instruction_section(node))
     fb = _feedback_section(feedbacks)
     if fb:
         parts.append(fb)

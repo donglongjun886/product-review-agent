@@ -139,8 +139,8 @@ def test_agent_system_prompt_byte_identical_across_nodes():
     assert "不调用任何工具" in single
 
 
-def test_agent_system_library_contains_all_output_schemas():
-    """共享 system 的输出格式库：四节点各一节、逐字节稳定（跨案缓存的前提）。"""
+def test_agent_system_library_contains_roles_and_schemas():
+    """共享 system：角色指令库 + 输出格式库各四节、逐字节稳定（跨案缓存的前提）。"""
     schemas = {
         "hypothesize": HypothesizeOutput.model_json_schema(),
         "plan": PlanOutput.model_json_schema(),
@@ -149,11 +149,12 @@ def test_agent_system_library_contains_all_output_schemas():
     }
     system = build_agent_system(schemas)
     assert build_agent_system(schemas) == system  # 同输入逐字节稳定
-    assert "## 输出格式库" in system
+    assert "## 角色指令库" in system and "## 输出格式库" in system
     for node in AGENT_NODES:
+        assert f"## {node} 的角色要求" in system
         assert f"## {node} 的输出格式" in system
+    assert "初始风险假设生成器" in system
     assert "decision" in system and "hypotheses" in system
-    assert "本轮角色要求" not in system  # 角色指令仍在轮次消息里
 
 
 def test_agent_system_requires_all_node_schemas():
@@ -178,17 +179,17 @@ def test_turn_message_hypothesize_omits_section_when_no_existing():
     assert "云步百搭小白鞋" in text
 
 
-def test_turn_message_structure_content_instruction_feedback():
-    """轮次消息结构：增量内容在前 → 本轮角色指令 → 修正反馈；输出格式不再进 user。"""
+def test_turn_message_structure_content_then_feedback():
+    """轮次消息结构：增量内容在前 → 修正反馈；角色与输出格式都不再进 user。"""
     text = build_turn_message(
         node="hypothesize",
         state=_HYP_WITH_EXISTING,
         feedbacks=["JSON 校验失败：decision 字段缺失"],
     )
     case_pos = text.index("P_44702")
-    instruction_pos = text.index("初始风险假设生成器")
     feedback_pos = text.index("上一轮输出校验反馈")
-    assert case_pos < instruction_pos < feedback_pos
+    assert case_pos < feedback_pos
+    assert "初始风险假设生成器" not in text
     assert "输出格式要求" not in text and "输出格式库" not in text
 
 
@@ -295,11 +296,12 @@ def test_output_schema_contracts_unchanged():
 
 
 def test_turn_message_empty_state_all_agent_nodes_robust():
-    """空 state / 缺键：四个 agent 节点都不崩、返回非空文本（输出格式不在 user 里）。"""
+    """空 state / 缺键：四个 agent 节点都不崩、返回非空文本（角色与格式都不在 user 里）。"""
     for node in AGENT_NODES:
         text = build_turn_message(node=node, state={})
         assert isinstance(text, str) and text
         assert "输出格式要求" not in text
+        assert "## 角色指令库" not in text
     text = build_turn_message(node="decide", state={"hypotheses": "not-a-list"})
     assert isinstance(text, str) and text
 
