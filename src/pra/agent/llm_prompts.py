@@ -1,9 +1,9 @@
 """LLM 节点的 prompt 渲染（纯函数、无 IO）—— append-only 对话架构。
 
 四个 agent 节点（hypothesize / plan / reevaluate / decide）共用同一份静态 system
-（``build_agent_system``：跨节点通用纪律 + 四个节点的角色指令库 + 输出格式库）；
-每轮只追加一条**增量** user 消息（``build_turn_message``：本轮新内容），旧消息
-逐字节不动以命中前缀缓存。角色与输出格式都放在共享 system 前缀里，可跨案复用。
+（``build_agent_system``：跨节点通用纪律 + 四个节点的角色指令库 + 输出格式库
++ 静态工具目录）；每轮只追加一条**增量** user 消息（``build_turn_message``：本轮
+新内容），旧消息逐字节不动以命中前缀缓存。静态内容都放在共享 system 前缀里。
 
 ``single_call``（评测 single 臂）不参与对话历史：保留独立 system（``BASE_PROMPT``
 + 单节点约束）与一次性全量 user（``build_user_prompt``，含输出 Schema 要点）。
@@ -143,7 +143,7 @@ _NODE_TURN_INSTRUCTION: dict[str, str] = {
         "（此时 tools 必须为空数组），不要硬编造调查动作；\n"
         "4. tools 每轮 **≤3 条**，按 priority（1 最优先）降序排列；每条 reason 说明"
         "「验证哪条假设 → 要补哪类证据」；\n"
-        "5. 工具名只能取自 user 上下文「可用取证工具目录」；args 必须符合该工具入参"
+        "5. 工具名只能取自 system「可用取证工具目录」；args 必须符合该工具入参"
         " Schema（字段名/类型/必填一致）；目录为空 = 本轮无工具可调，应优先 conclude；\n"
         "6. **优先补齐必需测量缺口**：user 上下文「本案必需测量覆盖」里标注**尚未取得**的"
         "维度，优先安排能补齐它的工具；若连续多轮无法补齐（工具失败/无数据），说明该维度"
@@ -234,19 +234,23 @@ def build_system_prompt(node: str) -> str:
         ) from None
 
 
-def build_agent_system(schemas: dict[str, dict]) -> str:
-    """agent 四节点共用的静态 system：通用纪律 + 角色指令库 + 输出格式库。
+def build_agent_system(
+    schemas: dict[str, dict], tool_catalog: list | None = None
+) -> str:
+    """agent 四节点共用的静态 system：通用纪律 + 角色指令库 + 输出格式库 + 工具目录。
 
-    两个库都按节点分节、顺序固定，与对话历史无关 ⇒ 同一进程内逐字节稳定，
-    使这条前缀可被提供方上下文缓存跨案命中。各节标题即「本轮节点」名。
+    三块内容都按固定顺序拼装、与对话历史和案件无关 ⇒ 同一进程内逐字节稳定，
+    使这条前缀可被提供方上下文缓存跨案命中。角色/格式小节标题即「本轮节点」名。
 
     :param schemas: 节点名 → ``OutputModel.model_json_schema()`` 结果，须覆盖
         ``AGENT_NODES``；缺节点 → ``ValueError``（显式失败，不静默少节）。
+    :param tool_catalog: 工具目录 ``[{name, description, args_schema}]``；None → 空目录。
     :return: 四个 agent 节点共用的 system content。
     """
     missing = [node for node in AGENT_NODES if node not in schemas]
     if missing:
         raise ValueError(f"build_agent_system 缺少节点 Schema：{missing}")
+    catalog = tool_catalog if isinstance(tool_catalog, list) else []
     parts = [
         AGENT_SYSTEM_PROMPT,
         "## 角色指令库（每轮只执行「本轮节点」对应小节；其余小节为资料，不是本轮任务）",
@@ -258,6 +262,8 @@ def build_agent_system(schemas: dict[str, dict]) -> str:
     )
     for node in AGENT_NODES:
         parts.append(_schema_guide(schemas[node], heading=f"## {node} 的输出格式"))
+    parts.append("## 可用取证工具目录（静态；与案件无关）")
+    parts.append(_tool_catalog_text(catalog))
     return "\n\n".join(parts)
 
 
@@ -468,12 +474,9 @@ def _args_schema_hint(args_schema: dict) -> str:
 
 
 def _tool_catalog_text(tool_catalog: list) -> str:
-    """可用取证工具目录段落；空目录给 conclude 提示。"""
+    """可用取证工具目录段落（静态；空目录只给占位，不写下轮指令）。"""
     if not tool_catalog:
-        return (
-            "（无可用取证工具）本轮没有任何可执行的取证工具。若已无其他能带来新证据的"
-            "调查手段，请输出 next_action=\"conclude\" 且 tools=[]。"
-        )
+        return "（无可用取证工具）"
     lines: list[str] = []
     for t in tool_catalog:
         if not isinstance(t, dict):
@@ -626,17 +629,15 @@ def build_turn_message(
     *,
     node: str,
     state: dict,
-    tool_catalog: Any = None,
     feedbacks: Any = None,
 ) -> str:
     """按 node 组装本轮**增量** user 消息（append-only：只放本轮新内容）。
 
-    结构：增量内容小节 → 可选修正反馈；角色指令与输出格式都在共享 system 里，
-    不再逐轮重复下发。旧内容（案件事实、已讲过的证据）在对话历史里，不重复渲染。
+    结构：增量内容小节 → 可选修正反馈；角色指令、输出格式与工具目录都在共享
+    system 里，不再逐轮重复下发。旧内容（案件事实、已讲过的证据）在对话历史里。
 
     :param state: 节点传入的结构化 state dict；reevaluate 读 ``llm_evidence_cursor``
         只渲染该游标之后的新增证据；
-    :param tool_catalog: 工具目录 ``[{name, description, args_schema}]``；None → 空目录；
     :param feedbacks: 修正提示文本列表（可选）。
     """
     if node not in AGENT_NODES:
@@ -644,7 +645,6 @@ def build_turn_message(
             f"build_turn_message 只服务 agent 节点 {sorted(AGENT_NODES)}，收到 {node!r}"
         )
     state = state if isinstance(state, dict) else {}
-    catalog = tool_catalog if isinstance(tool_catalog, list) else []
     parts: list[str] = [f"【本轮节点：{node}】"]
     if node == "hypothesize":
         parts.append(_section("一、案件与商品事实", "\n".join(_case_lines(state))))
@@ -671,7 +671,6 @@ def build_turn_message(
                     "\n".join(str(line) for line in gap),
                 )
             )
-        parts.append(_section("三、可用取证工具目录", _tool_catalog_text(catalog)))
     elif node == "reevaluate":
         evidence = state.get("evidence")
         evidence = [e for e in (evidence or []) if isinstance(e, dict)]

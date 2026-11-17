@@ -139,17 +139,30 @@ def test_agent_system_prompt_byte_identical_across_nodes():
     assert "不调用任何工具" in single
 
 
-def test_agent_system_library_contains_roles_and_schemas():
-    """共享 system：角色指令库 + 输出格式库各四节、逐字节稳定（跨案缓存的前提）。"""
+def test_agent_system_library_contains_roles_schemas_and_tools():
+    """共享 system：角色库 + 格式库 + 工具目录，逐字节稳定（跨案缓存的前提）。"""
     schemas = {
         "hypothesize": HypothesizeOutput.model_json_schema(),
         "plan": PlanOutput.model_json_schema(),
         "reevaluate": ReevaluateOutput.model_json_schema(),
         "decide": DecisionProposal.model_json_schema(),
     }
-    system = build_agent_system(schemas)
-    assert build_agent_system(schemas) == system  # 同输入逐字节稳定
+    catalog = [
+        {
+            "name": "PolicySearchTool",
+            "description": "政策条款检索",
+            "args_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "检索描述"}},
+                "required": ["query"],
+            },
+        }
+    ]
+    system = build_agent_system(schemas, tool_catalog=catalog)
+    assert build_agent_system(schemas, tool_catalog=catalog) == system  # 逐字节稳定
     assert "## 角色指令库" in system and "## 输出格式库" in system
+    assert "## 可用取证工具目录" in system
+    assert "PolicySearchTool" in system and "query" in system
     for node in AGENT_NODES:
         assert f"## {node} 的角色要求" in system
         assert f"## {node} 的输出格式" in system
@@ -212,24 +225,13 @@ def test_turn_message_reevaluate_renders_only_new_evidence():
     assert "无新增证据" in none_new
 
 
-def test_turn_message_plan_renders_dashboard_gap_and_catalog():
-    """plan 增量内容：假设仪表盘快照 + 必需测量覆盖缺口 + 可用工具目录；证据不重复讲。"""
-    args_schema = {
-        "type": "object",
-        "properties": {"query": {"type": "string", "description": "检索描述"}},
-        "required": ["query"],
-    }
-    catalog = [
-        {"name": "PolicySearchTool", "description": "政策条款检索", "args_schema": args_schema}
-    ]
-    text = build_turn_message(node="plan", state=_RICH_STATE, tool_catalog=catalog)
+def test_turn_message_plan_renders_dashboard_and_gap():
+    """plan 增量内容：假设仪表盘快照 + 必需测量覆盖缺口；工具目录在共享 system。"""
+    text = build_turn_message(node="plan", state=_RICH_STATE)
     assert "H1" in text and "SUPPORTED" in text
     assert "本案必需测量覆盖" in text
-    assert "PolicySearchTool" in text and "query" in text
+    assert "可用取证工具目录" not in text
     assert "5 removals / 3 title-relisting" not in text  # 证据已在历史里，不重复
-    empty = build_turn_message(node="plan", state={})
-    assert "conclude" in empty
-    assert "无可用取证工具" in empty
 
 
 def test_turn_message_decide_sections():

@@ -103,13 +103,14 @@ class LiteLLMBackend(LLMBackend):
         self.reasoning_effort = reasoning_effort
         self._api_key: str | None = api_key or os.environ.get(_API_KEY_ENV) or None
         self._tool_catalog: list[dict] = self._extract_tool_catalog(tools)
-        # agent 四节点共用的静态 system（含输出格式库）：构造一次，逐字节稳定，
+        # agent 四节点共用的静态 system（含角色/格式/工具目录）：构造一次、逐字节稳定，
         # 使整段前缀可被上下文缓存跨案复用（single_call 仍用独立 system）。
         self._agent_system: str = build_agent_system(
             {
                 node: model.model_json_schema()
                 for node, model in _AGENT_OUTPUT_MODELS.items()
-            }
+            },
+            tool_catalog=self._tool_catalog,
         )
         # 实例级缓存命中累计（纯观测，不进 state/预算语义）；None = 提供方从未给过缓存字段
         self._cache_hit_tokens: int | None = None
@@ -204,11 +205,7 @@ class LiteLLMBackend(LLMBackend):
             return [system, user], [user]
         turn_user = {
             "role": "user",
-            "content": build_turn_message(
-                node=node,
-                state=state,
-                tool_catalog=self._tool_catalog,
-            ),
+            "content": build_turn_message(node=node, state=state),
         }
         sent: list[dict] = [system, *self._validated_history(state), turn_user]
         new_messages: list[dict] = [turn_user]
