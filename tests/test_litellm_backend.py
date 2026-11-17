@@ -19,7 +19,7 @@ from pra.agent.guardrails.llm_shell import (
 from pra.agent.guardrails.schemas import PlanOutput
 from pra.agent.litellm_backend import LiteLLMBackend
 from pra.agent.llm_prompts import (
-    build_system_prompt,
+    AGENT_SYSTEM_PROMPT,
     build_user_prompt,
 )
 
@@ -264,10 +264,12 @@ async def test_complete_success_content_tokens_and_kwargs(monkeypatch):
 
     msgs = fake.calls[0]["messages"]
     assert [m["role"] for m in msgs] == ["system", "user"]
-    assert msgs[0]["content"] == build_system_prompt("hypothesize")
+    assert msgs[0]["content"].startswith(AGENT_SYSTEM_PROMPT)
+    assert "## hypothesize 的输出格式" in msgs[0]["content"]
     user = msgs[1]["content"]
+    assert "【本轮节点：hypothesize】" in user
     assert "P_MOCK_99" in user
-    assert "decision" in user and "HUMAN_REVIEW" in user
+    assert "HUMAN_REVIEW" not in user  # 输出格式在 system，不再进 user
 
 
 async def test_complete_usage_details_extraction_matrix(monkeypatch):
@@ -579,7 +581,8 @@ async def test_complete_appends_history_and_returns_new_messages(monkeypatch):
     )
     sent = fake.calls[0]["messages"]
     assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
-    assert sent[0]["content"] == build_system_prompt("plan")
+    assert sent[0]["content"].startswith(AGENT_SYSTEM_PROMPT)
+    assert "## 输出格式库" in sent[0]["content"]
     assert sent[1] == history[0] and sent[2] == history[1]  # 历史逐字节原样
     assert sent[3]["content"] == resp.messages[0]["content"]
     assert resp.messages == [

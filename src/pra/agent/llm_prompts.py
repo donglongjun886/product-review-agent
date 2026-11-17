@@ -1,12 +1,12 @@
 """LLM 节点的 prompt 渲染（纯函数、无 IO）—— append-only 对话架构。
 
-四个 agent 节点（hypothesize / plan / reevaluate / decide）共用同一份 system
-（``AGENT_SYSTEM_PROMPT``：跨节点通用纪律 + 轮次工作方式说明）；每轮只追加一条
-**增量** user 消息（``build_turn_message``：本轮新内容 → 本轮角色指令 → 输出
-Schema 要点），旧消息逐字节不动以保证前缀缓存命中。
+四个 agent 节点（hypothesize / plan / reevaluate / decide）共用同一份静态 system
+（``build_agent_system``：跨节点通用纪律 + 四个节点的输出格式库）；每轮只追加一条
+**增量** user 消息（``build_turn_message``：本轮新内容 → 本轮角色指令），旧消息
+逐字节不动以命中前缀缓存。输出格式放在共享 system 前缀里，可跨案复用。
 
 ``single_call``（评测 single 臂）不参与对话历史：保留独立 system（``BASE_PROMPT``
-+ 单节点约束）与一次性全量 user（``build_user_prompt``）。
++ 单节点约束）与一次性全量 user（``build_user_prompt``，含输出 Schema 要点）。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ __all__ = [
     "AGENT_SYSTEM_PROMPT",
     "BASE_PROMPT",
     "SYSTEM_PROMPTS",
+    "build_agent_system",
     "build_system_prompt",
     "build_turn_message",
     "build_user_prompt",
@@ -67,12 +68,15 @@ def _section(title: str, body: str) -> str:
 
 
 # 跨节点通用纪律（单点定义；agent 节点角色指令见 _NODE_TURN_INSTRUCTION）。
-BASE_PROMPT = (
+_DISCIPLINE_COMMON = (
     "硬性纪律（所有节点通用）：\n"
     "1. **禁止臆造**：判断与引用只能依据 user 上下文真实给出的事实/数值/来源/条款，"
     "禁止凭标题、类目或先例脑补上下文没有的内容；\n"
     "2. **禁止重复**：不得重复提出既有清单中同维度或同表述的内容（语义重复即重复，"
     "不要求逐字一致）—— 重复只会空转轮次、烧掉预算；\n"
+)
+
+BASE_PROMPT = _DISCIPLINE_COMMON + (
     "3. **只输出一个 JSON 对象**，字段/类型/枚举/必填严格符合 user 上下文末尾的 JSON "
     "Schema 要点；除 JSON 外不要输出任何解释文字。"
 )
@@ -80,13 +84,15 @@ BASE_PROMPT = (
 # 四个走对话历史的 agent 节点（共用 AGENT_SYSTEM_PROMPT）。
 AGENT_NODES: tuple[str, ...] = ("hypothesize", "plan", "reevaluate", "decide")
 
-# agent 节点统一 system：通用纪律 + 轮次工作方式说明（逐字节稳定，前缀缓存的共享根）。
-AGENT_SYSTEM_PROMPT = (
-    BASE_PROMPT
-    + "\n\n你是电商商品上架审核的调查 Agent，按**多轮对话**工作：对话历史是本案的完整"
+# agent 节点统一 system 的通用段：通用纪律 + 轮次工作方式（逐字节稳定，前缀缓存的共享根）。
+AGENT_SYSTEM_PROMPT = _DISCIPLINE_COMMON + (
+    "3. **只输出一个 JSON 对象**，字段/类型/枚举/必填严格符合 system「输出格式库」中"
+    "「本轮节点」对应的小节；除 JSON 外不要输出任何解释文字。"
+) + (
+    "\n\n你是电商商品上架审核的调查 Agent，按**多轮对话**工作：对话历史是本案的完整"
     "调查记录（案件事实、各轮增量证据、你此前的输出）；每轮最新的 user 消息给出"
-    "「本轮新内容 + 本轮角色指令 + 输出 Schema 要点」，你只回应当前这一轮的任务，"
-    "历史消息中的旧角色指令不适用于本轮。"
+    "「本轮新内容 + 本轮角色指令」，输出格式见本 system 的「输出格式库」；你只回应"
+    "当前这一轮的任务，历史消息中的旧角色指令不适用于本轮。"
 )
 
 # 节点角色指令（随各节点轮次消息末尾下发）。
@@ -226,6 +232,28 @@ def build_system_prompt(node: str) -> str:
         raise ValueError(
             f"未知 node: {node!r}，应为 {sorted(SYSTEM_PROMPTS)}"
         ) from None
+
+
+def build_agent_system(schemas: dict[str, dict]) -> str:
+    """agent 四节点共用的静态 system：通用纪律 + 输出格式库。
+
+    输出格式库按节点分节、顺序固定，与对话历史无关 ⇒ 同一进程内逐字节稳定，
+    使这条前缀可被提供方上下文缓存跨案命中。各节标题即「本轮节点」名。
+
+    :param schemas: 节点名 → ``OutputModel.model_json_schema()`` 结果，须覆盖
+        ``AGENT_NODES``；缺节点 → ``ValueError``（显式失败，不静默少节）。
+    :return: 四个 agent 节点共用的 system content。
+    """
+    missing = [node for node in AGENT_NODES if node not in schemas]
+    if missing:
+        raise ValueError(f"build_agent_system 缺少节点 Schema：{missing}")
+    parts = [
+        AGENT_SYSTEM_PROMPT,
+        "## 输出格式库（每轮只取「本轮节点」对应小节；其余小节为资料，不是本轮任务）",
+    ]
+    for node in AGENT_NODES:
+        parts.append(_schema_guide(schemas[node], heading=f"## {node} 的输出格式"))
+    return "\n\n".join(parts)
 
 
 def _case_lines(state: dict) -> list[str]:
@@ -556,16 +584,16 @@ def _object_field_lines(sch: dict, defs: dict, depth: int) -> list[str]:
     return lines
 
 
-def _schema_guide(json_schema: dict) -> str:
-    """OutputModel JSON Schema → 人读「输出格式要求」段落。"""
+def _schema_guide(json_schema: dict, *, heading: str = "## 输出格式要求") -> str:
+    """OutputModel JSON Schema → 人读「输出格式要求」段落（``heading`` 定标题层级）。"""
     if not isinstance(json_schema, dict):
-        return "## 输出格式要求\n（未提供 JSON Schema，请按输出模型字段输出）"
+        return f"{heading}\n（未提供 JSON Schema，请按输出模型字段输出）"
     defs = json_schema.get("$defs")
     defs = defs if isinstance(defs, dict) else {}
     title = json_schema.get("title") or "输出对象"
     desc = (json_schema.get("description") or "").strip().replace("\n", " ")
     lines = [
-        "## 输出格式要求（JSON Schema 要点 —— 字段名/类型/枚举/必填必须严格一致）",
+        f"{heading}（JSON Schema 要点 —— 字段名/类型/枚举/必填必须严格一致）",
         f"- 顶层对象：{title}",
     ]
     if desc:
@@ -590,26 +618,25 @@ def _feedback_section(feedbacks: Any) -> str:
 
 
 def _turn_instruction_section(node: str) -> str:
-    """节点角色指令小节（随轮次消息末尾下发）。"""
-    return _section("本轮角色与输出要求", _NODE_TURN_INSTRUCTION[node])
+    """节点角色指令小节（随轮次消息下发；输出格式在共享 system 里）。"""
+    return _section("本轮角色要求", _NODE_TURN_INSTRUCTION[node])
 
 
 def build_turn_message(
     *,
     node: str,
     state: dict,
-    json_schema: dict,
     tool_catalog: Any = None,
     feedbacks: Any = None,
 ) -> str:
     """按 node 组装本轮**增量** user 消息（append-only：只放本轮新内容）。
 
-    结构：增量内容小节 → 本轮角色指令 → 输出 Schema 要点 → 可选修正反馈。
-    旧内容（案件事实、已讲过的证据）在对话历史里，不重复渲染。
+    结构：增量内容小节 → 本轮角色指令 → 可选修正反馈；输出格式在共享 system 的
+    「输出格式库」里，不再逐轮重复下发。旧内容（案件事实、已讲过的证据）在对话
+    历史里，不重复渲染。
 
     :param state: 节点传入的结构化 state dict；reevaluate 读 ``llm_evidence_cursor``
         只渲染该游标之后的新增证据；
-    :param json_schema: OutputModel 的 ``model_json_schema()`` dict；
     :param tool_catalog: 工具目录 ``[{name, description, args_schema}]``；None → 空目录；
     :param feedbacks: 修正提示文本列表（可选）。
     """
@@ -707,7 +734,6 @@ def build_turn_message(
         parts.append(_section("四、运行状态（degraded / failures）", "\n".join(status_lines)))
         parts.append(_section("五、预算摘要", "\n".join(_budget_lines(state.get("budget")))))
     parts.append(_turn_instruction_section(node))
-    parts.append(_schema_guide(json_schema))
     fb = _feedback_section(feedbacks)
     if fb:
         parts.append(fb)

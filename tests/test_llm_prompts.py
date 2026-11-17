@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from pra.agent.guardrails.schemas import HypothesizeOutput, ReevaluateOutput
+import pytest
+
+from pra.agent.guardrails.schemas import (
+    DecisionProposal,
+    HypothesizeOutput,
+    PlanOutput,
+    ReevaluateOutput,
+)
 from pra.agent.llm_prompts import (
     AGENT_NODES,
+    build_agent_system,
     build_system_prompt,
     build_turn_message,
     build_user_prompt,
@@ -131,58 +139,73 @@ def test_agent_system_prompt_byte_identical_across_nodes():
     assert "不调用任何工具" in single
 
 
+def test_agent_system_library_contains_all_output_schemas():
+    """共享 system 的输出格式库：四节点各一节、逐字节稳定（跨案缓存的前提）。"""
+    schemas = {
+        "hypothesize": HypothesizeOutput.model_json_schema(),
+        "plan": PlanOutput.model_json_schema(),
+        "reevaluate": ReevaluateOutput.model_json_schema(),
+        "decide": DecisionProposal.model_json_schema(),
+    }
+    system = build_agent_system(schemas)
+    assert build_agent_system(schemas) == system  # 同输入逐字节稳定
+    assert "## 输出格式库" in system
+    for node in AGENT_NODES:
+        assert f"## {node} 的输出格式" in system
+    assert "decision" in system and "hypotheses" in system
+    assert "本轮角色要求" not in system  # 角色指令仍在轮次消息里
+
+
+def test_agent_system_requires_all_node_schemas():
+    """缺节点 Schema → 显式失败，不静默少节。"""
+    with pytest.raises(ValueError, match="缺少节点 Schema"):
+        build_agent_system({"hypothesize": HypothesizeOutput.model_json_schema()})
+
+
 def test_turn_message_hypothesize_renders_case_and_existing_hypotheses():
-    text = build_turn_message(
-        node="hypothesize", state=_HYP_WITH_EXISTING, json_schema=_SCHEMA
-    )
+    text = build_turn_message(node="hypothesize", state=_HYP_WITH_EXISTING)
     assert "P_44702" in text
     assert "云步百搭小白鞋" in text
     assert "既有假设清单" in text
     assert "H1" in text and "UNRESOLVED" in text
     assert "H2" in text and "REFUTED" in text
-    assert "输出格式要求" in text
     assert "__STATE__" not in text
 
 
 def test_turn_message_hypothesize_omits_section_when_no_existing():
-    text = build_turn_message(
-        node="hypothesize", state=_HYP_WITHOUT_EXISTING, json_schema=_SCHEMA
-    )
+    text = build_turn_message(node="hypothesize", state=_HYP_WITHOUT_EXISTING)
     assert "二、既有假设清单" not in text  # 小节标题不出现（指令正文提及该词属正常）
     assert "云步百搭小白鞋" in text
 
 
-def test_turn_message_instruction_after_content_schema_at_tail():
-    """轮次消息结构：增量内容在前，本轮角色指令在后，输出 Schema 要点与修正反馈压尾。"""
+def test_turn_message_structure_content_instruction_feedback():
+    """轮次消息结构：增量内容在前 → 本轮角色指令 → 修正反馈；输出格式不再进 user。"""
     text = build_turn_message(
         node="hypothesize",
         state=_HYP_WITH_EXISTING,
-        json_schema=_SCHEMA,
         feedbacks=["JSON 校验失败：decision 字段缺失"],
     )
     case_pos = text.index("P_44702")
     instruction_pos = text.index("初始风险假设生成器")
-    schema_pos = text.index("输出格式要求")
     feedback_pos = text.index("上一轮输出校验反馈")
-    assert case_pos < instruction_pos < schema_pos < feedback_pos
+    assert case_pos < instruction_pos < feedback_pos
+    assert "输出格式要求" not in text and "输出格式库" not in text
 
 
 def test_turn_message_reevaluate_renders_only_new_evidence():
     """reevaluate 增量渲染：只讲 llm_evidence_cursor 之后的证据；cursor=0 → 全量。"""
     state = {**_RICH_STATE, "llm_evidence_cursor": 1}
-    text = build_turn_message(node="reevaluate", state=state, json_schema=_SCHEMA)
+    text = build_turn_message(node="reevaluate", state=state)
     assert "POLICY_3.2" in text
     assert "5 removals / 3 title-relisting" not in text  # cursor 之前的旧证据不重复讲
     full = build_turn_message(
         node="reevaluate",
         state={**_RICH_STATE, "llm_evidence_cursor": 0},
-        json_schema=_SCHEMA,
     )
     assert "5 removals / 3 title-relisting" in full
     none_new = build_turn_message(
         node="reevaluate",
         state={**_RICH_STATE, "llm_evidence_cursor": 2},
-        json_schema=_SCHEMA,
     )
     assert "POLICY_3.2" not in none_new
     assert "无新增证据" in none_new
@@ -198,21 +221,19 @@ def test_turn_message_plan_renders_dashboard_gap_and_catalog():
     catalog = [
         {"name": "PolicySearchTool", "description": "政策条款检索", "args_schema": args_schema}
     ]
-    text = build_turn_message(
-        node="plan", state=_RICH_STATE, json_schema=_SCHEMA, tool_catalog=catalog
-    )
+    text = build_turn_message(node="plan", state=_RICH_STATE, tool_catalog=catalog)
     assert "H1" in text and "SUPPORTED" in text
     assert "本案必需测量覆盖" in text
     assert "PolicySearchTool" in text and "query" in text
     assert "5 removals / 3 title-relisting" not in text  # 证据已在历史里，不重复
-    empty = build_turn_message(node="plan", state={}, json_schema=_SCHEMA)
+    empty = build_turn_message(node="plan", state={})
     assert "conclude" in empty
     assert "无可用取证工具" in empty
 
 
 def test_turn_message_decide_sections():
     """decide 增量内容：全量假设仪表盘 + 可引用政策/先例 + 覆盖清单 + 运行状态 + 预算。"""
-    text = build_turn_message(node="decide", state=_RICH_STATE, json_schema=_SCHEMA)
+    text = build_turn_message(node="decide", state=_RICH_STATE)
     assert "H1" in text and "SUPPORTED" in text
     assert "POLICY_REF" in text
     assert "本案必需测量覆盖" in text
@@ -238,7 +259,6 @@ def test_decide_prompt_budget_caps_two_dims_only():
                 },
             }
         },
-        json_schema=_SCHEMA,
     )
     assert "LLM≤10 次" in text and "工具≤15 次" in text
     assert "token≤" not in text and "时长≤" not in text
@@ -254,12 +274,11 @@ def test_decide_prompt_renders_measurement_coverage():
                 "  - text_compliance：已测（阴性）",
             ],
         },
-        json_schema=_SCHEMA,
     )
     assert "本案必需测量覆盖" in text
     assert "text_compliance：已测（阴性）" in text
     assert "以此为准" in text
-    without = build_turn_message(node="decide", state={}, json_schema=_SCHEMA)
+    without = build_turn_message(node="decide", state={})
     assert "三、本案必需测量覆盖" not in without  # 小节标题不出现（指令正文提及该词属正常）
 
 
@@ -276,14 +295,12 @@ def test_output_schema_contracts_unchanged():
 
 
 def test_turn_message_empty_state_all_agent_nodes_robust():
-    """空 state / 缺键：四个 agent 节点都不崩、返回非空文本。"""
+    """空 state / 缺键：四个 agent 节点都不崩、返回非空文本（输出格式不在 user 里）。"""
     for node in AGENT_NODES:
-        text = build_turn_message(node=node, state={}, json_schema={})
+        text = build_turn_message(node=node, state={})
         assert isinstance(text, str) and text
-        assert "## 输出格式要求" in text
-    text = build_turn_message(
-        node="decide", state={"hypotheses": "not-a-list"}, json_schema={}
-    )
+        assert "输出格式要求" not in text
+    text = build_turn_message(node="decide", state={"hypotheses": "not-a-list"})
     assert isinstance(text, str) and text
 
 

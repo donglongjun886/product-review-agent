@@ -10,8 +10,15 @@ from pra.agent.guardrails.llm_shell import (
     LLMBackendError,
     LLMResponse,
 )
+from pra.agent.guardrails.schemas import (
+    DecisionProposal,
+    HypothesizeOutput,
+    PlanOutput,
+    ReevaluateOutput,
+)
 from pra.agent.llm_prompts import (
     SYSTEM_PROMPTS,
+    build_agent_system,
     build_system_prompt,
     build_turn_message,
     build_user_prompt,
@@ -20,6 +27,14 @@ from pra.agent.llm_prompts import (
 __all__ = ["LiteLLMBackend"]
 
 _API_KEY_ENV = "DEEPSEEK_API_KEY"
+
+# agent 四节点的输出模型（system 的输出格式库按节点名分节渲染）。
+_AGENT_OUTPUT_MODELS: dict[str, Any] = {
+    "hypothesize": HypothesizeOutput,
+    "plan": PlanOutput,
+    "reevaluate": ReevaluateOutput,
+    "decide": DecisionProposal,
+}
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -88,6 +103,14 @@ class LiteLLMBackend(LLMBackend):
         self.reasoning_effort = reasoning_effort
         self._api_key: str | None = api_key or os.environ.get(_API_KEY_ENV) or None
         self._tool_catalog: list[dict] = self._extract_tool_catalog(tools)
+        # agent 四节点共用的静态 system（含输出格式库）：构造一次，逐字节稳定，
+        # 使整段前缀可被上下文缓存跨案复用（single_call 仍用独立 system）。
+        self._agent_system: str = build_agent_system(
+            {
+                node: model.model_json_schema()
+                for node, model in _AGENT_OUTPUT_MODELS.items()
+            }
+        )
         # 实例级缓存命中累计（纯观测，不进 state/预算语义）；None = 提供方从未给过缓存字段
         self._cache_hit_tokens: int | None = None
         self._cache_miss_tokens: int | None = None
@@ -164,9 +187,13 @@ class LiteLLMBackend(LLMBackend):
         发送消息 = [system, *对话历史, *本轮 user 消息]；agent 节点走增量轮次消息
         （``build_turn_message``），修正反馈以独立 user 消息追加（重试时轮次消息已在
         历史里，只把反馈计入新增）；single_call 一次性全量渲染（``build_user_prompt``），
-        忽略对话历史、修正反馈内嵌同一条 user。
+        忽略对话历史、修正反馈内嵌同一条 user。agent 的 system 是含输出格式库的静态串
+        （四个节点逐字节一致），single_call 用独立 system。
         """
-        system = {"role": "system", "content": build_system_prompt(node)}
+        system_content = (
+            build_system_prompt(node) if node == "single_call" else self._agent_system
+        )
+        system = {"role": "system", "content": system_content}
         if node == "single_call":
             user = {
                 "role": "user",
@@ -180,7 +207,6 @@ class LiteLLMBackend(LLMBackend):
             "content": build_turn_message(
                 node=node,
                 state=state,
-                json_schema=json_schema,
                 tool_catalog=self._tool_catalog,
             ),
         }
